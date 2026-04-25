@@ -17,7 +17,7 @@ COMMIT  ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(DATE)
 
-.PHONY: all build ctl test vet clean proto package gui
+.PHONY: all build ctl test vet clean proto gui
 
 all: proto build ctl
 
@@ -48,39 +48,7 @@ vet:
 clean:
 	rm -f $(BINARY) $(CTL_BINARY)
 	rm -f $(PROTO_GO) $(PROTO_GRPC)
-	rm -rf build stage release gorganizer-v*-linux-*.tar.gz*
+	rm -rf build
 
 install: build
 	install -Dm755 $(BINARY) $(DESTDIR)/usr/bin/$(BINARY)
-
-# `make package` produces a release tarball locally. Mirrors what CI does in
-# .github/workflows/release.yml, so contributors can smoke-test the install
-# flow without pushing a tag.
-package: all gui
-	@root="gorganizer-$(VERSION)-linux-x86_64"; \
-	rm -rf "release/$$root"; \
-	mkdir -p "release/$$root/bin" \
-	         "release/$$root/libexec" \
-	         "release/$$root/share/applications" \
-	         "release/$$root/share/icons/hicolor/256x256/apps"; \
-	cp $(BINARY)          "release/$$root/bin/"; \
-	cp $(CTL_BINARY)      "release/$$root/bin/"; \
-	cp build/src/gorganizer "release/$$root/bin/gorganizer-gui"; \
-	cp scripts/gorganizer-launcher.in "release/$$root/libexec/gorganizer-launcher"; \
-	cp dist/gorganizer.desktop.in     "release/$$root/share/applications/"; \
-	cp dist/gorganizer-nxm.desktop.in "release/$$root/share/applications/"; \
-	[ -f resources/icons/gorganizer.png ] && \
-	  cp resources/icons/gorganizer.png \
-	     "release/$$root/share/icons/hicolor/256x256/apps/gorganizer.png" || true; \
-	cp install.sh   "release/$$root/install.sh"; \
-	cp uninstall.sh "release/$$root/uninstall.sh"; \
-	[ -f LICENSE ]   && cp LICENSE   "release/$$root/" || true; \
-	[ -f README.md ] && cp README.md "release/$$root/" || true; \
-	echo "$(VERSION)" > "release/$$root/VERSION"; \
-	chmod +x "release/$$root/bin/"* \
-	         "release/$$root/libexec/gorganizer-launcher" \
-	         "release/$$root/install.sh" \
-	         "release/$$root/uninstall.sh"; \
-	( cd release && tar -czf "../$$root.tar.gz" "$$root" ); \
-	sha256sum "$$root.tar.gz" > "$$root.tar.gz.sha256"; \
-	ls -lh "$$root.tar.gz" "$$root.tar.gz.sha256"

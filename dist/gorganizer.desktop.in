@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Gorganizer
-Comment=Native Linux mod organizer for Bethesda games
-Exec=@@PREFIX@@/bin/gorganizer
-Icon=gorganizer
-Terminal=false
-Categories=Game;Utility;
-Keywords=mod;organizer;skyrim;fallout;bethesda;

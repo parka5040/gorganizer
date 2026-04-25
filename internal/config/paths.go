@@ -34,6 +34,8 @@ func SocketPath() string {
 }
 
 // GameModsDirName returns the folder name for a game's mods (e.g., "FalloutNV_Mods").
+// Mirror of GAME_MODS_DIRS in gorganizer.sh — keep both lists in sync when
+// adding a game.
 var gameModsDirNames = map[string]string{
 	"morrowind":  "Morrowind_Mods",
 	"oblivion":   "Oblivion_Mods",
