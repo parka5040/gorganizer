@@ -3,7 +3,7 @@
 
 #include <QApplication>
 #include <QPainter>
-#include <QStyleOptionProgressBar>
+#include <QPen>
 
 namespace gorganizer {
 
@@ -85,25 +85,42 @@ void DownloadsRowDelegate::paint(QPainter* painter, const QStyleOptionViewItem& 
         painter->setPen(option.palette.color(QPalette::Text));
         painter->drawText(chip, Qt::AlignCenter, label);
     } else {
-        QStyleOptionProgressBar bar;
-        bar.rect = r;
-        bar.state = option.state;
-        bar.palette = option.palette;
-        bar.minimum = 0;
-        bar.maximum = (pct < 0) ? 0 : 100;  // busy bar when indeterminate
-        bar.progress = (pct < 0) ? 0 : pct;
-        bar.text = (pct < 0)
+        // Hand-painted progress bar: guarantees a left-to-right fill that
+        // doesn't depend on QStyle's interpretation of cell geometry or
+        // theme QSS chunk rules. Earlier versions deferred to
+        // QStyle::CE_ProgressBar, which under Fusion + tight cell heights
+        // could appear to fill bottom-to-top.
+        const QColor chunkColor = phaseColor(phase, merged, option.palette);
+        QColor trackColor = option.palette.color(QPalette::Base);
+        if (trackColor.alpha() == 0)
+            trackColor = option.palette.color(QPalette::Window);
+
+        // Track.
+        painter->setPen(QPen(option.palette.color(QPalette::Mid), 1));
+        painter->setBrush(trackColor);
+        painter->drawRoundedRect(r, 3, 3);
+
+        // Chunk (determinate). Indeterminate (pct < 0) leaves the track
+        // empty and just shows the label — we don't drive a timer from a
+        // delegate, so a true pulsing animation belongs in the activity
+        // log; the chip color still telegraphs the phase.
+        if (pct > 0) {
+            QRect chunkRect(r.x(), r.y(),
+                            qMax(0, r.width() * qMin(pct, 100) / 100),
+                            r.height());
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(chunkColor);
+            painter->setClipRect(r.adjusted(1, 1, -1, -1));
+            painter->drawRoundedRect(chunkRect, 3, 3);
+            painter->setClipping(false);
+        }
+
+        // Label, centered over the bar.
+        const QString text = (pct < 0)
             ? label
             : QString("%1  %2%").arg(label).arg(pct);
-        bar.textVisible = true;
-        bar.textAlignment = Qt::AlignCenter;
-
-        // Tint the chunk via palette override so we don't override user theme.
-        QPalette p = option.palette;
-        p.setColor(QPalette::Highlight, phaseColor(phase, merged, option.palette));
-        bar.palette = p;
-
-        QApplication::style()->drawControl(QStyle::CE_ProgressBar, &bar, painter);
+        painter->setPen(option.palette.color(QPalette::Text));
+        painter->drawText(r, Qt::AlignCenter, text);
     }
     painter->restore();
 }

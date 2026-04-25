@@ -8,7 +8,6 @@ add_library(gorganizer_ui STATIC
     RunButtonWidget.cpp
     ProfileSelectorWidget.cpp
     ConnectionIndicator.cpp
-    DownloadProgressWidget.cpp
     DownloadsLibraryView.cpp
     DownloadsModel.cpp
     DownloadsRowDelegate.cpp
@@ -17,6 +16,7 @@ add_library(gorganizer_ui STATIC
     SplashScreen.cpp
     ActivityLogPanel.cpp
     ModInstallDialog.cpp
+    InstallWorker.cpp
     FomodPlan.cpp
     FomodInstallerDialog.cpp
     IniEditorDialog.cpp

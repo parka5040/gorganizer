@@ -6,7 +6,6 @@
 #include "RunButtonWidget.h"
 #include "ProfileSelectorWidget.h"
 #include "ConnectionIndicator.h"
-#include "DownloadProgressWidget.h"
 #include "DownloadsLibraryView.h"
 #include "ActivityLogPanel.h"
 #include "SettingsDialog.h"
@@ -185,20 +184,42 @@ void MainWindow::setupUi()
     fileMenu->addSeparator();
     fileMenu->addAction("&Quit", this, &QWidget::close);
 
-    // View menu with theme selector.
+    // View menu with appearance + dark-variant selectors.
     auto* viewMenu = menuBar()->addMenu("&View");
-    auto* themeMenu = viewMenu->addMenu("&Theme");
+
+    // Appearance: System / Light / Dark — top-level mode.
+    auto* appearanceMenu = viewMenu->addMenu("&Appearance");
+    m_appearanceActions = new QActionGroup(this);
+    m_appearanceActions->setExclusive(true);
+    const QString currentMode = m_config.appearanceMode();
+    const QStringList modes = ThemeManager::availableModes(); // "System","Light","Dark"
+    for (const auto& label : modes) {
+        auto* action = appearanceMenu->addAction(label);
+        action->setCheckable(true);
+        const QString modeKey = label.toLower();
+        action->setChecked(modeKey == currentMode);
+        m_appearanceActions->addAction(action);
+        connect(action, &QAction::triggered, this, [this, modeKey] {
+            m_config.setAppearanceMode(modeKey);
+            ThemeManager::applyMode(modeKey, m_config.preferredStyle());
+        });
+    }
+
+    // Dark variants — only meaningful in Dark or System (when OS is dark).
+    auto* darkMenu = viewMenu->addMenu("Dark &Variant");
     m_themeActions = new QActionGroup(this);
     m_themeActions->setExclusive(true);
-    QString currentTheme = m_config.preferredStyle();
-    for (const auto& name : ThemeManager::availableThemes()) {
-        auto* action = themeMenu->addAction(name);
+    QString currentVariant = m_config.preferredStyle();
+    if (!ThemeManager::isDarkVariant(currentVariant))
+        currentVariant = "Dracula";
+    for (const auto& name : ThemeManager::availableDarkVariants()) {
+        auto* action = darkMenu->addAction(name);
         action->setCheckable(true);
-        action->setChecked(name == currentTheme || (currentTheme.isEmpty() && name == "Default"));
+        action->setChecked(name == currentVariant);
         m_themeActions->addAction(action);
         connect(action, &QAction::triggered, this, [this, name] {
-            ThemeManager::applyTheme(name);
             m_config.setPreferredStyle(name);
+            ThemeManager::applyMode(m_config.appearanceMode(), name);
         });
     }
 
@@ -246,12 +267,9 @@ void MainWindow::setupUi()
 
     // --- Central widget: vertical splitter (workspace | activity log) ---
     //
-    // The transient InstallStatusBanner that flashed above the mod list
-    // during an install is gone — install/download progress is now
-    // narrated in the persistent ActivityLogPanel docked at the bottom,
-    // and an in-flight DownloadProgressWidget rides immediately above
-    // the activity log inside the left column of the workspace splitter
-    // (so its right edge naturally ends at the Downloads box).
+    // Download/install progress lives in the Downloads tab's per-row bar
+    // and is narrated in the ActivityLogPanel at the bottom. There is no
+    // separate progress strip under the mod list.
     auto* central = new QWidget;
     auto* centralLayout = new QVBoxLayout(central);
     centralLayout->setContentsMargins(0, 0, 0, 0);
@@ -261,20 +279,8 @@ void MainWindow::setupUi()
 
     auto* splitter = new QSplitter(Qt::Horizontal);
 
-    // Left column: mod list + download progress strip below it. The
-    // strip is hidden when no download is active (DownloadProgressWidget
-    // toggles its own visibility on terminal status), so the mod list
-    // gets the full height in the common case.
-    auto* leftCol = new QWidget;
-    auto* leftLayout = new QVBoxLayout(leftCol);
-    leftLayout->setContentsMargins(0, 0, 0, 0);
-    leftLayout->setSpacing(0);
     m_modList = new ModListWidget(m_grpc);
-    leftLayout->addWidget(m_modList, 1);
-    m_downloadProgress = new DownloadProgressWidget(m_grpc);
-    m_downloadProgress->setMinimumHeight(20);
-    leftLayout->addWidget(m_downloadProgress);
-    splitter->addWidget(leftCol);
+    splitter->addWidget(m_modList);
 
     m_rightTabs = new QTabWidget;
     m_pluginList = new PluginListWidget;
@@ -310,10 +316,6 @@ void MainWindow::setupUi()
     setCentralWidget(central);
 
     // --- Status bar (MO2-style: game - profile | connection) ---
-    // The download progress bar moved out of the status bar and into the
-    // workspace's left column (see above) so it sits directly above the
-    // activity log and ends at the Downloads box, instead of being a thin
-    // strip lost in the status bar.
     m_statusInfo = new QLabel;
     statusBar()->addWidget(m_statusInfo, 1);
 
@@ -505,14 +507,19 @@ void MainWindow::onOpenSettings()
 {
     SettingsDialog dlg(m_grpc, &m_config, this);
     dlg.exec();
-    // The dialog's theme combo writes directly to m_config; refresh the View
-    // → Theme menu's check state so it stays in sync if the user reopens it.
+    // Settings dialog can mutate either the dark variant or the appearance
+    // mode; refresh both menus so reopening the View menu shows the truth.
     if (m_themeActions) {
         QString current = m_config.preferredStyle();
-        if (current.isEmpty())
-            current = "Default";
+        if (!ThemeManager::isDarkVariant(current))
+            current = "Dracula";
         for (auto* a : m_themeActions->actions())
             a->setChecked(a->text() == current);
+    }
+    if (m_appearanceActions) {
+        const QString mode = m_config.appearanceMode();
+        for (auto* a : m_appearanceActions->actions())
+            a->setChecked(a->text().toLower() == mode);
     }
 }
 

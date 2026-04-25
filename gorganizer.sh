@@ -12,6 +12,10 @@
 #                         each launch and refreshed if the clone moved.
 #   setup                 Detect distro, install build deps via system PM.
 #   build [--rebuild]     Build only. --rebuild forces a clean rebuild.
+#   update                Pull latest from origin/main, rebuild, re-register.
+#                         Refuses to run if the working tree is dirty or not
+#                         a git checkout. User config and *_Mods/ are
+#                         preserved.
 #   register              (Re-)install desktop file + icon + nxm:// handler.
 #   unregister            Reverse `register`.
 #   nxm <URI>             One-shot: forward an nxm:// URL to the running daemon.
@@ -664,6 +668,87 @@ cmd_nxm() {
     exec "$DAEMON_BIN" --handle-nxm "$uri"
 }
 
+# --- update ----------------------------------------------------------------
+
+cmd_update() {
+    # In-place update of an existing checkout. Pulls origin/main, forces a
+    # clean rebuild, refreshes the desktop entry (Exec= path may have moved
+    # under the user) and bounces a running daemon. User config under
+    # $CONFIG_DIR and mod data under each <Game>_Mods/ tree are never
+    # touched here — git pull only changes tracked files.
+    local restart=false
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --restart) restart=true; shift ;;
+            *) err "Unknown option: $1"; return 2 ;;
+        esac
+    done
+
+    if ! command -v git >/dev/null 2>&1; then
+        err "git not found in PATH; can't update."
+        exit 1
+    fi
+    if [ ! -d "$SCRIPT_DIR/.git" ]; then
+        err "$SCRIPT_DIR is not a git checkout."
+        err "Re-clone the repo to update:"
+        err "    git clone https://github.com/parka5040/gorganizer ~/gorganizer"
+        exit 1
+    fi
+
+    # Refuse to clobber local edits — they're the user's, not ours to merge.
+    if ! git -C "$SCRIPT_DIR" diff --quiet HEAD -- 2>/dev/null \
+       || [ -n "$(git -C "$SCRIPT_DIR" status --porcelain)" ]; then
+        err "Working tree has uncommitted changes:"
+        git -C "$SCRIPT_DIR" status -s >&2
+        err "Stash or commit them, then re-run \`./gorganizer.sh update\`."
+        exit 1
+    fi
+
+    local old_sha new_sha
+    old_sha=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD)
+
+    log "Fetching origin..."
+    if ! git -C "$SCRIPT_DIR" fetch --quiet origin; then
+        err "git fetch failed."
+        exit 1
+    fi
+
+    log "Pulling --ff-only..."
+    if ! git -C "$SCRIPT_DIR" pull --ff-only --quiet origin main; then
+        err "Non-fast-forward (or other) pull failure. Resolve manually:"
+        err "    cd $SCRIPT_DIR && git pull"
+        exit 1
+    fi
+
+    new_sha=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD)
+    if [ "$old_sha" = "$new_sha" ]; then
+        ok "Already on the latest commit ($new_sha)."
+    else
+        ok "Updated $old_sha -> $new_sha:"
+        git -C "$SCRIPT_DIR" log --oneline "${old_sha}..${new_sha}" || true
+    fi
+
+    log "Rebuilding from clean..."
+    do_build force || exit 1
+
+    log "Refreshing desktop entry..."
+    cmd_register || warn "Desktop registration reported issues."
+
+    if pgrep -x gorganizerd >/dev/null 2>&1; then
+        if [ "$restart" = true ]; then
+            log "Restarting daemon..."
+            kill_stale_daemons
+            start_daemon
+            ok "Daemon restarted."
+        else
+            warn "A daemon is running on the old build."
+            warn "Re-run with --restart, or quit the GUI and rerun ./gorganizer.sh."
+        fi
+    fi
+
+    ok "Update complete."
+}
+
 # --- setup -----------------------------------------------------------------
 
 cmd_setup() {
@@ -784,6 +869,9 @@ case "${1:-}" in
             exit 0
         fi
         do_build "$force"
+        ;;
+    update)
+        shift; cmd_update "$@"
         ;;
     register)
         shift; cmd_register "$@"

@@ -18,7 +18,6 @@ class DownloadsLibraryView;
 class RunButtonWidget;
 class ProfileSelectorWidget;
 class ConnectionIndicator;
-class DownloadProgressWidget;
 class ActivityLogPanel;
 
 class MainWindow : public QMainWindow {
@@ -54,13 +53,13 @@ private:
     RunButtonWidget* m_runButton = nullptr;
     ProfileSelectorWidget* m_profileSelector = nullptr;
     ConnectionIndicator* m_connectionIndicator = nullptr;
-    DownloadProgressWidget* m_downloadProgress = nullptr;
     QLabel* m_statusInfo = nullptr;
 
     std::vector<GameInfo> m_managedGames;
     GameInfo m_activeGame;
     QString m_currentProfile = "Default";
-    QActionGroup* m_themeActions = nullptr;
+    QActionGroup* m_themeActions = nullptr;     // legacy: dark variant choice
+    QActionGroup* m_appearanceActions = nullptr; // System / Light / Dark
 };
 
 } // namespace gorganizer

@@ -2,34 +2,80 @@
 
 #include <QApplication>
 #include <QFile>
+#include <QGuiApplication>
 #include <QHash>
+#include <QStyleHints>
 #include <QtGlobal>
 
 namespace gorganizer {
 
 QStringList ThemeManager::availableThemes()
 {
-    return {"Default", "Dracula", "Monokai", "Nord", "Gruvbox Dark", "One Dark", "Solarized Dark"};
+    return {"Light", "Dracula", "Monokai", "Nord", "Gruvbox Dark", "One Dark", "Solarized Dark"};
+}
+
+QStringList ThemeManager::availableModes()
+{
+    return {"System", "Light", "Dark"};
+}
+
+QStringList ThemeManager::availableDarkVariants()
+{
+    return {"Dracula", "Monokai", "Nord", "Gruvbox Dark", "One Dark", "Solarized Dark"};
+}
+
+bool ThemeManager::isDarkVariant(const QString& name)
+{
+    return availableDarkVariants().contains(name);
+}
+
+bool ThemeManager::systemPrefersDark()
+{
+    // Qt 6.5+ exposes the OS color scheme via QStyleHints. On older Qt or
+    // when the platform doesn't report a scheme, default to light.
+    if (auto* hints = QGuiApplication::styleHints())
+        return hints->colorScheme() == Qt::ColorScheme::Dark;
+    return false;
 }
 
 void ThemeManager::applyTheme(const QString& name)
 {
-    if (name.isEmpty() || name == "Default") {
-        qApp->setStyleSheet(QString());
+    // Legacy entry point. "Default" used to mean unstyled Fusion (light);
+    // map it onto the new Light theme so existing config files keep working.
+    if (name.isEmpty() || name == "Default" || name == "Light") {
+        QString qss = qssForTheme("Light");
+        qApp->setStyleSheet(qss);
         return;
     }
     QString qss = qssForTheme(name);
     if (qss.isEmpty()) {
-        qWarning("gorganizer: failed to load theme '%s' — falling back to Default", qPrintable(name));
-        qApp->setStyleSheet(QString());
+        qWarning("gorganizer: failed to load theme '%s' — falling back to Light", qPrintable(name));
+        qApp->setStyleSheet(qssForTheme("Light"));
         return;
     }
     qApp->setStyleSheet(qss);
 }
 
+void ThemeManager::applyMode(const QString& mode, const QString& darkVariant)
+{
+    QString variant = isDarkVariant(darkVariant) ? darkVariant : QStringLiteral("Dracula");
+
+    if (mode == "light") {
+        applyTheme("Light");
+        return;
+    }
+    if (mode == "dark") {
+        applyTheme(variant);
+        return;
+    }
+    // "system" (or any unknown value): follow the OS.
+    applyTheme(systemPrefersDark() ? variant : QStringLiteral("Light"));
+}
+
 QString ThemeManager::qssForTheme(const QString& name)
 {
     static const QHash<QString, QString> resourceMap = {
+        {"Light",          ":/themes/light.qss"},
         {"Dracula",        ":/themes/dracula.qss"},
         {"Monokai",        ":/themes/monokai.qss"},
         {"Nord",           ":/themes/nord.qss"},

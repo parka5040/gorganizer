@@ -316,8 +316,8 @@ void SettingsDialog::populateThemeCombo()
     m_themeCombo->clear();
     m_themeCombo->addItems(ThemeManager::availableThemes());
     QString current = m_config ? m_config->preferredStyle() : QString();
-    if (current.isEmpty())
-        current = "Default";
+    if (current.isEmpty() || current == "Default")
+        current = "Light";
     int idx = m_themeCombo->findText(current);
     if (idx >= 0)
         m_themeCombo->setCurrentIndex(idx);
@@ -326,9 +326,20 @@ void SettingsDialog::populateThemeCombo()
 
 void SettingsDialog::onThemeChanged(const QString& name)
 {
-    ThemeManager::applyTheme(name);
-    if (m_config)
+    if (!m_config)
+        return;
+    // Picking "Light" here is shorthand for switching the whole appearance
+    // mode to light. Picking a dark variant updates the saved variant and
+    // forces dark mode so the change is visible immediately. Either way we
+    // re-resolve via applyMode so System users don't get stuck on a forced
+    // theme.
+    if (name == "Light") {
+        m_config->setAppearanceMode("light");
+    } else if (ThemeManager::isDarkVariant(name)) {
         m_config->setPreferredStyle(name);
+        m_config->setAppearanceMode("dark");
+    }
+    ThemeManager::applyMode(m_config->appearanceMode(), m_config->preferredStyle());
 }
 
 void SettingsDialog::onSaveProton()

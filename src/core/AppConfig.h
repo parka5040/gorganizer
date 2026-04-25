@@ -24,6 +24,15 @@ public:
     void setPreferredStyle(const QString& style);
     QString preferredStyle() const;
 
+    // Appearance mode is the user's top-level Light/Dark/System choice.
+    // The dark *variant* (Dracula, Nord, ...) is preferredStyle() above; mode
+    // selects whether that variant is shown at all.
+    //   "system" — follow OS color scheme (default)
+    //   "light"  — force light.qss
+    //   "dark"   — force the variant from preferredStyle()
+    void setAppearanceMode(const QString& mode);
+    QString appearanceMode() const;
+
     // Per-game "last active profile" so the UI reopens on the profile the user
     // actually left it on, not always "Default".
     void setLastProfileFor(const QString& gameShortName, const QString& profileName);

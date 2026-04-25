@@ -8,11 +8,15 @@
 #include <QDialogButtonBox>
 #include <QString>
 #include <QList>
+#include <QThread>
 #include "FomodPlan.h"
+
+class QCloseEvent;
 
 namespace gorganizer {
 
 class GrpcClient;
+class InstallWorker;
 
 // Dialog that handles the full mod archive install flow:
 // 1. Extract archive to temp dir (with progress)
@@ -37,6 +41,10 @@ public:
     QString installedModName() const { return m_modName; }
     int installedFileCount() const { return m_fileCount; }
 
+protected:
+    void closeEvent(QCloseEvent* event) override;
+    void reject() override;
+
 signals:
     // Emitted when the client-side FOMOD wizard opens/closes. MainWindow
     // forwards these to the InstallStatusBanner so the user has a visible
@@ -47,15 +55,14 @@ signals:
 private slots:
     void onExtractFinished(int exitCode);
     void onInstallClicked();
+    void onCancelClicked();
+    void onWorkerFinished(bool ok, bool cancelled, int fileCount, const QString& err);
 
 private:
     void startExtraction();
     void scanExtractedTree();
     void populateTree(const QString& dir, QTreeWidgetItem* parent);
     void installFrom(const QString& sourceDir);
-    int copyRecursive(const QString& src, const QString& dst);
-    int copyFomodSelections(const QString& modulePath, const QString& destDir);
-    int copyLegacyFomod(const QString& modulePath, const QString& destDir);
     void writeMetadata(const QString& modDir);
 
     QString m_archivePath;
@@ -83,8 +90,17 @@ private:
     QTreeWidget* m_treeWidget;
     QDialogButtonBox* m_buttons;
     QPushButton* m_installBtn;
+    QPushButton* m_cancelBtn = nullptr;
 
-    enum Phase { Extracting, Choosing, Installing, Done };
+    // Background install: long file copies run on m_workerThread so the
+    // dialog stays responsive (drag, focus, indeterminate-bar animation).
+    // The worker checks an atomic cancel flag between files; on cancel the
+    // partially-populated destination is removed in onWorkerFinished.
+    QThread* m_workerThread = nullptr;
+    InstallWorker* m_worker = nullptr;
+    QString m_installDestDir;
+
+    enum Phase { Extracting, Choosing, Installing, Cancelling, Done };
     Phase m_phase = Extracting;
 };
 

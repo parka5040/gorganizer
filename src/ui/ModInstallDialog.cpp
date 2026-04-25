@@ -1,6 +1,7 @@
 #include "ModInstallDialog.h"
 #include "FomodInstallerDialog.h"
 #include "GrpcClient.h"
+#include "InstallWorker.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -17,6 +18,7 @@
 #include <QTextStream>
 #include <QDateTime>
 #include <QFile>
+#include <QCloseEvent>
 
 namespace gorganizer {
 
@@ -62,9 +64,9 @@ ModInstallDialog::ModInstallDialog(const QString& archivePath,
     m_buttons = new QDialogButtonBox;
     m_installBtn = m_buttons->addButton("Install", QDialogButtonBox::AcceptRole);
     m_installBtn->setEnabled(false);
-    m_buttons->addButton(QDialogButtonBox::Cancel);
+    m_cancelBtn = m_buttons->addButton(QDialogButtonBox::Cancel);
     connect(m_installBtn, &QPushButton::clicked, this, &ModInstallDialog::onInstallClicked);
-    connect(m_buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    connect(m_cancelBtn, &QPushButton::clicked, this, &ModInstallDialog::onCancelClicked);
     layout->addWidget(m_buttons);
 
     // Start extraction
@@ -156,7 +158,7 @@ void ModInstallDialog::scanExtractedTree()
         m_treeWidget->hide();
         m_progressBar->setRange(0, 0);
         m_progressBar->show();
-        m_statusLabel->setText("Installing to " + m_modName + "/...");
+        m_statusLabel->setText("Installing " + m_modName + "… please wait");
         installFrom(m_detectedDataRoot);
         return;
     }
@@ -312,29 +314,121 @@ void ModInstallDialog::onInstallClicked()
 
 void ModInstallDialog::installFrom(const QString& sourceDir)
 {
-    QString destDir = m_modsDir + "/" + m_modName;
-    QDir().mkpath(destDir);
+    m_installDestDir = m_modsDir + "/" + m_modName;
+    QDir().mkpath(m_installDestDir);
 
+    // Spin up the worker on a dedicated thread so the file-copy loop
+    // doesn't pin the UI. The dialog's Cancel button can interrupt
+    // mid-copy via the worker's atomic flag; partial output is wiped in
+    // onWorkerFinished.
+    m_worker = new InstallWorker;
     if (m_legacyFomodFlatCopy) {
-        m_fileCount = copyLegacyFomod(m_fomodModulePath, destDir);
+        m_worker->configureLegacyFomod(m_fomodModulePath, m_installDestDir);
     } else if (!m_fomodSelections.isEmpty()) {
-        m_fileCount = copyFomodSelections(m_fomodModulePath, destDir);
+        m_worker->configureFomodSelections(m_fomodModulePath, m_fomodSelections,
+                                           m_installDestDir);
     } else {
-        m_fileCount = copyRecursive(sourceDir, destDir);
+        m_worker->configureRecursive(sourceDir, m_installDestDir);
     }
 
-    // Generate metadata.yaml manifest.
-    if (m_fileCount > 0)
-        writeMetadata(destDir);
+    m_workerThread = new QThread(this);
+    m_worker->moveToThread(m_workerThread);
+    connect(m_workerThread, &QThread::started, m_worker, &InstallWorker::run);
+    connect(m_worker, &InstallWorker::finished,
+            this, &ModInstallDialog::onWorkerFinished);
+    connect(m_worker, &InstallWorker::finished,
+            m_workerThread, &QThread::quit);
+    connect(m_workerThread, &QThread::finished,
+            m_worker, &QObject::deleteLater);
+    connect(m_workerThread, &QThread::finished,
+            m_workerThread, &QObject::deleteLater);
 
-    // Clean up temp extraction dir.
+    m_workerThread->start();
+}
+
+void ModInstallDialog::onCancelClicked()
+{
+    // During install, Cancel asks the worker to stop and removes the
+    // partial mod folder in onWorkerFinished. Outside install we just
+    // reject the dialog like a normal cancel.
+    if (m_phase == Installing && m_worker) {
+        m_phase = Cancelling;
+        m_cancelBtn->setEnabled(false);
+        m_statusLabel->setText("Cancelling…");
+        m_worker->cancel();
+        return;
+    }
+    QDialog::reject();
+}
+
+void ModInstallDialog::closeEvent(QCloseEvent* event)
+{
+    if (m_phase == Installing && m_worker) {
+        m_phase = Cancelling;
+        if (m_cancelBtn)
+            m_cancelBtn->setEnabled(false);
+        m_statusLabel->setText("Cancelling…");
+        m_worker->cancel();
+        event->ignore(); // wait for the worker — onWorkerFinished closes us
+        return;
+    }
+    QDialog::closeEvent(event);
+}
+
+void ModInstallDialog::reject()
+{
+    if (m_phase == Installing && m_worker) {
+        m_phase = Cancelling;
+        if (m_cancelBtn)
+            m_cancelBtn->setEnabled(false);
+        m_statusLabel->setText("Cancelling…");
+        m_worker->cancel();
+        return; // don't actually reject — onWorkerFinished does it
+    }
+    QDialog::reject();
+}
+
+void ModInstallDialog::onWorkerFinished(bool ok, bool cancelled, int fileCount,
+                                       const QString& err)
+{
+    m_worker = nullptr;       // owned by its thread; deleteLater wired up
+    m_workerThread = nullptr; // ditto
+    m_fileCount = fileCount;
+
+    // Always nuke the temp extraction tree.
     QDir(m_extractDir).removeRecursively();
+
+    if (cancelled || !ok) {
+        // Wipe the half-populated destination so the user doesn't end up
+        // with a broken mod folder the daemon would happily list. Bail out
+        // only if the path is unmistakably under the user's mods dir, to
+        // avoid a worst-case rmtree on a typo'd target.
+        if (!m_installDestDir.isEmpty()) {
+            QString destAbs = QDir(m_installDestDir).absolutePath();
+            QString modsAbs = QDir(m_modsDir).absolutePath();
+            if (destAbs.startsWith(modsAbs + "/"))
+                QDir(destAbs).removeRecursively();
+        }
+        m_progressBar->hide();
+        m_phase = Done;
+        if (cancelled) {
+            m_statusLabel->setText("Install cancelled.");
+            reject();
+        } else {
+            m_statusLabel->setText(QString("Install failed: %1").arg(err));
+        }
+        return;
+    }
+
+    if (fileCount > 0)
+        writeMetadata(m_installDestDir);
 
     m_progressBar->hide();
     m_phase = Done;
 
-    if (m_fileCount > 0) {
-        m_statusLabel->setText(QString("Installed %1 files to %2/").arg(m_fileCount).arg(m_modName));
+    if (fileCount > 0) {
+        m_statusLabel->setText(
+            QString("Installed %1 files to %2/").arg(fileCount).arg(m_modName));
         // Notify the daemon: register the new mod folder so every profile's
         // modlist.txt gets a (disabled) entry, the installed-archive cache
         // is dropped, and the Downloads tab flips to INSTALLED. Without this
@@ -346,14 +440,11 @@ void ModInstallDialog::installFrom(const QString& sourceDir)
             QString archAbs = QFileInfo(m_archivePath).absoluteFilePath();
             if (archAbs.startsWith(modsDirNorm + "/"))
                 archiveRel = archAbs.mid(modsDirNorm.length() + 1);
-            QString err;
-            if (!m_grpc->registerManualInstall(m_gameId, m_modName, archiveRel, err)) {
-                // Non-fatal — surface a warning but still accept(): the user
-                // already has a working mod folder; the worst case is they
-                // need to enable it manually.
+            QString rpcErr;
+            if (!m_grpc->registerManualInstall(m_gameId, m_modName, archiveRel, rpcErr)) {
                 m_statusLabel->setText(
                     QString("Installed %1 files. (Daemon notify failed: %2)")
-                        .arg(m_fileCount).arg(err));
+                        .arg(fileCount).arg(rpcErr));
             }
         }
         accept();
@@ -474,127 +565,6 @@ void ModInstallDialog::writeMetadata(const QString& modDir)
         out << "  - \"" << f << "\"\n";
 
     meta.close();
-}
-
-int ModInstallDialog::copyFomodSelections(const QString& modulePath, const QString& destDir)
-{
-    // FOMOD selections are ordered source→destination operations. Higher
-    // `priority` wins on conflicts per the FOMOD spec; stable-sort so the
-    // later writes land last.
-    auto ops = m_fomodSelections;
-    std::stable_sort(ops.begin(), ops.end(),
-        [](const FomodFile& a, const FomodFile& b) { return a.priority < b.priority; });
-
-    auto normalizeDest = [&](const FomodFile& f) -> QString {
-        QString dest = f.destination;
-        dest.replace('\\', '/');
-        // Empty destination on a folder means "mirror folder contents at mod root".
-        // Empty destination on a file means "put file at mod root under its basename".
-        if (dest.isEmpty()) {
-            if (f.isFolder)
-                return QString();
-            return QFileInfo(f.source).fileName();
-        }
-        // Strip leading/trailing slashes.
-        while (dest.startsWith('/')) dest.remove(0, 1);
-        while (dest.endsWith('/'))   dest.chop(1);
-        return dest;
-    };
-
-    int count = 0;
-    for (const auto& f : ops) {
-        QString normSource = f.source;
-        normSource.replace('\\', '/');
-        QString absSource = modulePath + "/" + normSource;
-
-        if (f.isFolder) {
-            QDir srcDir(absSource);
-            if (!srcDir.exists()) continue;
-            QString destRoot = destDir;
-            QString destSub = normalizeDest(f);
-            if (!destSub.isEmpty())
-                destRoot = destDir + "/" + destSub;
-            QDir().mkpath(destRoot);
-
-            QDirIterator it(absSource, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot,
-                            QDirIterator::Subdirectories);
-            while (it.hasNext()) {
-                it.next();
-                QString rel = srcDir.relativeFilePath(it.filePath());
-                QString target = destRoot + "/" + rel;
-                if (it.fileInfo().isDir()) {
-                    QDir().mkpath(target);
-                } else {
-                    QDir().mkpath(QFileInfo(target).absolutePath());
-                    QFile::remove(target); // allow overwrite
-                    if (QFile::copy(it.filePath(), target))
-                        ++count;
-                }
-            }
-        } else {
-            if (!QFile::exists(absSource)) continue;
-            QString destSub = normalizeDest(f);
-            QString target = destSub.isEmpty() ? destDir + "/" + QFileInfo(absSource).fileName()
-                                               : destDir + "/" + destSub;
-            QDir().mkpath(QFileInfo(target).absolutePath());
-            QFile::remove(target);
-            if (QFile::copy(absSource, target))
-                ++count;
-        }
-    }
-    return count;
-}
-
-int ModInstallDialog::copyLegacyFomod(const QString& modulePath, const QString& destDir)
-{
-    // Legacy NMM FOMOD: copy every file under modulePath EXCEPT the fomod/
-    // directory and any *.cs install script. We deliberately skip the script
-    // — executing untrusted C# is out of scope and the bundled mod files
-    // alone are typically functional for these older mods.
-    int count = 0;
-    QDir base(modulePath);
-    QDirIterator it(modulePath, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot,
-                    QDirIterator::Subdirectories);
-    while (it.hasNext()) {
-        it.next();
-        QString rel = base.relativeFilePath(it.filePath());
-        QString lowerRel = rel.toLower();
-        if (lowerRel == "fomod" || lowerRel.startsWith("fomod/"))
-            continue;
-        if (lowerRel.endsWith(".cs"))
-            continue;
-
-        QString target = destDir + "/" + rel;
-        if (it.fileInfo().isDir()) {
-            QDir().mkpath(target);
-        } else {
-            QDir().mkpath(QFileInfo(target).absolutePath());
-            QFile::remove(target);
-            if (QFile::copy(it.filePath(), target))
-                ++count;
-        }
-    }
-    return count;
-}
-
-int ModInstallDialog::copyRecursive(const QString& src, const QString& dst)
-{
-    int count = 0;
-    QDirIterator it(src, QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
-    while (it.hasNext()) {
-        it.next();
-        QString rel = QDir(src).relativeFilePath(it.filePath());
-        QString destPath = dst + "/" + rel;
-
-        if (it.fileInfo().isDir()) {
-            QDir().mkpath(destPath);
-        } else {
-            QDir().mkpath(QFileInfo(destPath).path());
-            QFile::copy(it.filePath(), destPath);
-            count++;
-        }
-    }
-    return count;
 }
 
 } // namespace gorganizer

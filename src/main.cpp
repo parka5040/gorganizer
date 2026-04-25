@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QStyleFactory>
+#include <QStyleHints>
 #include <QProcess>
 #include <QFileInfo>
 #include <QDir>
@@ -85,7 +86,18 @@ int main(int argc, char* argv[])
         qWarning("gorganizer: Fusion style unavailable — Qt6 base install may be incomplete");
 
     gorganizer::AppConfig config;
-    gorganizer::ThemeManager::applyTheme(config.preferredStyle());
+    gorganizer::ThemeManager::applyMode(config.appearanceMode(), config.preferredStyle());
+
+    // When the user is on "System" mode, repaint as the OS toggles between
+    // light and dark. The lambda re-reads config so a mid-session mode change
+    // doesn't keep us subscribed to a now-irrelevant signal.
+    QObject::connect(QGuiApplication::styleHints(),
+                     &QStyleHints::colorSchemeChanged, &app,
+                     [&config](Qt::ColorScheme) {
+                         if (config.appearanceMode() == "system")
+                             gorganizer::ThemeManager::applyMode(
+                                 "system", config.preferredStyle());
+                     });
 
     QString wizardApiKey;
     if (config.isFirstBoot()) {

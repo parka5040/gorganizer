@@ -64,6 +64,20 @@ QString AppConfig::preferredStyle() const
     return m_settings.value("ui/style").toString();
 }
 
+void AppConfig::setAppearanceMode(const QString& mode)
+{
+    m_settings.setValue("ui/appearanceMode", mode);
+    m_settings.sync();
+}
+
+QString AppConfig::appearanceMode() const
+{
+    QString m = m_settings.value("ui/appearanceMode").toString();
+    if (m != "system" && m != "light" && m != "dark")
+        return "system";
+    return m;
+}
+
 void AppConfig::setLastProfileFor(const QString& gameShortName, const QString& profileName)
 {
     if (gameShortName.isEmpty() || profileName.isEmpty())
