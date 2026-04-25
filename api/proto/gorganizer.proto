@@ -1,0 +1,831 @@
+syntax = "proto3";
+package gorganizer.v1;
+
+option go_package = "github.com/parka/gorganizer/api/proto";
+
+// --- Service ---
+
+service Gorganizer {
+  // Game management
+  rpc ListGames(ListGamesRequest) returns (ListGamesResponse);
+  rpc DetectGames(DetectGamesRequest) returns (DetectGamesResponse);
+  rpc ConfigureGame(ConfigureGameRequest) returns (ConfigureGameResponse);
+
+  // Mod management (installed mods)
+  rpc ListMods(ListModsRequest) returns (ListModsResponse);
+  rpc GetMod(GetModRequest) returns (ModInfo);
+  rpc RescanMod(RescanModRequest) returns (ModInfo);
+  rpc RenameMod(RenameModRequest) returns (RenameModResponse);
+  rpc UninstallMod(UninstallModRequest) returns (UninstallModResponse);
+  rpc ReinstallMod(ReinstallModRequest) returns (ReinstallModResponse);
+  // Notify the daemon about a mod folder produced by a path that bypasses
+  // StartInstall (e.g. the C++ FOMOD wizard's local-extract install).
+  // The daemon ensures every profile's modlist.txt has an entry, drops
+  // its installed-archive cache, and emits an archive RowChanged so the
+  // Downloads tab flips to INSTALLED. Idempotent.
+  rpc RegisterManualInstall(RegisterManualInstallRequest) returns (RegisterManualInstallResponse);
+
+  // List every file under the always-on Overwrite layer (the dropbox for
+  // loose files / tool output the user wants to fold into a real mod).
+  // Returns empty list when the directory doesn't exist or is empty.
+  rpc ListOverwriteFiles(ListOverwriteFilesRequest) returns (ListOverwriteFilesResponse);
+
+  // Move (or copy when keep_in_overwrite=true) a subset of files from the
+  // Overwrite layer into a freshly-named mod folder. The daemon registers
+  // the resulting mod (modlist.txt entry, source_archives empty, enabled
+  // false). On collision with an existing mod folder the call fails — the
+  // user must pick a different name.
+  rpc ExtractOverwriteToMod(ExtractOverwriteToModRequest) returns (ExtractOverwriteToModResponse);
+
+  // Profile management
+  rpc ListProfiles(ListProfilesRequest) returns (ListProfilesResponse);
+  rpc CreateProfile(CreateProfileRequest) returns (Profile);
+  rpc DeleteProfile(DeleteProfileRequest) returns (DeleteProfileResponse);
+  rpc GetModList(GetModListRequest) returns (ModListResponse);
+  rpc SetModList(SetModListRequest) returns (SetModListResponse);
+  // Visual-only mod list separators (MO2-style).
+  rpc ListSeparators(ListSeparatorsRequest) returns (ListSeparatorsResponse);
+  rpc SetSeparators(SetSeparatorsRequest) returns (SetSeparatorsResponse);
+
+  // VFS control
+  rpc MountVFS(MountVFSRequest) returns (MountVFSResponse);
+  rpc UnmountVFS(UnmountVFSRequest) returns (UnmountVFSResponse);
+  rpc GetVFSStatus(GetVFSStatusRequest) returns (VFSStatus);
+  rpc RebuildVFS(RebuildVFSRequest) returns (RebuildVFSResponse);
+  // Manual recovery: when the daemon detects an unrecognized Data/ alongside
+  // an intact Data.orig/ (e.g. a hand-edited install or a half-applied
+  // overlay from a different gorganizer build), it refuses to auto-restore
+  // and surfaces a RecoveryPending event. The frontend prompts the user;
+  // confirming calls RestoreFromBackup which performs the destructive
+  // restore (remove Data, rename Data.orig → Data) under explicit consent.
+  rpc RestoreFromBackup(RestoreFromBackupRequest) returns (RestoreFromBackupResponse);
+
+  // Conflict analysis
+  rpc GetConflicts(GetConflictsRequest) returns (ConflictsResponse);
+
+  // --- Archives (the Downloads tab) ---
+  //
+  // "Archive" = a single on-disk file under DownloadsDir(gameID). An archive
+  // may be in-flight (download queued or streaming), fully downloaded, or
+  // installed (has a corresponding mod directory). All lifecycle changes
+  // flow through this surface; no duplicate paths.
+  rpc ListArchives(ListArchivesRequest) returns (ListArchivesResponse);
+  rpc StartDownload(StartDownloadRequest) returns (StartDownloadResponse);
+  rpc CancelDownload(CancelDownloadRequest) returns (CancelDownloadResponse);
+  rpc RetryDownload(RetryDownloadRequest) returns (RetryDownloadResponse);
+  rpc RemoveArchive(RemoveArchiveRequest) returns (RemoveArchiveResponse);
+  rpc SetArchiveHidden(SetArchiveHiddenRequest) returns (SetArchiveHiddenResponse);
+  rpc SetArchivesHiddenBulk(SetArchivesHiddenBulkRequest) returns (SetArchivesHiddenBulkResponse);
+  rpc RefreshArchiveMetadata(RefreshArchiveMetadataRequest) returns (RefreshArchiveMetadataResponse);
+  rpc StreamArchiveEvents(StreamArchiveEventsRequest) returns (stream ArchiveEvent);
+
+  // --- Installs (archive → mod) ---
+  //
+  // PreviewInstall extracts the archive into a daemon-side cache, parses
+  // FOMOD if present, and returns either a plan the UI can walk or a flat
+  // file list. StartInstall accepts an optional preview_id so the cached
+  // extraction is reused; without one it extracts fresh. DiscardPreview
+  // drops the cache entry when the user cancels the wizard.
+  rpc PreviewInstall(PreviewInstallRequest) returns (PreviewInstallResponse);
+  rpc StartInstall(StartInstallRequest) returns (StartInstallResponse);
+  rpc DiscardPreview(DiscardPreviewRequest) returns (DiscardPreviewResponse);
+  rpc StreamInstallEvents(StreamInstallEventsRequest) returns (stream InstallEvent);
+
+  // Per-game settings (auto-install toggle, etc.)
+  rpc GetGameSettings(GetGameSettingsRequest) returns (GameSettings);
+  rpc SetGameSettings(SetGameSettingsRequest) returns (GameSettings);
+
+  // Per-profile INI management
+  rpc ListProfileIniFiles(ListProfileIniFilesRequest) returns (ListProfileIniFilesResponse);
+  rpc SaveProfileIniFile(SaveProfileIniFileRequest) returns (SaveProfileIniFileResponse);
+  rpc SetProfileIniEnabled(SetProfileIniEnabledRequest) returns (ProfileIniStatus);
+  rpc GetProfileIniStatus(GetProfileIniStatusRequest) returns (ProfileIniStatus);
+  rpc ListIniTweaks(ListIniTweaksRequest) returns (ListIniTweaksResponse);
+  rpc SetIniTweak(SetIniTweakRequest) returns (IniTweakState);
+
+  // Game launch (with optional script extender)
+  rpc LaunchGame(LaunchGameRequest) returns (LaunchGameResponse);
+  rpc DetectProton(DetectProtonRequest) returns (DetectProtonResponse);
+
+  // Fetches the game's canonical script extender from Nexus Mods and
+  // extracts it into the game's install directory. Requires an API key.
+  rpc InstallScriptExtender(InstallScriptExtenderRequest) returns (InstallScriptExtenderResponse);
+
+  // Global Proton preference (used when no per-game override is set).
+  rpc GetPreferredProton(GetPreferredProtonRequest) returns (GetPreferredProtonResponse);
+  rpc SetPreferredProton(SetPreferredProtonRequest) returns (SetPreferredProtonResponse);
+
+  // Settings
+  rpc SetNexusAPIKey(SetNexusAPIKeyRequest) returns (SetNexusAPIKeyResponse);
+
+  // Lifecycle
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+  // Lightweight, non-streaming readiness probe used by the splash screen.
+  // Polled at ~150 ms during cold start; the frontend unlocks the main
+  // window when GamesWarmed flips true.
+  rpc Health(HealthRequest) returns (Readiness);
+
+  // Live status streaming (VFS status, Info/Error only — download and
+  // install progress live on their own per-game streams).
+  rpc WatchStatus(WatchStatusRequest) returns (stream StatusEvent);
+}
+
+// --- Game messages ---
+
+message Game {
+  string game_id = 1;
+  string name = 2;
+  uint32 steam_app_id = 3;
+  string install_path = 4;
+  string data_path = 5;
+}
+
+message ListGamesRequest {}
+message ListGamesResponse {
+  repeated Game games = 1;
+}
+
+message DetectGamesRequest {}
+message DetectGamesResponse {
+  repeated Game games = 1;
+}
+
+message ConfigureGameRequest {
+  string game_id = 1;
+  string name = 2;
+  uint32 steam_app_id = 3;
+  string install_path = 4;
+  string data_subpath = 5;
+}
+message ConfigureGameResponse {}
+
+// --- Mod messages ---
+
+message ModInfo {
+  string name = 1;
+  string game_id = 2;
+  string base_path = 3;
+  string data_path = 4;
+  int32 file_count = 5;
+  int64 total_size = 6;
+  repeated string files = 7;
+}
+
+message ListModsRequest {
+  string game_id = 1;
+}
+message ListModsResponse {
+  repeated ModInfo mods = 1;
+}
+
+message GetModRequest {
+  string game_id = 1;
+  string mod_name = 2;
+}
+
+message RescanModRequest {
+  string game_id = 1;
+  string mod_name = 2;
+}
+
+message RenameModRequest {
+  string game_id = 1;
+  string old_name = 2;
+  string new_name = 3;
+}
+message RenameModResponse {
+  string mod_name = 1;
+}
+
+message UninstallModRequest {
+  string game_id = 1;
+  string mod_name = 2;
+  // When false and the mod is enabled in any profile, the daemon returns
+  // a ModInUseError-mapped FailedPrecondition with the profile list; the
+  // frontend prompts the user and retries with force=true.
+  bool force = 3;
+}
+message UninstallModResponse {
+  // Archives whose sticky Uninstalled flag was set as part of this
+  // uninstall (archives used solely by this mod, not shared).
+  repeated string archives_flagged_uninstalled = 1;
+}
+
+message ReinstallModRequest {
+  string game_id = 1;
+  string mod_name = 2;
+}
+message ReinstallModResponse {
+  int32 archives_replayed = 1;
+  int32 archives_skipped = 2;   // missing on disk
+  int32 file_count = 3;
+}
+
+message RegisterManualInstallRequest {
+  string game_id = 1;
+  string mod_name = 2;            // folder name under ModsDir
+  // Archive path relative to ModsDir(gameID), e.g. "Downloads/123_Foo/foo.7z".
+  // Empty means the mod was not produced from a tracked download (drag-drop
+  // from outside the Downloads tree). If non-empty, the daemon emits an
+  // ArchiveEvent.RowChanged for it so the Downloads tab flips to INSTALLED
+  // without a manual reload.
+  string archive_rel_path = 3;
+}
+message RegisterManualInstallResponse {
+  int32 profiles_updated = 1;     // number of profiles whose modlist.txt got a new entry
+}
+
+message ListOverwriteFilesRequest {
+  string game_id = 1;
+}
+message ListOverwriteFilesResponse {
+  repeated OverwriteEntry files = 1;
+  string overwrite_dir = 2;       // absolute path, for the UI's "Open Folder"
+}
+message OverwriteEntry {
+  string rel_path = 1;            // forward-slash, relative to overwrite_dir
+  int64 size_bytes = 2;
+  string modified_at = 3;         // RFC3339; useful when discriminating tool output
+  bool is_dir = 4;                // exposed so the UI can render an expandable tree
+}
+
+message ExtractOverwriteToModRequest {
+  string game_id = 1;
+  string mod_name = 2;            // folder name under ModsDir; must not already exist
+  // Files / dirs to move (or copy) — paths are relative to overwrite_dir
+  // and forward-slashed. Empty `files` means "extract everything".
+  repeated string files = 3;
+  // When true, leave originals in Overwrite (copy). When false, the
+  // default, move them out — the typical workflow is "graduate this loose
+  // batch into a real mod and clear the dropbox".
+  bool keep_in_overwrite = 4;
+}
+message ExtractOverwriteToModResponse {
+  int32 file_count = 1;
+}
+
+// --- Profile messages ---
+
+message Profile {
+  string name = 1;
+  string game_id = 2;
+  string created_at = 3;
+}
+
+message ListProfilesRequest {
+  string game_id = 1;
+}
+message ListProfilesResponse {
+  repeated Profile profiles = 1;
+}
+
+message CreateProfileRequest {
+  string game_id = 1;
+  string name = 2;
+}
+
+message DeleteProfileRequest {
+  string game_id = 1;
+  string name = 2;
+}
+message DeleteProfileResponse {}
+
+// --- Mod list messages ---
+
+message ModListEntry {
+  string mod_name = 1;
+  bool enabled = 2;
+  int32 priority = 3;
+}
+
+message GetModListRequest {
+  string game_id = 1;
+  string profile_name = 2;
+}
+message ModListResponse {
+  repeated ModListEntry entries = 1;
+}
+
+message SetModListRequest {
+  string game_id = 1;
+  string profile_name = 2;
+  repeated ModListEntry entries = 3;
+}
+message SetModListResponse {}
+
+// --- Separator messages (mod list visual grouping) ---
+
+message Separator {
+  string name = 1;
+  string visual_index = 2; // 16-char lowercase hex
+  bool collapsed = 3;
+}
+message ListSeparatorsRequest {
+  string game_id = 1;
+  string profile_name = 2;
+}
+message ListSeparatorsResponse {
+  repeated Separator separators = 1;
+}
+message SetSeparatorsRequest {
+  string game_id = 1;
+  string profile_name = 2;
+  repeated Separator separators = 3;
+}
+message SetSeparatorsResponse {}
+
+// --- VFS messages ---
+
+message VFSStatus {
+  bool mounted = 1;
+  string game_id = 2;
+  string profile_name = 3;
+  string mount_point = 4;
+  int32 enabled_mod_count = 5;
+  int32 total_file_count = 6;
+}
+
+message MountVFSRequest {
+  string game_id = 1;
+  string profile_name = 2;
+}
+message MountVFSResponse {
+  VFSStatus status = 1;
+}
+
+message UnmountVFSRequest {
+  string game_id = 1;
+}
+message UnmountVFSResponse {}
+
+message RestoreFromBackupRequest {
+  string game_id = 1;
+}
+message RestoreFromBackupResponse {}
+
+// RecoveryPending tells the frontend that startup recovery encountered an
+// ambiguous on-disk state (unrecognized Data/ + a present Data.orig/). The
+// daemon will not auto-restore without user consent. data_path / backup_path
+// give the GUI enough context to show the user exactly which directories
+// are at stake before they confirm.
+message RecoveryPending {
+  string game_id = 1;
+  string data_path = 2;
+  string backup_path = 3;
+  string reason = 4;
+}
+
+message GetVFSStatusRequest {
+  string game_id = 1;
+}
+
+message RebuildVFSRequest {
+  string game_id = 1;
+}
+message RebuildVFSResponse {}
+
+// --- Conflict messages ---
+
+message FileConflict {
+  string virtual_path = 1;
+  string winning_mod = 2;
+  repeated string losing_mods = 3;
+}
+
+message GetConflictsRequest {
+  string game_id = 1;
+  string profile_name = 2;
+}
+message ConflictsResponse {
+  repeated FileConflict conflicts = 1;
+}
+
+// --- Download / archive lifecycle ---
+
+// Unified lifecycle for both streaming download progress and snapshot
+// archive-row listings. The frontend must not invent phases that aren't
+// represented here — if you need a new state, add it here first.
+enum DownloadStatus {
+  DOWNLOAD_STATUS_UNKNOWN = 0;
+  DOWNLOAD_STATUS_QUEUED = 1;      // in the queue, not yet started
+  DOWNLOAD_STATUS_DOWNLOADING = 2; // bytes in flight
+  DOWNLOAD_STATUS_DOWNLOADED = 3;  // archive on disk, not installed
+  DOWNLOAD_STATUS_INSTALLING = 4;  // extract + copy (transient)
+  DOWNLOAD_STATUS_INSTALLED = 5;   // archive on disk AND mod dir exists
+  DOWNLOAD_STATUS_UNINSTALLED = 6; // archive on disk, previously installed
+  DOWNLOAD_STATUS_CANCELLED = 7;   // user-cancelled; archive may be absent
+  DOWNLOAD_STATUS_FAILED = 8;
+}
+
+message StartDownloadRequest {
+  string nxm_uri = 1;
+}
+message StartDownloadResponse {
+  // UUIDv7; persistent across daemon restarts for this download's lifetime.
+  string download_id = 1;
+  // Queue position at the time of enqueue; 0 = started immediately.
+  int32 queued_ahead = 2;
+}
+
+message CancelDownloadRequest {
+  string download_id = 1;
+}
+message CancelDownloadResponse {}
+
+message RetryDownloadRequest {
+  string download_id = 1;
+}
+message RetryDownloadResponse {
+  int32 queued_ahead = 1;
+}
+
+message DownloadProgress {
+  string download_id = 1;
+  string mod_name = 2;
+  int64 bytes_downloaded = 3;
+  int64 bytes_total = 4;
+  DownloadStatus status = 5;
+  string error = 6;
+  int32 queued_ahead = 7;  // 0 when not queued (in-flight or terminal)
+}
+
+message ArchiveRow {
+  string archive_rel_path = 1;   // relative to DownloadsDir(gameID); empty for pre-archive rows
+  int32 mod_id = 2;
+  int32 file_id = 3;
+  string mod_name = 4;
+  string file_name = 5;          // nexus-reported file title
+  string file_archive_name = 6;  // on-disk archive filename
+  string version = 7;
+  string category = 8;           // main | update | optional | old_version | miscellaneous
+  int64 size_bytes = 9;
+  string uploaded_at = 10;
+  string downloaded_at = 11;
+  bool hidden = 12;
+  string game_domain = 13;       // nexus game slug for URL building
+  string thumbnail_url = 14;
+  bool adult_content = 15;
+  DownloadStatus status = 16;
+  string installed_mod_folder = 17; // empty unless status=INSTALLED
+  // Echoed when the row corresponds to an in-flight download, so the
+  // frontend can promote its transient row in place rather than duplicate.
+  string download_id = 18;
+  int64 bytes_downloaded = 19;   // 0 for non-downloading rows
+  int32 queued_ahead = 20;       // 0 unless DOWNLOAD_STATUS_QUEUED
+  // True when this archive was installed via "Merge Into Existing Mod..."
+  // into a target that already had at least one prior source archive.
+  // Drives the "Merged" status string + "Show Containing Mod" right-click
+  // action in the Downloads view.
+  bool merged = 21;
+}
+
+message ListArchivesRequest {
+  string game_id = 1;
+}
+message ListArchivesResponse {
+  repeated ArchiveRow rows = 1;
+}
+
+message RemoveArchiveRequest {
+  string game_id = 1;
+  string archive_rel_path = 2;
+}
+message RemoveArchiveResponse {}
+
+message SetArchiveHiddenRequest {
+  string game_id = 1;
+  string archive_rel_path = 2;
+  bool hidden = 3;
+}
+message SetArchiveHiddenResponse {}
+
+message SetArchivesHiddenBulkRequest {
+  string game_id = 1;
+  bool hidden = 2;
+  enum Scope {
+    ALL = 0;
+    INSTALLED = 1;
+    UNINSTALLED = 2;
+  }
+  Scope scope = 3;
+}
+message SetArchivesHiddenBulkResponse {
+  int32 affected = 1;
+}
+
+message RefreshArchiveMetadataRequest {
+  string game_id = 1;
+  string archive_rel_path = 2;
+}
+message RefreshArchiveMetadataResponse {
+  ArchiveRow row = 1;
+}
+
+message StreamArchiveEventsRequest {
+  string game_id = 1;
+}
+message ArchiveEvent {
+  oneof event {
+    DownloadProgress download_progress = 1;
+    // Emitted when an archive row's persistent state changes (hidden,
+    // uninstalled, re-refreshed metadata) so the frontend can update
+    // without a full ListArchives.
+    ArchiveRow row_changed = 2;
+    // Emitted when an archive is removed, so the frontend can drop its row.
+    string archive_removed = 3; // archive_rel_path
+  }
+}
+
+// --- Install messages ---
+
+message PreviewInstallRequest {
+  string game_id = 1;
+  string archive_rel_path = 2;
+}
+message PreviewInstallResponse {
+  // Daemon-side opaque handle referring to the cached extraction. Pass
+  // back as preview_id on StartInstallRequest to avoid re-extracting.
+  string preview_id = 1;
+  bool has_fomod = 2;
+  FomodPlan plan = 3;                    // valid when has_fomod=true
+  repeated string flat_file_list = 4;    // relative to extract root; valid when has_fomod=false
+}
+
+message DiscardPreviewRequest {
+  string preview_id = 1;
+}
+message DiscardPreviewResponse {}
+
+enum InstallMode {
+  INSTALL_MODE_NEW_MOD = 0;      // install as a new mod folder
+  INSTALL_MODE_MERGE_INTO = 1;   // append into target_mod's source_archives
+}
+
+message StartInstallRequest {
+  string game_id = 1;
+  // Either archive_rel_path (in Downloads) OR external_archive_path (drag-
+  // drop / out-of-library). Exactly one must be set.
+  string archive_rel_path = 2;
+  string external_archive_path = 3;
+  InstallMode mode = 4;
+  // Required for NEW_MOD (the folder to create) OR for MERGE_INTO (the
+  // existing folder to append to).
+  string target_mod = 5;
+  // Reuse a daemon-cached extraction from PreviewInstall. Optional.
+  string preview_id = 6;
+  // When non-empty, skip auto-flatten and copy exactly this file set
+  // (FOMOD path). Ignored when preview reported has_fomod=false.
+  repeated FomodFile fomod_selected_files = 7;
+}
+message StartInstallResponse {
+  string mod_folder = 1;
+  int32 file_count = 2;
+}
+
+message InstallProgress {
+  // Stable per-install correlation key. When the install sourced from a
+  // download, matches the DOWNLOAD_ID; otherwise daemon-issued UUID.
+  string install_id = 1;
+  string archive_rel_path = 2;
+  string mod_name = 3;
+  enum Step {
+    STEP_IDLE = 0;
+    STEP_EXTRACTING = 1;
+    STEP_COPYING = 2;
+    STEP_FINALIZING = 3;
+    STEP_COMPLETE = 4;
+    STEP_FAILED = 5;
+  }
+  Step step = 4;
+  int32 pct = 5;            // 0-100; -1 = indeterminate
+  string current_file = 6;  // currently-copying file, best-effort
+  int64 files_done = 7;
+  int64 files_total = 8;
+  string error = 9;
+}
+
+message StreamInstallEventsRequest {
+  string game_id = 1;
+}
+message InstallEvent {
+  oneof event {
+    InstallProgress install_progress = 1;
+  }
+}
+
+// --- Game launch messages ---
+
+message LaunchGameRequest {
+  string game_id = 1;
+  bool use_tool = 2;
+  string profile_name = 3;
+}
+message LaunchGameResponse {
+  int32 pid = 1;
+}
+
+message DetectProtonRequest {}
+message DetectProtonResponse {
+  repeated ProtonVersion versions = 1;
+}
+
+message ProtonVersion {
+  string name = 1;
+  string path = 2;
+}
+
+message InstallScriptExtenderRequest {
+  string game_id = 1;
+}
+message InstallScriptExtenderResponse {
+  string name = 1; // e.g. "xNVSE"
+}
+
+message GetPreferredProtonRequest {}
+message GetPreferredProtonResponse {
+  string path = 1; // empty = auto-pick
+}
+message SetPreferredProtonRequest {
+  string path = 1; // pass "" to clear
+}
+message SetPreferredProtonResponse {}
+
+// --- Lifecycle messages ---
+
+message SetNexusAPIKeyRequest {
+  string api_key = 1;
+}
+message SetNexusAPIKeyResponse {
+  bool valid = 1;
+  string error_message = 2;
+}
+
+message ShutdownRequest {}
+message ShutdownResponse {}
+
+message HealthRequest {}
+// Readiness reports the cold-start state of the daemon. The splash holds
+// the frontend until games_warmed is true; last_init_step is rendered as
+// the splash subtitle so the user sees what's currently running.
+message Readiness {
+  bool socket_ready = 1;     // gRPC server bound (always true at this point)
+  bool recovery_done = 2;    // crash recovery has finished for all games
+  bool games_warmed = 3;     // initial DetectGames + per-game warmup completed
+  string last_init_step = 4; // human-readable string for the splash subtitle
+}
+
+// --- Game settings ---
+
+message GameSettings {
+  string game_id = 1;
+  bool auto_install = 2;
+}
+message GetGameSettingsRequest {
+  string game_id = 1;
+}
+message SetGameSettingsRequest {
+  string game_id = 1;
+  bool auto_install = 2;
+}
+
+// --- FOMOD messages (mirrors src/ui/FomodPlan.h) ---
+
+message FomodFile {
+  string source = 1;
+  string destination = 2;
+  bool is_folder = 3;
+  int32 priority = 4;
+}
+
+enum FomodGroupType {
+  FOMOD_GROUP_SELECT_ANY = 0;
+  FOMOD_GROUP_SELECT_AT_MOST_ONE = 1;
+  FOMOD_GROUP_SELECT_EXACTLY_ONE = 2;
+  FOMOD_GROUP_SELECT_AT_LEAST_ONE = 3;
+  FOMOD_GROUP_SELECT_ALL = 4;
+}
+
+enum FomodPluginState {
+  FOMOD_PLUGIN_OPTIONAL = 0;
+  FOMOD_PLUGIN_REQUIRED = 1;
+  FOMOD_PLUGIN_RECOMMENDED = 2;
+  FOMOD_PLUGIN_COULD_BE_USABLE = 3;
+  FOMOD_PLUGIN_NOT_USABLE = 4;
+}
+
+message FomodPlugin {
+  string name = 1;
+  string description = 2;
+  string image_path = 3;
+  repeated FomodFile files = 4;
+  FomodPluginState default_state = 5;
+}
+
+message FomodGroup {
+  string name = 1;
+  FomodGroupType type = 2;
+  repeated FomodPlugin plugins = 3;
+}
+
+message FomodStep {
+  string name = 1;
+  repeated FomodGroup groups = 2;
+}
+
+message FomodPlan {
+  string module_name = 1;
+  string module_path = 2;               // root that holds fomod/ (daemon-local, opaque to client)
+  repeated FomodFile required_files = 3;
+  repeated FomodStep steps = 4;
+
+  // Legacy NMM-style FOMOD: archive has fomod/info.xml and (optionally) a
+  // C# script.cs but NO ModuleConfig.xml. We surface a simple info popup
+  // instead of a multi-step wizard, then install everything outside fomod/
+  // as a flat copy. The C# script is intentionally NOT executed.
+  bool legacy_info_only = 5;
+  string description = 6;               // from fomod/info.xml <Description>
+  string screenshot_path = 7;           // absolute path to a screenshot in fomod/, or empty
+  string version = 8;                   // from fomod/info.xml <Version>
+  string author = 9;                    // from fomod/info.xml <Author>
+}
+
+// --- INI management messages ---
+
+message ProfileIniFile {
+  string filename = 1;        // e.g. "SkyrimCustom.ini"
+  string content = 2;         // full file contents
+  string disk_path = 3;       // absolute path to the file on disk
+}
+
+message ListProfileIniFilesRequest {
+  string game_id = 1;
+  string profile_name = 2;
+}
+message ListProfileIniFilesResponse {
+  repeated ProfileIniFile files = 1;
+  string my_games_dir = 2;    // where the files get pushed at launch
+  bool use_custom_ini = 3;    // profile's current toggle state
+}
+
+message SaveProfileIniFileRequest {
+  string game_id = 1;
+  string profile_name = 2;
+  string filename = 3;
+  string content = 4;
+}
+message SaveProfileIniFileResponse {}
+
+message SetProfileIniEnabledRequest {
+  string game_id = 1;
+  string profile_name = 2;
+  bool enabled = 3;
+}
+
+message GetProfileIniStatusRequest {
+  string game_id = 1;
+  string profile_name = 2;
+}
+
+message ProfileIniStatus {
+  string game_id = 1;
+  string profile_name = 2;
+  bool use_custom_ini = 3;
+  string my_games_dir = 4;
+  bool game_supports_ini = 5; // false for games without a known INI spec
+}
+
+message IniTweakState {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  string target_file = 4;   // filename the tweak writes into (e.g. "FalloutCustom.ini")
+  bool enabled = 5;
+}
+
+message ListIniTweaksRequest {
+  string game_id = 1;
+  string profile_name = 2;
+}
+message ListIniTweaksResponse {
+  repeated IniTweakState tweaks = 1;
+}
+
+message SetIniTweakRequest {
+  string game_id = 1;
+  string profile_name = 2;
+  string tweak_id = 3;
+  bool enabled = 4;
+}
+
+// --- Status streaming (VFS + lifecycle only) ---
+
+message WatchStatusRequest {}
+
+message StatusEvent {
+  oneof event {
+    VFSStatus vfs_status = 1;
+    string error = 2;
+    string info = 3;
+    RecoveryPending recovery_pending = 4;
+  }
+}

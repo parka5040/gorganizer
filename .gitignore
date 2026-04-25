@@ -1,0 +1,46 @@
+# Build output
+build/
+cmake-build-*/
+.cache/
+compile_commands.json
+
+# C++ objects
+*.o
+*.a
+moc_*
+*.moc
+qrc_*
+
+# Go binaries (built at repo root)
+gorganizerd
+gorganizerctl
+cmd/runtime-probe/runtime-probe
+cmd/vfs-smoke/vfs-smoke
+
+# Generated protobuf (Go)
+api/proto/*.pb.go
+
+# Release-build staging
+stage/
+gorganizer-v*-linux-*.tar.gz
+gorganizer-v*-linux-*.tar.gz.sha256
+
+# Daemon logs that may end up in-tree during dev
+*.log
+
+# Claude Code local state (NEVER commit)
+.claude/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Per-game mod folders (created by gorganizer.sh)
+*_Mods/
+
+# OS
+.DS_Store
+Thumbs.db

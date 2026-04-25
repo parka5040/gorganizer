@@ -1,0 +1,571 @@
+#include "DownloadsLibraryView.h"
+#include "DownloadsModel.h"
+#include "DownloadsRowDelegate.h"
+#include "ModInstallDialog.h"
+
+#include <QVBoxLayout>
+#include <QHeaderView>
+#include <QMenu>
+#include <QMessageBox>
+#include <QInputDialog>
+#include <QPushButton>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QDir>
+#include <QFileInfo>
+#include <QSettings>
+#include <QSortFilterProxyModel>
+
+namespace gorganizer {
+
+// Tiny proxy that consults the underlying DownloadsModel's filter flag. The
+// default QSortFilterProxyModel regex filter doesn't work here because
+// "hidden" is a model role, not a display string.
+class DownloadsProxy : public QSortFilterProxyModel {
+public:
+    using QSortFilterProxyModel::QSortFilterProxyModel;
+
+    void setShowHidden(bool show)
+    {
+        auto* src = qobject_cast<DownloadsModel*>(sourceModel());
+        if (!src) return;
+        src->setShowHidden(show);
+        invalidateFilter();
+    }
+
+protected:
+    bool filterAcceptsRow(int sourceRow, const QModelIndex&) const override
+    {
+        auto* src = qobject_cast<DownloadsModel*>(sourceModel());
+        return src ? src->rowMatchesFilter(sourceRow) : true;
+    }
+};
+
+DownloadsLibraryView::DownloadsLibraryView(GrpcClient* grpc, QWidget* parent)
+    : QWidget(parent)
+    , m_grpc(grpc)
+{
+    auto* layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+
+    // Header row: Show Hidden toggle on the left, Auto-install on the
+    // right. Show Hidden mirrors the right-click context menu's
+    // "Show Hidden" action — having it as a persistent checkbox here
+    // saves the user a context menu trip every time they want to peek
+    // at archives they've previously hidden.
+    auto* header = new QHBoxLayout;
+    header->setContentsMargins(4, 4, 4, 0);
+    m_showHiddenToggle = new QCheckBox("Show Hidden");
+    m_showHiddenToggle->setToolTip(
+        "Include archives you've previously hidden in this list.\n"
+        "Same as right-clicking and toggling 'Show Hidden'.");
+    connect(m_showHiddenToggle, &QCheckBox::toggled, this, [this](bool checked) {
+        static_cast<DownloadsProxy*>(m_proxy)->setShowHidden(checked);
+    });
+    header->addWidget(m_showHiddenToggle);
+    header->addStretch();
+
+    m_autoInstallToggle = new QCheckBox("Auto-install downloaded mods for this game");
+    m_autoInstallToggle->setToolTip(
+        "When enabled, completed downloads with a recognized layout install automatically.\n"
+        "Disable to always double-click in this list to install.");
+    connect(m_autoInstallToggle, &QCheckBox::toggled, this, [this](bool checked) {
+        if (m_suppressToggleSignal || m_game.shortName.isEmpty())
+            return;
+        GrpcGameSettings s;
+        QString err;
+        if (!m_grpc->setGameSettings(m_game.shortName, checked, s, err))
+            QMessageBox::warning(this, "Settings Error", err);
+    });
+    header->addWidget(m_autoInstallToggle);
+
+    layout->addLayout(header);
+
+    m_model = new DownloadsModel(this);
+    m_proxy = new DownloadsProxy(this);
+    m_proxy->setSourceModel(m_model);
+    m_proxy->setSortRole(Qt::DisplayRole);
+
+    m_delegate = new DownloadsRowDelegate(this);
+
+    m_view = new QTreeView;
+    m_view->setModel(m_proxy);
+    m_view->setItemDelegateForColumn(DownloadsModel::ColStatus, m_delegate);
+    m_view->setRootIsDecorated(false);
+    m_view->setAlternatingRowColors(true);
+    m_view->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_view->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_view->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_view->setSortingEnabled(true);
+    m_view->setUniformRowHeights(true);
+
+    // All columns user-resizable. Mod column is intentionally wide (~3× the
+    // natural fit) because mod names commonly run long; Status column is
+    // wider than the original 180px so the progress bar + phase chip fit
+    // without truncation in non-Default themes.
+    QHeaderView* hdr = m_view->header();
+    hdr->setSectionResizeMode(DownloadsModel::ColName,        QHeaderView::Interactive);
+    hdr->setSectionResizeMode(DownloadsModel::ColVersion,     QHeaderView::Interactive);
+    hdr->setSectionResizeMode(DownloadsModel::ColCategory,    QHeaderView::Interactive);
+    hdr->setSectionResizeMode(DownloadsModel::ColStatus,      QHeaderView::Interactive);
+    hdr->setSectionResizeMode(DownloadsModel::ColSize,        QHeaderView::Interactive);
+    hdr->setSectionResizeMode(DownloadsModel::ColDownloaded,  QHeaderView::Interactive);
+    hdr->setStretchLastSection(false);
+
+    hdr->resizeSection(DownloadsModel::ColName,       540);
+    hdr->resizeSection(DownloadsModel::ColVersion,    100);
+    hdr->resizeSection(DownloadsModel::ColCategory,   140);
+    hdr->resizeSection(DownloadsModel::ColStatus,     240);
+    hdr->resizeSection(DownloadsModel::ColSize,       100);
+    hdr->resizeSection(DownloadsModel::ColDownloaded, 160);
+
+    // Persist user adjustments via QSettings (org=gorganizer, app=gorganizer).
+    // Restored before the user has a chance to see the defaults clobber their
+    // saved layout; saved on every interactive resize.
+    {
+        QSettings s;
+        QByteArray saved = s.value("downloads/columns/headerState").toByteArray();
+        if (!saved.isEmpty())
+            hdr->restoreState(saved);
+    }
+    connect(hdr, &QHeaderView::sectionResized, this,
+            [hdr](int, int, int) {
+        QSettings s;
+        s.setValue("downloads/columns/headerState", hdr->saveState());
+    });
+
+    connect(m_view, &QTreeView::customContextMenuRequested, this, &DownloadsLibraryView::onContextMenu);
+    connect(m_view, &QTreeView::doubleClicked, this, &DownloadsLibraryView::onDoubleClicked);
+
+    layout->addWidget(m_view);
+
+    // v2 subscribes to per-game ArchiveEvent (progress + row changes) and
+    // InstallProgress. The client fans archiveEventReceived across all
+    // consumers; we demux here into the two downstream handlers we already
+    // had.
+    connect(m_grpc, &GrpcClient::archiveEventReceived, this,
+            [this](const GrpcArchiveEvent& evt) {
+        switch (evt.kind) {
+        case GrpcArchiveEvent::KindDownloadProgress:
+            onDownloadProgress(evt.progress);
+            break;
+        case GrpcArchiveEvent::KindRowChanged:
+            // The daemon now stamps the originating download_id onto the
+            // RowChanged event for downloads that just landed. Eagerly
+            // drop the matching transient row before reloading — without
+            // this the upcoming ListArchives snapshot races against the
+            // download manager's active-map cleanup, returns the new
+            // archive row WITHOUT a download_id, and the promotion logic
+            // in DownloadsModel::replaceFromDaemon can't consolidate them.
+            // Result: two rows, one with full metadata, one stuck in
+            // "Downloaded" with only file size.
+            if (!evt.row.downloadId.isEmpty())
+                m_model->removeTransientByDownloadId(evt.row.downloadId);
+            reloadFromDaemon();
+            break;
+        case GrpcArchiveEvent::KindArchiveRemoved:
+            m_model->removeByKey(evt.archiveRemoved);
+            break;
+        default:
+            break;
+        }
+    });
+    connect(m_grpc, &GrpcClient::installProgressEvent,
+            this, &DownloadsLibraryView::onInstallProgress);
+}
+
+void DownloadsLibraryView::setGame(const GameInfo& game)
+{
+    m_game = game;
+
+    // Pull the per-game auto-install toggle without triggering the setter.
+    if (!game.shortName.isEmpty()) {
+        GrpcGameSettings s;
+        QString err;
+        m_suppressToggleSignal = true;
+        if (m_grpc->getGameSettings(game.shortName, s, err))
+            m_autoInstallToggle->setChecked(s.autoInstall);
+        else
+            m_autoInstallToggle->setChecked(false);
+        m_suppressToggleSignal = false;
+    }
+
+    reloadFromDaemon();
+}
+
+void DownloadsLibraryView::refresh()
+{
+    reloadFromDaemon();
+}
+
+void DownloadsLibraryView::reloadFromDaemon()
+{
+    if (m_game.shortName.isEmpty()) {
+        m_model->replaceFromDaemon({});
+        return;
+    }
+    std::vector<GrpcArchiveRow> rows;
+    QString err;
+    if (!m_grpc->listArchives(m_game.shortName, rows, err)) {
+        // Non-fatal: daemon may not yet have a Downloads/ folder for this game.
+        m_model->replaceFromDaemon({});
+        return;
+    }
+    m_model->replaceFromDaemon(rows);
+}
+
+GrpcArchiveRow DownloadsLibraryView::rowFromModel(const DownloadRowData& d)
+{
+    GrpcArchiveRow r;
+    r.archiveRelPath = d.archiveRelPath;
+    r.modId = d.modId;
+    r.fileId = d.fileId;
+    r.modName = d.name;
+    r.fileName = d.fileName;
+    r.fileArchiveName = d.fileArchiveName;
+    r.version = d.version;
+    r.category = d.category;
+    r.sizeBytes = d.sizeBytes;
+    r.uploadedAt = d.uploadedAt;
+    r.downloadedAt = d.downloadedAt;
+    r.hidden = d.hidden;
+    r.gameDomain = d.gameDomain;
+    r.thumbnailUrl = d.thumbnailUrl;
+    r.adultContent = d.adultContent;
+    // Mirror the unified proto DownloadStatus values — see DownloadsModel.h.
+    r.status = static_cast<int>(d.phase);
+    r.installedModFolder = d.installedModFolder;
+    return r;
+}
+
+void DownloadsLibraryView::onContextMenu(const QPoint& pos)
+{
+    QMenu menu(this);
+    QModelIndex proxyIdx = m_view->indexAt(pos);
+    QModelIndex srcIdx = proxyIdx.isValid() ? m_proxy->mapToSource(proxyIdx) : QModelIndex{};
+
+    if (srcIdx.isValid()) {
+        DownloadRowData d = m_model->rowAt(srcIdx.row());
+        GrpcArchiveRow row = rowFromModel(d);
+        bool isInstalled = (d.phase == DownloadPhase::Installed);
+        bool inFlight = (d.phase == DownloadPhase::Queued ||
+                         d.phase == DownloadPhase::Downloading);
+        bool retryable = (d.phase == DownloadPhase::Failed ||
+                          d.phase == DownloadPhase::Cancelled);
+
+        // Download lifecycle actions top of menu — most relevant when the
+        // row is in-flight or errored.
+        if (inFlight) {
+            QString dlId = d.downloadId;
+            menu.addAction("Cancel Download", this, [this, dlId] {
+                if (!dlId.isEmpty()) m_grpc->cancelDownload(dlId);
+            });
+            menu.addSeparator();
+        } else if (retryable) {
+            QString dlId = d.downloadId;
+            menu.addAction("Retry Download", this, [this, dlId] {
+                if (!dlId.isEmpty()) m_grpc->retryDownload(dlId);
+            });
+            menu.addSeparator();
+        }
+
+        if (!inFlight && !retryable) {
+            menu.addAction(isInstalled ? "Reinstall" : "Install", this,
+                           [this, row] { actionInstall(row, false); });
+            menu.addAction("Install As New Mod...", this,
+                           [this, row] { actionInstall(row, true); });
+            menu.addAction("Merge Into Existing Mod...", this,
+                           [this, row] { actionMergeInto(row); });
+            // "Show Containing Mod" only appears for archives that were
+            // explicitly merged into a pre-existing mod — gives the user a
+            // way to find out which mod ate this archive without digging
+            // through metadata.yaml files.
+            if (d.merged && !d.installedModFolder.isEmpty()) {
+                QString folder = d.installedModFolder;
+                menu.addAction("Show Containing Mod", this, [this, folder] {
+                    QMessageBox::information(this, "Merged Into",
+                        QString("This archive was merged into:\n\n%1\n\n"
+                                "Open the Mods tab to inspect or rearrange it.")
+                            .arg(folder));
+                });
+            }
+            menu.addSeparator();
+        }
+        menu.addAction(row.hidden ? "Un-Hide" : "Hide", this,
+                       [this, row] { actionHide(row.archiveRelPath, !row.hidden); });
+        if (!inFlight) {
+            menu.addAction("Refresh Nexus Metadata", this, [this, row] {
+                QString err;
+                GrpcArchiveRow fresh;
+                if (!m_grpc->refreshArchiveMetadata(m_game.shortName, row.archiveRelPath, fresh, err)) {
+                    QMessageBox::warning(this, "Refresh Failed", err);
+                    return;
+                }
+                reloadFromDaemon();
+            });
+        }
+        menu.addSeparator();
+        menu.addAction("Open Nexus Page", this, [row] { openNexusPage(row); });
+        if (!inFlight)
+            menu.addAction("Delete Archive", this, [this, row] { actionDelete(row); });
+        menu.addSeparator();
+    }
+
+    menu.addAction("Hide All Installed", this,
+                   [this] { actionBulkHide(GrpcBulkHideInstalled, true); });
+    menu.addAction("Hide All Uninstalled", this,
+                   [this] { actionBulkHide(GrpcBulkHideUninstalled, true); });
+    menu.addAction("Un-Hide All", this,
+                   [this] { actionBulkHide(GrpcBulkHideAll, false); });
+    menu.addSeparator();
+
+    auto* toggle = menu.addAction("Show Hidden");
+    toggle->setCheckable(true);
+    toggle->setChecked(m_model->showHidden());
+    connect(toggle, &QAction::toggled, this, [this](bool checked) {
+        // Keep the persistent header checkbox in lockstep so the two
+        // entry points always agree on state.
+        if (m_showHiddenToggle && m_showHiddenToggle->isChecked() != checked)
+            m_showHiddenToggle->setChecked(checked);
+        else
+            static_cast<DownloadsProxy*>(m_proxy)->setShowHidden(checked);
+    });
+
+    menu.exec(m_view->viewport()->mapToGlobal(pos));
+}
+
+void DownloadsLibraryView::onDoubleClicked(const QModelIndex& idx)
+{
+    if (!idx.isValid())
+        return;
+    QModelIndex srcIdx = m_proxy->mapToSource(idx);
+    DownloadRowData d = m_model->rowAt(srcIdx.row());
+    GrpcDownloadRow row = rowFromModel(d);
+
+    // If any currently-installed archive shares the same Nexus mod_id but
+    // this archive itself isn't installed yet, ask before doing anything —
+    // multi-archive mods (e.g. meshes bundled separately from the ESP) are
+    // common on Bethesda titles and silent merge would be surprising.
+    QString existingFolder;
+    if (d.phase != DownloadPhase::Installed && row.modId != 0) {
+        int rc = m_model->rowCount();
+        for (int r = 0; r < rc; ++r) {
+            if (r == srcIdx.row())
+                continue;
+            DownloadRowData other = m_model->rowAt(r);
+            if (other.phase == DownloadPhase::Installed && other.modId == row.modId
+                && !other.installedModFolder.isEmpty()) {
+                existingFolder = other.installedModFolder;
+                break;
+            }
+        }
+    }
+
+    if (!existingFolder.isEmpty()) {
+        QMessageBox box(this);
+        box.setWindowTitle("Multi-Archive Mod");
+        box.setIcon(QMessageBox::Question);
+        QString displayName = row.modName.isEmpty() ? row.fileArchiveName : row.modName;
+        box.setText(QString("An archive for \"%1\" is already installed as mod \"%2\".")
+                        .arg(displayName, existingFolder));
+        box.setInformativeText(
+            "Install this archive as a new, separate mod, or merge it "
+            "into the existing mod folder?\n\n"
+            "Merging is typical when a mod ships meshes/textures/ESP as "
+            "separate downloads for the same Nexus mod ID.");
+        QAbstractButton* mergeBtn = box.addButton("Merge Into Existing", QMessageBox::AcceptRole);
+        QAbstractButton* newBtn = box.addButton("Install As New", QMessageBox::ActionRole);
+        QAbstractButton* cancelBtn = box.addButton(QMessageBox::Cancel);
+        box.setDefaultButton(static_cast<QPushButton*>(mergeBtn));
+        box.exec();
+
+        QAbstractButton* clicked = box.clickedButton();
+        if (clicked == cancelBtn)
+            return;
+        if (clicked == mergeBtn) {
+            QString modFolder, err;
+            int fileCount = 0;
+            if (!m_grpc->startInstallSync(m_game.shortName, row.archiveRelPath,
+                                          QString(), GrpcInstallMergeIntoMod,
+                                          existingFolder, QString(), {},
+                                          modFolder, fileCount, err)) {
+                QMessageBox::warning(this, "Merge Failed", err);
+                return;
+            }
+            emit modInstalledFromDownload();
+            reloadFromDaemon();
+            return;
+        }
+        // newBtn → fall through as a force-new install
+        (void)newBtn;
+        actionInstall(row, true);
+        return;
+    }
+
+    actionInstall(row, false);
+}
+
+static QString modsDirectoryForGame(const QString& gameShortName)
+{
+    static const QHash<QString, QString> dirNames = {
+        {"morrowind", "Morrowind_Mods"}, {"oblivion", "Oblivion_Mods"},
+        {"skyrim", "Skyrim_Mods"}, {"skyrimse", "SkyrimSE_Mods"},
+        {"fallout3", "Fallout3_Mods"}, {"falloutnv", "FalloutNV_Mods"},
+        {"fallout4", "Fallout4_Mods"}, {"starfield", "Starfield_Mods"},
+    };
+    QByteArray root = qgetenv("GORGANIZER_ROOT");
+    if (!root.isEmpty()) {
+        QString name = dirNames.value(gameShortName, gameShortName + "_Mods");
+        return QString::fromUtf8(root) + "/" + name;
+    }
+    QString dataHome = qEnvironmentVariable("XDG_DATA_HOME");
+    if (dataHome.isEmpty())
+        dataHome = QDir::homePath() + "/.local/share";
+    return dataHome + "/gorganizer/" + gameShortName + "/mods";
+}
+
+void DownloadsLibraryView::actionInstall(const GrpcArchiveRow& row, bool forceNewMod)
+{
+    QString modFolder, err;
+    int fileCount = 0;
+    GrpcInstallMode mode = GrpcInstallAsNewMod;
+    QString target;
+
+    // Status 5 = INSTALLED per unified proto DownloadStatus.
+    if (!forceNewMod && row.status == 5 && !row.installedModFolder.isEmpty()) {
+        // Already installed — a reinstall via merge into the same folder.
+        mode = GrpcInstallMergeIntoMod;
+        target = row.installedModFolder;
+    }
+
+    if (!m_grpc->startInstallSync(m_game.shortName, row.archiveRelPath, QString(),
+                                  mode, target, QString(), {},
+                                  modFolder, fileCount, err)) {
+        // Daemon routes FOMOD archives through the UI-side wizard. When the
+        // error is `fomod_required`, re-enter the install flow via
+        // ModInstallDialog pointed at the real archive on disk.
+        if (err.contains("fomod_required")) {
+            QString modsDir = modsDirectoryForGame(m_game.shortName);
+            QString archiveAbs = modsDir + "/Downloads/" + row.archiveRelPath;
+            QString defaultModName = row.modName.isEmpty()
+                ? QFileInfo(row.fileArchiveName).completeBaseName()
+                : row.modName;
+            ModInstallDialog dlg(archiveAbs, modsDir, defaultModName, this);
+            dlg.setDaemonContext(m_grpc, m_game.shortName);
+            connect(&dlg, &ModInstallDialog::fomodWizardOpened,
+                    this, &DownloadsLibraryView::fomodWizardOpened);
+            connect(&dlg, &ModInstallDialog::fomodWizardClosed,
+                    this, &DownloadsLibraryView::fomodWizardClosed);
+            if (dlg.exec() == QDialog::Accepted)
+                emit modInstalledFromDownload();
+            reloadFromDaemon();
+            return;
+        }
+        QMessageBox::warning(this, "Install Failed", err);
+        return;
+    }
+    emit modInstalledFromDownload();
+    reloadFromDaemon();
+}
+
+void DownloadsLibraryView::actionMergeInto(const GrpcArchiveRow& row)
+{
+    // Collect candidate mod folders from currently-visible installed rows.
+    QStringList candidates;
+    int rc = m_model->rowCount();
+    for (int r = 0; r < rc; ++r) {
+        DownloadRowData d = m_model->rowAt(r);
+        if (d.phase == DownloadPhase::Installed && d.modId == row.modId
+            && !d.installedModFolder.isEmpty()
+            && !candidates.contains(d.installedModFolder))
+            candidates.append(d.installedModFolder);
+    }
+    if (candidates.isEmpty())
+        candidates.append("<type a mod folder name>");
+
+    bool ok = false;
+    QString target = QInputDialog::getItem(this, "Merge Into Existing Mod",
+        "Target mod folder:", candidates, 0, true, &ok);
+    if (!ok || target.isEmpty())
+        return;
+
+    QString modFolder, err;
+    int fileCount = 0;
+    if (!m_grpc->startInstallSync(m_game.shortName, row.archiveRelPath, QString(),
+                                  GrpcInstallMergeIntoMod, target, QString(), {},
+                                  modFolder, fileCount, err)) {
+        QMessageBox::warning(this, "Merge Failed", err);
+        return;
+    }
+    emit modInstalledFromDownload();
+    reloadFromDaemon();
+}
+
+void DownloadsLibraryView::actionHide(const QString& archivePath, bool hidden)
+{
+    QString err;
+    if (!m_grpc->setArchiveHidden(m_game.shortName, archivePath, hidden, err)) {
+        QMessageBox::warning(this, "Hide Failed", err);
+        return;
+    }
+    // Instant UI response — no full reload needed.
+    m_model->setHidden(archivePath, hidden);
+    m_proxy->invalidate();
+}
+
+void DownloadsLibraryView::actionBulkHide(GrpcBulkHideScope scope, bool hidden)
+{
+    QString err;
+    int affected = 0;
+    if (!m_grpc->setArchivesHiddenBulk(m_game.shortName, hidden, scope, affected, err)) {
+        QMessageBox::warning(this, "Bulk Hide Failed", err);
+        return;
+    }
+    reloadFromDaemon();
+}
+
+void DownloadsLibraryView::actionDelete(const GrpcArchiveRow& row)
+{
+    auto reply = QMessageBox::question(this, "Delete Archive",
+        QString("Delete %1 from disk? This cannot be undone.").arg(row.fileArchiveName));
+    if (reply != QMessageBox::Yes)
+        return;
+    QString err;
+    if (!m_grpc->removeArchive(m_game.shortName, row.archiveRelPath, err)) {
+        QMessageBox::warning(this, "Delete Failed", err);
+        return;
+    }
+    m_model->removeByKey(row.archiveRelPath);
+}
+
+void DownloadsLibraryView::openNexusPage(const GrpcArchiveRow& row)
+{
+    if (row.gameDomain.isEmpty() || row.modId == 0)
+        return;
+    QString url = QString("https://www.nexusmods.com/%1/mods/%2")
+                      .arg(row.gameDomain).arg(row.modId);
+    QDesktopServices::openUrl(QUrl(url));
+}
+
+void DownloadsLibraryView::onDownloadProgress(const GrpcDownloadProgress& progress)
+{
+    m_model->applyDownloadProgress(progress);
+    // Terminal statuses per unified proto DownloadStatus:
+    //   3=DOWNLOADED, 5=INSTALLED, 6=UNINSTALLED, 7=CANCELLED, 8=FAILED.
+    // Any of these means the Nexus metadata / sidecar / install folder is
+    // settled, so pull a fresh snapshot for full-row fields.
+    if (progress.status == 3 || progress.status >= 5)
+        reloadFromDaemon();
+}
+
+void DownloadsLibraryView::onInstallProgress(const GrpcInstallProgress& progress)
+{
+    m_model->applyInstallProgress(progress);
+    if (progress.step == GrpcInstallStepComplete || progress.step == GrpcInstallStepFailed) {
+        // After install terminal state, sidecar/mod-folder info will have
+        // moved; pull fresh rows to catch installed_mod_folder.
+        reloadFromDaemon();
+    }
+}
+
+} // namespace gorganizer
