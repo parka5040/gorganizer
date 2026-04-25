@@ -108,25 +108,34 @@ print_dep_install_hint() {
 }
 
 # --- runtime dep check -----------------------------------------------------
-# Read-only; never auto-installs. Probes via ldconfig -p and command -v.
+# Two-phase check:
+#   1. Pre-extraction: a permissive smoke test ("does the package family
+#      exist at all?"). Uses prefix matches so we don't false-positive on
+#      SONAME version skew (e.g. Arch's libfuse3.so.4 vs Ubuntu's .so.3).
+#   2. Post-extraction (verify_binary_compat): the authoritative check —
+#      ldd against the actual binary, surfaces the exact "not found" lines.
+# Read-only; never auto-installs.
 check_runtime_deps() {
-    log "Checking runtime libraries..."
+    log "Checking runtime library packages (smoke test)..."
     local missing=()
 
-    # Critical shared libraries the GUI dynamically links.
+    # Prefix patterns: match any SONAME version. We just want to confirm
+    # the package family is installed; ldd later handles version skew.
     local libs=(
-        "libQt6Core.so.6"
-        "libQt6Gui.so.6"
-        "libQt6Widgets.so.6"
-        "libgrpc++.so"
-        "libprotobuf.so"
-        "libfuse3.so.3"
+        "libQt6Core"
+        "libQt6Gui"
+        "libQt6Widgets"
+        "libgrpc++"
+        "libprotobuf"
+        "libfuse3"
     )
     for lib in "${libs[@]}"; do
-        if ldconfig -p 2>/dev/null | grep -q "$lib"; then
+        # Escape regex specials in the lib name (just '+' for grpc++).
+        local re="${lib//+/\\+}\\.so"
+        if ldconfig -p 2>/dev/null | grep -qE "$re"; then
             ok "$lib"
         else
-            warn "$lib not found"
+            warn "$lib not found in ldconfig cache"
             missing+=("$lib")
         fi
     done
@@ -151,14 +160,60 @@ check_runtime_deps() {
 
     if [ ${#missing[@]} -gt 0 ]; then
         echo "" >&2
-        err "Critical runtime dependencies missing: ${missing[*]}"
+        err "Runtime package(s) appear missing: ${missing[*]}"
         print_dep_install_hint
         if ! $SKIP_DEPS_CHECK; then
             echo "" >&2
             err "Refusing to install. Pass --skip-deps-check to override."
             exit 1
         fi
-        warn "--skip-deps-check set; proceeding anyway. Gorganizer may fail to launch."
+        warn "--skip-deps-check set; proceeding anyway."
+    fi
+}
+
+# verify_binary_compat: precise check using ldd against the actual binaries
+# we're about to install. Catches SONAME mismatches that the smoke test
+# can't (e.g. Arch ships libfuse3.so.4, the Ubuntu-built release links .so.3).
+verify_binary_compat() {
+    log "Verifying binary compatibility against your libraries..."
+    local bins=(
+        "$SOURCE_DIR/bin/gorganizerd"
+        "$SOURCE_DIR/bin/gorganizerctl"
+        "$SOURCE_DIR/bin/gorganizer-gui"
+    )
+    local all_missing=""
+    for bin in "${bins[@]}"; do
+        [ -x "$bin" ] || continue
+        local missing
+        missing="$(ldd "$bin" 2>&1 | awk '/not found/ {print $1}' | sort -u || true)"
+        if [ -n "$missing" ]; then
+            warn "$(basename "$bin") needs libraries not present:"
+            echo "$missing" | sed 's/^/        /' >&2
+            all_missing="$all_missing $missing"
+        else
+            ok "$(basename "$bin") — all libraries resolve"
+        fi
+    done
+
+    if [ -n "$all_missing" ]; then
+        echo "" >&2
+        err "The release binary's library versions don't match your distro."
+        echo "" >&2
+        warn "This usually means SONAME skew. Releases are built on Ubuntu 24.04;"
+        warn "Arch and bleeding-edge distros often have newer SONAMEs (.so.4 vs .so.3 etc)."
+        echo "" >&2
+        warn "Workaround: build from source against your distro's libraries."
+        warn "    git clone https://github.com/${GH_OWNER}/${GH_REPO}"
+        warn "    cd ${GH_REPO}"
+        warn "    make all gui && make package"
+        warn "    tar xf gorganizer-*-linux-x86_64.tar.gz -C /tmp"
+        warn "    /tmp/gorganizer-*-linux-x86_64/install.sh"
+        if ! $SKIP_DEPS_CHECK; then
+            echo "" >&2
+            err "Refusing to install incompatible binaries. Pass --skip-deps-check to override."
+            exit 1
+        fi
+        warn "--skip-deps-check set; proceeding. Binaries will likely fail to launch."
     fi
 }
 
@@ -429,6 +484,8 @@ check_runtime_deps
 if [ "$MODE" = "network" ]; then
     fetch_release "$PIN_VERSION"
 fi
+
+verify_binary_compat
 
 install_files
 post_install
