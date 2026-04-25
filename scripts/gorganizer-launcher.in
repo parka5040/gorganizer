@@ -64,14 +64,6 @@ case "${1:-}" in
         fi
         exec "$PREFIX/share/gorganizer/register-nxm.sh"
         ;;
-    --version)
-        if [ -x "$DAEMON_BIN" ]; then
-            "$DAEMON_BIN" --version
-        else
-            echo "gorganizer (daemon not installed)"
-        fi
-        exit 0
-        ;;
     --help|-h)
         cat <<USAGE
 Gorganizer — Native Linux mod organizer for Bethesda games
@@ -81,7 +73,6 @@ Usage: gorganizer [OPTION]
   (none)            Spawn the daemon and launch the GUI.
   --nxm <URI>       Forward an nxm:// link to the running daemon.
   --register-nxm    Re-run system nxm:// MIME handler registration.
-  --version         Print version information.
   --help, -h        Show this message.
 
 For uninstall, run: $PREFIX/share/gorganizer/uninstall.sh

@@ -12,7 +12,11 @@ scope.
 
 ## Install
 
-One-line install (downloads the latest release):
+There are two paths. Pick the one that matches your distro.
+
+### Path A — System install via prebuilt release (Ubuntu 24.04, Debian, similar)
+
+Downloads the latest release tarball and installs to `~/.local/`. No sudo.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/parka5040/gorganizer/main/install.sh | bash
@@ -26,9 +30,33 @@ cd gorganizer
 ./install.sh
 ```
 
-Both modes install user-locally to `~/.local/` — no sudo required. They also
-register Gorganizer as the system handler for `nxm://` links so Nexus Mods
-"Mod Manager Download" buttons work.
+The installer also registers Gorganizer as the system handler for `nxm://`
+links so Nexus Mods "Mod Manager Download" buttons work.
+
+**Heads up:** the published release is built on Ubuntu 24.04 and dynamically
+links against its libraries. Distros with newer SONAMEs (Arch, Fedora 40+,
+openSUSE Tumbleweed) will fail the installer's `ldd` compatibility check
+and should use Path B instead.
+
+### Path B — Clone and run from source (Arch, Fedora, bleeding-edge distros)
+
+No system install. Builds against your own libraries, runs out of the
+project directory.
+
+```bash
+git clone https://github.com/parka5040/gorganizer
+cd gorganizer
+./gorganizer.sh
+```
+
+`gorganizer.sh` builds via `make` if needed, spawns the daemon, and runs
+the GUI. Per-game mod folders live under the project dir (e.g.
+`./FalloutNV_Mods/`). To register the system `nxm://` handler against this
+in-tree script:
+
+```bash
+./gorganizer.sh --register-nxm
+```
 
 ### Runtime requirements
 
@@ -119,5 +147,6 @@ build provenance, and publishes a GitHub Release. Users picked up by
 - `api/proto/` — gRPC service definition
 - `src/` — Qt6 GUI (C++)
 - `dist/` — `.desktop` templates
-- `scripts/gorganizer-launcher.in` — runtime launcher template
-- `install.sh`, `uninstall.sh` — user-facing installers
+- `scripts/gorganizer-launcher.in` — runtime launcher template (used by install.sh)
+- `gorganizer.sh` — clone-and-run dev launcher (Path B above)
+- `install.sh`, `uninstall.sh` — user-facing installers (Path A above)
