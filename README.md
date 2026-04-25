@@ -18,29 +18,36 @@ cd ~/gorganizer
 ./gorganizer.sh
 ```
 
-The clone path is up to you — `~/Apps/gorganizer` works just as well. The
-script's first run detects your distro (Arch, Debian/Ubuntu, Fedora, openSUSE),
-prompts you to install the build dependencies through the system package
-manager, builds the daemon and Qt6 GUI in-tree, then launches it. Subsequent
-runs are zero-friction.
+The clone path is up to you — `~/Apps/gorganizer` works just as well. On
+first run the script:
+
+1. Detects your distro (Arch, Debian/Ubuntu, Fedora, openSUSE) and prompts
+   `[Y/n]` to install build dependencies via the system package manager.
+2. Builds the Go daemon and Qt6 GUI in-tree.
+3. Migrates any `*_Mods/` folders left behind by a previous install.
+4. Installs a `gorganizer.desktop` entry + icon so the app appears in your
+   start menu (works on KDE, GNOME, Niri, anything that reads
+   `~/.local/share/applications/`) and registers `nxm://` so Nexus "Mod
+   Manager Download" buttons route to the running daemon.
+5. Launches the GUI.
+
+Subsequent runs are zero-friction. The script verifies the desktop entry
+each launch and refreshes it automatically if you moved the clone.
 
 Mod folders live alongside the script: `<clone>/<Game>_Mods/` (e.g.
 `~/gorganizer/FalloutNV_Mods/`). The daemon log lands at
 `~/.local/state/gorganizer/gorganizerd.log`.
 
-### Register the system menu and Nexus link handler
+### Manual register / unregister
+
+The default flow handles registration. If you ever need to force-refresh the
+desktop entries (`gorganizer.desktop` and the `nxm://` handler) without
+launching the app:
 
 ```bash
-./gorganizer.sh register
+./gorganizer.sh register     # idempotent
+./gorganizer.sh unregister   # remove menu entry + nxm handler + icon
 ```
-
-Installs `gorganizer.desktop` (so Gorganizer shows up in your application
-menu), copies the icon, and registers `gorganizer-nxm.desktop` as the system
-handler for `nxm://` links — Nexus Mods "Mod Manager Download" buttons
-forward to the running daemon.
-
-`register` is idempotent. Re-run it after moving the clone directory; the
-desktop entries are pinned to absolute paths.
 
 ### Subcommands
 

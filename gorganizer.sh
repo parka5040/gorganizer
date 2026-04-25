@@ -7,10 +7,12 @@
 #     ./gorganizer.sh
 #
 # Subcommands:
-#   (none)                Build if needed (prompting for deps), then run.
+#   (none)                Install (deps + build + desktop entry) and run.
+#                         Re-running is cheap; register-state is verified
+#                         each launch and refreshed if the clone moved.
 #   setup                 Detect distro, install build deps via system PM.
 #   build [--rebuild]     Build only. --rebuild forces a clean rebuild.
-#   register              Install desktop file + icon + nxm:// MIME handler.
+#   register              (Re-)install desktop file + icon + nxm:// handler.
 #   unregister            Reverse `register`.
 #   nxm <URI>             One-shot: forward an nxm:// URL to the running daemon.
 #   import [--from PATH]  Migrate legacy *_Mods/ folders into this clone.
@@ -265,6 +267,10 @@ do_build() {
 
 # --- desktop / mime registration -------------------------------------------
 
+# Icon=<absolute path>  is more reliable than the theme-name lookup
+# (Icon=gorganizer): the latter requires the icon cache to be current,
+# which trips up launchers that read .desktop files synchronously
+# (Niri's fuzzel/wofi, some KDE configurations).
 write_desktop_file() {
     cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
@@ -272,7 +278,7 @@ Type=Application
 Name=Gorganizer
 Comment=Native Linux mod organizer for Bethesda games
 Exec=$SCRIPT_DIR/gorganizer.sh
-Icon=gorganizer
+Icon=$ICON_DEST
 Terminal=false
 Categories=Game;Utility;
 Keywords=mod;organizer;skyrim;fallout;bethesda;
@@ -286,7 +292,7 @@ Type=Application
 Name=Gorganizer NXM Handler
 Comment=Nexus Mods download handler for Gorganizer
 Exec=$SCRIPT_DIR/gorganizer.sh nxm %u
-Icon=gorganizer
+Icon=$ICON_DEST
 Terminal=false
 Categories=Game;
 NoDisplay=true
@@ -353,6 +359,19 @@ if not new.endswith("\n"):
 with open(path, "w", encoding="utf-8") as f:
     f.write(new)
 PYEOF
+}
+
+# Returns 0 if the desktop entries / icon / NXM mime are missing or stale
+# (Exec= paths point somewhere other than this clone). Returns 1 if all good.
+needs_register() {
+    [ -f "$DESKTOP_FILE" ]     || return 0
+    [ -f "$NXM_DESKTOP_FILE" ] || return 0
+    [ -f "$ICON_DEST" ]        || return 0
+    grep -qF "Exec=$SCRIPT_DIR/gorganizer.sh" "$DESKTOP_FILE"     2>/dev/null || return 0
+    grep -qF "Exec=$SCRIPT_DIR/gorganizer.sh" "$NXM_DESKTOP_FILE" 2>/dev/null || return 0
+    grep -qF "Icon=$ICON_DEST" "$DESKTOP_FILE"     2>/dev/null || return 0
+    grep -qF "Icon=$ICON_DEST" "$NXM_DESKTOP_FILE" 2>/dev/null || return 0
+    return 1
 }
 
 cmd_register() {
@@ -597,6 +616,15 @@ cmd_run() {
         migrate_legacy_install || true
         mkdir -p "$CONFIG_DIR"
         touch "$BOOTSTRAP_SENTINEL"
+    fi
+
+    # Auto-register the desktop entry so the app shows up in the system
+    # launcher / start menu. Cheap on subsequent runs (the check is just
+    # three stat()s + a grep). Re-runs if the clone moved (Exec= path
+    # mismatch) so launcher entries don't go stale silently.
+    if needs_register; then
+        log "Installing desktop entry and nxm:// handler..."
+        cmd_register || warn "Desktop registration reported issues."
     fi
 
     # Silence Qt6 D-Bus / system tray noise on systems without a
