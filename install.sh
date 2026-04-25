@@ -2,10 +2,10 @@
 # Gorganizer installer.
 #
 # One-line install:
-#   curl -fsSL https://raw.githubusercontent.com/parka735/gorganizer/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/parka5040/gorganizer/main/install.sh | bash
 #
 # Or from a clone:
-#   git clone https://github.com/parka735/gorganizer && cd gorganizer && ./install.sh
+#   git clone https://github.com/parka5040/gorganizer && cd gorganizer && ./install.sh
 #
 # Modes (auto-detected):
 #   - offline: when this script lives next to a populated bin/ tree (it's
@@ -21,7 +21,7 @@
 #   --help, -h         Show this message.
 set -euo pipefail
 
-GH_OWNER="parka735"
+GH_OWNER="parka5040"
 GH_REPO="gorganizer"
 GH_API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
 

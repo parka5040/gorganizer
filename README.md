@@ -15,13 +15,13 @@ scope.
 One-line install (downloads the latest release):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/parka735/gorganizer/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/parka5040/gorganizer/main/install.sh | bash
 ```
 
 Or from a clone:
 
 ```bash
-git clone https://github.com/parka735/gorganizer
+git clone https://github.com/parka5040/gorganizer
 cd gorganizer
 ./install.sh
 ```
