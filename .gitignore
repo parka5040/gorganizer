@@ -11,11 +11,13 @@ moc_*
 *.moc
 qrc_*
 
-# Go binaries (built at repo root)
-gorganizerd
-gorganizerctl
-cmd/runtime-probe/runtime-probe
-cmd/vfs-smoke/vfs-smoke
+# Go binaries (built at repo root). Leading slash anchors to repo root so we
+# don't accidentally ignore cmd/gorganizerd/ and cmd/gorganizerctl/, the
+# source directories that share names with the binaries.
+/gorganizerd
+/gorganizerctl
+/cmd/runtime-probe/runtime-probe
+/cmd/vfs-smoke/vfs-smoke
 
 # Generated protobuf (Go)
 api/proto/*.pb.go
