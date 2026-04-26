@@ -80,7 +80,34 @@ ok()   { echo -e "${CYAN}[gorganizer]${RESET} ${GREEN}OK${RESET} $*"; }
 warn() { echo -e "${CYAN}[gorganizer]${RESET} ${YELLOW}!!${RESET} $*"; }
 err()  { echo -e "${CYAN}[gorganizer]${RESET} ${RED}XX${RESET} $*" >&2; }
 
-usage() { sed -n '2,/^set -euo/p' "$0" | sed 's/^#\s\?//;s/^# //;/^set -euo/d'; }
+usage() {
+    cat <<'USAGE'
+gorganizer.sh — single entry point for build, run, register, and uninstall.
+
+Canonical install (any clone path; ~/gorganizer is just an example):
+    git clone https://github.com/parka5040/gorganizer ~/gorganizer
+    cd ~/gorganizer
+    ./gorganizer.sh
+
+Subcommands:
+  (none)                Install (deps + build + desktop entry) and run.
+                        Re-running is cheap; register-state is verified
+                        each launch and refreshed if the clone moved.
+  setup                 Detect distro, install build deps via system PM.
+  build [--rebuild]     Build only. --rebuild forces a clean rebuild.
+  update                Pull latest from origin/main, rebuild, re-register.
+                        Refuses to run if the working tree is dirty or not
+                        a git checkout. User config and *_Mods/ are
+                        preserved.
+  register              (Re-)install desktop file + icon + nxm:// handler.
+  unregister            Reverse `register`.
+  nxm <URI>             One-shot: forward an nxm:// URL to the running daemon.
+  import [--from PATH]  Migrate legacy *_Mods/ folders into this clone.
+  uninstall [--purge]   Stop daemon, unregister, prompt for user data + deps.
+  --rebuild             Compatibility alias for `build --rebuild`.
+  --help, -h            Show this message.
+USAGE
+}
 
 # Read [Y/n] (default yes) or [y/N] (default no). Returns 0 for yes, 1 for no.
 # Skips the prompt when stdin is not a tty and returns the default.
@@ -312,7 +339,7 @@ mimeapps_ensure() {
     mkdir -p "$(dirname "$MIMEAPPS")"
     [ -f "$MIMEAPPS" ] || : > "$MIMEAPPS"
     python3 - "$MIMEAPPS" "$section" "$entry" <<'PYEOF'
-import sys
+import os, sys, tempfile
 path, section, entry = sys.argv[1:4]
 key = entry.split("=", 1)[0] + "="
 hdr = f"[{section}]"
@@ -342,8 +369,21 @@ if not seen:
 new = "\n".join(out)
 if not new.endswith("\n"):
     new += "\n"
-with open(path, "w", encoding="utf-8") as f:
-    f.write(new)
+# Atomic replace: write to a sibling tempfile, fsync, then os.replace.
+# Without this, a crash mid-write (or two gorganizer instances racing)
+# could leave mimeapps.list truncated and break every nxm:// link.
+d = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(prefix=".mimeapps.", dir=d)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(new)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+except Exception:
+    try: os.unlink(tmp)
+    except OSError: pass
+    raise
 PYEOF
 }
 
@@ -352,7 +392,7 @@ mimeapps_drop() {
     local entry="$1"
     [ -f "$MIMEAPPS" ] || return 0
     python3 - "$MIMEAPPS" "$entry" <<'PYEOF'
-import sys
+import os, sys, tempfile
 path, entry = sys.argv[1:3]
 with open(path, "r", encoding="utf-8") as f:
     text = f.read()
@@ -360,8 +400,18 @@ out = [line for line in text.splitlines() if line.strip() != entry]
 new = "\n".join(out)
 if not new.endswith("\n"):
     new += "\n"
-with open(path, "w", encoding="utf-8") as f:
-    f.write(new)
+d = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(prefix=".mimeapps.", dir=d)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(new)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+except Exception:
+    try: os.unlink(tmp)
+    except OSError: pass
+    raise
 PYEOF
 }
 
@@ -430,42 +480,40 @@ cmd_unregister() {
 # this clone as <DirName>/. Returns 0 if any were found+moved (or nothing
 # to do); 1 only on hard failure.
 migrate_legacy_install() {
-    local found=() mapping
+    # Parallel arrays — paths theoretically could contain `|`, and bash
+    # has no clean way to escape a delimiter inside an array element. A
+    # second parallel array per field is uglier but unambiguous.
+    local srcs=() dsts=() games=() mapping
     for mapping in "${GAME_MODS_DIRS[@]}"; do
         local game="${mapping%%:*}" name="${mapping##*:}"
         local src="$DATA_DIR/$game/mods"
         local dst="$SCRIPT_DIR/$name"
         if [ -d "$src" ] && [ ! -e "$dst" ]; then
-            found+=("$src|$dst|$game")
+            srcs+=("$src")
+            dsts+=("$dst")
+            games+=("$game")
         fi
     done
-    [ ${#found[@]} -eq 0 ] && return 0
+    [ ${#srcs[@]} -eq 0 ] && return 0
 
     log "Found legacy mod folders from a previous install:"
-    local entry
-    for entry in "${found[@]}"; do
-        local s="${entry%%|*}"
-        local rest="${entry#*|}"
-        local d="${rest%%|*}"
-        echo "    $s" >&2
-        echo "        →  $d" >&2
+    local i
+    for ((i = 0; i < ${#srcs[@]}; i++)); do
+        echo "    ${srcs[$i]}" >&2
+        echo "        →  ${dsts[$i]}" >&2
     done
     if ! prompt_yn "Move them into this clone now?" N; then
         warn "Skipped. Run \`./gorganizer.sh import\` to revisit later."
         return 0
     fi
 
-    for entry in "${found[@]}"; do
-        local s="${entry%%|*}"
-        local rest="${entry#*|}"
-        local d="${rest%%|*}"
-        local game="${rest##*|}"
-        if mv "$s" "$d"; then
-            ok "Moved $s → $d"
+    for ((i = 0; i < ${#srcs[@]}; i++)); do
+        if mv "${srcs[$i]}" "${dsts[$i]}"; then
+            ok "Moved ${srcs[$i]} → ${dsts[$i]}"
             # Remove now-empty parent if it has no other contents.
-            rmdir "$DATA_DIR/$game" 2>/dev/null || true
+            rmdir "$DATA_DIR/${games[$i]}" 2>/dev/null || true
         else
-            err "Failed to move $s"
+            err "Failed to move ${srcs[$i]}"
         fi
     done
 }
@@ -480,7 +528,7 @@ migrate_from_path() {
         return 1
     fi
 
-    local found=() mapping
+    local srcs=() dsts=() mapping
     for mapping in "${GAME_MODS_DIRS[@]}"; do
         local name="${mapping##*:}"
         local src="$from/$name"
@@ -490,27 +538,26 @@ migrate_from_path() {
                 warn "Skipping $name: target exists at $dst"
                 continue
             fi
-            found+=("$src|$dst")
+            srcs+=("$src")
+            dsts+=("$dst")
         fi
     done
-    [ ${#found[@]} -eq 0 ] && { log "No *_Mods/ folders found in $from"; return 0; }
+    [ ${#srcs[@]} -eq 0 ] && { log "No *_Mods/ folders found in $from"; return 0; }
 
     log "Will move from $from:"
-    local entry
-    for entry in "${found[@]}"; do
-        local s="${entry%%|*}" d="${entry##*|}"
-        echo "    $s  →  $d" >&2
+    local i
+    for ((i = 0; i < ${#srcs[@]}; i++)); do
+        echo "    ${srcs[$i]}  →  ${dsts[$i]}" >&2
     done
     if ! prompt_yn "Proceed?" N; then
         warn "Cancelled."
         return 0
     fi
-    for entry in "${found[@]}"; do
-        local s="${entry%%|*}" d="${entry##*|}"
-        if mv "$s" "$d"; then
-            ok "Moved $s → $d"
+    for ((i = 0; i < ${#srcs[@]}; i++)); do
+        if mv "${srcs[$i]}" "${dsts[$i]}"; then
+            ok "Moved ${srcs[$i]} → ${dsts[$i]}"
         else
-            err "Failed to move $s"
+            err "Failed to move ${srcs[$i]}"
         fi
     done
 }
@@ -648,9 +695,32 @@ cmd_run() {
 
     kill_stale_daemons
     start_daemon
-    trap stop_daemon_trap EXIT INT TERM
 
-    exec "$GUI_BIN"
+    # GUI as a backgrounded child + `wait`. Three reasons:
+    #   * `exec "$GUI_BIN"` would replace this shell, so EXIT/INT/TERM
+    #     traps cannot fire — a GUI crash (segfault, OOM, uncaught Qt
+    #     exception) would orphan the daemon.
+    #   * Running the GUI as a *foreground* child (no `&`) makes bash
+    #     wait synchronously, queueing pending signals until the GUI
+    #     exits on its own. A `kill -TERM` to the script alone wouldn't
+    #     reach the GUI.
+    #   * Backgrounding + `wait` lets bash respond to signals
+    #     immediately. The INT/TERM trap forwards to the GUI so it
+    #     shuts down cleanly; the EXIT trap then reaps the daemon.
+    "$GUI_BIN" &
+    GUI_PID=$!
+    trap 'kill -TERM "$GUI_PID" 2>/dev/null || true' INT TERM
+    trap stop_daemon_trap EXIT
+
+    # `wait` is interruptible: a fired trap unblocks it with exit code
+    # 128+signum. Loop until the GUI is actually gone so we propagate
+    # the GUI's real exit code, not the signal-interrupted placeholder.
+    GUI_RC=0
+    while kill -0 "$GUI_PID" 2>/dev/null; do
+        wait "$GUI_PID"
+        GUI_RC=$?
+    done
+    exit "$GUI_RC"
 }
 
 # --- nxm forwarding --------------------------------------------------------

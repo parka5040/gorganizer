@@ -1,5 +1,6 @@
 #include "InstallWorker.h"
 
+#include <QDebug>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -57,8 +58,24 @@ void InstallWorker::run()
     } catch (const std::exception& e) {
         ok = false;
         err = QString::fromUtf8(e.what());
+    } catch (...) {
+        // Catch-all so a non-std exception (foreign library, asm) can't
+        // skip the finished() emission and leave the dialog stuck on
+        // "Installing… please wait" forever.
+        ok = false;
+        err = QStringLiteral("install worker: unknown exception");
     }
-    emit finished(ok && !m_cancel.load(), m_cancel.load(), count, err);
+    // Wrap the finished() emission so an exception in any connected
+    // slot (slot calls happen inline for direct connections) cannot
+    // tear out of run() without unwinding the QThread cleanly. A
+    // QThread that exits via exception terminates the whole process.
+    try {
+        emit finished(ok && !m_cancel.load(), m_cancel.load(), count, err);
+    } catch (const std::exception& e) {
+        qCritical("InstallWorker::run: finished() slot threw: %s", e.what());
+    } catch (...) {
+        qCritical("InstallWorker::run: finished() slot threw unknown exception");
+    }
 }
 
 int InstallWorker::doRecursive()

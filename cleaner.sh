@@ -4,8 +4,9 @@
 # Source code is untouched.
 #
 # Usage:
-#   ./cleaner.sh          Clean everything
-#   ./cleaner.sh --keep-mods  Clean build/config but keep mod folders
+#   ./cleaner.sh                Clean everything (asks for confirmation)
+#   ./cleaner.sh --keep-mods    Clean build/config but keep mod folders
+#   ./cleaner.sh --yes          Skip confirmation (for scripted reset)
 set -euo pipefail
 
 if [ -t 1 ]; then
@@ -25,19 +26,48 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 KEEP_MODS=false
+ASSUME_YES=false
 for arg in "$@"; do
     case "$arg" in
         --keep-mods) KEEP_MODS=true ;;
+        --yes|-y) ASSUME_YES=true ;;
         --help|-h)
-            echo "Usage: $0 [--keep-mods]"
+            echo "Usage: $0 [--keep-mods] [--yes]"
             echo ""
             echo "  (no args)     Remove everything: build, mods, config, runtime"
             echo "  --keep-mods   Keep mod folders (*_Mods/), clean everything else"
+            echo "  --yes, -y     Skip the destructive-action confirmation prompt"
             exit 0
             ;;
         *) echo "Unknown flag: $arg"; exit 1 ;;
     esac
 done
+
+# Confirm before doing anything destructive. The script removes mods,
+# config, and downloads — without a gate, a fat-fingered tab-complete
+# can wipe a user's entire modding setup. --yes opts out for CI / dev
+# scripts that already know what they're doing.
+if ! $ASSUME_YES; then
+    if $KEEP_MODS; then
+        warn "About to remove: build artifacts, config (~/.config/gorganizer),"
+        warn "                 data (~/.local/share/gorganizer), runtime, desktop entries."
+        warn "Mod folders (*_Mods/) will be KEPT."
+    else
+        warn "About to remove: build artifacts, ALL *_Mods/ folders in $SCRIPT_DIR,"
+        warn "                 config (~/.config/gorganizer),"
+        warn "                 data (~/.local/share/gorganizer), runtime, desktop entries."
+    fi
+    if [ -t 0 ]; then
+        read -r -p "$(echo -e "${CYAN}[cleaner]${RESET} Type 'yes' to proceed: ")" reply || reply=""
+        if [ "$reply" != "yes" ]; then
+            log "Cancelled."
+            exit 0
+        fi
+    else
+        warn "Non-interactive shell and --yes not given; aborting."
+        exit 1
+    fi
+fi
 
 # Kill running daemon if its socket exists.
 SOCKET="${XDG_RUNTIME_DIR:-/tmp}/gorganizer/gorganizer.sock"

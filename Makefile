@@ -17,7 +17,7 @@ COMMIT  ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(DATE)
 
-.PHONY: all build ctl test vet clean proto gui
+.PHONY: all build ctl test vet clean proto gui install
 
 all: proto build ctl
 
@@ -37,7 +37,7 @@ ctl: proto
 
 gui:
 	cmake -B build -DCMAKE_BUILD_TYPE=Release -DGORGANIZER_VERSION="$(VERSION)"
-	cmake --build build -j$$(nproc)
+	cmake --build build -j$$(command -v nproc >/dev/null 2>&1 && nproc || echo 1)
 
 test:
 	$(GO) test -race -count=1 ./internal/...

@@ -176,6 +176,7 @@ int main(int argc, char* argv[])
         splash.show();
         QEventLoop loop;
         bool ok = false;
+        QString lastStepSeen;
         QObject::connect(&splash, &gorganizer::SplashScreen::ready, &loop, [&]() {
             ok = true;
             loop.quit();
@@ -183,18 +184,40 @@ int main(int argc, char* argv[])
         QObject::connect(&splash, &gorganizer::SplashScreen::failed, &loop,
             [&](const QString& lastStep) {
                 ok = false;
-                QMessageBox::warning(&splash, "Daemon startup timed out",
-                    QString("The Gorganizer daemon did not finish initializing in time.\n\n"
-                            "Last step seen: %1\n\n"
-                            "Check the daemon log for details:\n"
-                            "  ${XDG_STATE_HOME:-$HOME/.local/state}/gorganizer/gorganizerd.log").arg(lastStep));
+                lastStepSeen = lastStep;
                 loop.quit();
             });
+        // Hard cap on the splash. Without this, a daemon that hangs in
+        // warmup (stuck Steam scan, blocked filesystem) freezes the
+        // GUI on the splash forever — user can't even close the
+        // window because the event loop only quits on
+        // ready/failed. 30s is enough for any realistic warmup; on
+        // expiry we fall through into the same failure path the
+        // splash itself would have taken.
+        QTimer watchdog;
+        watchdog.setSingleShot(true);
+        QObject::connect(&watchdog, &QTimer::timeout, &loop, [&]() {
+            if (loop.isRunning()) {
+                ok = false;
+                lastStepSeen = QStringLiteral("(splash watchdog timeout)");
+                loop.quit();
+            }
+        });
+        watchdog.start(30000);
+
         splash.startPolling();
         loop.exec();
+        watchdog.stop();
         splash.close();
-        if (!ok)
+        if (!ok) {
+            QMessageBox::warning(nullptr, "Daemon startup timed out",
+                QString("The Gorganizer daemon did not finish initializing in time.\n\n"
+                        "Last step seen: %1\n\n"
+                        "Check the daemon log for details:\n"
+                        "  $XDG_STATE_HOME/gorganizer/gorganizerd.log\n"
+                        "  (or ~/.local/state/gorganizer/gorganizerd.log)").arg(lastStepSeen));
             return 1;
+        }
     }
 
     gorganizer::MainWindow mainWindow(config, &grpcClient);
@@ -215,13 +238,24 @@ int main(int argc, char* argv[])
 
     // --- Ask the daemon to shut down ---
     //
-    // Fire-and-forget: the daemon is detached, so we don't manage its
-    // lifetime. Its Shutdown RPC handler blocks on any still-running
-    // Proton launches before unmounting VFS, then exits on its own.
-    // We intentionally do NOT terminate()/kill() the daemon here — doing
-    // so while a game is running would tear the FUSE mount out mid-play.
+    // Synchronous with a bounded deadline + a socket-disappearance
+    // poll. The daemon is detached, so we don't reap its PID — but we
+    // do want to know it's actually gone before the GUI exits, so the
+    // shell wrapper's `kill_stale_daemons` doesn't race the next
+    // launch and the user doesn't see a stale socket warning.
+    //
+    // We intentionally do NOT terminate()/kill() the daemon here —
+    // doing so while a game is running would tear the VFS mount out
+    // mid-play. The daemon's own Shutdown handler blocks on launched
+    // games up to its internal 30s timeout (see daemon.shutdownTimeout).
     if (daemonOwned) {
-        grpcClient.shutdownDaemon();
+        QString shutdownErr;
+        // 3s for the RPC ack, then up to 10s for the socket file to
+        // disappear (covers the daemon's deactivate + IPC.Stop path).
+        if (!grpcClient.shutdownDaemonSync(3000, 10000, shutdownErr)) {
+            qWarning("daemon shutdown not confirmed: %s — relying on shell wrapper to reap it",
+                     qUtf8Printable(shutdownErr));
+        }
     }
 
     return exitCode;

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -26,11 +27,11 @@ import (
 // already holds it; if the previous owner died, the lock is released
 // automatically by the kernel and we take it.
 func acquireSingleInstanceLock() (release func(), err error) {
-	dir := filepath.Dir(config.SocketPath())
+	lockPath := config.LockPath()
+	dir := filepath.Dir(lockPath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, fmt.Errorf("creating runtime dir %s: %w", dir, err)
 	}
-	lockPath := filepath.Join(dir, "gorganizerd.lock")
 
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
@@ -53,8 +54,16 @@ func acquireSingleInstanceLock() (release func(), err error) {
 	_ = f.Sync()
 
 	release = func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		_ = f.Close()
+		// Log unlock failures: if the kernel can't release the flock,
+		// the next daemon may hit EWOULDBLOCK on a lock no one really
+		// owns. Rare on local fs; useful breadcrumb if it ever happens
+		// (NFS, weird overlay) so a user can `rm` the file by hand.
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
+			slog.Warn("releasing flock failed", "path", lockPath, "err", err)
+		}
+		if err := f.Close(); err != nil {
+			slog.Warn("closing lock file failed", "path", lockPath, "err", err)
+		}
 		_ = os.Remove(lockPath)
 	}
 	return release, nil

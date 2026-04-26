@@ -523,10 +523,16 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// Stop performs a graceful stop of the gRPC server.
+// Stop performs a graceful stop of the gRPC server and removes the
+// socket file. Without the os.Remove the socket inode persists between
+// daemon sessions, so `gorganizerd --handle-nxm` connects to a stale
+// path and gets ECONNREFUSED instead of "no daemon running".
 func (s *Server) Stop() {
 	if s.grpcServer != nil {
 		slog.Info("stopping gRPC server")
 		s.grpcServer.GracefulStop()
+	}
+	if s.socketPath != "" {
+		_ = os.Remove(s.socketPath)
 	}
 }

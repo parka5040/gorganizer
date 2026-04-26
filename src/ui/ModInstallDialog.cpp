@@ -73,6 +73,46 @@ ModInstallDialog::ModInstallDialog(const QString& archivePath,
     startExtraction();
 }
 
+ModInstallDialog::~ModInstallDialog()
+{
+    // Last-resort cleanup. Normal exit paths handle this — but if the
+    // dialog is destroyed mid-extract or mid-install (parent torn
+    // down, app quit, exception), Qt's parent-child cleanup deletes
+    // the worker QProcess and QThread without first asking them to
+    // stop. A QThread destroyed while still running fatally aborts
+    // the process; an unkilled QProcess can be left running as a
+    // detached child.
+
+    // 1. Kill the extraction subprocess if it's still running. The
+    // QProcess is parented to `this`, so Qt would delete it after this
+    // dtor returns — but ~QProcess only calls terminate(), not kill(),
+    // and waits a short time. Be explicit.
+    if (m_extractProc && m_extractProc->state() != QProcess::NotRunning) {
+        m_extractProc->kill();
+        m_extractProc->waitForFinished(2000);
+    }
+
+    // 2. Stop the install worker thread cleanly. cancel() sets the
+    // worker's atomic flag; the thread should exit shortly. If it
+    // doesn't (rare — usually means the worker is wedged on a slow
+    // filesystem op), proceed anyway and rely on the OS to reap the
+    // thread when the process exits. Better than crashing.
+    if (m_workerThread) {
+        if (m_worker) m_worker->cancel();
+        m_workerThread->quit();
+        if (!m_workerThread->wait(3000)) {
+            qWarning("ModInstallDialog: install worker did not stop within 3s");
+        }
+    }
+
+    // 3. Best-effort temp-dir cleanup. Normal flow already does this in
+    // onWorkerFinished or scanExtractedTree's FOMOD-cancel path; this
+    // catches the case where the dialog dies before either runs.
+    if (!m_extractDir.isEmpty()) {
+        QDir(m_extractDir).removeRecursively();
+    }
+}
+
 void ModInstallDialog::startExtraction()
 {
     m_phase = Extracting;
@@ -84,6 +124,7 @@ void ModInstallDialog::startExtraction()
 
     // Use 7z to extract (handles zip, 7z, rar uniformly).
     auto* proc = new QProcess(this);
+    m_extractProc = proc;
     connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &ModInstallDialog::onExtractFinished);
 

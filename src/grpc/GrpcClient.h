@@ -394,6 +394,12 @@ public:
 
     // Daemon lifecycle
     void shutdownDaemon();
+    // Synchronous variant used at app exit. Sends Shutdown with a
+    // bounded deadline and then polls the socket file (the daemon
+    // removes it on graceful stop) so the GUI doesn't return control
+    // to the shell wrapper while the daemon is still alive. Returns
+    // true if the daemon shut down within totalTimeoutMs.
+    bool shutdownDaemonSync(int rpcTimeoutMs, int pollTimeoutMs, QString& errorOut);
 
     // Cold-start readiness probe. Synchronous because the splash polls it
     // every ~150 ms with a short deadline; goes through its own stub so it

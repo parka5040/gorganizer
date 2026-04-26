@@ -153,8 +153,13 @@ type Daemon struct {
 	// archives.go for the eviction policy.
 	previews *previewCache
 
-	shutdownCh chan struct{}
-	mu         sync.RWMutex
+	// shutdownCh is closed (not sent on) to broadcast cancellation. Both
+	// Run() and runPreviewSweeper() consume it; a one-shot send would
+	// race them and the loser would block forever. Idempotency is
+	// guaranteed by shutdownOnce.
+	shutdownCh   chan struct{}
+	shutdownOnce sync.Once
+	mu           sync.RWMutex
 
 	// installedArchiveCache memoizes installedArchiveMap per gameID so
 	// ListArchives / BulkHide don't re-walk every mod's metadata.yaml on
@@ -303,6 +308,14 @@ func (d *Daemon) RecoverAll() {
 	}
 }
 
+// shutdownTimeout caps how long shutdownAll is allowed to block. A
+// zombied Proton process must not be able to wedge daemon teardown
+// indefinitely — the kernel will SIGKILL us at the systemd grace
+// boundary, and a SIGKILL leaves the lock + socket on disk. 30s is
+// generous enough for a real game to honor SIGTERM and short enough
+// to keep `systemctl stop` snappy.
+const shutdownTimeout = 30 * time.Second
+
 // Run starts the gRPC server and blocks until shutdown.
 func (d *Daemon) Run(socketPath string) error {
 	d.ipcServer = ipc.NewServer(socketPath, d)
@@ -313,7 +326,10 @@ func (d *Daemon) Run(socketPath string) error {
 	go d.warmupAsync()
 
 	<-d.shutdownCh
-	d.shutdownAll()
+
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	d.shutdownAll(ctx)
 	return nil
 }
 
@@ -379,13 +395,18 @@ func (d *Daemon) warmupAsync() {
 	}
 }
 
-func (d *Daemon) shutdownAll() {
+func (d *Daemon) shutdownAll(ctx context.Context) {
 	// Block unmount until every in-flight Proton launch has exited.
 	// The FUSE-mounted Data/ dir is the live file source for the engine;
 	// unmounting while the game still holds asset handles fails every
 	// subsequent read and the user sees "splash plays, menu stalls". We
 	// have to outlive the game even when the frontend has already quit.
-	d.waitForLaunchedExit()
+	//
+	// ctx caps the wait: a zombied Proton process must not stall
+	// shutdown forever. On timeout we proceed to teardown anyway and
+	// log loudly — the alternative is the kernel SIGKILLing us at the
+	// systemd grace boundary, which leaves lock+socket on disk.
+	d.waitForLaunchedExit(ctx)
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -431,10 +452,11 @@ func (d *Daemon) trackLaunched(gameID string, h *tools.LaunchHandle) {
 }
 
 // waitForLaunchedExit blocks until every registered Proton launch has
-// signaled Done. Emits a log at entry so a user staring at a journal can
-// tell *why* daemon shutdown is pausing, and emits nothing on the fast
-// path (no games running) so a clean quit stays terse.
-func (d *Daemon) waitForLaunchedExit() {
+// signaled Done, or until ctx is cancelled (the watchdog in Run). Emits
+// a log at entry so a user staring at a journal can tell *why* daemon
+// shutdown is pausing, and emits nothing on the fast path (no games
+// running) so a clean quit stays terse.
+func (d *Daemon) waitForLaunchedExit(ctx context.Context) {
 	d.launchedMu.Lock()
 	dones := make([]<-chan struct{}, 0, len(d.launched))
 	ids := make([]string, 0, len(d.launched))
@@ -450,7 +472,14 @@ func (d *Daemon) waitForLaunchedExit() {
 	slog.Info("waiting for launched games to exit before unmounting VFS",
 		"count", len(dones), "games", ids)
 	for _, done := range dones {
-		<-done
+		select {
+		case <-done:
+		case <-ctx.Done():
+			slog.Warn("shutdown timed out waiting for launched games — proceeding anyway",
+				"remaining", len(dones), "games", ids,
+				"reason", "VFS may not unmount cleanly; user must verify Data/ on next launch")
+			return
+		}
 	}
 	slog.Info("all launched games have exited — proceeding with shutdown")
 }
@@ -1801,11 +1830,11 @@ func (d *Daemon) GetProfileIniStatus(gameID, profileName string) (*ipc.ProfileIn
 
 // --- ipc.LifecycleController ---
 
+// Shutdown signals every consumer of d.shutdownCh by closing it. Idempotent
+// via sync.Once: repeated calls (e.g. SIGTERM after a frontend RPC already
+// asked for shutdown) collapse to a single close.
 func (d *Daemon) Shutdown() {
-	select {
-	case d.shutdownCh <- struct{}{}:
-	default:
-	}
+	d.shutdownOnce.Do(func() { close(d.shutdownCh) })
 }
 
 func (d *Daemon) WatchStatus() <-chan ipc.StatusEventResult {

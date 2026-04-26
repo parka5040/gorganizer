@@ -89,12 +89,45 @@ func main() {
 	checkProtontricksAvailable()
 
 	// Signal handling.
-	sigCh := make(chan os.Signal, 1)
+	//
+	// Three layers of guarantee that gorganizerd does not become a zombie:
+	//
+	//   1. First SIGTERM/SIGINT calls d.Shutdown(), which lets Run() do
+	//      its bounded shutdownAll (30s internal timeout, see daemon.go).
+	//   2. A watchdog timer fires shortly after the inner timeout and
+	//      hard-exits with best-effort cleanup of socket+lock files. This
+	//      catches cases where shutdownAll itself wedges (e.g.,
+	//      mm.Deactivate hung on a stuck unmount).
+	//   3. A second signal short-circuits straight to hard-exit so a user
+	//      mashing Ctrl-C doesn't have to wait through layers 1 and 2.
+	//
+	// The buffer of 4 is paranoia — signal.Notify drops if full.
+	sigCh := make(chan os.Signal, 4)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		sig := <-sigCh
 		slog.Info("received signal, shutting down", "signal", sig)
+
+		// Watchdog: hard-cap how long shutdown can take. Slightly longer
+		// than daemon.shutdownTimeout so the graceful path wins on the
+		// happy path, but short enough that systemd's TimeoutStopSec
+		// (default 90s) never has to escalate to SIGKILL.
+		const watchdogTimeout = 45 * time.Second
+		watchdog := time.AfterFunc(watchdogTimeout, func() {
+			slog.Error("shutdown watchdog fired — forcing exit",
+				"timeout", watchdogTimeout)
+			hardExit(sock, 2)
+		})
+		defer watchdog.Stop()
+
 		d.Shutdown()
+
+		// Second-signal escalation. If d.Run() returns before this
+		// fires, main exits normally and this goroutine is leaked
+		// (acceptable: the process is about to exit anyway).
+		sig2 := <-sigCh
+		slog.Warn("received second signal, exiting immediately", "signal", sig2)
+		hardExit(sock, 130)
 	}()
 
 	// Run daemon (blocks until shutdown).
@@ -103,6 +136,19 @@ func main() {
 		slog.Error("daemon failed", "err", err)
 		os.Exit(1)
 	}
+}
+
+// hardExit is the last-resort cleanup path. The deferred releaseLock()
+// in main() never runs on os.Exit, so we replicate its socket+lock
+// removal best-effort. The kernel releases the flock automatically when
+// the process dies; only the inode itself is the leak we have to clean.
+func hardExit(socketPath string, code int) {
+	_ = os.Remove(socketPath)
+	lockPath := config.LockPath()
+	if lockPath != "" {
+		_ = os.Remove(lockPath)
+	}
+	os.Exit(code)
 }
 
 // forwardNXM connects to the running daemon and sends an NXM URI.

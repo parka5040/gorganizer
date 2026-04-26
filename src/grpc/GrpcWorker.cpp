@@ -6,6 +6,23 @@
 
 namespace gorganizer {
 
+namespace {
+// Default deadline for unary RPCs. Chosen generously enough that even
+// expensive ops (Steam scan, hardlink-farm mount, full conflict walk)
+// fit comfortably; tight enough that a stalled daemon can't wedge a
+// worker thread indefinitely. Without these, GrpcClient::disconnect's
+// QThread::wait(3000) leaves zombie threads when the daemon dies
+// mid-RPC. Streaming RPCs are deliberately NOT clamped — they're
+// long-lived by design.
+constexpr auto kDefaultUnaryTimeout = std::chrono::seconds(30);
+inline void setUnaryDeadline(
+    grpc::ClientContext& ctx,
+    std::chrono::milliseconds timeout = kDefaultUnaryTimeout)
+{
+    ctx.set_deadline(std::chrono::system_clock::now() + timeout);
+}
+} // namespace
+
 GrpcWorker::GrpcWorker(std::shared_ptr<grpc::Channel> channel)
     : m_stub(gorganizer::v1::Gorganizer::NewStub(channel))
 {
@@ -150,6 +167,7 @@ GrpcArchiveRow GrpcWorker::archiveRowFromProto(const gorganizer::v1::ArchiveRow&
 void GrpcWorker::doListGames()
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx);
     gorganizer::v1::ListGamesRequest req;
     gorganizer::v1::ListGamesResponse resp;
     auto status = m_stub->ListGames(&ctx, req, &resp);
@@ -162,6 +180,7 @@ void GrpcWorker::doListGames()
 void GrpcWorker::doDetectGames()
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx, std::chrono::seconds(60)); // Steam scan across libraries
     gorganizer::v1::DetectGamesRequest req;
     gorganizer::v1::DetectGamesResponse resp;
     auto status = m_stub->DetectGames(&ctx, req, &resp);
@@ -176,6 +195,7 @@ void GrpcWorker::doConfigureGame(const QString& gameId, const QString& name,
                                   const QString& dataSubpath)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx);
     gorganizer::v1::ConfigureGameRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_name(name.toStdString());
@@ -191,6 +211,7 @@ void GrpcWorker::doConfigureGame(const QString& gameId, const QString& name,
 void GrpcWorker::doListMods(const QString& gameId)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx);
     gorganizer::v1::ListModsRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::ListModsResponse resp;
@@ -204,6 +225,7 @@ void GrpcWorker::doListMods(const QString& gameId)
 void GrpcWorker::doGetMod(const QString& gameId, const QString& modName)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx);
     gorganizer::v1::GetModRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_mod_name(modName.toStdString());
@@ -216,6 +238,7 @@ void GrpcWorker::doGetMod(const QString& gameId, const QString& modName)
 void GrpcWorker::doRescanMod(const QString& gameId, const QString& modName)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx, std::chrono::minutes(5)); // file walk + hashing
     gorganizer::v1::RescanModRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_mod_name(modName.toStdString());
@@ -228,6 +251,7 @@ void GrpcWorker::doRescanMod(const QString& gameId, const QString& modName)
 void GrpcWorker::doListProfiles(const QString& gameId)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx);
     gorganizer::v1::ListProfilesRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::ListProfilesResponse resp;
@@ -241,6 +265,7 @@ void GrpcWorker::doListProfiles(const QString& gameId)
 void GrpcWorker::doCreateProfile(const QString& gameId, const QString& name)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx);
     gorganizer::v1::CreateProfileRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_name(name.toStdString());
@@ -253,6 +278,7 @@ void GrpcWorker::doCreateProfile(const QString& gameId, const QString& name)
 void GrpcWorker::doDeleteProfile(const QString& gameId, const QString& name)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx);
     gorganizer::v1::DeleteProfileRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_name(name.toStdString());
@@ -265,6 +291,7 @@ void GrpcWorker::doDeleteProfile(const QString& gameId, const QString& name)
 void GrpcWorker::doGetModList(const QString& gameId, const QString& profileName)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx);
     gorganizer::v1::GetModListRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
@@ -280,6 +307,7 @@ void GrpcWorker::doSetModList(const QString& gameId, const QString& profileName,
                               const std::vector<GrpcModListEntry>& entries)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx);
     gorganizer::v1::SetModListRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
@@ -298,6 +326,7 @@ void GrpcWorker::doSetModList(const QString& gameId, const QString& profileName,
 void GrpcWorker::doMountVfs(const QString& gameId, const QString& profileName)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx, std::chrono::minutes(5)); // hardlink farm build for large modlists
     gorganizer::v1::MountVFSRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
@@ -310,6 +339,7 @@ void GrpcWorker::doMountVfs(const QString& gameId, const QString& profileName)
 void GrpcWorker::doUnmountVfs(const QString& gameId)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx);
     gorganizer::v1::UnmountVFSRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::UnmountVFSResponse resp;
@@ -321,6 +351,7 @@ void GrpcWorker::doUnmountVfs(const QString& gameId)
 void GrpcWorker::doRestoreFromBackup(const QString& gameId)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx);
     gorganizer::v1::RestoreFromBackupRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::RestoreFromBackupResponse resp;
@@ -335,6 +366,7 @@ void GrpcWorker::doRestoreFromBackup(const QString& gameId)
 void GrpcWorker::doGetVfsStatus(const QString& gameId)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx);
     gorganizer::v1::GetVFSStatusRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::VFSStatus resp;
@@ -346,6 +378,7 @@ void GrpcWorker::doGetVfsStatus(const QString& gameId)
 void GrpcWorker::doRebuildVfs(const QString& gameId)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx, std::chrono::minutes(5)); // hardlink farm rebuild
     gorganizer::v1::RebuildVFSRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::RebuildVFSResponse resp;
@@ -357,6 +390,7 @@ void GrpcWorker::doRebuildVfs(const QString& gameId)
 void GrpcWorker::doGetConflicts(const QString& gameId, const QString& profileName)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx, std::chrono::minutes(2)); // full mod walk
     gorganizer::v1::GetConflictsRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
@@ -371,6 +405,7 @@ void GrpcWorker::doGetConflicts(const QString& gameId, const QString& profileNam
 void GrpcWorker::doLaunchGame(const QString& gameId, bool useTool, const QString& profileName)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx);
     gorganizer::v1::LaunchGameRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_use_tool(useTool);
@@ -384,6 +419,7 @@ void GrpcWorker::doLaunchGame(const QString& gameId, bool useTool, const QString
 void GrpcWorker::doStartDownload(const QString& nxmUri)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx);
     gorganizer::v1::StartDownloadRequest req;
     req.set_nxm_uri(nxmUri.toStdString());
     gorganizer::v1::StartDownloadResponse resp;
@@ -395,6 +431,7 @@ void GrpcWorker::doStartDownload(const QString& nxmUri)
 void GrpcWorker::doCancelDownload(const QString& downloadId)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx);
     gorganizer::v1::CancelDownloadRequest req;
     req.set_download_id(downloadId.toStdString());
     gorganizer::v1::CancelDownloadResponse resp;
@@ -406,6 +443,7 @@ void GrpcWorker::doCancelDownload(const QString& downloadId)
 void GrpcWorker::doRetryDownload(const QString& downloadId)
 {
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx);
     gorganizer::v1::RetryDownloadRequest req;
     req.set_download_id(downloadId.toStdString());
     gorganizer::v1::RetryDownloadResponse resp;
@@ -458,7 +496,13 @@ void GrpcWorker::doSetNexusAPIKey(const QString& apiKey)
 
 void GrpcWorker::doShutdownDaemon()
 {
+    // Tight deadline: the daemon should ack the signal almost
+    // instantly. The actual shutdown work happens after the RPC
+    // returns; we don't wait for the daemon to fully exit here.
+    // GrpcClient::shutdownDaemonSync (used at app exit) is the
+    // synchronous path with its own deadline + post-RPC poll.
     grpc::ClientContext ctx;
+    setUnaryDeadline(ctx, std::chrono::seconds(3));
     gorganizer::v1::ShutdownRequest req;
     gorganizer::v1::ShutdownResponse resp;
     m_stub->Shutdown(&ctx, req, &resp);

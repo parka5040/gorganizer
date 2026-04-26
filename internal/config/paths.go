@@ -33,6 +33,12 @@ func SocketPath() string {
 	return filepath.Join(RuntimeDir(), "gorganizer.sock")
 }
 
+// LockPath returns RuntimeDir()/gorganizerd.lock — the singleton flock
+// file held by the running daemon. Mirror in gorganizer.sh ($LOCK_PATH).
+func LockPath() string {
+	return filepath.Join(RuntimeDir(), "gorganizerd.lock")
+}
+
 // GameModsDirName returns the folder name for a game's mods (e.g., "FalloutNV_Mods").
 // Mirror of GAME_MODS_DIRS in gorganizer.sh — keep both lists in sync when
 // adding a game.

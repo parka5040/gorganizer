@@ -3,6 +3,7 @@
 #include <QDialog>
 #include <QTreeWidget>
 #include <QLabel>
+#include <QPointer>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QDialogButtonBox>
@@ -12,6 +13,7 @@
 #include "FomodPlan.h"
 
 class QCloseEvent;
+class QProcess;
 
 namespace gorganizer {
 
@@ -30,6 +32,7 @@ public:
                               const QString& modsDir,
                               const QString& defaultModName,
                               QWidget* parent = nullptr);
+    ~ModInstallDialog() override;
 
     // Optional daemon callback. When set, a successful install ends with a
     // RegisterManualInstall RPC so the daemon updates each profile's
@@ -99,6 +102,12 @@ private:
     QThread* m_workerThread = nullptr;
     InstallWorker* m_worker = nullptr;
     QString m_installDestDir;
+
+    // QPointer so the dtor can probe liveness without dangling. The
+    // QProcess is parented to this dialog (so Qt deletes it for us);
+    // we just need a back-reference to ask it to terminate cleanly
+    // before destruction.
+    QPointer<QProcess> m_extractProc;
 
     enum Phase { Extracting, Choosing, Installing, Cancelling, Done };
     Phase m_phase = Extracting;

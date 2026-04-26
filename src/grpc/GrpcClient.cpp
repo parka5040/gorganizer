@@ -3,6 +3,10 @@
 #include "gorganizer.grpc.pb.h"
 
 #include <grpcpp/grpcpp.h>
+#include <QElapsedTimer>
+#include <QFileInfo>
+#include <QThread>
+#include <chrono>
 #include <cstdlib>
 
 namespace gorganizer {
@@ -105,17 +109,38 @@ void GrpcClient::disconnectFromDaemon()
     if (m_archiveWorker) m_archiveWorker->stop();
     if (m_installWorker) m_installWorker->stop();
 
-    auto shutdown = [](QThread*& t, GrpcWorker*& w) {
+    // wait(3000) per thread is normally plenty: stop() fires TryCancel
+    // on streams, and Tier 1.7's per-RPC deadlines bound any unary call
+    // in flight. If a thread *still* hasn't finished, deleting the
+    // worker out from under a live stub is the documented Qt path to a
+    // crash on app teardown — so leak the thread instead and let Qt's
+    // parent-child cleanup reap it on ~GrpcClient (which itself happens
+    // after all threads have been signaled stopped). Better a one-time
+    // cleanup leak than a heisenbug crash.
+    auto shutdown = [](QThread*& t, GrpcWorker*& w, const char* tag) {
         if (!t) return;
         t->quit();
-        t->wait(3000);
+        if (!t->wait(3000)) {
+            qWarning("GrpcClient: %s thread did not exit within 3s; "
+                     "leaking it to avoid use-after-free on the gRPC stub",
+                     tag);
+            // Detach: don't delete worker or thread; ~QObject will
+            // tear them down when GrpcClient itself goes away.
+            t = nullptr;
+            w = nullptr;
+            return;
+        }
         delete w; w = nullptr;
         t = nullptr;
     };
-    shutdown(m_workerThread, m_worker);
-    shutdown(m_streamThread, m_streamWorker);
-    shutdown(m_archiveThread, m_archiveWorker);
-    shutdown(m_installThread, m_installWorker);
+    shutdown(m_workerThread,  m_worker,        "unary");
+    shutdown(m_streamThread,  m_streamWorker,  "watch-status");
+    shutdown(m_archiveThread, m_archiveWorker, "archive-stream");
+    shutdown(m_installThread, m_installWorker, "install-stream");
+
+    // Reset the channel only after every thread has confirmed exit. A
+    // worker that's still inside m_stub->XYZ(...) holds a stub backed
+    // by this channel; resetting it under their feet is UAF.
     m_channel.reset();
 
     if (m_connected) {
@@ -313,6 +338,42 @@ void GrpcClient::setNexusAPIKey(const QString& apiKey)
 void GrpcClient::shutdownDaemon()
 {
     QMetaObject::invokeMethod(m_worker, &GrpcWorker::doShutdownDaemon);
+}
+
+bool GrpcClient::shutdownDaemonSync(int rpcTimeoutMs, int pollTimeoutMs, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    // Inline stub creation: makeStub() lives in an anonymous namespace
+    // declared lower in this file, so we can't call it from up here.
+    auto stub = gorganizer::v1::Gorganizer::NewStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(rpcTimeoutMs));
+    gorganizer::v1::ShutdownRequest req;
+    gorganizer::v1::ShutdownResponse resp;
+    auto s = stub->Shutdown(&ctx, req, &resp);
+    if (!s.ok()) {
+        errorOut = QString::fromStdString(s.error_message());
+        // Don't return early — the daemon may already be on its way
+        // out (stream cancellation can race the RPC return). Fall
+        // through to the socket-poll which is the authoritative
+        // signal: ipc.Server.Stop() removes the socket on graceful
+        // shutdown.
+    }
+
+    // Poll for socket disappearance. The daemon's graceful Stop()
+    // removes the socket file as its last act, so its absence is a
+    // strong signal that the daemon's gRPC server has fully exited.
+    const char* xdgRuntime = std::getenv("XDG_RUNTIME_DIR");
+    QString sockPath = QString::fromUtf8(xdgRuntime ? xdgRuntime : "/tmp")
+                       + "/gorganizer/gorganizer.sock";
+    QElapsedTimer t;
+    t.start();
+    while (t.elapsed() < pollTimeoutMs) {
+        if (!QFileInfo::exists(sockPath)) return true;
+        QThread::msleep(50);
+    }
+    if (errorOut.isEmpty()) errorOut = "daemon did not exit within timeout";
+    return false;
 }
 
 // --- Synchronous helpers ---
