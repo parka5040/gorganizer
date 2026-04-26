@@ -1,15 +1,18 @@
 #!/bin/bash
-# gorganizer.sh — single entry point for build, run, register, and uninstall.
+# gorganizer.sh — single entry point for install, launch, and uninstall.
 #
 # Canonical install (any clone path; ~/gorganizer is just an example):
 #     git clone https://github.com/parka5040/gorganizer ~/gorganizer
 #     cd ~/gorganizer
-#     ./gorganizer.sh
+#     ./gorganizer.sh        # builds + installs only; does NOT launch
 #
 # Subcommands:
-#   (none)                Install (deps + build + desktop entry) and run.
-#                         Re-running is cheap; register-state is verified
-#                         each launch and refreshed if the clone moved.
+#   (none)                Install or update: build, register desktop entry +
+#                         nxm:// handler. If a prior install is detected the
+#                         flow becomes an in-place rebuild + re-register.
+#                         Does NOT launch the GUI — start it from your app
+#                         menu, or run `./gorganizer.sh launch`.
+#   launch                Start the daemon + GUI. Used by the desktop entry.
 #   setup                 Detect distro, install build deps via system PM.
 #   build [--rebuild]     Build only. --rebuild forces a clean rebuild.
 #   update                Pull latest from origin/main, rebuild, re-register.
@@ -20,13 +23,38 @@
 #   unregister            Reverse `register`.
 #   nxm <URI>             One-shot: forward an nxm:// URL to the running daemon.
 #   import [--from PATH]  Migrate legacy *_Mods/ folders into this clone.
-#   uninstall [--purge]   Stop daemon, unregister, prompt for user data + deps.
+#   uninstall [--purge]   Remove the application: stop daemon, unregister,
+#                         delete build artifacts. User data is preserved.
+#                         --purge additionally removes config, profiles,
+#                         caches, and the daemon log.
 #   --rebuild             Compatibility alias for `build --rebuild`.
+#   --version, -v         Print version and exit.
 #   --help, -h            Show this message.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+# --- version ---------------------------------------------------------------
+# The VERSION file at the repo root is the single source of truth. The
+# Makefile reads it, ldflags-stamps both binaries, and the GUI's
+# GORGANIZER_VERSION compile define mirrors it. We surface it here so
+# `./gorganizer.sh --version` works even before anything is built.
+gorganizer_version() {
+    local v
+    if [ -f "$SCRIPT_DIR/VERSION" ]; then
+        v="$(sed -n '1{s/[[:space:]]*$//;p;}' "$SCRIPT_DIR/VERSION" 2>/dev/null)"
+    fi
+    [ -z "${v:-}" ] && v="dev"
+    if [ -d "$SCRIPT_DIR/.git" ] && command -v git >/dev/null 2>&1; then
+        local desc
+        desc="$(git -C "$SCRIPT_DIR" describe --tags --always --dirty 2>/dev/null || true)"
+        if [ -n "$desc" ] && [ "$desc" != "$v" ]; then
+            v="$v+$desc"
+        fi
+    fi
+    echo "$v"
+}
 
 # --- paths -----------------------------------------------------------------
 
@@ -81,18 +109,23 @@ warn() { echo -e "${CYAN}[gorganizer]${RESET} ${YELLOW}!!${RESET} $*"; }
 err()  { echo -e "${CYAN}[gorganizer]${RESET} ${RED}XX${RESET} $*" >&2; }
 
 usage() {
-    cat <<'USAGE'
-gorganizer.sh — single entry point for build, run, register, and uninstall.
+    cat <<USAGE
+gorganizer.sh — single entry point for install, launch, and uninstall.
+
+Version: $(gorganizer_version)
 
 Canonical install (any clone path; ~/gorganizer is just an example):
     git clone https://github.com/parka5040/gorganizer ~/gorganizer
     cd ~/gorganizer
-    ./gorganizer.sh
+    ./gorganizer.sh        # builds + installs only; does NOT launch
 
 Subcommands:
-  (none)                Install (deps + build + desktop entry) and run.
-                        Re-running is cheap; register-state is verified
-                        each launch and refreshed if the clone moved.
+  (none)                Install or update: build, register desktop entry +
+                        nxm:// handler. If a prior install is detected the
+                        flow becomes an in-place rebuild + re-register.
+                        Does NOT launch the GUI — start it from your app
+                        menu, or run \`./gorganizer.sh launch\`.
+  launch                Start the daemon + GUI (used by the desktop entry).
   setup                 Detect distro, install build deps via system PM.
   build [--rebuild]     Build only. --rebuild forces a clean rebuild.
   update                Pull latest from origin/main, rebuild, re-register.
@@ -100,11 +133,15 @@ Subcommands:
                         a git checkout. User config and *_Mods/ are
                         preserved.
   register              (Re-)install desktop file + icon + nxm:// handler.
-  unregister            Reverse `register`.
+  unregister            Reverse \`register\`.
   nxm <URI>             One-shot: forward an nxm:// URL to the running daemon.
   import [--from PATH]  Migrate legacy *_Mods/ folders into this clone.
-  uninstall [--purge]   Stop daemon, unregister, prompt for user data + deps.
-  --rebuild             Compatibility alias for `build --rebuild`.
+  uninstall [--purge]   Remove the application: stop daemon, unregister,
+                        delete build artifacts. User data is preserved.
+                        --purge additionally removes config, profiles,
+                        caches, and the daemon log.
+  --rebuild             Compatibility alias for \`build --rebuild\`.
+  --version, -v         Print version and exit.
   --help, -h            Show this message.
 USAGE
 }
@@ -303,16 +340,21 @@ do_build() {
 # which trips up launchers that read .desktop files synchronously
 # (Niri's fuzzel/wofi, some KDE configurations).
 write_desktop_file() {
+    # Exec uses the `launch` subcommand because the no-arg form is the
+    # install/update flow — running it from a launcher would silently
+    # rebuild instead of opening the GUI. `launch` is the user-facing
+    # run path and the only thing the desktop entry should ever invoke.
     cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Gorganizer
 Comment=Native Linux mod organizer for Bethesda games
-Exec=$SCRIPT_DIR/gorganizer.sh
+Exec=$SCRIPT_DIR/gorganizer.sh launch
 Icon=$ICON_DEST
 Terminal=false
 Categories=Game;Utility;
 Keywords=mod;organizer;skyrim;fallout;bethesda;
+Version=$(gorganizer_version)
 EOF
 }
 
@@ -416,13 +458,15 @@ PYEOF
 }
 
 # Returns 0 if the desktop entries / icon / NXM mime are missing or stale
-# (Exec= paths point somewhere other than this clone). Returns 1 if all good.
+# (Exec= paths point somewhere other than this clone, or still point to the
+# pre-`launch`-subcommand entry that would re-run the installer instead of
+# opening the GUI). Returns 1 if all good.
 needs_register() {
     [ -f "$DESKTOP_FILE" ]     || return 0
     [ -f "$NXM_DESKTOP_FILE" ] || return 0
     [ -f "$ICON_DEST" ]        || return 0
-    grep -qF "Exec=$SCRIPT_DIR/gorganizer.sh" "$DESKTOP_FILE"     2>/dev/null || return 0
-    grep -qF "Exec=$SCRIPT_DIR/gorganizer.sh" "$NXM_DESKTOP_FILE" 2>/dev/null || return 0
+    grep -qF "Exec=$SCRIPT_DIR/gorganizer.sh launch" "$DESKTOP_FILE"     2>/dev/null || return 0
+    grep -qF "Exec=$SCRIPT_DIR/gorganizer.sh nxm"    "$NXM_DESKTOP_FILE" 2>/dev/null || return 0
     grep -qF "Icon=$ICON_DEST" "$DESKTOP_FILE"     2>/dev/null || return 0
     grep -qF "Icon=$ICON_DEST" "$NXM_DESKTOP_FILE" 2>/dev/null || return 0
     return 1
@@ -649,33 +693,88 @@ stop_daemon_trap() {
     exit "$rc"
 }
 
-# --- run -------------------------------------------------------------------
+# --- install (default) -----------------------------------------------------
 
-cmd_run() {
-    if [ ! -x "$DAEMON_BIN" ] || [ ! -x "$GUI_BIN" ] || needs_build; then
-        local family
-        family="$(detect_distro_family)"
-        if [ ! -x "$DAEMON_BIN" ] || [ ! -x "$GUI_BIN" ]; then
-            # First build — try to ensure deps are present.
-            install_deps_interactive "$family" || true
-        fi
-        do_build || exit 1
+# Returns 0 if a prior install of the application is detected — i.e. both
+# binaries already live in this clone AND the desktop entries are in place
+# and point at this clone. Used by cmd_install to decide between "fresh
+# install" wording and "in-place update" wording.
+already_installed() {
+    [ -x "$DAEMON_BIN" ] || return 1
+    [ -x "$GUI_BIN" ]    || return 1
+    [ -f "$DESKTOP_FILE" ] || return 1
+    grep -qF "Exec=$SCRIPT_DIR/gorganizer.sh launch" "$DESKTOP_FILE" 2>/dev/null || return 1
+    return 0
+}
+
+cmd_install() {
+    local mode="install"
+    if already_installed; then
+        mode="update"
     fi
 
-    # First-run migration: only if the bootstrap sentinel is absent.
+    # Ensure build deps before the first build. On updates we trust them
+    # already — `setup` is the explicit re-check command if the toolchain
+    # changed under the user.
+    if [ ! -x "$DAEMON_BIN" ] || [ ! -x "$GUI_BIN" ]; then
+        local family
+        family="$(detect_distro_family)"
+        install_deps_interactive "$family" || true
+    fi
+
+    # Build (incremental): no-op when sources are unchanged AND both
+    # binaries are present.
+    if [ ! -x "$DAEMON_BIN" ] || [ ! -x "$GUI_BIN" ] || needs_build; then
+        do_build || exit 1
+    else
+        ok "Binaries up to date — skipping build."
+    fi
+
+    # First-install migration only — gated by the sentinel so updates
+    # never re-prompt for legacy *_Mods/ moves.
     if [ ! -f "$BOOTSTRAP_SENTINEL" ]; then
         migrate_legacy_install || true
         mkdir -p "$CONFIG_DIR"
         touch "$BOOTSTRAP_SENTINEL"
     fi
 
-    # Auto-register the desktop entry so the app shows up in the system
-    # launcher / start menu. Cheap on subsequent runs (the check is just
-    # three stat()s + a grep). Re-runs if the clone moved (Exec= path
-    # mismatch) so launcher entries don't go stale silently.
+    # Refresh the desktop entry on every run so a moved clone or a
+    # version bump shows up in the launcher immediately.
     if needs_register; then
         log "Installing desktop entry and nxm:// handler..."
         cmd_register || warn "Desktop registration reported issues."
+    else
+        ok "Desktop entry already registered."
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Gorganizer${RESET} ${CYAN}$(gorganizer_version)${RESET}"
+    echo -e "  ${CYAN}-----------${RESET}"
+    if [ "$mode" = "update" ]; then
+        log "  In-place update complete."
+    else
+        log "  Install complete."
+    fi
+    log "  Daemon:    $DAEMON_BIN"
+    log "  Frontend:  $GUI_BIN"
+    log "  Mod root:  $SCRIPT_DIR/<Game>_Mods/"
+    log "  Desktop:   $DESKTOP_FILE"
+    echo ""
+    log "Launch via your application menu, or run:"
+    log "    ${BOLD}./gorganizer.sh launch${RESET}"
+}
+
+# --- launch ----------------------------------------------------------------
+
+cmd_launch() {
+    # Argv carryover from the desktop entry: an nxm:// URI may be passed
+    # along when the user clicks a Nexus "Mod manager download" button
+    # while the GUI is already up. The GUI itself forwards URIs through
+    # to the daemon (see src/main.cpp); we just pass them through argv.
+    if [ ! -x "$DAEMON_BIN" ] || [ ! -x "$GUI_BIN" ]; then
+        err "Gorganizer is not built yet."
+        err "Run \`./gorganizer.sh\` from this clone to build and install."
+        exit 1
     fi
 
     # Silence Qt6 D-Bus / system tray noise on systems without a
@@ -684,8 +783,8 @@ cmd_run() {
     export GORGANIZER_ROOT="$SCRIPT_DIR"
 
     echo ""
-    echo -e "  ${BOLD}Gorganizer${RESET}"
-    echo -e "  ${CYAN}----------${RESET}"
+    echo -e "  ${BOLD}Gorganizer${RESET} ${CYAN}$(gorganizer_version)${RESET}"
+    echo -e "  ${CYAN}-----------${RESET}"
     log "  Daemon:    $DAEMON_BIN"
     log "  Frontend:  $GUI_BIN"
     log "  Mod root:  $SCRIPT_DIR/<Game>_Mods/"
@@ -707,7 +806,7 @@ cmd_run() {
     #   * Backgrounding + `wait` lets bash respond to signals
     #     immediately. The INT/TERM trap forwards to the GUI so it
     #     shuts down cleanly; the EXIT trap then reaps the daemon.
-    "$GUI_BIN" &
+    "$GUI_BIN" "$@" &
     GUI_PID=$!
     trap 'kill -TERM "$GUI_PID" 2>/dev/null || true' INT TERM
     trap stop_daemon_trap EXIT
@@ -812,7 +911,7 @@ cmd_update() {
             ok "Daemon restarted."
         else
             warn "A daemon is running on the old build."
-            warn "Re-run with --restart, or quit the GUI and rerun ./gorganizer.sh."
+            warn "Re-run with --restart, or quit the GUI and rerun \`./gorganizer.sh launch\`."
         fi
     fi
 
@@ -831,10 +930,10 @@ cmd_setup() {
 # --- uninstall -------------------------------------------------------------
 
 cmd_uninstall() {
-    local force_purge=false
+    local purge=false
     while [ $# -gt 0 ]; do
         case "$1" in
-            --purge) force_purge=true; shift ;;
+            --purge) purge=true; shift ;;
             *) err "Unknown option: $1"; return 2 ;;
         esac
     done
@@ -852,56 +951,33 @@ cmd_uninstall() {
         rm -f "$SOCKET_PATH" "$LOCK_PATH"
     fi
 
+    # Remove desktop entry, NXM handler, icon, mime registration.
     cmd_unregister
 
-    # User data prompt.
-    local user_dirs=("$CONFIG_DIR" "$DATA_DIR" "${XDG_STATE_HOME:-$HOME/.local/state}/gorganizer")
-    local existing=()
-    for d in "${user_dirs[@]}"; do [ -e "$d" ] && existing+=("$d"); done
-    if [ ${#existing[@]} -gt 0 ]; then
-        if $force_purge; then
-            for d in "${existing[@]}"; do rm -rf "$d" && log "Purged $d"; done
-        else
-            warn "User data exists at:"
-            for d in "${existing[@]}"; do echo "    $d" >&2; done
-            warn "These hold your config, profiles, downloads, and daemon log."
-            if prompt_yn "Type yes to remove user data, anything else to keep:" N; then
-                for d in "${existing[@]}"; do rm -rf "$d" && log "Removed $d"; done
-            else
-                log "User data preserved."
-            fi
-        fi
-    fi
-
-    # System packages prompt.
-    local family deps remove_cmd
-    family="$(detect_distro_family)"
-    deps="$(deps_for_family "$family")"
-    remove_cmd="$(pm_remove_cmd "$family")"
-    if [ -n "$deps" ] && [ -n "$remove_cmd" ]; then
-        echo ""
-        warn "${BOLD}Optional:${RESET} remove the build/runtime packages installed for Gorganizer."
-        warn "These may be shared with other applications:"
-        echo "    $deps" >&2
-        if prompt_yn "Remove them now? (default: no)" N; then
-            sudo -v || { err "sudo failed; skipping package removal."; return 0; }
-            # shellcheck disable=SC2086
-            $remove_cmd $deps || warn "Package removal returned non-zero."
-        else
-            log "System packages preserved."
-        fi
-    fi
-
-    # Local build artifacts in the clone.
+    # Always-on: blow away build artifacts. The whole point of `uninstall`
+    # is to leave nothing executable behind that the launcher could still
+    # find via PATH or a stale .desktop somewhere else.
     if [ -e "$DAEMON_BIN" ] || [ -e "$CTL_BIN" ] || [ -d "$SCRIPT_DIR/build" ]; then
-        echo ""
-        log "Local build artifacts in $SCRIPT_DIR:"
-        [ -e "$DAEMON_BIN" ]      && echo "    $DAEMON_BIN" >&2
-        [ -e "$CTL_BIN" ]         && echo "    $CTL_BIN" >&2
-        [ -d "$SCRIPT_DIR/build" ] && echo "    $SCRIPT_DIR/build/" >&2
-        if prompt_yn "Remove these build artifacts?" Y; then
-            make clean >/dev/null 2>&1 || true
-            ok "Build artifacts removed."
+        make clean >/dev/null 2>&1 || true
+        rm -rf "$SCRIPT_DIR/build"
+        rm -f "$DAEMON_BIN" "$CTL_BIN"
+        ok "Build artifacts removed."
+    fi
+
+    # User data is preserved by default — config, profiles, downloads,
+    # and the daemon log are exactly what the user wants to keep across
+    # a reinstall. --purge is the explicit nuke option.
+    local user_dirs=("$CONFIG_DIR" "$DATA_DIR" "${XDG_STATE_HOME:-$HOME/.local/state}/gorganizer")
+    if $purge; then
+        for d in "${user_dirs[@]}"; do
+            [ -e "$d" ] && rm -rf "$d" && log "Purged $d"
+        done
+    else
+        local kept=()
+        for d in "${user_dirs[@]}"; do [ -e "$d" ] && kept+=("$d"); done
+        if [ ${#kept[@]} -gt 0 ]; then
+            log "User data preserved (run with --purge to remove):"
+            for d in "${kept[@]}"; do echo "    $d" >&2; done
         fi
     fi
 
@@ -920,7 +996,10 @@ fi
 
 case "${1:-}" in
     "")
-        cmd_run
+        cmd_install
+        ;;
+    launch)
+        shift; cmd_launch "$@"
         ;;
     setup)
         shift; cmd_setup "$@"
@@ -957,6 +1036,9 @@ case "${1:-}" in
         ;;
     uninstall)
         shift; cmd_uninstall "$@"
+        ;;
+    --version|-v|version)
+        echo "gorganizer.sh $(gorganizer_version)"
         ;;
     --help|-h|help)
         usage

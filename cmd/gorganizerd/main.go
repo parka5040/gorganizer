@@ -18,12 +18,28 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+// Build-time version metadata stamped via -ldflags=-X (see Makefile). The
+// "dev" defaults are what an unstamped `go build` produces — matching the
+// VERSION file's expectation that an undecorated binary built outside the
+// Makefile is a development build.
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildDate = "unknown"
+)
+
 func main() {
 	configPath := flag.String("config", "", "Path to config.json (default: $XDG_CONFIG_HOME/gorganizer/config.json)")
 	socketPath := flag.String("socket-path", "", "Path to Unix domain socket (default: $XDG_RUNTIME_DIR/gorganizer/gorganizer.sock)")
 	logLevel := flag.String("log-level", "", "Log level (debug, info, warn, error)")
 	handleNXM := flag.String("handle-nxm", "", "Forward NXM URI to running daemon and exit")
+	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("gorganizerd %s (commit %s, built %s)\n", version, commit, buildDate)
+		return
+	}
 
 	// Handle NXM mode: act as a gRPC client, not a server.
 	if *handleNXM != "" {
@@ -131,7 +147,7 @@ func main() {
 	}()
 
 	// Run daemon (blocks until shutdown).
-	slog.Info("starting gorganizerd", "socket", sock)
+	slog.Info("starting gorganizerd", "version", version, "commit", commit, "socket", sock)
 	if err := d.Run(sock); err != nil {
 		slog.Error("daemon failed", "err", err)
 		os.Exit(1)

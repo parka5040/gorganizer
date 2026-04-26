@@ -9,10 +9,23 @@ PROTO_SRC   := $(PROTO_DIR)/gorganizer.proto
 PROTO_GO    := $(PROTO_DIR)/gorganizer.pb.go
 PROTO_GRPC  := $(PROTO_DIR)/gorganizer_grpc.pb.go
 
-# Version stamping. CI sets VERSION on tag push; locally we fall back to
-# `git describe`, then "dev" if no tags exist yet. COMMIT/DATE follow the
-# same pattern.
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# Version stamping. The VERSION file at the repo root is the canonical
+# source of truth — bump it on release. `git describe` is appended as a
+# build-time decoration when the working tree differs from the tagged
+# version (so dev builds carry the commit short-sha + dirty flag).
+# COMMIT/DATE follow the same pattern. CI may override VERSION explicitly
+# (e.g. for tagged releases) by passing VERSION=... on the command line.
+VERSION_FILE_VALUE := $(shell sed -n '1{s/[[:space:]]*$$//;p;}' VERSION 2>/dev/null)
+GIT_DESC          := $(shell git describe --tags --always --dirty 2>/dev/null)
+ifeq ($(strip $(VERSION_FILE_VALUE)),)
+VERSION ?= $(if $(GIT_DESC),$(GIT_DESC),dev)
+else
+ifeq ($(strip $(GIT_DESC)),)
+VERSION ?= $(VERSION_FILE_VALUE)
+else
+VERSION ?= $(VERSION_FILE_VALUE)+$(GIT_DESC)
+endif
+endif
 COMMIT  ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(DATE)
