@@ -174,6 +174,19 @@ type Daemon struct {
 	// MainWindow when GamesWarmed flips true.
 	readiness   ipc.ReadinessResult
 	readinessMu sync.RWMutex
+
+	// pluginHeaderCache memoises parsed TES4 record headers. Keyed by
+	// (mod-folder source path, mtime, size) so VFS activate/deactivate
+	// cycles don't cause repeated header re-reads. Initialized lazily on
+	// first plugin-status request — most users never open the plugin list.
+	pluginHeaderCache *plugins.HeaderCache
+	pluginHeaderCacheOnce sync.Once
+
+	// softDepFetcher resolves Nexus v3 soft-dependency declarations and
+	// caches results on disk. Lazily constructed — requires a configured
+	// API key and an initialized download client. nil when no key.
+	softDepFetcher   *plugins.SoftDepFetcher
+	softDepFetcherMu sync.Mutex
 }
 
 type mountState struct {

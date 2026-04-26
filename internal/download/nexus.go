@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"runtime"
+	"strconv"
+	"sync"
 	"time"
 )
 
@@ -57,6 +59,14 @@ type NexusClient struct {
 	apiKey     string
 	httpClient *http.Client
 	baseURL    string
+
+	// rlMu guards the rate-limit fields below. We update them on every
+	// response from any endpoint (v1 or v3) and consult them before
+	// firing soft-dep batches so we don't burn through the daily quota.
+	rlMu             sync.Mutex
+	rlDailyRemaining int
+	rlHourlyRemaining int
+	rlLastSeen       time.Time
 }
 
 // NewNexusClient creates a new Nexus API client.
@@ -67,7 +77,37 @@ func NewNexusClient(apiKey string) *NexusClient {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		rlDailyRemaining:  -1, // -1 = unknown until first response observed
+		rlHourlyRemaining: -1,
 	}
+}
+
+// captureRateLimit reads the X-RL-* headers Nexus emits on every response.
+// Field names per https://help.nexusmods.com (legacy v1) and v3 OpenAPI.
+func (c *NexusClient) captureRateLimit(h http.Header) {
+	d, dOk := strconv.Atoi(h.Get("X-RL-Daily-Remaining"))
+	hh, hOk := strconv.Atoi(h.Get("X-RL-Hourly-Remaining"))
+	if dOk != nil && hOk != nil {
+		return
+	}
+	c.rlMu.Lock()
+	defer c.rlMu.Unlock()
+	if dOk == nil {
+		c.rlDailyRemaining = d
+	}
+	if hOk == nil {
+		c.rlHourlyRemaining = hh
+	}
+	c.rlLastSeen = time.Now()
+}
+
+// RateLimitRemaining returns the most-recently-observed (daily, hourly)
+// remaining counts. Either field is -1 when no response has been observed
+// yet. Callers use these to throttle large soft-dep batches.
+func (c *NexusClient) RateLimitRemaining() (daily, hourly int) {
+	c.rlMu.Lock()
+	defer c.rlMu.Unlock()
+	return c.rlDailyRemaining, c.rlHourlyRemaining
 }
 
 // setHeaders applies MO2-compatible API headers that the Nexus API expects.
@@ -279,4 +319,118 @@ func (c *NexusClient) ValidateAPIKey(ctx context.Context) error {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("validation failed: HTTP %d: %s", resp.StatusCode, string(body))
 	}
+}
+
+// --- Nexus API v3 (dependency endpoints) ---
+//
+// The v3 surface is documented in api/proto/openapi.yaml. We only consume
+// two endpoints here:
+//
+//   GET /games/{game_domain}/mod-files/{game_scoped_id}
+//   GET /mod-files/{id}/dependencies/ranges
+//
+// The first call resolves the *game-scoped* file id (what we record in
+// metadata.yaml from nxm:// URIs) into the *global* file id used by the
+// dependency endpoints. Global ids are immutable, so callers persist the
+// translation and only round-trip once per file.
+
+// V3ModFile is the subset of v3 GetModFile we need.
+type V3ModFile struct {
+	ID                string `json:"id"`             // global file id
+	GameScopedID      string `json:"game_scoped_id"` // matches what we have on disk
+	GameID            string `json:"game_id"`
+	ModGameScopedID   string `json:"mod_game_scoped_id"`
+}
+
+// V3MinimalMod is a small slice of MinimalMod surfaced by the dependency
+// range responses; carrying just the fields we need for soft-dep display.
+type V3MinimalMod struct {
+	ID            string `json:"id"`
+	GameScopedID  string `json:"game_scoped_id"`
+	Name          string `json:"name"`
+	ThumbnailURL  string `json:"thumbnail_url"`
+}
+
+// V3DepDefinition is one dependency definition with its ranges.
+type V3DepDefinition struct {
+	ID     string         `json:"id"`
+	Ranges []V3DepRange   `json:"ranges"`
+}
+
+// V3DepRange represents one alternative within a dep definition. We keep
+// only the parts we resolve against (target_group.mod) — version satisfaction
+// is intentionally not enforced (presence is enough).
+type V3DepRange struct {
+	ID          string `json:"id"`
+	TargetGroup struct {
+		ID   string       `json:"id"`
+		Name string       `json:"name"`
+		Mod  V3MinimalMod `json:"mod"`
+	} `json:"target_group"`
+}
+
+// V3DepRangesResponse is the envelope of GET /mod-files/{id}/dependencies/ranges.
+type V3DepRangesResponse struct {
+	DependencyDefinitions []V3DepDefinition `json:"dependency_definitions"`
+}
+
+// GetModFile resolves a game-scoped file id into the global file id used by
+// the v3 dependency endpoints.
+func (c *NexusClient) GetModFile(ctx context.Context, gameDomain, gameScopedID string) (*V3ModFile, error) {
+	endpoint := fmt.Sprintf("%s/v3/games/%s/mod-files/%s", c.baseURL, gameDomain, gameScopedID)
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setHeaders(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("nexus v3 mod-file request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	c.captureRateLimit(resp.Header)
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("nexus v3 mod-file returned %d: %s", resp.StatusCode, string(body))
+	}
+	var env struct {
+		Data V3ModFile `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		return nil, fmt.Errorf("decoding v3 mod-file: %w", err)
+	}
+	return &env.Data, nil
+}
+
+// GetModFileDependencyRanges fetches stored dependency ranges for a global
+// file id. The empty `dependency_definitions` array is a normal response —
+// the file simply has no declared deps.
+func (c *NexusClient) GetModFileDependencyRanges(ctx context.Context, globalFileID string) (*V3DepRangesResponse, error) {
+	endpoint := fmt.Sprintf("%s/v3/mod-files/%s/dependencies/ranges", c.baseURL, globalFileID)
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setHeaders(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("nexus v3 dep-ranges request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	c.captureRateLimit(resp.Header)
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("nexus v3 dep-ranges returned %d: %s", resp.StatusCode, string(body))
+	}
+	// The dep-ranges endpoint replies with the response body directly,
+	// not wrapped in a `data` envelope (per openapi.yaml ModFileDependencyRangesResponse).
+	var out V3DepRangesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decoding v3 dep-ranges: %w", err)
+	}
+	return &out, nil
 }

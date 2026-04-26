@@ -84,6 +84,7 @@ public slots:
     void doStartWatching();                   // WatchStatus (global)
     void doStreamArchiveEvents(const QString& gameId);
     void doStreamInstallEvents(const QString& gameId);
+    void doStreamPluginStatus(const QString& gameId, const QString& profileName);
 
 signals:
     // Game + mod + profile results.
@@ -127,6 +128,13 @@ signals:
     // user consent, calls restoreFromBackup.
     void recoveryPending(const QString& gameId, const QString& dataPath,
                          const QString& backupPath, const QString& reason);
+
+    // Plugin dependency status stream
+    void pluginStatusSnapshot(const std::vector<GrpcPluginStatus>& plugins);
+    void pluginStatusUpdate(const GrpcPluginStatus& plugin);
+
+    // Activity-log dep warning routed through WatchStatus
+    void dependencyWarning(const GrpcDependencyWarning& warning);
 
     void rpcError(const QString& method, const QString& error);
 

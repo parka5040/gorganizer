@@ -33,6 +33,7 @@ private slots:
     void onArchiveEvent(const GrpcArchiveEvent& evt);
     void onDaemonInfo(const QString& info);
     void onDaemonError(const QString& err);
+    void onDependencyWarning(const GrpcDependencyWarning& warning);
 
 private:
     enum class Severity { Info, Success, Warning, Error };

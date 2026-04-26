@@ -45,6 +45,7 @@ type DaemonController interface {
 	ProfileController
 	VFSController
 	ConflictController
+	PluginStatusController
 	ArchiveController
 	InstallController
 	LaunchController
@@ -107,6 +108,15 @@ type VFSController interface {
 // ConflictController handles conflict analysis.
 type ConflictController interface {
 	GetConflicts(gameID, profileName string) ([]FileConflictResult, error)
+}
+
+// PluginStatusController streams plugin dependency-analysis results.
+//
+// The first event on the returned channel is always a PluginStatusEvent
+// with Snapshot != nil; subsequent events are Update != nil deltas as
+// soft-dep checks complete on background workers.
+type PluginStatusController interface {
+	StreamPluginStatus(ctx context.Context, gameID, profileName string) (<-chan PluginStatusEventResult, error)
 }
 
 // ArchiveController — the Downloads tab lifecycle. Every archive-scope verb
@@ -463,10 +473,59 @@ type NexusAPIKeyResult struct {
 }
 
 type StatusEventResult struct {
-	VFSStatus       *VFSStatusResult
-	Error           string
-	Info            string
-	RecoveryPending *RecoveryPendingResult
+	VFSStatus          *VFSStatusResult
+	Error              string
+	Info               string
+	RecoveryPending    *RecoveryPendingResult
+	DependencyWarning  *DependencyWarningResult
+}
+
+// DependencyWarningResult is the daemon-side struct that gets serialized
+// to proto DependencyWarning. Severity is implied by Kind on the wire —
+// the C++ frontend maps it to ActivityLogPanel severity.
+type DependencyWarningResult struct {
+	PluginFilename string
+	Detail         string
+	Kind           DepKindResult
+}
+
+// DepKindResult mirrors proto DepKind — values aligned numerically with
+// internal/plugins.DepKind so a direct cast works.
+type DepKindResult int
+
+const (
+	DepKindOK                DepKindResult = 0
+	DepKindMasterAbsent      DepKindResult = 1
+	DepKindMasterDisabled    DepKindResult = 2
+	DepKindMasterOutOfOrder  DepKindResult = 3
+	DepKindSoftMissing       DepKindResult = 4
+)
+
+// DepIssueResult mirrors proto DepIssue.
+type DepIssueResult struct {
+	Kind        DepKindResult
+	Master      string
+	SoftModName string
+	SoftModID   int32
+	SoftModURL  string
+}
+
+// PluginStatusItemResult mirrors proto PluginStatusItem.
+type PluginStatusItemResult struct {
+	Filename    string
+	Ext         string
+	IsLight     bool
+	Enabled     bool
+	FromMod     string
+	SoftPending bool
+	Issues      []DepIssueResult
+}
+
+// PluginStatusEventResult is one event on the StreamPluginStatus stream.
+// Exactly one of Snapshot / Update is set.
+type PluginStatusEventResult struct {
+	Snapshot []PluginStatusItemResult
+	Update   *PluginStatusItemResult
 }
 
 // RecoveryPendingResult is the daemon-side struct that gets serialized

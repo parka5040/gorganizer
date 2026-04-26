@@ -19,6 +19,14 @@ func ConfigDir() string {
 	return filepath.Join(xdgConfigHome(), "gorganizer")
 }
 
+// CacheDir returns $XDG_CACHE_HOME/gorganizer.
+// Falls back to ~/.cache/gorganizer. Used for refetchable artifacts (Nexus
+// soft-dep responses, global file id translations) that the daemon may
+// safely throw away at any time.
+func CacheDir() string {
+	return filepath.Join(xdgCacheHome(), "gorganizer")
+}
+
 // RuntimeDir returns $XDG_RUNTIME_DIR/gorganizer.
 // Falls back to /tmp/gorganizer-<uid>.
 func RuntimeDir() string {
@@ -111,4 +119,12 @@ func xdgConfigHome() string {
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config")
+}
+
+func xdgCacheHome() string {
+	if dir := os.Getenv("XDG_CACHE_HOME"); dir != "" {
+		return dir
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".cache")
 }

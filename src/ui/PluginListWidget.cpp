@@ -1,5 +1,6 @@
 #include "PluginListWidget.h"
 #include "PluginScanner.h"
+#include "GrpcClient.h"
 
 #include <QVBoxLayout>
 #include <QHeaderView>
@@ -8,6 +9,8 @@
 #include <QDir>
 #include <QFile>
 #include <QSet>
+#include <QPainter>
+#include <QPixmap>
 #include <algorithm>
 
 namespace gorganizer {
@@ -158,7 +161,7 @@ PluginListWidget::PluginListWidget(QWidget* parent)
     layout->addWidget(titleLabel);
 
     m_model = new QStandardItemModel(this);
-    m_model->setHorizontalHeaderLabels({"Index", "Plugin", "Type"});
+    m_model->setHorizontalHeaderLabels({"Index", "Plugin", "Type", QString()});
 
     m_view = new LoadOrderTreeView(this);
     m_view->setModel(m_model);
@@ -180,6 +183,8 @@ PluginListWidget::PluginListWidget(QWidget* parent)
     m_view->header()->setSectionResizeMode(ColIndex, QHeaderView::ResizeToContents);
     m_view->header()->setSectionResizeMode(ColPlugin, QHeaderView::Stretch);
     m_view->header()->setSectionResizeMode(ColType, QHeaderView::ResizeToContents);
+    m_view->header()->setSectionResizeMode(ColStatus, QHeaderView::Fixed);
+    m_view->header()->resizeSection(ColStatus, 24);
 
     connect(m_view->header(), &QHeaderView::sectionClicked,
             this, &PluginListWidget::onHeaderClicked);
@@ -324,6 +329,196 @@ void PluginListWidget::refresh()
 {
     if (m_game.detected)
         loadForGame(m_game);
+    resubscribeStream();
+}
+
+void PluginListWidget::setGrpcClient(GrpcClient* grpc)
+{
+    if (m_grpc == grpc) return;
+    if (m_grpc) {
+        disconnect(m_grpc, nullptr, this, nullptr);
+        m_grpc->unsubscribePluginStatus();
+    }
+    m_grpc = grpc;
+    if (!m_grpc) return;
+    connect(m_grpc, &GrpcClient::pluginStatusSnapshot,
+            this, &PluginListWidget::onPluginStatusSnapshot);
+    connect(m_grpc, &GrpcClient::pluginStatusUpdate,
+            this, &PluginListWidget::onPluginStatusUpdate);
+    resubscribeStream();
+}
+
+void PluginListWidget::setActiveProfile(const QString& profileName)
+{
+    if (m_activeProfile == profileName) return;
+    m_activeProfile = profileName;
+    resubscribeStream();
+}
+
+void PluginListWidget::resubscribeStream()
+{
+    if (!m_grpc) return;
+    if (!m_game.detected || m_activeProfile.isEmpty()) {
+        m_grpc->unsubscribePluginStatus();
+        return;
+    }
+    m_grpc->subscribePluginStatus(m_game.shortName, m_activeProfile);
+}
+
+namespace {
+// Status icons rendered at runtime — small filled triangles in the standard
+// red/orange/yellow that match ActivityLogPanel severity colors. We avoid
+// shipping image assets for a single 16-pixel glyph.
+QPixmap statusIcon(QColor color)
+{
+    QPixmap pm(16, 16);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setBrush(color);
+    p.setPen(Qt::NoPen);
+    QPolygon tri;
+    tri << QPoint(8, 1) << QPoint(15, 14) << QPoint(1, 14);
+    p.drawPolygon(tri);
+    p.setPen(QPen(QColor(0, 0, 0, 200), 1));
+    p.setBrush(Qt::NoBrush);
+    p.drawPolygon(tri);
+    p.setPen(QPen(QColor(0, 0, 0, 220), 2));
+    p.drawLine(QPoint(8, 5), QPoint(8, 10));
+    p.drawPoint(QPoint(8, 12));
+    return pm;
+}
+
+QPixmap pendingIcon()
+{
+    QPixmap pm(16, 16);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setBrush(QColor(150, 150, 150, 180));
+    p.setPen(Qt::NoPen);
+    p.drawEllipse(2, 2, 12, 12);
+    return pm;
+}
+
+// Tint colors per worst-issue kind. Alpha applied to the row background.
+QColor tintFor(int kind)
+{
+    switch (kind) {
+    case GrpcDepMasterAbsent:
+    case GrpcDepMasterOutOfOrder:
+        return QColor(180, 50, 50, 60);   // red
+    case GrpcDepMasterDisabled:
+        return QColor(220, 130, 40, 50);  // orange
+    case GrpcDepSoftMissing:
+        return QColor(200, 180, 30, 50);  // yellow
+    default:
+        return QColor(0, 0, 0, 0);
+    }
+}
+
+// Worst-kind ordering: red > orange > yellow. Determines which color tints
+// the row when multiple issue kinds coexist.
+int rankKind(int kind)
+{
+    switch (kind) {
+    case GrpcDepMasterAbsent:
+    case GrpcDepMasterOutOfOrder:
+        return 3;
+    case GrpcDepMasterDisabled:
+        return 2;
+    case GrpcDepSoftMissing:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+QString humanIssue(const GrpcDepIssue& iss)
+{
+    switch (iss.kind) {
+    case GrpcDepMasterAbsent:
+        return QObject::tr("Missing master: %1").arg(iss.master);
+    case GrpcDepMasterDisabled:
+        return QObject::tr("Master disabled: %1").arg(iss.master);
+    case GrpcDepMasterOutOfOrder:
+        return QObject::tr("Master loads after dependent: %1").arg(iss.master);
+    case GrpcDepSoftMissing:
+        if (!iss.softModName.isEmpty())
+            return QObject::tr("Soft dependency missing: %1").arg(iss.softModName);
+        return QObject::tr("Soft dependency missing");
+    default:
+        return QString();
+    }
+}
+} // namespace
+
+void PluginListWidget::applyStatusToRow(int row, const GrpcPluginStatus& s)
+{
+    if (row < 0 || row >= m_model->rowCount()) return;
+    auto* statusItem = m_model->item(row, ColStatus);
+    if (!statusItem) return;
+
+    int worst = 0;
+    QStringList details;
+    for (const auto& iss : s.issues) {
+        if (iss.kind == GrpcDepOK) continue;
+        if (rankKind(iss.kind) > rankKind(worst)) worst = iss.kind;
+        QString text = humanIssue(iss);
+        if (!text.isEmpty()) details << text;
+    }
+
+    QPixmap icon;
+    if (worst == GrpcDepMasterAbsent || worst == GrpcDepMasterOutOfOrder)
+        icon = statusIcon(QColor(220, 50, 50));
+    else if (worst == GrpcDepMasterDisabled)
+        icon = statusIcon(QColor(230, 140, 40));
+    else if (worst == GrpcDepSoftMissing)
+        icon = statusIcon(QColor(220, 200, 40));
+    else if (s.softPending)
+        icon = pendingIcon();
+
+    statusItem->setData(icon.isNull() ? QVariant() : QVariant(icon), Qt::DecorationRole);
+    statusItem->setData(details.join("\n"), Qt::ToolTipRole);
+    statusItem->setData(details, DepIssuesRole);
+    statusItem->setData(worst, DepWorstKindRole);
+
+    // Row tint via Qt::BackgroundRole on every cell.
+    QBrush tint(tintFor(worst));
+    for (int col = 0; col < m_model->columnCount(); ++col) {
+        if (auto* cell = m_model->item(row, col)) {
+            cell->setData(worst == 0 ? QVariant() : QVariant(tint), Qt::BackgroundRole);
+        }
+    }
+}
+
+void PluginListWidget::onPluginStatusSnapshot(const std::vector<GrpcPluginStatus>& plugins)
+{
+    // Build a name→row index once. Plugin filenames are case-insensitive on
+    // Bethesda engines, so match accordingly.
+    QHash<QString, int> rowByName;
+    rowByName.reserve(m_model->rowCount());
+    for (int r = 0; r < m_model->rowCount(); ++r) {
+        if (auto* it = m_model->item(r, ColPlugin))
+            rowByName.insert(it->text().toLower(), r);
+    }
+    for (const auto& s : plugins) {
+        auto it = rowByName.constFind(s.filename.toLower());
+        if (it == rowByName.constEnd()) continue;
+        applyStatusToRow(it.value(), s);
+    }
+}
+
+void PluginListWidget::onPluginStatusUpdate(const GrpcPluginStatus& plugin)
+{
+    for (int r = 0; r < m_model->rowCount(); ++r) {
+        auto* it = m_model->item(r, ColPlugin);
+        if (!it) continue;
+        if (it->text().compare(plugin.filename, Qt::CaseInsensitive) == 0) {
+            applyStatusToRow(r, plugin);
+            return;
+        }
+    }
 }
 
 std::vector<PluginEntry> PluginListWidget::collectPlugins()
@@ -482,7 +677,14 @@ void PluginListWidget::populateLoadOrder(const std::vector<PluginEntry>& plugins
         nameItem->setForeground(color);
         typeItem->setForeground(color);
 
-        m_model->appendRow({indexItem, nameItem, typeItem});
+        // Status column: empty by default, populated by the StreamPluginStatus
+        // subscription handlers below.
+        auto* statusItem = new QStandardItem;
+        statusItem->setEditable(false);
+        statusItem->setDragEnabled(false);
+        statusItem->setTextAlignment(Qt::AlignCenter);
+
+        m_model->appendRow({indexItem, nameItem, typeItem, statusItem});
         rowIndex++;
     };
 

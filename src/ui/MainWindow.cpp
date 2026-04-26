@@ -284,6 +284,7 @@ void MainWindow::setupUi()
 
     m_rightTabs = new QTabWidget;
     m_pluginList = new PluginListWidget;
+    m_pluginList->setGrpcClient(m_grpc);
     m_rightTabs->addTab(m_pluginList, "Plugins");
 
     // Data tab placeholder.
@@ -383,6 +384,7 @@ void MainWindow::onGameChanged(uint32_t appId)
     m_runButton->setGame(m_activeGame, m_config.lastToolFor(m_activeGame.shortName));
     m_pluginList->setModsDir(modsDirectoryFor(m_activeGame.shortName));
     m_pluginList->loadForGame(m_activeGame);
+    m_pluginList->setActiveProfile(m_currentProfile);
 
     if (m_activeGame.detected) {
         // Ensure mod directory exists on-demand (only for detected games).
@@ -417,6 +419,7 @@ void MainWindow::onProfileChanged(const QString& profileName)
     if (m_activeGame.detected)
         m_config.setLastProfileFor(m_activeGame.shortName, profileName);
     m_modList->loadForGame(m_activeGame, profileName);
+    m_pluginList->setActiveProfile(profileName);
     updateStatusBarInfo();
 }
 

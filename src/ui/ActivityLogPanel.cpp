@@ -95,6 +95,30 @@ ActivityLogPanel::ActivityLogPanel(GrpcClient* grpc, QWidget* parent)
     connect(m_grpc, &GrpcClient::archiveEventReceived, this, &ActivityLogPanel::onArchiveEvent);
     connect(m_grpc, &GrpcClient::daemonInfo, this, &ActivityLogPanel::onDaemonInfo);
     connect(m_grpc, &GrpcClient::daemonError, this, &ActivityLogPanel::onDaemonError);
+    connect(m_grpc, &GrpcClient::dependencyWarning, this, &ActivityLogPanel::onDependencyWarning);
+}
+
+void ActivityLogPanel::onDependencyWarning(const GrpcDependencyWarning& warning)
+{
+    // Map kind to severity:
+    //   absent / out-of-order → Error (red), the engine will silently drop forms.
+    //   disabled              → Warning (amber), the user has a one-click fix.
+    //   soft                  → Warning (amber), recommend but not required.
+    Severity sev = Severity::Warning;
+    switch (warning.kind) {
+    case GrpcDepMasterAbsent:
+    case GrpcDepMasterOutOfOrder:
+        sev = Severity::Error;
+        break;
+    case GrpcDepMasterDisabled:
+    case GrpcDepSoftMissing:
+        sev = Severity::Warning;
+        break;
+    default:
+        return;
+    }
+    QString line = QString("[%1] %2").arg(warning.pluginFilename, warning.detail);
+    log(sev, line);
 }
 
 void ActivityLogPanel::log(Severity sev, const QString& message)

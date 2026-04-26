@@ -28,6 +28,18 @@ var slugToGameID = map[string]string{
 	"starfield":           "starfield",
 }
 
+// GameSlug returns the canonical Nexus slug for an internal gameID.
+// Returns "" when there's no mapping (e.g. an unknown game). Stay-aligned
+// with slugToGameID — the inverse direction.
+func GameSlug(gameID string) string {
+	for slug, id := range slugToGameID {
+		if id == gameID {
+			return slug
+		}
+	}
+	return ""
+}
+
 // ParseNXM parses an nxm:// URI into its components.
 // Format: nxm://skyrimspecialedition/mods/12345/files/67890?key=abc123&expires=1234567890
 func ParseNXM(uri string) (*NXMLink, error) {

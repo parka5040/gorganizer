@@ -635,6 +635,14 @@ func (s *gorganizerServer) WatchStatus(_ *pb.WatchStatusRequest, stream pb.Gorga
 					Reason:     evt.RecoveryPending.Reason,
 				},
 			}
+		case evt.DependencyWarning != nil:
+			pbEvt.Event = &pb.StatusEvent_DependencyWarning{
+				DependencyWarning: &pb.DependencyWarning{
+					PluginFilename: evt.DependencyWarning.PluginFilename,
+					Detail:         evt.DependencyWarning.Detail,
+					Kind:           pb.DepKind(evt.DependencyWarning.Kind),
+				},
+			}
 		case evt.Error != "":
 			pbEvt.Event = &pb.StatusEvent_Error{Error: evt.Error}
 		case evt.Info != "":
@@ -647,6 +655,58 @@ func (s *gorganizerServer) WatchStatus(_ *pb.WatchStatusRequest, stream pb.Gorga
 		}
 	}
 	return nil
+}
+
+func (s *gorganizerServer) StreamPluginStatus(req *pb.StreamPluginStatusRequest, stream pb.Gorganizer_StreamPluginStatusServer) error {
+	ch, err := s.ctrl.StreamPluginStatus(stream.Context(), req.GetGameId(), req.GetProfileName())
+	if err != nil {
+		return err
+	}
+	for evt := range ch {
+		pbEvt := &pb.PluginStatusEvent{}
+		switch {
+		case evt.Snapshot != nil:
+			items := make([]*pb.PluginStatusItem, 0, len(evt.Snapshot))
+			for i := range evt.Snapshot {
+				items = append(items, pluginStatusToProto(&evt.Snapshot[i]))
+			}
+			pbEvt.Event = &pb.PluginStatusEvent_Snapshot{
+				Snapshot: &pb.PluginStatusSnapshot{Plugins: items},
+			}
+		case evt.Update != nil:
+			pbEvt.Event = &pb.PluginStatusEvent_Update{
+				Update: &pb.PluginStatusUpdate{Plugin: pluginStatusToProto(evt.Update)},
+			}
+		default:
+			continue
+		}
+		if err := stream.Send(pbEvt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func pluginStatusToProto(p *PluginStatusItemResult) *pb.PluginStatusItem {
+	issues := make([]*pb.DepIssue, 0, len(p.Issues))
+	for _, i := range p.Issues {
+		issues = append(issues, &pb.DepIssue{
+			Kind:        pb.DepKind(i.Kind),
+			Master:      i.Master,
+			SoftModName: i.SoftModName,
+			SoftModId:   i.SoftModID,
+			SoftModUrl:  i.SoftModURL,
+		})
+	}
+	return &pb.PluginStatusItem{
+		Filename:    p.Filename,
+		Ext:         p.Ext,
+		IsLight:     p.IsLight,
+		Enabled:     p.Enabled,
+		FromMod:     p.FromMod,
+		SoftPending: p.SoftPending,
+		Issues:      issues,
+	}
 }
 
 // --- Conversion helpers ---

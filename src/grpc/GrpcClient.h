@@ -112,6 +112,41 @@ struct GrpcInstallProgress {
     QString error;
 };
 
+// Plugin dependency analysis (StreamPluginStatus). Mirrors proto DepKind /
+// DepIssue / PluginStatusItem.
+enum GrpcDepKind {
+    GrpcDepOK = 0,
+    GrpcDepMasterAbsent = 1,       // red
+    GrpcDepMasterDisabled = 2,     // orange
+    GrpcDepMasterOutOfOrder = 3,   // red
+    GrpcDepSoftMissing = 4,        // yellow
+};
+
+struct GrpcDepIssue {
+    int kind = 0;                  // GrpcDepKind
+    QString master;                // hard kinds
+    QString softModName;           // soft kind
+    int softModId = 0;
+    QString softModUrl;
+};
+
+struct GrpcPluginStatus {
+    QString filename;
+    QString ext;                   // ".esp" / ".esm" / ".esl"
+    bool isLight = false;          // ESL flag from header — overrides ext
+    bool enabled = false;
+    QString fromMod;
+    bool softPending = false;
+    std::vector<GrpcDepIssue> issues;
+};
+
+// One activity-log warning routed via WatchStatus.
+struct GrpcDependencyWarning {
+    QString pluginFilename;
+    QString detail;
+    int kind = 0;                  // GrpcDepKind
+};
+
 struct GrpcArchiveRow {
     QString archiveRelPath;
     int modId = 0;
@@ -389,6 +424,13 @@ public:
     void subscribeEvents(const QString& gameId);
     void unsubscribeEvents();
 
+    // Plugin dependency status stream. The first event is a full snapshot;
+    // subsequent events are deltas as soft-dep checks complete on the
+    // daemon's background workers. Subscribing while a previous stream is
+    // active cancels the prior one (game/profile switch).
+    void subscribePluginStatus(const QString& gameId, const QString& profileName);
+    void unsubscribePluginStatus();
+
     // Settings
     void setNexusAPIKey(const QString& apiKey);
 
@@ -457,10 +499,16 @@ signals:
     void archiveEventReceived(const GrpcArchiveEvent& evt);
     void installProgressEvent(const GrpcInstallProgress& progress);
 
+    // Plugin dependency status stream
+    void pluginStatusSnapshot(const std::vector<GrpcPluginStatus>& plugins);
+    void pluginStatusUpdate(const GrpcPluginStatus& plugin);
+
     // Global status events
     void vfsStatusChanged(const GrpcVFSStatus& status);
     void daemonError(const QString& error);
     void daemonInfo(const QString& info);
+    // Activity-log entry produced by the daemon's plugin dep analyzer.
+    void dependencyWarning(const GrpcDependencyWarning& warning);
     // Daemon detected an ambiguous on-disk Data state at startup. The
     // MainWindow shows a confirmation modal; user consent fires
     // restoreFromBackup.
@@ -486,6 +534,8 @@ private:
     GrpcWorker* m_archiveWorker = nullptr;
     QThread* m_installThread = nullptr;  // StreamInstallEvents
     GrpcWorker* m_installWorker = nullptr;
+    QThread* m_pluginStatusThread = nullptr;  // StreamPluginStatus
+    GrpcWorker* m_pluginStatusWorker = nullptr;
     QTimer* m_connectionTimer = nullptr;
     bool m_connected = false;
     QString m_subscribedGame;

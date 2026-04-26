@@ -60,6 +60,9 @@ void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
     connect(worker, &GrpcWorker::vfsStatusChanged, this, &GrpcClient::vfsStatusChanged);
     connect(worker, &GrpcWorker::archiveEventReceived, this, &GrpcClient::archiveEventReceived);
     connect(worker, &GrpcWorker::installProgressEvent, this, &GrpcClient::installProgressEvent);
+    connect(worker, &GrpcWorker::pluginStatusSnapshot, this, &GrpcClient::pluginStatusSnapshot);
+    connect(worker, &GrpcWorker::pluginStatusUpdate, this, &GrpcClient::pluginStatusUpdate);
+    connect(worker, &GrpcWorker::dependencyWarning, this, &GrpcClient::dependencyWarning);
     connect(worker, &GrpcWorker::daemonError, this, &GrpcClient::daemonError);
     connect(worker, &GrpcWorker::daemonInfo, this, &GrpcClient::daemonInfo);
     connect(worker, &GrpcWorker::recoveryPending, this, &GrpcClient::recoveryPending);
@@ -94,10 +97,16 @@ void GrpcClient::connectToDaemon()
     m_installWorker->moveToThread(m_installThread);
     connectWorkerSignals(m_installWorker);
 
+    m_pluginStatusWorker = new GrpcWorker(m_channel);
+    m_pluginStatusThread = new QThread(this);
+    m_pluginStatusWorker->moveToThread(m_pluginStatusThread);
+    connectWorkerSignals(m_pluginStatusWorker);
+
     m_workerThread->start();
     m_streamThread->start();
     m_archiveThread->start();
     m_installThread->start();
+    m_pluginStatusThread->start();
     m_connectionTimer->start();
 }
 
@@ -108,6 +117,7 @@ void GrpcClient::disconnectFromDaemon()
     if (m_streamWorker) m_streamWorker->stop();
     if (m_archiveWorker) m_archiveWorker->stop();
     if (m_installWorker) m_installWorker->stop();
+    if (m_pluginStatusWorker) m_pluginStatusWorker->stop();
 
     // wait(3000) per thread is normally plenty: stop() fires TryCancel
     // on streams, and Tier 1.7's per-RPC deadlines bound any unary call
@@ -137,6 +147,7 @@ void GrpcClient::disconnectFromDaemon()
     shutdown(m_streamThread,  m_streamWorker,  "watch-status");
     shutdown(m_archiveThread, m_archiveWorker, "archive-stream");
     shutdown(m_installThread, m_installWorker, "install-stream");
+    shutdown(m_pluginStatusThread, m_pluginStatusWorker, "plugin-status-stream");
 
     // Reset the channel only after every thread has confirmed exit. A
     // worker that's still inside m_stub->XYZ(...) holds a stub backed
@@ -328,6 +339,23 @@ void GrpcClient::unsubscribeEvents()
     if (m_archiveWorker) m_archiveWorker->cancelActiveStream();
     if (m_installWorker) m_installWorker->cancelActiveStream();
     m_subscribedGame.clear();
+}
+
+void GrpcClient::subscribePluginStatus(const QString& gameId, const QString& profileName)
+{
+    if (!m_pluginStatusWorker) return;
+    // Cancel any in-flight stream so the worker loop exits before we
+    // dispatch the new (gameId, profileName).
+    m_pluginStatusWorker->cancelActiveStream();
+    if (gameId.isEmpty() || profileName.isEmpty()) return;
+    QMetaObject::invokeMethod(m_pluginStatusWorker, [this, gameId, profileName] {
+        m_pluginStatusWorker->doStreamPluginStatus(gameId, profileName);
+    });
+}
+
+void GrpcClient::unsubscribePluginStatus()
+{
+    if (m_pluginStatusWorker) m_pluginStatusWorker->cancelActiveStream();
 }
 
 void GrpcClient::setNexusAPIKey(const QString& apiKey)

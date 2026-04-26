@@ -539,6 +539,15 @@ void GrpcWorker::doStartWatching()
                 QString::fromStdString(rp.reason()));
             break;
         }
+        case gorganizer::v1::StatusEvent::kDependencyWarning: {
+            const auto& dw = event.dependency_warning();
+            GrpcDependencyWarning out;
+            out.pluginFilename = QString::fromStdString(dw.plugin_filename());
+            out.detail = QString::fromStdString(dw.detail());
+            out.kind = static_cast<int>(dw.kind());
+            emit dependencyWarning(out);
+            break;
+        }
         default:
             break;
         }
@@ -603,6 +612,66 @@ void GrpcWorker::doStreamInstallEvents(const QString& gameId)
         switch (event.event_case()) {
         case gorganizer::v1::InstallEvent::kInstallProgress:
             emit installProgressEvent(installProgressFromProto(event.install_progress()));
+            break;
+        default:
+            break;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lk(m_streamMu);
+        m_streamCtx = nullptr;
+    }
+}
+
+namespace {
+// Convert a proto PluginStatusItem into the Qt-side struct.
+GrpcPluginStatus pluginStatusFromProto(const gorganizer::v1::PluginStatusItem& p) {
+    GrpcPluginStatus out;
+    out.filename = QString::fromStdString(p.filename());
+    out.ext = QString::fromStdString(p.ext());
+    out.isLight = p.is_light();
+    out.enabled = p.enabled();
+    out.fromMod = QString::fromStdString(p.from_mod());
+    out.softPending = p.soft_pending();
+    for (const auto& iss : p.issues()) {
+        GrpcDepIssue issue;
+        issue.kind = static_cast<int>(iss.kind());
+        issue.master = QString::fromStdString(iss.master());
+        issue.softModName = QString::fromStdString(iss.soft_mod_name());
+        issue.softModId = iss.soft_mod_id();
+        issue.softModUrl = QString::fromStdString(iss.soft_mod_url());
+        out.issues.push_back(std::move(issue));
+    }
+    return out;
+}
+} // namespace
+
+void GrpcWorker::doStreamPluginStatus(const QString& gameId, const QString& profileName)
+{
+    grpc::ClientContext ctx;
+    {
+        std::lock_guard<std::mutex> lk(m_streamMu);
+        m_streamCtx = &ctx;
+    }
+    gorganizer::v1::StreamPluginStatusRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_profile_name(profileName.toStdString());
+    auto reader = m_stub->StreamPluginStatus(&ctx, req);
+
+    gorganizer::v1::PluginStatusEvent event;
+    while (!m_stopped.load() && reader->Read(&event)) {
+        switch (event.event_case()) {
+        case gorganizer::v1::PluginStatusEvent::kSnapshot: {
+            std::vector<GrpcPluginStatus> items;
+            items.reserve(event.snapshot().plugins_size());
+            for (const auto& p : event.snapshot().plugins()) {
+                items.push_back(pluginStatusFromProto(p));
+            }
+            emit pluginStatusSnapshot(items);
+            break;
+        }
+        case gorganizer::v1::PluginStatusEvent::kUpdate:
+            emit pluginStatusUpdate(pluginStatusFromProto(event.update().plugin()));
             break;
         default:
             break;

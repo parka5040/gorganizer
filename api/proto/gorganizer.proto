@@ -128,6 +128,13 @@ service Gorganizer {
   // Live status streaming (VFS status, Info/Error only — download and
   // install progress live on their own per-game streams).
   rpc WatchStatus(WatchStatusRequest) returns (stream StatusEvent);
+
+  // Plugin dependency status streaming. The first message is a snapshot
+  // (full plugin list with hard-dep status fully computed); subsequent
+  // messages are single-plugin deltas as soft-dep checks complete on
+  // background workers. The frontend renders a Status column + row tint
+  // and emits matching DependencyWarning entries to the Activity Log.
+  rpc StreamPluginStatus(StreamPluginStatusRequest) returns (stream PluginStatusEvent);
 }
 
 // --- Game messages ---
@@ -827,5 +834,72 @@ message StatusEvent {
     string error = 2;
     string info = 3;
     RecoveryPending recovery_pending = 4;
+    DependencyWarning dependency_warning = 5;
   }
+}
+
+// --- Plugin dependency analysis ---
+
+// DepKind classifies one issue against an enabled plugin. Numeric values
+// match internal/plugins.DepKind so a direct cast works on the daemon side.
+enum DepKind {
+  DEP_OK = 0;
+  DEP_MASTER_ABSENT = 1;       // red    — master file not on disk anywhere
+  DEP_MASTER_DISABLED = 2;     // orange — master in a disabled mod folder
+  DEP_MASTER_OUT_OF_ORDER = 3; // red    — master loads after dependent
+  DEP_SOFT_MISSING = 4;        // yellow — Nexus-declared soft dep absent
+}
+
+// DepIssue is one entry on a plugin's issues list. Master is set for the
+// hard-* kinds; soft_mod_* fields are set for SOFT_MISSING.
+message DepIssue {
+  DepKind kind = 1;
+  string master = 2;
+  string soft_mod_name = 3;
+  int32 soft_mod_id = 4;
+  string soft_mod_url = 5;
+}
+
+// PluginStatusItem is one row of the analyzer's verdict.
+message PluginStatusItem {
+  string filename = 1;
+  string ext = 2;          // ".esp" / ".esm" / ".esl"
+  bool is_light = 3;       // ESL flag from header — overrides ext when .esp + 0x200
+  bool enabled = 4;
+  string from_mod = 5;
+  bool soft_pending = 6;   // true while the soft-dep check is still in flight
+  repeated DepIssue issues = 7;
+}
+
+message StreamPluginStatusRequest {
+  string game_id = 1;
+  string profile_name = 2;
+}
+
+// PluginStatusSnapshot is the first message on the StreamPluginStatus
+// stream — the full plugin list with hard-dep status complete.
+message PluginStatusSnapshot {
+  repeated PluginStatusItem plugins = 1;
+}
+
+// PluginStatusUpdate carries one plugin's revised status, replacing any
+// prior entry on the frontend with the same filename. Used for soft-dep
+// arrivals.
+message PluginStatusUpdate {
+  PluginStatusItem plugin = 1;
+}
+
+message PluginStatusEvent {
+  oneof event {
+    PluginStatusSnapshot snapshot = 1;
+    PluginStatusUpdate update = 2;
+  }
+}
+
+// DependencyWarning is one entry routed to the Activity Log. Severity is
+// implied by kind (absent / out-of-order → error; disabled / soft → warning).
+message DependencyWarning {
+  string plugin_filename = 1;
+  string detail = 2;
+  DepKind kind = 3;
 }
