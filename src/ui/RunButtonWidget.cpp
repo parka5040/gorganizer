@@ -2,6 +2,7 @@
 
 #include <QHBoxLayout>
 #include <QHash>
+#include <QStandardItemModel>
 #include <QVariant>
 #include <filesystem>
 
@@ -84,7 +85,15 @@ RunButtonWidget::RunButtonWidget(QWidget* parent)
 void RunButtonWidget::setGame(const GameInfo& game, const QString& preferredToolId)
 {
     m_game = game;
+    m_lastPreferredToolId = preferredToolId;
     rebuildCombo(preferredToolId);
+}
+
+void RunButtonWidget::setFourGBPatched(bool patched)
+{
+    if (m_fourGBPatched == patched) return;
+    m_fourGBPatched = patched;
+    rebuildCombo(m_lastPreferredToolId);
 }
 
 void RunButtonWidget::rebuildCombo(const QString& preferredToolId)
@@ -102,6 +111,7 @@ void RunButtonWidget::rebuildCombo(const QString& preferredToolId)
         m_combo->setItemData(0, int(TargetGame), Qt::UserRole + 1);
     }
 
+    auto* itemModel = qobject_cast<QStandardItemModel*>(m_combo->model());
     for (const auto& t : toolsFor(m_game.shortName)) {
         Target target;
         target.toolId = t.toolId;
@@ -115,7 +125,29 @@ void RunButtonWidget::rebuildCombo(const QString& preferredToolId)
         int row = m_combo->count();
         m_combo->addItem(target.label, target.toolId);
         m_combo->setItemData(row, int(target.type), Qt::UserRole + 1);
+
+        // Post-FNV4GB-patch: nvse_loader.exe still exists on disk but
+        // launching through it bypasses the patcher's own entry point —
+        // the user must run the launcher exe instead. Mark the row
+        // disabled so a click can't fire the wrong launch path.
+        if (m_fourGBPatched
+            && m_game.shortName == "falloutnv"
+            && target.toolId == "xnvse"
+            && target.type == TargetTool
+            && itemModel != nullptr) {
+            if (auto* item = itemModel->item(row)) {
+                item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
+                item->setToolTip(
+                    QStringLiteral("FalloutNV.exe is patched, please run through the launcher"));
+            }
+        }
     }
+
+    auto rowIsEnabled = [&](int row) -> bool {
+        if (!itemModel) return true;
+        auto* item = itemModel->item(row);
+        return item == nullptr || (item->flags() & Qt::ItemIsEnabled);
+    };
 
     // Restore preferred tool when it resolves to a real combo row.
     if (!preferredToolId.isEmpty()) {
@@ -132,12 +164,18 @@ void RunButtonWidget::rebuildCombo(const QString& preferredToolId)
         for (int i = 0; i < m_combo->count(); ++i) {
             auto type = static_cast<TargetType>(
                 m_combo->itemData(i, Qt::UserRole + 1).toInt());
-            if (type == TargetTool) {
+            if (type == TargetTool && rowIsEnabled(i)) {
                 m_combo->setCurrentIndex(i);
                 break;
             }
         }
     }
+
+    // If we ended up on a disabled row (saved preference matched the
+    // post-patch xNVSE entry, or any other disabled tool), fall back to
+    // the always-enabled "Launch <Game>" row at index 0.
+    if (!rowIsEnabled(m_combo->currentIndex()))
+        m_combo->setCurrentIndex(0);
 
     m_combo->blockSignals(false);
     syncRunLabel();

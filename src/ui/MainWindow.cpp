@@ -172,6 +172,21 @@ MainWindow::MainWindow(AppConfig& config, GrpcClient* grpc, QWidget* parent)
                 m_grpc->restoreFromBackup(gameId);
             }
         });
+
+    // The connected/disconnected lambdas above are *transition* handlers.
+    // The splash flips m_connected to true via Health() before MainWindow
+    // is even constructed, so the connected() signal has already fired
+    // and the detectGames + startWatching kickoff would be lost. Trigger
+    // the same setup ourselves whenever the GrpcClient is already in the
+    // connected state at construction time. Idempotent on the daemon
+    // side: detectGames is safe to call repeatedly, and startWatching
+    // is gated by m_streamWorker so a second call after a real connected
+    // signal is a cheap no-op.
+    if (m_grpc->isConnected()) {
+        statusBar()->showMessage("Daemon connected", 3000);
+        m_grpc->detectGames();
+        m_grpc->startWatching();
+    }
 }
 
 void MainWindow::setupUi()
@@ -226,6 +241,12 @@ void MainWindow::setupUi()
     // Tools menu.
     auto* toolsMenu = menuBar()->addMenu("&Tools");
     toolsMenu->addAction("INI &Editor...", this, &MainWindow::onOpenIniEditor);
+    m_patch4GBAction = toolsMenu->addAction("Patch Fallout to &4GB",
+                                            this, &MainWindow::onPatchFalloutTo4GB);
+    // Action visibility tracks the active game — only Fallout: New Vegas
+    // surfaces the entry. updateStatusBarInfo() (called on every game change)
+    // re-evaluates and toggles the action.
+    m_patch4GBAction->setVisible(false);
     toolsMenu->addSeparator();
     toolsMenu->addAction("&Settings...", this, &MainWindow::onOpenSettings);
 
@@ -386,6 +407,23 @@ void MainWindow::onGameChanged(uint32_t appId)
     m_pluginList->loadForGame(m_activeGame);
     m_pluginList->setActiveProfile(m_currentProfile);
 
+    // FNV4GB visibility + greyout state.
+    const bool isFNV = (m_activeGame.shortName == "falloutnv" && m_activeGame.detected);
+    if (m_patch4GBAction)
+        m_patch4GBAction->setVisible(isFNV);
+    bool patched = false;
+    if (isFNV && m_grpc->isConnected())
+        patched = m_grpc->is4GBPatched(m_activeGame.shortName);
+    m_runButton->setFourGBPatched(patched);
+    if (m_patch4GBAction && patched) {
+        m_patch4GBAction->setEnabled(false);
+        m_patch4GBAction->setToolTip(
+            "FalloutNV.exe is already patched to 4GB. Re-running the patcher is unnecessary.");
+    } else if (m_patch4GBAction) {
+        m_patch4GBAction->setEnabled(true);
+        m_patch4GBAction->setToolTip(QString());
+    }
+
     if (m_activeGame.detected) {
         // Ensure mod directory exists on-demand (only for detected games).
         QString modsDir = modsDirectoryFor(m_activeGame.shortName);
@@ -504,6 +542,115 @@ void MainWindow::onInstallMod()
         // Refresh mod list.
         m_modList->loadForGame(m_activeGame, m_currentProfile);
     }
+}
+
+void MainWindow::onPatchFalloutTo4GB()
+{
+    // Hard guard: the action is only meant to surface for FNV. The
+    // visibility toggle in onGameChanged should cover this, but a
+    // keyboard shortcut hit on the wrong game shouldn't crash.
+    if (m_activeGame.shortName != "falloutnv" || !m_activeGame.detected) {
+        QMessageBox::information(this, "Patch Fallout to 4GB",
+            "This patch is only available for Fallout: New Vegas.");
+        return;
+    }
+    if (!m_grpc->isConnected()) {
+        QMessageBox::warning(this, "Not Connected",
+            "The daemon must be running to download the 4GB patcher.");
+        return;
+    }
+
+    // Pre-flight: explain prerequisites in the same dialog the user sees
+    // when something's missing — better UX than firing the request and
+    // letting the daemon's error string carry all the context.
+    auto confirm = QMessageBox::question(this, "Patch Fallout to 4GB",
+        "<p>The 4GB Patcher modifies FalloutNV.exe in place so the game can "
+        "address more than 2 GiB of memory — required for heavy mod load orders.</p>"
+        "<p>Requirements:</p>"
+        "<ul>"
+        "<li>xNVSE must already be installed.</li>"
+        "<li>A Nexus API key must be configured in Tools &#x2192; Settings.</li>"
+        "</ul>"
+        "<p>Continue?</p>",
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+    if (confirm != QMessageBox::Yes)
+        return;
+
+    statusBar()->showMessage("Downloading FNV 4GB patcher from Nexus...");
+    QString patcherExePath, version, err;
+    if (!m_grpc->install4GBPatcher(m_activeGame.shortName, patcherExePath, version, err)) {
+        // The daemon returns descriptive sentinel errors for the two
+        // missing-prereq cases so the popup can be specific. Fall back to
+        // the raw error otherwise.
+        const QString lower = err.toLower();
+        if (lower.contains("xnvse")) {
+            QMessageBox::warning(this, "xNVSE Required",
+                "<p>xNVSE must be installed before applying the 4GB patch. "
+                "The patcher relies on the script extender being in place.</p>"
+                "<p>Open the Run combo and choose <b>Install xNVSE...</b>, then try "
+                "again.</p>");
+        } else if (lower.contains("api key") || lower.contains("apikey")) {
+            QMessageBox::warning(this, "Nexus API Key Required",
+                "<p>A Nexus Mods API key is required to download the 4GB patcher.</p>"
+                "<p>Open <b>Tools &#x2192; Settings</b> and paste a key, then try "
+                "again.</p>");
+        } else {
+            QMessageBox::warning(this, "Download Failed",
+                QString("<p>%1</p>"
+                        "<p>If you are a non-premium Nexus user, open the mod page "
+                        "in a browser and click 'Download with Manager' to trigger "
+                        "an NXM download.</p>").arg(err.toHtmlEscaped()));
+        }
+        statusBar()->clearMessage();
+        return;
+    }
+
+    statusBar()->showMessage(
+        QString("FNV 4GB patcher %1 downloaded.").arg(version), 5000);
+
+    // Second confirmation — the user explicitly asked for the prompt
+    // between download and execution. The patcher is destructive
+    // (rewrites FalloutNV.exe) so we make the consent specific.
+    auto apply = QMessageBox::question(this, "Apply 4GB Patch",
+        QString("<p>The patcher has been extracted to:</p>"
+                "<p><code>%1</code></p>"
+                "<p>Apply the patch to <b>FalloutNV.exe</b> now? "
+                "This rewrites the game executable in place.</p>")
+            .arg(patcherExePath.toHtmlEscaped()),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+    if (apply != QMessageBox::Yes) {
+        statusBar()->showMessage(
+            "Patcher downloaded; apply it later from Tools \xE2\x86\x92 Patch Fallout to 4GB.",
+            8000);
+        return;
+    }
+
+    statusBar()->showMessage("Applying 4GB patch...");
+    QString output, applyErr;
+    if (!m_grpc->apply4GBPatch(m_activeGame.shortName, patcherExePath, output, applyErr)) {
+        QMessageBox::warning(this, "Patch Failed",
+            QString("<p>%1</p>"
+                    "<p>Patcher output:</p><pre>%2</pre>")
+                .arg(applyErr.toHtmlEscaped(), output.toHtmlEscaped()));
+        statusBar()->clearMessage();
+        return;
+    }
+
+    QMessageBox::information(this, "Patch Applied",
+        QString("<p>FalloutNV.exe has been patched to 4GB.</p>"
+                "<p>Patcher output:</p><pre>%1</pre>")
+            .arg(output.isEmpty() ? "(no output)" : output.toHtmlEscaped()));
+
+    // Refresh: hide the menu action and grey out the xNVSE row in the
+    // Run combo so the next launch routes through the patcher's
+    // launcher path instead of nvse_loader.
+    if (m_patch4GBAction) {
+        m_patch4GBAction->setEnabled(false);
+        m_patch4GBAction->setToolTip(
+            "FalloutNV.exe is already patched to 4GB. Re-running the patcher is unnecessary.");
+    }
+    m_runButton->setFourGBPatched(true);
+    statusBar()->showMessage("FalloutNV.exe patched to 4GB.", 5000);
 }
 
 void MainWindow::onOpenSettings()

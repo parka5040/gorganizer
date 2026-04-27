@@ -36,6 +36,7 @@ private slots:
     void onOpenSettings();
     void onOpenIniEditor();
     void onAddNewGame();
+    void onPatchFalloutTo4GB();
 
 private:
     void setupUi();
@@ -60,6 +61,7 @@ private:
     QString m_currentProfile = "Default";
     QActionGroup* m_themeActions = nullptr;     // legacy: dark variant choice
     QActionGroup* m_appearanceActions = nullptr; // System / Light / Dark
+    QAction* m_patch4GBAction = nullptr;         // Tools → Patch Fallout to 4GB
 };
 
 } // namespace gorganizer

@@ -574,6 +574,33 @@ func (s *gorganizerServer) InstallScriptExtender(_ context.Context, req *pb.Inst
 	return &pb.InstallScriptExtenderResponse{Name: name}, nil
 }
 
+func (s *gorganizerServer) Install4GBPatcher(_ context.Context, req *pb.Install4GBPatcherRequest) (*pb.Install4GBPatcherResponse, error) {
+	res, err := s.ctrl.Install4GBPatcher(req.GetGameId())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.Install4GBPatcherResponse{
+		PatcherExePath: res.PatcherExePath,
+		Version:        res.Version,
+	}, nil
+}
+
+func (s *gorganizerServer) Apply4GBPatch(_ context.Context, req *pb.Apply4GBPatchRequest) (*pb.Apply4GBPatchResponse, error) {
+	out, err := s.ctrl.Apply4GBPatch(req.GetGameId(), req.GetPatcherExePath())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.Apply4GBPatchResponse{Output: out}, nil
+}
+
+func (s *gorganizerServer) Get4GBPatchStatus(_ context.Context, req *pb.Get4GBPatchStatusRequest) (*pb.Get4GBPatchStatusResponse, error) {
+	patched, err := s.ctrl.Get4GBPatchStatus(req.GetGameId())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.Get4GBPatchStatusResponse{Patched: patched}, nil
+}
+
 func (s *gorganizerServer) GetPreferredProton(_ context.Context, _ *pb.GetPreferredProtonRequest) (*pb.GetPreferredProtonResponse, error) {
 	path, err := s.ctrl.GetPreferredProton()
 	if err != nil {

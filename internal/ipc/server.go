@@ -49,6 +49,7 @@ type DaemonController interface {
 	ArchiveController
 	InstallController
 	LaunchController
+	FNV4GBController
 	SettingsController
 	IniController
 	LifecycleController
@@ -178,6 +179,21 @@ type LaunchController interface {
 	InstallScriptExtender(gameID string) (string, error)
 	GetPreferredProton() (string, error)
 	SetPreferredProton(path string) error
+}
+
+// FNV4GBController handles the Fallout: New Vegas 4GB patcher flow. Split
+// from LaunchController because the install/apply distinction matters: the
+// GUI prompts the user with "Apply patch?" between the two RPCs.
+type FNV4GBController interface {
+	Install4GBPatcher(gameID string) (FNV4GBInstallResult, error)
+	Apply4GBPatch(gameID, patcherExePath string) (output string, err error)
+	Get4GBPatchStatus(gameID string) (bool, error)
+}
+
+// FNV4GBInstallResult mirrors proto Install4GBPatcherResponse.
+type FNV4GBInstallResult struct {
+	PatcherExePath string
+	Version        string
 }
 
 // SettingsController handles daemon settings + per-game settings.

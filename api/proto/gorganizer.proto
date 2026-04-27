@@ -111,6 +111,19 @@ service Gorganizer {
   // extracts it into the game's install directory. Requires an API key.
   rpc InstallScriptExtender(InstallScriptExtenderRequest) returns (InstallScriptExtenderResponse);
 
+  // FNV4GB Patcher (Fallout: New Vegas only). Two-step flow so the GUI can
+  // confirm "Apply patch?" between download and execution. Install4GBPatcher
+  // pulls the Linux variant from Nexus (mod 62552, file 1000079136),
+  // extracts it next to FalloutNV.exe, and returns the patcher path.
+  // Apply4GBPatch runs that executable and, on success, writes a marker
+  // file the GUI uses to grey out the xNVSE launch target.
+  rpc Install4GBPatcher(Install4GBPatcherRequest) returns (Install4GBPatcherResponse);
+  rpc Apply4GBPatch(Apply4GBPatchRequest) returns (Apply4GBPatchResponse);
+  // Cheap query the Run combo uses on every rebuild — true means the
+  // FalloutNV.exe in the game's install dir has been patched and the
+  // xNVSE launch target should be disabled with an explanatory tooltip.
+  rpc Get4GBPatchStatus(Get4GBPatchStatusRequest) returns (Get4GBPatchStatusResponse);
+
   // Global Proton preference (used when no per-game override is set).
   rpc GetPreferredProton(GetPreferredProtonRequest) returns (GetPreferredProtonResponse);
   rpc SetPreferredProton(SetPreferredProtonRequest) returns (SetPreferredProtonResponse);
@@ -646,6 +659,36 @@ message InstallScriptExtenderRequest {
 }
 message InstallScriptExtenderResponse {
   string name = 1; // e.g. "xNVSE"
+}
+
+// --- FNV 4GB patcher messages ---
+
+message Install4GBPatcherRequest {
+  string game_id = 1;
+}
+message Install4GBPatcherResponse {
+  // Absolute path to the extracted patcher executable. The GUI passes
+  // this back unchanged on Apply4GBPatchRequest so the daemon doesn't
+  // need to redo the locate-the-binary walk.
+  string patcher_exe_path = 1;
+  string version = 2;
+}
+
+message Apply4GBPatchRequest {
+  string game_id = 1;
+  string patcher_exe_path = 2;
+}
+message Apply4GBPatchResponse {
+  // Combined stdout+stderr from the patcher run. Surfaced verbatim in
+  // the GUI's result dialog so users can see what the patcher reported.
+  string output = 1;
+}
+
+message Get4GBPatchStatusRequest {
+  string game_id = 1;
+}
+message Get4GBPatchStatusResponse {
+  bool patched = 1;
 }
 
 message GetPreferredProtonRequest {}

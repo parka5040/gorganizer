@@ -38,6 +38,14 @@ public:
     // load if present; empty string → default to "Launch <Game>".
     void setGame(const GameInfo& game, const QString& preferredToolId = QString());
 
+    // Sets the FNV4GB-patched flag for the active game. When true the
+    // xNVSE launch target is rendered disabled with an explanatory
+    // tooltip — running nvse_loader against a 4GB-patched FalloutNV.exe
+    // skips the patcher's own launcher entry point. Caller is expected
+    // to query GrpcClient::is4GBPatched and pass the result here on
+    // every game change AND after a successful patch.
+    void setFourGBPatched(bool patched);
+
     // Returns the currently-selected target. Caller dispatches accordingly.
     Target currentTarget() const;
 
@@ -57,6 +65,8 @@ private:
     GameInfo m_game;
     QComboBox* m_combo = nullptr;
     QToolButton* m_runBtn = nullptr;
+    bool m_fourGBPatched = false;
+    QString m_lastPreferredToolId;
 };
 
 } // namespace gorganizer

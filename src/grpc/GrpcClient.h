@@ -355,6 +355,17 @@ public:
     // Game launch
     void launchGame(const QString& gameId, bool useTool, const QString& profileName);
     bool installScriptExtender(const QString& gameId, QString& nameOut, QString& errorOut);
+
+    // FNV 4GB patcher — Fallout: New Vegas only. Two-step flow: install
+    // downloads the Linux variant from Nexus + extracts it next to
+    // FalloutNV.exe, then apply runs the patcher. is4GBPatched is a cheap
+    // marker-file probe used by RunButtonWidget to grey out the xNVSE
+    // launch target post-patch.
+    bool install4GBPatcher(const QString& gameId, QString& patcherExePathOut,
+                           QString& versionOut, QString& errorOut);
+    bool apply4GBPatch(const QString& gameId, const QString& patcherExePath,
+                       QString& outputOut, QString& errorOut);
+    bool is4GBPatched(const QString& gameId);
     bool detectProtonVersions(std::vector<GrpcProtonVersion>& out, QString& errorOut);
     bool getPreferredProton(QString& pathOut, QString& errorOut);
     bool setPreferredProton(const QString& path, QString& errorOut);

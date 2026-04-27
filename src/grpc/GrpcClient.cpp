@@ -108,6 +108,11 @@ void GrpcClient::connectToDaemon()
     m_installThread->start();
     m_pluginStatusThread->start();
     m_connectionTimer->start();
+    // Kick off a check on the next event-loop tick so we don't sit at
+    // "Disconnected" for 5 s waiting for the timer's first fire. The
+    // singleShot avoids re-entering the channel state machine before
+    // grpc::CreateChannel has finished its asynchronous setup.
+    QTimer::singleShot(0, this, &GrpcClient::onCheckConnection);
 }
 
 void GrpcClient::disconnectFromDaemon()
@@ -854,6 +859,57 @@ bool GrpcClient::installScriptExtender(const QString& gameId, QString& nameOut, 
     return true;
 }
 
+bool GrpcClient::install4GBPatcher(const QString& gameId, QString& patcherExePathOut,
+                                    QString& versionOut, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    // 5 min deadline matches InstallScriptExtender — Nexus CDN throughput
+    // varies by region and the archive itself is small but free-tier rate
+    // limits can stall the request.
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::minutes(5));
+    gorganizer::v1::Install4GBPatcherRequest req;
+    req.set_game_id(gameId.toStdString());
+    gorganizer::v1::Install4GBPatcherResponse resp;
+    auto s = stub->Install4GBPatcher(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    patcherExePathOut = QString::fromStdString(resp.patcher_exe_path());
+    versionOut = QString::fromStdString(resp.version());
+    return true;
+}
+
+bool GrpcClient::apply4GBPatch(const QString& gameId, const QString& patcherExePath,
+                                QString& outputOut, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::minutes(2));
+    gorganizer::v1::Apply4GBPatchRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_patcher_exe_path(patcherExePath.toStdString());
+    gorganizer::v1::Apply4GBPatchResponse resp;
+    auto s = stub->Apply4GBPatch(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    outputOut = QString::fromStdString(resp.output());
+    return true;
+}
+
+bool GrpcClient::is4GBPatched(const QString& gameId)
+{
+    if (!m_channel) return false;
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(3));
+    gorganizer::v1::Get4GBPatchStatusRequest req;
+    req.set_game_id(gameId.toStdString());
+    gorganizer::v1::Get4GBPatchStatusResponse resp;
+    auto s = stub->Get4GBPatchStatus(&ctx, req, &resp);
+    if (!s.ok()) return false;
+    return resp.patched();
+}
+
 bool GrpcClient::getGameSettings(const QString& gameId, GrpcGameSettings& settingsOut, QString& errorOut)
 {
     if (!m_channel) { errorOut = "not connected"; return false; }
@@ -1019,6 +1075,14 @@ bool GrpcClient::health(GrpcReadiness& out, QString& errorOut)
     out.recoveryDone = resp.recovery_done();
     out.gamesWarmed = resp.games_warmed();
     out.lastInitStep = QString::fromStdString(resp.last_init_step());
+    // A successful Health round-trip is unambiguous proof of connectivity —
+    // skip the 5s channel-state poll and flip the user-visible flag now so
+    // the splash hands off to MainWindow with the indicator already green
+    // and feature gates already passing.
+    if (!m_connected) {
+        m_connected = true;
+        emit connected();
+    }
     return true;
 }
 
