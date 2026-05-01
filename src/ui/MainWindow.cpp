@@ -387,8 +387,14 @@ void MainWindow::onGameChanged(uint32_t appId)
         m_patch4GBAction->setToolTip(QString());
     }
 
-    if (m_installTtwAction)
-        m_installTtwAction->setVisible(isTTW);
+    if (m_installTtwAction) {
+        bool ttwInstalled = false;
+        if (isTTW && m_grpc->isConnected()) {
+            QString verr;
+            ttwInstalled = m_grpc->verifyTTWIntegrity(verr);
+        }
+        m_installTtwAction->setVisible(isTTW && !ttwInstalled);
+    }
 
     if (m_activeGame.detected) {
         QString modsDir = modsDirectoryFor(m_activeGame.shortName);

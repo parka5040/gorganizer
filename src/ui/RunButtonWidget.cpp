@@ -171,12 +171,10 @@ void RunButtonWidget::rebuildCombo(const QString& preferredToolId)
         if (m_fourGBPatched
             && m_game.shortName == "falloutnv"
             && target.toolId == "xnvse"
-            && target.type == TargetTool
             && itemModel != nullptr) {
             if (auto* item = itemModel->item(row)) {
                 item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
-                item->setToolTip(
-                    QStringLiteral("FalloutNV.exe is patched, please run through the launcher"));
+                item->setToolTip(QStringLiteral("Launch through Launcher"));
             }
         }
     }
