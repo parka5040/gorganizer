@@ -131,6 +131,39 @@ service Gorganizer {
   // Settings
   rpc SetNexusAPIKey(SetNexusAPIKeyRequest) returns (SetNexusAPIKeyResponse);
 
+  // Tells the daemon which game the frontend currently shows. Daemon uses
+  // this to disambiguate inbound NXM downloads when the URL slug maps to
+  // multiple gameIDs — e.g. an "nxm://newvegas/..." link can land in
+  // FalloutNV_Mods/ or TTW_Mods/ depending on which the user is on.
+  rpc SetActiveGame(SetActiveGameRequest) returns (SetActiveGameResponse);
+
+  // --- Tale of Two Wastelands ---
+  //
+  // Synthetic-game ("ttw") install + lifecycle. The dialog is two-backend
+  // capable: native MPI (Backend B, recommended; uses the SulfurNitride
+  // mpi_installer Rust binary) or the closed-source TTW Install.exe under
+  // Wine (Backend A, parity with Windows guides). All RPCs that vary by
+  // backend take a TTWBackend enum.
+  rpc CheckTTWPrereqs(CheckTTWPrereqsRequest) returns (CheckTTWPrereqsResponse);
+  rpc CheckTTWDiskSpace(CheckTTWDiskSpaceRequest) returns (CheckTTWDiskSpaceResponse);
+  rpc CheckFNVNotMounted(CheckFNVNotMountedRequest) returns (CheckFNVNotMountedResponse);
+  rpc PrepareTTWInstaller(PrepareTTWInstallerRequest) returns (PrepareTTWInstallerResponse);
+  rpc CreateBlankTTWMod(CreateBlankTTWModRequest) returns (CreateBlankTTWModResponse);
+  rpc EnsureNativeMpiInstaller(EnsureNativeMpiInstallerRequest) returns (EnsureNativeMpiInstallerResponse);
+  rpc BootstrapFNVPrefix(BootstrapFNVPrefixRequest) returns (BootstrapFNVPrefixResponse);
+  rpc InstallTTWPrereqs(InstallTTWPrereqsRequest) returns (InstallTTWPrereqsResponse);
+  rpc LaunchTTWInstaller(LaunchTTWInstallerRequest) returns (LaunchTTWInstallerResponse);
+  rpc CancelTTWInstaller(CancelTTWInstallerRequest) returns (CancelTTWInstallerResponse);
+  // Fetches the post-install result (changed exes in FNV root, exes
+  // inside the dest mod folder, file count, layout-fix flag). The
+  // dialog calls this after detecting `[<id>:exit]` to populate the
+  // launcher candidate list with real candidates from disk rather
+  // than a hardcoded "nvse_loader.exe".
+  rpc GetTTWInstallResult(GetTTWInstallResultRequest) returns (GetTTWInstallResultResponse);
+  rpc SetTTWLauncherExe(SetTTWLauncherExeRequest) returns (SetTTWLauncherExeResponse);
+  rpc VerifyTTWIntegrity(VerifyTTWIntegrityRequest) returns (VerifyTTWIntegrityResponse);
+  rpc TranslateWinePath(TranslateWinePathRequest) returns (TranslateWinePathResponse);
+
   // Lifecycle
   rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
   // Lightweight, non-streaming readiness probe used by the splash screen.
@@ -158,6 +191,17 @@ message Game {
   uint32 steam_app_id = 3;
   string install_path = 4;
   string data_path = 5;
+  // Synthetic = true for derived game entries (currently TTW). Synthetic
+  // games never come from a Steam appmanifest; their runtime paths are
+  // borrowed from the linked parent.
+  bool synthetic = 6;
+  // For synthetic games, the gameID of the parent whose Proton prefix +
+  // install path are shared (e.g. "falloutnv" for TTW).
+  string linked_from_game_id = 7;
+  // True when the game's VFS overlay is currently mounted. Used by the
+  // RunButtonWidget so the FNV row can be disabled while TTW is active
+  // (and vice versa, for the same mutex group).
+  bool vfs_active = 8;
 }
 
 message ListGamesRequest {}
@@ -368,6 +412,12 @@ message VFSStatus {
 message MountVFSRequest {
   string game_id = 1;
   string profile_name = 2;
+  // When true, if another game in the same mutex group already has its
+  // VFS active (FNV ↔ TTW), unmount the conflicting game first. The
+  // frontend's FNV/TTW switcher sets this so the user only confirms
+  // once. Without auto_swap, the daemon returns VFSMutexError so the
+  // GUI can prompt.
+  bool auto_swap = 3;
 }
 message MountVFSResponse {
   VFSStatus status = 1;
@@ -702,6 +752,12 @@ message SetPreferredProtonResponse {}
 
 // --- Lifecycle messages ---
 
+message SetActiveGameRequest {
+  // Internal gameID — empty string clears the hint.
+  string game_id = 1;
+}
+message SetActiveGameResponse {}
+
 message SetNexusAPIKeyRequest {
   string api_key = 1;
 }
@@ -736,6 +792,151 @@ message GetGameSettingsRequest {
 message SetGameSettingsRequest {
   string game_id = 1;
   bool auto_install = 2;
+}
+
+// --- Tale of Two Wastelands messages ---
+
+enum TTWBackend {
+  TTW_BACKEND_NATIVE = 0;  // SulfurNitride mpi_installer (default, recommended)
+  TTW_BACKEND_WINE   = 1;  // closed-source TTW Install.exe under Proton
+}
+
+message CheckTTWPrereqsRequest {
+  TTWBackend backend = 1;
+}
+message CheckTTWPrereqsResponse {
+  TTWBackend backend = 1;
+  bool gstreamer_installed = 2;
+  string gstreamer_codecs_hint = 3;
+  bool xdelta_installed = 4;
+  int64 disk_space_available = 5;
+  int64 disk_space_required = 6;
+  bool fnv_vanilla = 7;
+
+  // Backend B (native).
+  string mpi_installer_path = 8;
+  string mpi_installer_version = 9;
+
+  // Backend A (Wine).
+  bool prefix_exists = 10;
+  bool has_dotnet48 = 11;
+  uint32 dotnet48_release_rev = 12;
+  bool has_msxml6 = 13;
+  bool has_vcrun2022 = 14;
+  bool has_corefonts = 15;
+  bool mono_needs_removal = 16;
+  bool steam_running = 17;
+  bool protontricks_available = 18;
+  bool winetricks_available = 19;
+
+  repeated string missing = 20;
+}
+
+message CheckTTWDiskSpaceRequest {}
+message CheckTTWDiskSpaceResponse {
+  int64 available = 1;
+  int64 required = 2;
+}
+
+message CheckFNVNotMountedRequest {}
+message CheckFNVNotMountedResponse {}
+
+message PrepareTTWInstallerRequest {
+  string user_path = 1;       // file or directory the user picked
+  TTWBackend backend = 2;
+}
+message PrepareTTWInstallerResponse {
+  TTWBackend backend = 1;
+  string mpi_file = 2;
+  string installer_exe = 3;   // populated for Backend A only
+  string version = 4;         // best-effort version parse from .mpi filename
+  repeated string alternate_mpis = 5;
+}
+
+message CreateBlankTTWModRequest {
+  string mod_name = 1;
+}
+message CreateBlankTTWModResponse {
+  string mod_dir = 1;
+}
+
+message EnsureNativeMpiInstallerRequest {}
+message EnsureNativeMpiInstallerResponse {
+  string path = 1;
+  string version = 2;
+}
+
+message BootstrapFNVPrefixRequest {}
+message BootstrapFNVPrefixResponse {}
+
+message InstallTTWPrereqsRequest {}
+message InstallTTWPrereqsResponse {
+  // Opaque handle the GUI passes back to CancelTTWInstaller if the user
+  // wants to abort. Streams progress via Info events on WatchStatus.
+  string install_id = 1;
+}
+
+message LaunchTTWInstallerRequest {
+  PrepareTTWInstallerResponse info = 1;
+  string data_mod_name = 2;
+}
+message LaunchTTWInstallerResponse {
+  string install_id = 1;
+}
+
+message CancelTTWInstallerRequest {
+  string install_id = 1;
+}
+message CancelTTWInstallerResponse {}
+
+message GetTTWInstallResultRequest {
+  string install_id = 1;
+  // When true, block until the install finishes (capped server-side at
+  // 1 hour). False returns whatever's available — useful for polling
+  // immediately after detecting an `[<id>:exit]` event.
+  bool block = 2;
+}
+
+message TTWExeDelta {
+  // Path relative to the root the delta came from (FNV install dir for
+  // changed_exes_in_root entries, or the dest mod folder for
+  // dest_mod_exes entries).
+  string rel_path = 1;
+  // "added" | "modified" | "in-dest"
+  string kind = 2;
+  int64 size = 3;
+  string mtime = 4;     // RFC3339
+  string sha256 = 5;    // populated only for the candidate set; may be empty
+}
+
+message GetTTWInstallResultResponse {
+  int32 installer_exit_code = 1;
+  bool layout_fixed = 2;
+  int32 data_mod_file_count = 3;
+  int64 data_mod_bytes = 4;
+  // Newly-added or size/mtime-modified .exe files in the FNV install
+  // root. TTW manifests can write a custom launcher here; surface the
+  // candidates so the user can pick the right one.
+  repeated TTWExeDelta changed_exes_in_root = 5;
+  // .exe files found inside the destination mod folder. Some MPI
+  // manifests park the launcher at %DESTINATION% rather than %FNVROOT%.
+  repeated TTWExeDelta data_mod_exes = 6;
+}
+
+message SetTTWLauncherExeRequest {
+  string rel_path = 1;        // e.g. "nvse_loader.exe"
+}
+message SetTTWLauncherExeResponse {}
+
+message VerifyTTWIntegrityRequest {}
+message VerifyTTWIntegrityResponse {}
+
+message TranslateWinePathRequest {
+  string game_id = 1;
+  string unix_path = 2;
+}
+message TranslateWinePathResponse {
+  string wine_path = 1;
 }
 
 // --- FOMOD messages (mirrors src/ui/FomodPlan.h) ---

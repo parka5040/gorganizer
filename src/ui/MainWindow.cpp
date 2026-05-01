@@ -12,6 +12,7 @@
 #include "ModInstallDialog.h"
 #include "IniEditorDialog.h"
 #include "GameDetector.h"
+#include "TTWInstallDialog.h"
 #include "ThemeManager.h"
 
 #include <QToolBar>
@@ -27,6 +28,9 @@
 #include <QSet>
 #include <QInputDialog>
 
+#include <algorithm>
+
+// Mirror of internal/config/paths.go::gameModsDirNames — keep in sync.
 static QString modsDirectoryFor(const QString& gameShortName)
 {
     static const QHash<QString, QString> dirNames = {
@@ -34,6 +38,7 @@ static QString modsDirectoryFor(const QString& gameShortName)
         {"skyrim", "Skyrim_Mods"}, {"skyrimse", "SkyrimSE_Mods"},
         {"fallout3", "Fallout3_Mods"}, {"falloutnv", "FalloutNV_Mods"},
         {"fallout4", "Fallout4_Mods"}, {"starfield", "Starfield_Mods"},
+        {"ttw", "TTW_Mods"},
     };
     QByteArray root = qgetenv("GORGANIZER_ROOT");
     if (!root.isEmpty()) {
@@ -60,7 +65,6 @@ MainWindow::MainWindow(AppConfig& config, GrpcClient* grpc, QWidget* parent)
     setupUi();
     loadManagedGames();
 
-    // Connect gRPC signals.
     connect(m_grpc, &GrpcClient::gameLaunched, this, &MainWindow::onGameLaunched);
     connect(m_grpc, &GrpcClient::gameLaunchFailed, this, &MainWindow::onGameLaunchFailed);
     connect(m_grpc, &GrpcClient::rpcError, this, &MainWindow::onRpcError);
@@ -73,20 +77,16 @@ MainWindow::MainWindow(AppConfig& config, GrpcClient* grpc, QWidget* parent)
         statusBar()->showMessage("Daemon disconnected");
     });
 
-    // After daemon detects games, update managed games and trigger load.
     connect(m_grpc, &GrpcClient::gamesDetected, this, [this](const std::vector<GrpcGame>& detectedGames) {
-        // The daemon returns everything it can see in Steam. We take that
-        // list, intersect it with the user's managed-games preference,
-        // and only surface those in the dropdown. Auto-adding every
-        // detected game would expand the managed list behind the user's
-        // back — what the wizard was meant to prevent. New games arrive
-        // via File → Add New Game... only.
-        auto managedIds = m_config.managedGames();
-        QSet<uint32_t> keep(managedIds.begin(), managedIds.end());
+        auto managedShortNames = m_config.managedGames();
+        QSet<QString> keep(managedShortNames.begin(), managedShortNames.end());
 
         m_managedGames.clear();
+        bool ttwVfsActive = false;
         for (const auto& g : detectedGames) {
-            if (!keep.contains(g.steamAppId))
+            if (g.gameId == "ttw" && g.vfsActive)
+                ttwVfsActive = true;
+            if (!keep.contains(g.gameId))
                 continue;
             GameInfo info;
             info.appId = g.steamAppId;
@@ -95,57 +95,38 @@ MainWindow::MainWindow(AppConfig& config, GrpcClient* grpc, QWidget* parent)
             info.installDir = g.installPath.toStdString();
             info.dataDir = g.dataPath.toStdString();
             info.detected = true;
+            info.synthetic = g.synthetic;
+            info.linkedFromShortName = g.linkedFromGameId;
+            info.vfsActive = g.vfsActive;
             m_managedGames.push_back(info);
         }
         m_gameSelector->setGames(m_managedGames);
-        uint32_t activeId = m_config.activeGameAppId();
-        m_gameSelector->setActiveGame(activeId);
+        QString activeShort = m_config.activeGameShortName();
+        m_gameSelector->setActiveGameByShortName(activeShort);
+        m_runButton->setTTWVfsActive(ttwVfsActive);
         auto current = m_gameSelector->currentGame();
         if (current.detected)
             onGameChanged(current.appId);
     });
 
-    // Mod install result.
     connect(m_grpc, &GrpcClient::installCompleted, this, [this](const QString& name, int count) {
         statusBar()->showMessage(QString("Installed \"%1\" (%2 files)").arg(name).arg(count), 5000);
         if (m_activeGame.detected)
             m_modList->loadForGame(m_activeGame, m_currentProfile);
     });
     connect(m_grpc, &GrpcClient::installFailed, this, [this](const QString& err) {
-        // fomod_required is a routing signal (daemon → frontend wizard),
-        // not a real failure. The DownloadsLibraryView catches it
-        // synchronously and opens the wizard; surfacing it on the status
-        // bar would be a misleading "this failed" right before the popup
-        // shows up.
         if (err.contains("fomod_required"))
             return;
         statusBar()->showMessage(QString("Install failed: %1").arg(err), 5000);
     });
 
-    // Status stream events.
     connect(m_grpc, &GrpcClient::daemonInfo, this, [this](const QString& info) {
         statusBar()->showMessage(info, 5000);
     });
-    // Daemon-side errors broadcast on WatchStatus (e.g. an NXM forwarded
-    // by the browser arriving while no API key is set). The persistent
-    // ActivityLogPanel renders these in red at the bottom of the window,
-    // so a status-bar tick + log entry is enough — no modal interruption.
     connect(m_grpc, &GrpcClient::daemonError, this, [this](const QString& err) {
         statusBar()->showMessage(err, 10000);
     });
 
-    // Recovery-pending modal: the daemon detected an ambiguous Data dir
-    // alongside a backup at startup and is refusing to mount/launch
-    // until the user confirms a destructive restore. Present a modal
-    // that explains the on-disk state and offers two actions:
-    //
-    //   - Restore from Data.orig: rm -rf Data, mv Data.orig Data
-    //     (the daemon clears the pending state on success)
-    //   - Cancel: leave the directory alone — user must inspect manually
-    //     before the game can be launched again.
-    //
-    // We show this as a non-blocking dialog so a single Daemon-side
-    // event for multiple games doesn't cascade into modal stacking.
     connect(m_grpc, &GrpcClient::recoveryPending, this,
         [this](const QString& gameId, const QString& dataPath,
                const QString& backupPath, const QString& reason) {
@@ -173,15 +154,6 @@ MainWindow::MainWindow(AppConfig& config, GrpcClient* grpc, QWidget* parent)
             }
         });
 
-    // The connected/disconnected lambdas above are *transition* handlers.
-    // The splash flips m_connected to true via Health() before MainWindow
-    // is even constructed, so the connected() signal has already fired
-    // and the detectGames + startWatching kickoff would be lost. Trigger
-    // the same setup ourselves whenever the GrpcClient is already in the
-    // connected state at construction time. Idempotent on the daemon
-    // side: detectGames is safe to call repeatedly, and startWatching
-    // is gated by m_streamWorker so a second call after a real connected
-    // signal is a cheap no-op.
     if (m_grpc->isConnected()) {
         statusBar()->showMessage("Daemon connected", 3000);
         m_grpc->detectGames();
@@ -191,7 +163,6 @@ MainWindow::MainWindow(AppConfig& config, GrpcClient* grpc, QWidget* parent)
 
 void MainWindow::setupUi()
 {
-    // --- Menu bar ---
     auto* fileMenu = menuBar()->addMenu("&File");
     fileMenu->addAction("&Install Mod...", this, &MainWindow::onInstallMod);
     fileMenu->addSeparator();
@@ -199,15 +170,13 @@ void MainWindow::setupUi()
     fileMenu->addSeparator();
     fileMenu->addAction("&Quit", this, &QWidget::close);
 
-    // View menu with appearance + dark-variant selectors.
     auto* viewMenu = menuBar()->addMenu("&View");
 
-    // Appearance: System / Light / Dark — top-level mode.
     auto* appearanceMenu = viewMenu->addMenu("&Appearance");
     m_appearanceActions = new QActionGroup(this);
     m_appearanceActions->setExclusive(true);
     const QString currentMode = m_config.appearanceMode();
-    const QStringList modes = ThemeManager::availableModes(); // "System","Light","Dark"
+    const QStringList modes = ThemeManager::availableModes();
     for (const auto& label : modes) {
         auto* action = appearanceMenu->addAction(label);
         action->setCheckable(true);
@@ -220,7 +189,6 @@ void MainWindow::setupUi()
         });
     }
 
-    // Dark variants — only meaningful in Dark or System (when OS is dark).
     auto* darkMenu = viewMenu->addMenu("Dark &Variant");
     m_themeActions = new QActionGroup(this);
     m_themeActions->setExclusive(true);
@@ -238,25 +206,22 @@ void MainWindow::setupUi()
         });
     }
 
-    // Tools menu.
     auto* toolsMenu = menuBar()->addMenu("&Tools");
     toolsMenu->addAction("INI &Editor...", this, &MainWindow::onOpenIniEditor);
     m_patch4GBAction = toolsMenu->addAction("Patch Fallout to &4GB",
                                             this, &MainWindow::onPatchFalloutTo4GB);
-    // Action visibility tracks the active game — only Fallout: New Vegas
-    // surfaces the entry. updateStatusBarInfo() (called on every game change)
-    // re-evaluates and toggles the action.
     m_patch4GBAction->setVisible(false);
+    m_installTtwAction = toolsMenu->addAction("Install Tale of Two &Wastelands...",
+                                              this, &MainWindow::onInstallTTW);
+    m_installTtwAction->setVisible(false);
     toolsMenu->addSeparator();
     toolsMenu->addAction("&Settings...", this, &MainWindow::onOpenSettings);
 
-    // --- Toolbar (MO2-style layout) ---
     auto* toolbar = addToolBar("Main");
     toolbar->setMovable(false);
     toolbar->setFloatable(false);
     toolbar->setIconSize(QSize(24, 24));
 
-    // Game selector.
     toolbar->addWidget(new QLabel(" Game: "));
     m_gameSelector = new GameSelectorWidget;
     m_gameSelector->setMinimumWidth(200);
@@ -264,33 +229,24 @@ void MainWindow::setupUi()
 
     toolbar->addSeparator();
 
-    // Profile section: label + selector widget (combo + create/delete/copy buttons).
     m_profileSelector = new ProfileSelectorWidget(m_grpc);
     toolbar->addWidget(m_profileSelector);
 
     toolbar->addSeparator();
 
-    // Install Mod button.
     auto* installBtn = new QToolButton;
     installBtn->setText("Install Mod...");
     installBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
     connect(installBtn, &QToolButton::clicked, this, &MainWindow::onInstallMod);
     toolbar->addWidget(installBtn);
 
-    // Spacer pushes Run button to the right.
     auto* spacer = new QWidget;
     spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     toolbar->addWidget(spacer);
 
-    // Run button.
     m_runButton = new RunButtonWidget;
     toolbar->addWidget(m_runButton);
 
-    // --- Central widget: vertical splitter (workspace | activity log) ---
-    //
-    // Download/install progress lives in the Downloads tab's per-row bar
-    // and is narrated in the ActivityLogPanel at the bottom. There is no
-    // separate progress strip under the mod list.
     auto* central = new QWidget;
     auto* centralLayout = new QVBoxLayout(central);
     centralLayout->setContentsMargins(0, 0, 0, 0);
@@ -308,7 +264,6 @@ void MainWindow::setupUi()
     m_pluginList->setGrpcClient(m_grpc);
     m_rightTabs->addTab(m_pluginList, "Plugins");
 
-    // Data tab placeholder.
     auto* dataPlaceholder = new QWidget;
     auto* dpLayout = new QVBoxLayout(dataPlaceholder);
     auto* dpLabel = new QLabel("Virtual data directory.\nShows the merged view of all enabled mods.\n\n(Coming soon)");
@@ -317,8 +272,6 @@ void MainWindow::setupUi()
     dpLayout->addWidget(dpLabel);
     m_rightTabs->addTab(dataPlaceholder, "Data");
 
-    // Single Downloads tab. Rows progress in place:
-    // Downloading → Waiting → Installing → Installed. No "In Flight" split.
     m_downloadsLibrary = new DownloadsLibraryView(m_grpc);
     m_rightTabs->addTab(m_downloadsLibrary, "Downloads");
     splitter->addWidget(m_rightTabs);
@@ -337,14 +290,12 @@ void MainWindow::setupUi()
     centralLayout->addWidget(vsplit, 1);
     setCentralWidget(central);
 
-    // --- Status bar (MO2-style: game - profile | connection) ---
     m_statusInfo = new QLabel;
     statusBar()->addWidget(m_statusInfo, 1);
 
     m_connectionIndicator = new ConnectionIndicator(m_grpc);
     statusBar()->addPermanentWidget(m_connectionIndicator);
 
-    // --- Signal connections ---
     connect(m_gameSelector, &GameSelectorWidget::gameChanged,
             this, &MainWindow::onGameChanged);
     connect(m_runButton, &RunButtonWidget::runRequested,
@@ -357,39 +308,44 @@ void MainWindow::setupUi()
     connect(m_profileSelector, &ProfileSelectorWidget::profileChanged,
             this, &MainWindow::onProfileChanged);
 
-    // When a mod is toggled, refresh the plugin list to show/hide its plugins.
     connect(m_modList, &ModListWidget::modToggled,
             m_pluginList, &PluginListWidget::refresh);
+    connect(m_modList, &ModListWidget::modToggled, this, [this] {
+        if (m_activeGame.detected && !m_currentProfile.isEmpty() && m_grpc->isConnected())
+            m_grpc->mountVfsWithSwap(m_activeGame.shortName, m_currentProfile);
+    });
 
-    // When a download is installed via the library view, refresh the mod list.
+    connect(m_grpc, &GrpcClient::vfsStatusChanged, this,
+            [this](const GrpcVFSStatus& status) {
+        if (!m_activeGame.detected) return;
+        if (status.gameId != m_activeGame.shortName) return;
+        m_pluginList->refresh();
+    });
+
     connect(m_downloadsLibrary, &DownloadsLibraryView::modInstalledFromDownload, this, [this] {
         if (m_activeGame.detected)
             m_modList->loadForGame(m_activeGame, m_currentProfile);
     });
-    // FOMOD-wizard "open/close" notifications used to drive the
-    // InstallStatusBanner's bring-to-front affordance. With the banner
-    // gone the notifications fall on the floor — the wizard is its own
-    // modal window the user can refocus directly.
 }
 
 void MainWindow::loadManagedGames()
 {
-    auto managedIds = m_config.managedGames();
+    auto managedShortNames = m_config.managedGames();
     auto allDetected = GameDetector::detectAll();
 
     m_managedGames.clear();
-    for (uint32_t id : managedIds) {
-        auto game = GameInfo::findIn(allDetected, id);
-        if (game)
-            m_managedGames.push_back(*game);
+    for (const QString& sn : managedShortNames) {
+        auto it = std::find_if(allDetected.begin(), allDetected.end(),
+                               [&sn](const GameInfo& g) { return g.shortName == sn; });
+        if (it != allDetected.end())
+            m_managedGames.push_back(*it);
     }
 
     m_gameSelector->setGames(m_managedGames);
 
-    uint32_t activeId = m_config.activeGameAppId();
-    m_gameSelector->setActiveGame(activeId);
+    QString activeShort = m_config.activeGameShortName();
+    m_gameSelector->setActiveGameByShortName(activeShort);
 
-    // Explicitly trigger game load for the restored selection.
     auto current = m_gameSelector->currentGame();
     if (current.detected)
         onGameChanged(current.appId);
@@ -397,22 +353,29 @@ void MainWindow::loadManagedGames()
 
 void MainWindow::onGameChanged(uint32_t appId)
 {
-    m_config.setActiveGameAppId(appId);
-
     auto found = GameInfo::findIn(m_managedGames, appId);
+    if (!found) {
+        auto current = m_gameSelector->currentGame();
+        if (!current.shortName.isEmpty())
+            found = current;
+    }
     m_activeGame = found.value_or(GameInfo{});
+    m_config.setActiveGameShortName(m_activeGame.shortName);
+
+    if (m_grpc->isConnected())
+        m_grpc->setActiveGame(m_activeGame.detected ? m_activeGame.shortName : QString());
 
     m_runButton->setGame(m_activeGame, m_config.lastToolFor(m_activeGame.shortName));
     m_pluginList->setModsDir(modsDirectoryFor(m_activeGame.shortName));
     m_pluginList->loadForGame(m_activeGame);
     m_pluginList->setActiveProfile(m_currentProfile);
 
-    // FNV4GB visibility + greyout state.
     const bool isFNV = (m_activeGame.shortName == "falloutnv" && m_activeGame.detected);
+    const bool isTTW = (m_activeGame.shortName == "ttw" && m_activeGame.detected);
     if (m_patch4GBAction)
-        m_patch4GBAction->setVisible(isFNV);
+        m_patch4GBAction->setVisible(isFNV || isTTW);
     bool patched = false;
-    if (isFNV && m_grpc->isConnected())
+    if ((isFNV || isTTW) && m_grpc->isConnected())
         patched = m_grpc->is4GBPatched(m_activeGame.shortName);
     m_runButton->setFourGBPatched(patched);
     if (m_patch4GBAction && patched) {
@@ -424,15 +387,13 @@ void MainWindow::onGameChanged(uint32_t appId)
         m_patch4GBAction->setToolTip(QString());
     }
 
+    if (m_installTtwAction)
+        m_installTtwAction->setVisible(isTTW);
+
     if (m_activeGame.detected) {
-        // Ensure mod directory exists on-demand (only for detected games).
         QString modsDir = modsDirectoryFor(m_activeGame.shortName);
         QDir().mkpath(modsDir);
 
-        // Pre-seed the current profile from AppConfig so everything downstream
-        // (mod list, plugin list, status bar) renders on the right profile the
-        // first time, instead of showing "Default" for a flash and then
-        // redrawing when the profile selector resolves.
         QString preferred = m_config.lastProfileFor(m_activeGame.shortName);
         if (!preferred.isEmpty())
             m_currentProfile = preferred;
@@ -442,10 +403,10 @@ void MainWindow::onGameChanged(uint32_t appId)
         if (m_downloadsLibrary)
             m_downloadsLibrary->setGame(m_activeGame);
 
-        // Hook up per-game archive + install streams so the Downloads tab
-        // receives progress ticks without a poll loop. The client cancels
-        // any prior subscription under the hood.
         m_grpc->subscribeEvents(m_activeGame.shortName);
+
+        if (m_grpc->isConnected() && !m_currentProfile.isEmpty())
+            m_grpc->mountVfsWithSwap(m_activeGame.shortName, m_currentProfile);
     }
 
     updateStatusBarInfo();
@@ -470,9 +431,10 @@ void MainWindow::onRunGame()
 
     auto target = m_runButton->currentTarget();
     if (target.type == RunButtonWidget::TargetInstallTool) {
-        // Button says "Install xNVSE..." — hand off to the daemon's
-        // Nexus-backed installer, then rebuild the combo so the next click
-        // runs the newly-installed tool.
+        if (target.toolId == "ttw-install") {
+            onInstallTTW();
+            return;
+        }
         if (!m_grpc->isConnected()) {
             QMessageBox::warning(this, "Not Connected",
                 "The daemon must be running to install a script extender.");
@@ -494,7 +456,6 @@ void MainWindow::onRunGame()
         return;
     }
 
-    // The daemon auto-mounts VFS before launching. The frontend just sends the RPC.
     if (m_grpc->isConnected()) {
         bool useTool = (target.type == RunButtonWidget::TargetTool);
         statusBar()->showMessage(
@@ -502,7 +463,6 @@ void MainWindow::onRunGame()
                     : QString("Preparing mods and launching %1...").arg(m_activeGame.name));
         m_grpc->launchGame(m_activeGame.shortName, useTool, m_currentProfile);
     } else {
-        // Fallback: direct Steam launch (no mods).
         QString steamUrl = QString("steam://rungameid/%1").arg(m_activeGame.appId);
         bool launched = QProcess::startDetached("xdg-open", {steamUrl});
         if (!launched) {
@@ -539,19 +499,18 @@ void MainWindow::onInstallMod()
                 .arg(dlg.installedModName())
                 .arg(dlg.installedFileCount()),
             5000);
-        // Refresh mod list.
         m_modList->loadForGame(m_activeGame, m_currentProfile);
     }
 }
 
 void MainWindow::onPatchFalloutTo4GB()
 {
-    // Hard guard: the action is only meant to surface for FNV. The
-    // visibility toggle in onGameChanged should cover this, but a
-    // keyboard shortcut hit on the wrong game shouldn't crash.
-    if (m_activeGame.shortName != "falloutnv" || !m_activeGame.detected) {
+    const bool isFNV = (m_activeGame.shortName == "falloutnv");
+    const bool isTTW = (m_activeGame.shortName == "ttw");
+    if ((!isFNV && !isTTW) || !m_activeGame.detected) {
         QMessageBox::information(this, "Patch Fallout to 4GB",
-            "This patch is only available for Fallout: New Vegas.");
+            "This patch is only available for Fallout: New Vegas (or "
+            "Tale of Two Wastelands, which shares FNV's install).");
         return;
     }
     if (!m_grpc->isConnected()) {
@@ -560,9 +519,6 @@ void MainWindow::onPatchFalloutTo4GB()
         return;
     }
 
-    // Pre-flight: explain prerequisites in the same dialog the user sees
-    // when something's missing — better UX than firing the request and
-    // letting the daemon's error string carry all the context.
     auto confirm = QMessageBox::question(this, "Patch Fallout to 4GB",
         "<p>The 4GB Patcher modifies FalloutNV.exe in place so the game can "
         "address more than 2 GiB of memory — required for heavy mod load orders.</p>"
@@ -579,9 +535,6 @@ void MainWindow::onPatchFalloutTo4GB()
     statusBar()->showMessage("Downloading FNV 4GB patcher from Nexus...");
     QString patcherExePath, version, err;
     if (!m_grpc->install4GBPatcher(m_activeGame.shortName, patcherExePath, version, err)) {
-        // The daemon returns descriptive sentinel errors for the two
-        // missing-prereq cases so the popup can be specific. Fall back to
-        // the raw error otherwise.
         const QString lower = err.toLower();
         if (lower.contains("xnvse")) {
             QMessageBox::warning(this, "xNVSE Required",
@@ -608,9 +561,6 @@ void MainWindow::onPatchFalloutTo4GB()
     statusBar()->showMessage(
         QString("FNV 4GB patcher %1 downloaded.").arg(version), 5000);
 
-    // Second confirmation — the user explicitly asked for the prompt
-    // between download and execution. The patcher is destructive
-    // (rewrites FalloutNV.exe) so we make the consent specific.
     auto apply = QMessageBox::question(this, "Apply 4GB Patch",
         QString("<p>The patcher has been extracted to:</p>"
                 "<p><code>%1</code></p>"
@@ -641,9 +591,6 @@ void MainWindow::onPatchFalloutTo4GB()
                 "<p>Patcher output:</p><pre>%1</pre>")
             .arg(output.isEmpty() ? "(no output)" : output.toHtmlEscaped()));
 
-    // Refresh: hide the menu action and grey out the xNVSE row in the
-    // Run combo so the next launch routes through the patcher's
-    // launcher path instead of nvse_loader.
     if (m_patch4GBAction) {
         m_patch4GBAction->setEnabled(false);
         m_patch4GBAction->setToolTip(
@@ -653,12 +600,41 @@ void MainWindow::onPatchFalloutTo4GB()
     statusBar()->showMessage("FalloutNV.exe patched to 4GB.", 5000);
 }
 
+void MainWindow::onInstallTTW()
+{
+    if (!m_grpc->isConnected()) {
+        QMessageBox::warning(this, "Daemon not connected",
+            "The gorganizer daemon is not running. Start it before launching the TTW installer.");
+        return;
+    }
+    TTWInstallDialog dlg(m_grpc, m_activeGame.shortName, m_currentProfile, this);
+    dlg.exec();
+    const bool installed =
+        (dlg.outcome() == TTWInstallDialog::Accepted ||
+         dlg.outcome() == TTWInstallDialog::InstalledOnly);
+
+    if (installed) {
+        auto managed = m_config.managedGames();
+        if (std::find(managed.begin(), managed.end(), QString("ttw")) == managed.end()) {
+            managed.push_back("ttw");
+            m_config.setManagedGames(managed);
+        }
+        m_config.setActiveGameShortName("ttw");
+    }
+
+    if (m_grpc->isConnected())
+        m_grpc->detectGames();
+    if (!installed) {
+        onGameChanged(m_activeGame.appId);
+        if (m_activeGame.detected && m_modList)
+            m_modList->loadForGame(m_activeGame, m_currentProfile);
+    }
+}
+
 void MainWindow::onOpenSettings()
 {
     SettingsDialog dlg(m_grpc, &m_config, this);
     dlg.exec();
-    // Settings dialog can mutate either the dark variant or the appearance
-    // mode; refresh both menus so reopening the View menu shows the truth.
     if (m_themeActions) {
         QString current = m_config.preferredStyle();
         if (!ThemeManager::isDarkVariant(current))
@@ -675,21 +651,20 @@ void MainWindow::onOpenSettings()
 
 void MainWindow::onAddNewGame()
 {
-    // Walks the set of Steam-detected Bethesda titles the user hasn't
-    // already added. Nothing happens to the managed list until the user
-    // picks one and confirms — the Games dropdown never side-effects
-    // add/remove on its own.
     auto allDetected = GameDetector::detectAll();
     auto managed = m_config.managedGames();
-    QSet<uint32_t> managedSet(managed.begin(), managed.end());
+    QSet<QString> managedSet(managed.begin(), managed.end());
 
     QStringList labels;
     std::vector<GameInfo> candidates;
     for (const auto& g : allDetected) {
-        if (managedSet.contains(g.appId))
+        if (managedSet.contains(g.shortName))
             continue;
         candidates.push_back(g);
-        labels.append(QString("%1 (App ID %2)").arg(g.name).arg(g.appId));
+        if (g.appId == 0)
+            labels.append(g.name);
+        else
+            labels.append(QString("%1 (App ID %2)").arg(g.name).arg(g.appId));
     }
     if (candidates.empty()) {
         QMessageBox::information(this, "Add New Game",
@@ -707,17 +682,15 @@ void MainWindow::onAddNewGame()
     if (idx < 0) return;
     const auto& chosen = candidates[idx];
 
-    managed.push_back(chosen.appId);
+    managed.push_back(chosen.shortName);
     m_config.setManagedGames(managed);
 
-    // Refresh from the daemon so directories (Downloads/, etc.) get
-    // materialized and the combo picks up the new entry.
     if (m_grpc->isConnected())
         m_grpc->detectGames();
     else
         loadManagedGames();
 
-    m_config.setActiveGameAppId(chosen.appId);
+    m_config.setActiveGameShortName(chosen.shortName);
     statusBar()->showMessage(
         QString("%1 added. Use the Game dropdown to switch.").arg(chosen.name),
         5000);
@@ -745,11 +718,6 @@ void MainWindow::onGameLaunched(int pid)
 
 void MainWindow::onGameLaunchFailed(const QString& error)
 {
-    // The daemon emits machine-parseable tokens for surfaceable conditions.
-    // Format: "loader_missing:<reason>:<configured-exe>:<install-path>:<gameID>".
-    // Break it out into a user-friendly dialog instead of dumping the raw
-    // FailedPrecondition string — when the user sees "Bethesda launcher"
-    // instead of xNVSE, the actionable next step is a reinstall.
     if (error.contains("loader_missing:")) {
         const int idx = error.indexOf("loader_missing:");
         const QStringList parts = error.mid(idx + QString("loader_missing:").length())
@@ -801,6 +769,28 @@ void MainWindow::onGameLaunchFailed(const QString& error)
         QMessageBox box(QMessageBox::Warning, title, body, QMessageBox::Ok, this);
         box.setTextFormat(Qt::RichText);
         box.exec();
+        updateStatusBarInfo();
+        return;
+    }
+
+    if (error.contains("fnv4gb_not_applied_for_ttw")) {
+        QMessageBox::warning(this, "Patch FalloutNV.exe to 4GB",
+            "<p><b>FalloutNV.exe is not LAA-patched.</b> TTW's merged data "
+            "set exceeds FNV's 2&nbsp;GiB memory cap within seconds of the "
+            "main menu — that's the \"music plays, then crash\" you just "
+            "saw.</p>"
+            "<p>Run <b>Tools &#x2192; Patch Fallout to 4GB</b> first, then "
+            "try launching again.</p>");
+        updateStatusBarInfo();
+        return;
+    }
+
+    if (error.contains("xnvse_missing_for_ttw")) {
+        QMessageBox::warning(this, "xNVSE Required",
+            "<p>TTW launches via <b>nvse_loader.exe</b>, but xNVSE's runtime "
+            "DLLs are not installed in the FNV directory.</p>"
+            "<p>Open the Run combo and choose <b>Install xNVSE...</b>, then "
+            "try launching again.</p>");
         updateStatusBarInfo();
         return;
     }

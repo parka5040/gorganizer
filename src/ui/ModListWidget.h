@@ -14,17 +14,9 @@ namespace gorganizer {
 
 enum ModColumn { ModColPriority = 0, ModColConflicts = 1, ModColName = 2, ModColCategory = 3, ModColVersion = 4 };
 
-// Row kinds used inside the model. Stored on the priority column's
-// Qt::UserRole + 50 so the view can treat separator rows specially
-// (collapse, drag rules) without touching the existing data layout.
-//
-// RowKindOverwrite is the always-on, always-bottom pseudo-row for the
-// Overwrite layer — italicized + centered, no checkbox, not dragable, not
-// counted in priority numbering. The user interacts with it only via
-// right-click (Open Folder, Extract All to Mod, Extract Selected...).
+// Row kinds in the model; RowKindOverwrite is the pinned-bottom write-capture pseudo-row.
 enum ModRowKind { RowKindMod = 0, RowKindSeparator = 1, RowKindOverwrite = 2 };
 
-// Reserved name for the Overwrite layer; mirrors profile.OverwriteModName.
 inline constexpr const char* kOverwriteModName = "Overwrite";
 
 // Parsed from metadata.yaml in each mod folder.
@@ -32,19 +24,16 @@ struct ModMetadata {
     QString name;
     QString folder;
     QString installed;
-    QString sourceArchive;            // legacy scalar (pre-merge schema)
-    QStringList sourceArchives;       // ordered merge list (paths rel to ModsDir)
+    QString sourceArchive;
+    QStringList sourceArchives;
     QString nexusUrl;
     QString category;
     QString version;
     bool enabled = true;
     int fileCount = 0;
-    // MO2-style mod-list layout state (see internal/separators on the Go
-    // side). Empty strings are normal for mods the user has never touched
-    // in Visual mode.
-    QString trueIndex;   // 16-char hex — mirrors modlist.txt position
-    QString visualIndex; // 16-char hex — independent Visual-mode position
-    QString separator;   // name of the separator this mod belongs to
+    QString trueIndex;
+    QString visualIndex;
+    QString separator;
 };
 
 class ModListWidget;
@@ -72,13 +61,10 @@ public:
 
     static QStringList defaultCategories();
 
-    // True when Visual mode is on (separators visible, drag reorders
-    // visual_index only). False = flat list, drag reorders modlist.txt
-    // (true load order) and separators are invisible.
     bool visualModeEnabled() const;
 
 signals:
-    void modToggled();  // emitted when a mod is enabled/disabled
+    void modToggled();
 
 private slots:
     void onConflictsReceived(const std::vector<GrpcFileConflict>& conflicts);
@@ -97,22 +83,18 @@ private:
     void applySort(int column, Qt::SortOrder order);
     void restorePriorityOrder();
     void setCategoryForRow(int row, const QString& category);
-    // Rewrites metadata.yaml in place, setting or clearing the `mod_page`
-    // key. Empty url clears the key entirely so the context menu stops
-    // showing "Visit Mod Page".
+    // Sets or clears the mod_page key in metadata.yaml; empty url removes the key.
     void updateModPageUrl(int row, const QString& url);
 
-    // --- Visual mode / separator support ---
     void onVisualToggled(bool on);
-    void rebuildView();                     // reshuffles model rows per current mode
-    void persistRowOrder();                 // writes new positions to disk (mode-aware)
-    void createSeparatorAt(int visualRow);  // context menu "Add Separator Here"
+    void rebuildView();
+    void persistRowOrder();
+    void createSeparatorAt(int visualRow);
     void renameSeparator(int row);
     void removeSeparator(int row);
     void toggleCollapseAt(int row);
     void persistSeparators();
-    // Atomic helper that sets/unsets a single top-level key in a mod's
-    // metadata.yaml without disturbing surrounding lines or list blocks.
+    // Sets/unsets a single top-level key in metadata.yaml without disturbing other lines.
     static void patchMetadataField(const QString& yamlPath, const QString& key,
                                     const QString& value);
 
@@ -122,16 +104,10 @@ private:
     QWidget* m_placeholder;
     QCheckBox* m_visualCheck = nullptr;
 
-    // Latest per-file conflict snapshot, cached so the UI can repaint
-    // selection-driven highlights and pop a per-file detail dialog without
-    // round-tripping the daemon on every click.
     std::vector<GrpcFileConflict> m_conflicts;
     void repaintConflictHighlights();
     void showConflictDetailsForMod(const QString& modName);
 
-    // Overwrite-row helpers — kept separate from the per-mod menu so the
-    // pinned row never gets mistaken for a regular mod (no Reinstall, no
-    // Set Category, no checkbox toggle).
     void appendOverwriteRow();
     void onOverwriteContextMenu(const QPoint& globalPos);
     void extractOverwriteAll();
@@ -142,8 +118,6 @@ private:
     QString m_modsDir;
     GameInfo m_activeGame;
     std::vector<ModMetadata> m_mods;
-    // Separators live outside the mod folders — they're per-profile. Kept
-    // as a parallel vector with the same fields the daemon persists.
     struct SeparatorDef {
         QString name;
         QString visualIndex;

@@ -7,7 +7,6 @@ import (
 )
 
 func TestLoadDefault(t *testing.T) {
-	// Point config dir to a temp directory with no config file.
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 
@@ -45,7 +44,6 @@ func TestSaveAndLoad(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	// Verify file permissions (API key is sensitive).
 	configPath := filepath.Join(dir, "gorganizer", "config.json")
 	info, err := os.Stat(configPath)
 	if err != nil {
@@ -55,7 +53,6 @@ func TestSaveAndLoad(t *testing.T) {
 		t.Errorf("permissions = %o, want 0600", info.Mode().Perm())
 	}
 
-	// Reload and verify.
 	loaded, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)

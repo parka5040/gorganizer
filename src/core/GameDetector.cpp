@@ -49,7 +49,6 @@ std::optional<GameInfo> GameDetector::parseAppManifest(
     if (appId == 0)
         return std::nullopt;
 
-    // Check against known Bethesda games
     const auto& known = GameInfo::knownGames();
     auto it = std::find_if(known.begin(), known.end(),
         [appId](const GameInfo& g) { return g.appId == appId; });
@@ -95,7 +94,6 @@ std::vector<GameInfo> GameDetector::detectGames(const std::vector<std::filesyste
         }
     }
 
-    // Sort by app ID for consistent ordering
     std::sort(detected.begin(), detected.end(),
         [](const GameInfo& a, const GameInfo& b) { return a.appId < b.appId; });
     return detected;
@@ -107,7 +105,23 @@ std::vector<GameInfo> GameDetector::detectAll()
     if (!root)
         return {};
     auto folders = findLibraryFolders(*root);
-    return detectGames(folders);
+    auto detected = detectGames(folders);
+
+    bool hasFO3 = false, hasFNV = false;
+    GameInfo fnv;
+    for (const auto& g : detected) {
+        if (g.shortName == "fallout3") hasFO3 = true;
+        if (g.shortName == "falloutnv") { hasFNV = true; fnv = g; }
+    }
+    if (hasFO3 && hasFNV) {
+        if (auto ttw = GameInfo::findByShortName("ttw")) {
+            ttw->installDir = fnv.installDir;
+            ttw->dataDir = fnv.dataDir;
+            ttw->detected = true;
+            detected.push_back(*ttw);
+        }
+    }
+    return detected;
 }
 
 std::optional<GameInfo> GameDetector::fromExecutable(const std::filesystem::path& exePath)
@@ -115,7 +129,6 @@ std::optional<GameInfo> GameDetector::fromExecutable(const std::filesystem::path
     if (!std::filesystem::exists(exePath))
         return std::nullopt;
 
-    // Map of main executable filename → shortName. Case-insensitive on stem.
     static const std::vector<std::pair<QString, QString>> exeMap = {
         {"morrowind", "morrowind"},
         {"oblivion",  "oblivion"},

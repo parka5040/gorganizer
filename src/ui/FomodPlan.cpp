@@ -12,8 +12,7 @@ namespace gorganizer {
 
 namespace {
 
-// Locate a direct child by name, case-insensitively. Returns absolute path
-// or empty string.
+// Locate a direct child by name, case-insensitively.
 QString findChildCI(const QString& parent, const QString& target)
 {
     QDir dir(parent);
@@ -48,8 +47,7 @@ FomodPluginState parsePluginState(const QString& s)
     return FomodPluginState::Optional;
 }
 
-// Read a <files>/<folder>+<file> block at the reader's current position,
-// consuming tokens until the matching EndElement.
+// Read a <files>/<folder>+<file> block until the matching EndElement.
 QList<FomodFile> readFilesBlock(QXmlStreamReader& xml)
 {
     QList<FomodFile> files;
@@ -91,9 +89,6 @@ void readPlugin(QXmlStreamReader& xml, FomodPlugin& plugin)
         } else if (tag == QLatin1String("files")) {
             plugin.files = readFilesBlock(xml);
         } else if (tag == QLatin1String("typeDescriptor")) {
-            // <typeDescriptor><type name="Recommended"/></typeDescriptor>
-            // or <dependencyType> with patterns — MVP treats the default
-            // <type> as the resolved state.
             while (!xml.atEnd()) {
                 xml.readNext();
                 if (xml.isEndElement() && xml.name() == QLatin1String("typeDescriptor")) break;
@@ -160,9 +155,7 @@ void readInstallStep(QXmlStreamReader& xml, FomodStep& step)
 
 } // namespace
 
-// Parse a legacy fomod/info.xml, handling UTF-16 LE/BE BOMs (NMM convention).
-// Populates name/description/version/author/screenshotPath. Best-effort: any
-// parse failure leaves plan with whatever the directory name suggests.
+// Best-effort parse of a legacy fomod/info.xml (handles UTF-16 BOMs).
 namespace {
 void readLegacyInfo(const QString& fomodDir, FomodPlan& plan)
 {
@@ -175,8 +168,6 @@ void readLegacyInfo(const QString& fomodDir, FomodPlan& plan)
     QByteArray raw = f.readAll();
     f.close();
 
-    // Detect encoding via BOM. QStringDecoder handles UTF-16 LE/BE; default
-    // to UTF-8 otherwise.
     QStringDecoder dec;
     if (raw.size() >= 2 && (uchar)raw[0] == 0xFF && (uchar)raw[1] == 0xFE)
         dec = QStringDecoder(QStringDecoder::Utf16LE);
@@ -201,7 +192,6 @@ void readLegacyInfo(const QString& fomodDir, FomodPlan& plan)
             plan.author = xml.readElementText().trimmed();
     }
 
-    // Pick a screenshot if present (NMM didn't standardize this).
     QDir dir(fomodDir);
     QStringList preferred = {"screenshot.png", "screenshot.jpg"};
     for (const auto& p : preferred) {
@@ -220,9 +210,6 @@ void readLegacyInfo(const QString& fomodDir, FomodPlan& plan)
 
 void FomodParser::expandNestedFomods(const QString& extractRoot)
 {
-    // Walk up to one level deep; for each *.fomod file (NMM-style nested
-    // archive — typically 7z), extract it via 7z next to itself and remove
-    // the original. Errors are logged and skipped per-file.
     auto visit = [](const QString& dir) {
         QDir d(dir);
         for (const auto& fi : d.entryInfoList(QDir::Files)) {
@@ -249,12 +236,8 @@ void FomodParser::expandNestedFomods(const QString& extractRoot)
 
 std::optional<FomodPlan> FomodParser::parse(const QString& extractRoot)
 {
-    // Make legacy NMM-style nested .fomod archives visible before walking.
     expandNestedFomods(extractRoot);
 
-    // Resolve the real FOMOD root. Daemon's HasFomodInstaller and this parser
-    // must stay in sync — both walk up to three levels deep (root, immediate
-    // subdirs, sub-subdirs) so doubly-wrapped archives still detect.
     enum class Kind { None, ModuleConfig, LegacyInfo };
     auto findFomod = [](const QString& dir) -> std::tuple<QString, QString, Kind> {
         QString fomod = findChildCI(dir, "fomod");

@@ -15,73 +15,54 @@ import (
 	"strings"
 	"time"
 
-	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/download"
 )
 
-// seManifestFilename is the name of the per-game manifest dropped into the
-// game's install directory at extender install time. Lists every file the
-// extender installer copied, with its sha256 so we can detect a Steam game
-// update that wiped or mutated extender files.
 const seManifestFilename = ".gorganizer-script-extender.manifest"
 
 // seManifestEntry records one file from the installed extender tree.
 type seManifestEntry struct {
-	RelPath string // relative to game InstallPath
+	RelPath string
 	Size    int64
 	SHA256  string
 }
 
 // seInstallManifest is the on-disk record of what an extender install
-// dropped into the game dir. On launch we re-hash each listed file and
-// compare — any drift means a Steam update (or manual tamper) has
-// potentially broken the extender, and the user should reinstall rather
-// than launch into the vanilla game.
 type seInstallManifest struct {
 	GameID          string
 	ExtenderName    string
 	InstalledAtUTC  time.Time
-	SteamLastUpdate int64 // from appmanifest_<appid>.acf at install time
+	SteamLastUpdate int64
 	Entries         []seManifestEntry
 }
 
 // ScriptExtenderDef describes where to pull a script extender from plus
 // the post-extraction layout. Two source flavors are supported: a public
-// GitHub releases page (preferred — no account, no API key, works for
-// every user out of the box) and a Nexus mod page (fallback for
-// extenders whose upstream doesn't publish GitHub releases).
-//
-// DataSubdirs are directory names the installer creates under the game's
-// Data/ folder so plugin DLLs have a home even before the user drops
-// any in.
 type ScriptExtenderDef struct {
-	Name        string // user-facing label, e.g. "xNVSE"
-	LoaderExe   string // e.g. "nvse_loader.exe" — what tools.DetectTool looks for
+	Name        string
+	LoaderExe   string
 	DataSubdirs []string
 
-	// GitHub release source. When set, the daemon uses the public
-	// /releases/latest REST endpoint — no authentication, no git client,
-	// no Nexus account required. AssetSuffix filters which release asset
-	// to download (xNVSE ships its loader as a .7z archive).
-	GitHubRepo  string // "owner/repo", e.g. "xNVSE/NVSE"
-	AssetSuffix string // e.g. ".7z" — matches case-insensitively
+	GitHubRepo  string
+	AssetSuffix string
 
-	// Nexus fallback fields (used only when GitHubRepo is empty).
-	GameSlug string // Nexus domain, e.g. "newvegas"
+	GameSlug string
 	ModID    int
 }
 
-// KnownScriptExtenders covers the games the user listed as Linux-compat on
-// Bethesda titles. xNVSE is resolved from its public GitHub release page
-// (xNVSE/NVSE) so non-premium users don't need a Nexus account for the
-// one extender whose upstream publishes GitHub builds. The others still
-// resolve via Nexus because that's where their canonical builds live.
 var KnownScriptExtenders = map[string]ScriptExtenderDef{
 	"fallout3": {
 		Name: "FOSE", GameSlug: "fallout3", ModID: 8606,
 		LoaderExe: "fose_loader.exe", DataSubdirs: []string{"FOSE"},
 	},
 	"falloutnv": {
+		Name:        "xNVSE",
+		GitHubRepo:  "xNVSE/NVSE",
+		AssetSuffix: ".7z",
+		LoaderExe:   "nvse_loader.exe",
+		DataSubdirs: []string{"NVSE"},
+	},
+	"ttw": {
 		Name:        "xNVSE",
 		GitHubRepo:  "xNVSE/NVSE",
 		AssetSuffix: ".7z",
@@ -99,15 +80,11 @@ var KnownScriptExtenders = map[string]ScriptExtenderDef{
 }
 
 // gitHubReleaseAsset is the subset of the GitHub Releases REST payload
-// we need — asset filename and its direct download URL.
 type gitHubReleaseAsset struct {
 	Name               string `json:"name"`
 	BrowserDownloadURL string `json:"browser_download_url"`
 }
 
-// gitHubRelease mirrors the top-level shape returned by
-// /repos/{owner}/{repo}/releases/latest. TagName gets logged so the
-// installed version is traceable.
 type gitHubRelease struct {
 	TagName string               `json:"tag_name"`
 	Name    string               `json:"name"`
@@ -116,14 +93,6 @@ type gitHubRelease struct {
 
 // fetchLatestGitHubRelease grabs a repo's latest (non-draft, non-
 // prerelease) release from the GitHub REST API and downloads the first
-// asset whose filename ends in suffix (case-insensitive). The archive
-// is written to destDir and its local path returned alongside the
-// release tag.
-//
-// No authentication is used — the 60 req/hr/IP unauthenticated quota is
-// plenty for the "install once per game" workflow, and requiring auth
-// would put a git/GitHub prerequisite in the way of first-time users,
-// which is exactly what we're trying to avoid.
 func fetchLatestGitHubRelease(repo, suffix, destDir string) (archivePath, version string, err error) {
 	if repo == "" {
 		return "", "", errors.New("empty repo")
@@ -138,8 +107,6 @@ func fetchLatestGitHubRelease(repo, suffix, destDir string) (archivePath, versio
 	if err != nil {
 		return "", "", err
 	}
-	// GitHub requires a User-Agent on every REST call; omitting it gets
-	// a 403 with no useful body. The Accept header pins the v3 schema.
 	req.Header.Set("User-Agent", "gorganizer")
 	req.Header.Set("Accept", "application/vnd.github+json")
 
@@ -185,18 +152,10 @@ func fetchLatestGitHubRelease(repo, suffix, destDir string) (archivePath, versio
 
 // InstallScriptExtender resolves the latest build of the game's script
 // extender, downloads it, and extracts the archive into the game's
-// install directory (next to the exe — NOT Data/). The extender's own
-// plugin subfolder (SKSE/NVSE/FOSE/F4SE) inside Data/ is created so
-// user-installed plugins have a home.
-//
-// xNVSE ships public GitHub releases, so its build is pulled directly
-// from api.github.com — no Nexus account, no API key, no git client
-// required. The other extenders still resolve via Nexus until their
-// upstreams publish comparable release feeds.
 func (d *Daemon) InstallScriptExtender(gameID string) (string, error) {
-	gc, ok := d.config.Games[gameID]
-	if !ok {
-		return "", fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
+	gc, err := d.config.EffectiveGameConfig(gameID)
+	if err != nil {
+		return "", err
 	}
 	def, ok := KnownScriptExtenders[gameID]
 	if !ok {
@@ -234,8 +193,6 @@ func (d *Daemon) InstallScriptExtender(gameID string) (string, error) {
 		return "", fmt.Errorf("extracting: %w", err)
 	}
 
-	// Find the directory that holds the loader exe — the archive usually
-	// wraps everything in a versioned folder (e.g. xnvse_6_4_7/…).
 	srcRoot, err := findExtenderRoot(extractDir, def.LoaderExe)
 	if err != nil {
 		return "", err
@@ -244,8 +201,6 @@ func (d *Daemon) InstallScriptExtender(gameID string) (string, error) {
 		return "", fmt.Errorf("copying to install dir: %w", err)
 	}
 
-	// Ensure Data/{SKSE,NVSE,FOSE,F4SE} exists so plugin DLLs land
-	// somewhere sensible even before the user downloads any.
 	subpath := gc.DataSubpath
 	if subpath == "" {
 		subpath = "Data"
@@ -254,18 +209,14 @@ func (d *Daemon) InstallScriptExtender(gameID string) (string, error) {
 		_ = os.MkdirAll(filepath.Join(gc.InstallPath, subpath, sub), 0755)
 	}
 
-	// Record the tool on the game config so the Run button can find it
-	// without another filesystem probe.
-	gc.Tool = strings.ToLower(def.Name)
-	gc.ToolExe = def.LoaderExe
-	d.config.Games[gameID] = gc
+	saved := d.config.Games[gameID]
+	saved.Tool = strings.ToLower(def.Name)
+	saved.ToolExe = def.LoaderExe
+	d.config.Games[gameID] = saved
 	if err := d.config.Save(); err != nil {
 		slog.Warn("saving script extender tool config failed", "err", err)
 	}
 
-	// Write the install manifest. If this fails we still consider the
-	// install successful — the manifest is diagnostic, not essential —
-	// but log so users can spot the drift-detection blind spot.
 	if err := writeScriptExtenderManifest(gameID, def.Name, srcRoot, gc.InstallPath); err != nil {
 		slog.Warn("writing script-extender manifest failed — Steam-update drift detection will be disabled",
 			"game", gameID, "err", err)
@@ -276,20 +227,11 @@ func (d *Daemon) InstallScriptExtender(gameID string) (string, error) {
 		"version", versionLabel,
 		"destination", gc.InstallPath)
 
-	// Best-effort: make sure the Proton prefix has the DX9 and VC++
-	// runtimes the Bethesda DX9 engines rely on (heavy mod loadouts
-	// crash without them). Runs asynchronously against the shared
-	// prefix; a missing protontricks is surfaced as a warning rather
-	// than a hard failure so install still succeeds.
 	go d.ensurePrefixRuntime(gameID, gc)
 
 	return def.Name, nil
 }
 
-// fetchLatestFromNexus pulls the newest MAIN-category file for a Nexus-
-// hosted script extender into destDir. Kept as a dedicated path (not the
-// default anymore) because SKSE64, F4SE, and FOSE don't publish to GitHub
-// and Nexus is still the canonical source for those builds.
 func fetchLatestFromNexus(apiKey string, def ScriptExtenderDef, destDir string) (archivePath, version string, err error) {
 	if apiKey == "" {
 		return "", "", fmt.Errorf("nexus API key required for %s — paste one in Tools → Settings", def.Name)
@@ -331,8 +273,6 @@ func fetchLatestFromNexus(apiKey string, def ScriptExtenderDef, destDir string) 
 
 // writeScriptExtenderManifest records the sha256 of every file the extender
 // installer placed under installPath. Walks `srcRoot` (the extractor's
-// output root) to know exactly which files to track — walking installPath
-// would also pick up game files we don't own.
 func writeScriptExtenderManifest(gameID, extenderName, srcRoot, installPath string) error {
 	manifest := seInstallManifest{
 		GameID:         gameID,
@@ -356,7 +296,7 @@ func writeScriptExtenderManifest(gameID, extenderName, srcRoot, installPath stri
 		sum, size, hashErr := hashFile(target)
 		if hashErr != nil {
 			slog.Warn("manifest: could not hash installed file", "path", target, "err", hashErr)
-			return nil // best-effort
+			return nil
 		}
 		entries = append(entries, seManifestEntry{
 			RelPath: filepath.ToSlash(rel),
@@ -392,13 +332,6 @@ func hashFile(path string) (string, int64, error) {
 
 // saveScriptExtenderManifest writes a manifest as a minimal one-line-per-
 // entry text file so it's both human-readable and trivial to parse back
-// without pulling in a YAML dep. Format:
-//
-//	# game: falloutnv
-//	# extender: xNVSE
-//	# installed_at: 2026-04-23T...Z
-//	<sha256>  <size>  <relpath>
-//	...
 func saveScriptExtenderManifest(installPath string, m seInstallManifest) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# game: %s\n", m.GameID)
@@ -411,10 +344,6 @@ func saveScriptExtenderManifest(installPath string, m seInstallManifest) error {
 	return os.WriteFile(target, []byte(b.String()), 0644)
 }
 
-// loadScriptExtenderManifest reads the manifest from a game dir. Returns an
-// empty manifest (no error) when the file doesn't exist — a game that was
-// modded by an older gorganizer build has no manifest yet, and we degrade
-// gracefully instead of refusing to launch.
 func loadScriptExtenderManifest(installPath string) (*seInstallManifest, error) {
 	path := filepath.Join(installPath, seManifestFilename)
 	data, err := os.ReadFile(path)
@@ -465,17 +394,6 @@ func loadScriptExtenderManifest(installPath string) (*seInstallManifest, error) 
 
 // VerifyScriptExtenderManifest re-hashes every file in the manifest and
 // returns the list of entries whose sha256 no longer matches (missing
-// counts as a mismatch). An empty slice means the install is intact.
-// Missing manifest (pre-existing install) is also returned as OK so we
-// don't block users who installed before this check existed.
-//
-// Path resolution is case-insensitive component-wise: the manifest may
-// record `Data/NVSE/nvse_config.ini` but the active VFS view (assembled
-// from mods that pack `nvse/` lowercase) presents `Data/nvse/nvse_config.ini`.
-// On Linux that's a different file by `os.Stat` rules, but at runtime Wine
-// treats them as the same. Resolving case-insensitively keeps the manifest
-// check honest about content drift without flagging case-only differences
-// as "modified".
 func VerifyScriptExtenderManifest(installPath string) ([]string, error) {
 	m, err := loadScriptExtenderManifest(installPath)
 	if err != nil {
@@ -497,9 +415,6 @@ func VerifyScriptExtenderManifest(installPath string) ([]string, error) {
 
 // resolvePathCaseInsensitive walks `relPath` against `base` one component
 // at a time, matching each segment case-insensitively against the actual
-// directory entries. Returns the path with on-disk casing if every segment
-// matched; otherwise returns the unmodified `base/relPath` (so the caller's
-// hashFile produces a normal "missing" error rather than a different one).
 func resolvePathCaseInsensitive(base, relPath string) string {
 	parts := strings.Split(relPath, string(filepath.Separator))
 	cur := base
@@ -547,8 +462,6 @@ func streamTo(url, path string) error {
 
 // findExtenderRoot locates the directory containing the loader exe inside
 // the extracted archive. Walks at most two levels deep — every shipped
-// script extender archive either puts the loader at root or inside a
-// single version-named wrapper.
 func findExtenderRoot(extractDir, loaderExe string) (string, error) {
 	if _, err := os.Stat(filepath.Join(extractDir, loaderExe)); err == nil {
 		return extractDir, nil
@@ -571,7 +484,6 @@ func findExtenderRoot(extractDir, loaderExe string) (string, error) {
 
 // copyTree walks src and copies every file into dst, preserving relative
 // paths. Overwrites existing files — script extender updates are a full
-// replacement of prior versions.
 func copyTree(src, dst string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {

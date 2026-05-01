@@ -10,28 +10,24 @@ import (
 
 // GameConfig holds per-game configuration.
 type GameConfig struct {
-	Name        string `json:"name"`
-	InstallPath string `json:"install_path"`
-	DataSubpath string `json:"data_subpath"`
-	SteamAppID  int    `json:"steam_app_id"`
-	Tool        string `json:"tool,omitempty"`
-	ToolExe     string `json:"tool_exe,omitempty"`
-	ProtonPath  string `json:"proton_path,omitempty"`
+	Name             string `json:"name"`
+	InstallPath      string `json:"install_path"`
+	DataSubpath      string `json:"data_subpath"`
+	SteamAppID       int    `json:"steam_app_id"`
+	Tool             string `json:"tool,omitempty"`
+	ToolExe          string `json:"tool_exe,omitempty"`
+	ProtonPath       string `json:"proton_path,omitempty"`
+	LinkedFromGameID string `json:"linked_from_game_id,omitempty"`
 }
 
 // Config holds global daemon configuration, persisted as JSON.
 type Config struct {
-	Games       map[string]GameConfig `json:"games"`
-	LogLevel    string                `json:"log_level"`
-	NexusAPIKey string                `json:"nexus_api_key,omitempty"`
-	// PreferredProton is a path to a Proton build used whenever a game
-	// doesn't specify its own `proton_path`. When empty, the daemon picks
-	// the top-ranked detected build (Proton 11 > 10 > 9 > Experimental > Hotfix).
-	// The frontend writes this from the Settings dialog.
-	PreferredProton string `json:"preferred_proton,omitempty"`
+	Games           map[string]GameConfig `json:"games"`
+	LogLevel        string                `json:"log_level"`
+	NexusAPIKey     string                `json:"nexus_api_key,omitempty"`
+	PreferredProton string                `json:"preferred_proton,omitempty"`
 }
 
-// DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
 		Games:    make(map[string]GameConfig),
@@ -39,8 +35,7 @@ func DefaultConfig() *Config {
 	}
 }
 
-// Load reads config.json from ConfigDir(). Returns a default Config if the
-// file does not exist (first boot is not an error).
+// Load reads config.json from ConfigDir(); returns defaults when missing.
 func Load() (*Config, error) {
 	path := filepath.Join(ConfigDir(), "config.json")
 	data, err := os.ReadFile(path)
@@ -58,8 +53,7 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// Save writes config.json to ConfigDir() with 0600 permissions
-// (API key is sensitive).
+// Save writes config.json with 0600 perms since the API key is sensitive.
 func (c *Config) Save() error {
 	dir := ConfigDir()
 	if _, err := EnsureDir(dir); err != nil {
@@ -78,7 +72,6 @@ func (c *Config) Save() error {
 	return nil
 }
 
-// GameDataPath returns the full path to a game's Data directory.
 func (c *Config) GameDataPath(gameID string) (string, error) {
 	gc, ok := c.Games[gameID]
 	if !ok {
@@ -89,4 +82,31 @@ func (c *Config) GameDataPath(gameID string) (string, error) {
 		subpath = "Data"
 	}
 	return filepath.Join(gc.InstallPath, subpath), nil
+}
+
+// EffectiveGameConfig resolves a synthetic gameID to its runtime config,
+// inheriting install paths from the parent while keeping its own tooling.
+func (c *Config) EffectiveGameConfig(gameID string) (GameConfig, error) {
+	gc, ok := c.Games[gameID]
+	if !ok {
+		return GameConfig{}, fmt.Errorf("%w: %s", ErrInvalidGameID, gameID)
+	}
+	if gc.LinkedFromGameID == "" {
+		return gc, nil
+	}
+	parent, ok := c.Games[gc.LinkedFromGameID]
+	if !ok {
+		return GameConfig{}, fmt.Errorf("synthetic game %s links to missing parent %s",
+			gameID, gc.LinkedFromGameID)
+	}
+	merged := gc
+	merged.InstallPath = parent.InstallPath
+	if merged.DataSubpath == "" {
+		merged.DataSubpath = parent.DataSubpath
+	}
+	merged.SteamAppID = parent.SteamAppID
+	if merged.ProtonPath == "" {
+		merged.ProtonPath = parent.ProtonPath
+	}
+	return merged, nil
 }

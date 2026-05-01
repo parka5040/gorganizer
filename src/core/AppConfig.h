@@ -15,32 +15,30 @@ public:
     bool isFirstBoot() const;
     void markSetupComplete();
 
+    void setActiveGameShortName(const QString& shortName);
+    QString activeGameShortName() const;
+
+    // Deprecated appId-keyed shims kept one release for legacy daemons.
     void setActiveGameAppId(uint32_t appId);
     uint32_t activeGameAppId() const;
 
-    void setManagedGames(const std::vector<uint32_t>& appIds);
-    std::vector<uint32_t> managedGames() const;
+    void setManagedGames(const std::vector<QString>& shortNames);
+    std::vector<QString> managedGames() const;
+
+    void setManagedGamesByAppId(const std::vector<uint32_t>& appIds);
+    std::vector<uint32_t> managedGamesByAppId() const;
 
     void setPreferredStyle(const QString& style);
     QString preferredStyle() const;
 
-    // Appearance mode is the user's top-level Light/Dark/System choice.
-    // The dark *variant* (Dracula, Nord, ...) is preferredStyle() above; mode
-    // selects whether that variant is shown at all.
-    //   "system" — follow OS color scheme (default)
-    //   "light"  — force light.qss
-    //   "dark"   — force the variant from preferredStyle()
+    // Light/Dark/System appearance mode; "system" follows OS, "dark" uses preferredStyle().
     void setAppearanceMode(const QString& mode);
     QString appearanceMode() const;
 
-    // Per-game "last active profile" so the UI reopens on the profile the user
-    // actually left it on, not always "Default".
     void setLastProfileFor(const QString& gameShortName, const QString& profileName);
     QString lastProfileFor(const QString& gameShortName) const;
 
-    // Per-game "last selected Run target". Empty string means "game itself"
-    // (Steam launch); otherwise the tool ID (e.g. "xnvse") selected in the
-    // Run combo. Persisted so the combo restores the user's choice next run.
+    // Per-game last selected Run target (empty = launch game itself).
     void setLastToolFor(const QString& gameShortName, const QString& toolId);
     QString lastToolFor(const QString& gameShortName) const;
 

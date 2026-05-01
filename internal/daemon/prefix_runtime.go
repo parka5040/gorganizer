@@ -13,28 +13,11 @@ import (
 	"github.com/parka/gorganizer/internal/config"
 )
 
-// prefixRuntimeInstalled memoizes successful protontricks runs per app
-// ID so clicking "Install xNVSE" repeatedly (or two launches in quick
-// succession) doesn't re-hit Wine's MSI installer — winetricks is slow
-// and re-runs would stack dialogs on a non-quiet build. Persistent state
-// isn't needed: a daemon restart re-checks, but winetricks with `-q`
-// short-circuits already-installed packages in a few seconds.
 var (
 	prefixRuntimeInstalled   = map[int]bool{}
 	prefixRuntimeInstalledMu sync.Mutex
 )
 
-// prefixRuntimePackages maps internal gameIDs to the winetricks packages
-// a heavy modded loadout of that title needs inside the Proton prefix.
-// The DX9 Bethesda engines (Fallout 3/NV, Oblivion, Skyrim LE) drive
-// shader pipelines through d3dx9_XX.dll — Wine ships a stub that works
-// for vanilla but breaks under mods that call extension functions (ENB,
-// most body replacers, script-extender plugins that hook rendering).
-// vcrun2022 covers the MSVC redist xNVSE + extender plugins link against.
-// xact covers the audio redist FNV reaches for on first launch.
-//
-// DX11 titles (Skyrim SE, Fallout 4, Starfield) only need the MSVC
-// redistributable — Proton's DXVK handles the graphics stack natively.
 var prefixRuntimePackages = map[string][]string{
 	"falloutnv": {"vcrun2022", "d3dx9", "xact"},
 	"fallout3":  {"vcrun2022", "d3dx9", "xact"},
@@ -47,14 +30,6 @@ var prefixRuntimePackages = map[string][]string{
 
 // ensurePrefixRuntime runs protontricks against the game's Proton
 // prefix to install the Windows redistributables heavy mod loadouts
-// depend on (VC++ runtime, DirectX 9, XAudio). Safe to call multiple
-// times: winetricks in quiet mode skips anything already installed, and
-// we memoize successful runs for the daemon's lifetime.
-//
-// protontricks is declared as a runtime dependency — its absence is a
-// loud warning pointing the user at their package manager (the project
-// targets Artix and Gentoo alongside systemd distros, so we can't assume
-// any specific packaging).
 func (d *Daemon) ensurePrefixRuntime(gameID string, gc config.GameConfig) {
 	pkgs, ok := prefixRuntimePackages[gameID]
 	if !ok || len(pkgs) == 0 {
@@ -79,16 +54,9 @@ func (d *Daemon) ensurePrefixRuntime(gameID string, gc config.GameConfig) {
 		return
 	}
 
-	// Invoke winetricks through protontricks. The `-c` form hands a
-	// shell command to winetricks in-prefix; the `-q` flag inside that
-	// command puts winetricks in unattended mode so no GUI dialogs
-	// appear. `--no-bwrap` bypasses the bubblewrap sandbox, which
-	// often misfires on Arch/Artix kernels with restricted user NS.
 	script := "winetricks -q " + joinPkgs(pkgs)
 	args := []string{"--no-bwrap", "-c", script, strconv.Itoa(appID)}
 
-	// 15 minutes is generous — cold first-run winetricks can download
-	// ~300 MB of redists. Subsequent runs finish in seconds.
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 

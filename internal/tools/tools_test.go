@@ -77,7 +77,6 @@ func TestBuildSteamParityEnvCore(t *testing.T) {
 }
 
 func TestBuildSteamParityEnvWithDllOverrides(t *testing.T) {
-	// Clear any inherited WINEDLLOVERRIDES so the test result is deterministic.
 	t.Setenv("WINEDLLOVERRIDES", "")
 	env := buildSteamParityEnv("/compat/22380", "/steam", "22380", "/games/FNV",
 		"nvse_1_4=n,b;nvse_steam_loader=n,b")
@@ -97,10 +96,7 @@ func TestBuildSteamParityEnvWithDllOverrides(t *testing.T) {
 }
 
 func TestMergeDllOverridesOursWinsOnCollision(t *testing.T) {
-	// Ours should beat an inherited entry so a user exporting "nvse_1_4=b"
-	// in their shell can't silently disable our native-force.
 	merged := mergeDllOverrides("nvse_1_4=b;other=n", "nvse_1_4=n,b;d3dx9_38=n,b")
-	// Expect order: nvse_1_4 (from inherited, overwritten value), other, d3dx9_38.
 	entries := map[string]string{}
 	for _, p := range splitSemi(merged) {
 		k, v, _ := strings.Cut(p, "=")
@@ -128,18 +124,14 @@ func splitSemi(s string) []string {
 	return out
 }
 
-// TestEraAppropriateD3DX9 pins the era-matched DirectX 9 redist ExtraDll
-// for each DX9-era script extender. These are what the xNVSE setup
-// required; extending to FOSE/OBSE/SKSE/SKSE64 keeps mod compat parity.
-// A change here means someone deliberately decided to ship a different
-// d3dx9 version — update the expected map in lockstep.
+// TestEraAppropriateD3DX9 pins the era-matched DirectX 9 redist ExtraDll for each DX9-era script extender.
 func TestEraAppropriateD3DX9(t *testing.T) {
 	expected := map[string][]string{
 		"xnvse":  {"d3dx9_38.dll"},
 		"fose":   {"d3dx9_38.dll"},
 		"skse":   {"d3dx9_42.dll"},
 		"obse":   {"d3dx9_27.dll", "d3dx9_9.dll"},
-		"skse64": nil, // DX11 — no d3dx9 redist
+		"skse64": nil,
 		"f4se":   nil,
 		"sfse":   nil,
 	}
@@ -162,18 +154,15 @@ func TestEraAppropriateD3DX9(t *testing.T) {
 	}
 }
 
-// TestScanNativeDllsCombinesPrefixesAndExtras simulates a FOSE install
-// with both extender DLLs and the d3dx9_38.dll redist present. The
-// resulting override list must contain both categories and must not
-// double-count a DLL that matches both a prefix and an extra.
+// TestScanNativeDllsCombinesPrefixesAndExtras checks that prefix matches and extras combine without duplication.
 func TestScanNativeDllsCombinesPrefixesAndExtras(t *testing.T) {
 	dir := t.TempDir()
 	present := []string{
-		"fose_loader.exe",       // exe — must be ignored (non-.dll)
-		"fose_1_2b_ng.dll",      // prefix match
-		"fose_steam_loader.dll", // prefix match
-		"d3dx9_38.dll",          // ExtraDll match
-		"unrelated.dll",         // must NOT appear
+		"fose_loader.exe",
+		"fose_1_2b_ng.dll",
+		"fose_steam_loader.dll",
+		"d3dx9_38.dll",
+		"unrelated.dll",
 	}
 	for _, name := range present {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0644); err != nil {
@@ -182,7 +171,6 @@ func TestScanNativeDllsCombinesPrefixesAndExtras(t *testing.T) {
 	}
 	tool := KnownTools["fose"]
 	got := tool.ScanNativeDlls(dir)
-	// Build a set for order-insensitive comparison.
 	set := map[string]bool{}
 	for _, g := range got {
 		set[g] = true
@@ -201,13 +189,9 @@ func TestScanNativeDllsCombinesPrefixesAndExtras(t *testing.T) {
 	}
 }
 
-// TestScanNativeDllsSkipsMissingExtras verifies that ExtraDlls which
-// aren't on disk are silently skipped rather than showing up as
-// broken WINEDLLOVERRIDES entries. A vanilla Oblivion install without
-// the d3dx9_27 redist must still produce a working override string.
+// TestScanNativeDllsSkipsMissingExtras verifies missing ExtraDlls are silently skipped.
 func TestScanNativeDllsSkipsMissingExtras(t *testing.T) {
 	dir := t.TempDir()
-	// Only the extender DLL, no d3dx9 redist present.
 	if err := os.WriteFile(filepath.Join(dir, "obse_1_2_416.dll"), []byte("x"), 0644); err != nil {
 		t.Fatalf("writing fixture: %v", err)
 	}

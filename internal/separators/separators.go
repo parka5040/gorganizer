@@ -1,8 +1,4 @@
-// Package separators is per-profile storage for MO2-style mod-list
-// separators. Separators are a pure UI construct — they group mods
-// visually without affecting conflict resolution or load order. The
-// daemon never cares about them at launch time; we persist them here so
-// the Qt frontend can restore the user's visual layout across sessions.
+// Package separators is per-profile storage for MO2-style mod-list separators.
 package separators
 
 import (
@@ -15,30 +11,19 @@ import (
 )
 
 // Separator is a named row the user inserts between mods in Visual mode.
-// Depth is always 1 — separators cannot be nested.
 type Separator struct {
-	// Name is the user-facing label and the stable identifier referenced
-	// from each mod's metadata.yaml `separator:` field.
-	Name string
-	// VisualIndex is a 16-char lowercase hex string whose integer value
-	// determines the separator's row in Visual mode. Uses the same index
-	// space as mod visual indices (they sort together).
+	Name        string
 	VisualIndex string
-	// Collapsed persists the fold-out state of the separator so Visual
-	// mode reopens exactly where the user left it.
-	Collapsed bool
+	Collapsed   bool
 }
 
-// Index returns the separator's visual index as a uint64. Returns 0 on
-// parse failure, which naturally sorts the separator to the top —
-// matches the "fall back to beginning" expectation.
+// Index returns the separator's visual index as a uint64; 0 on parse failure.
 func (s Separator) Index() uint64 {
 	v, _ := strconv.ParseUint(strings.TrimSpace(s.VisualIndex), 16, 64)
 	return v
 }
 
-// Load reads separators.yaml from the given profile directory. Missing
-// file → empty list + nil error (first-use case).
+// Load reads separators.yaml from the given profile directory.
 func Load(profileDir string) ([]Separator, error) {
 	path := filepath.Join(profileDir, "separators.yaml")
 	f, err := os.Open(path)
@@ -90,9 +75,7 @@ func Load(profileDir string) ([]Separator, error) {
 	return out, scanner.Err()
 }
 
-// Save writes separators.yaml atomically. Creates the profile dir if
-// needed. An empty list produces an empty-list file rather than
-// deleting — simplifies the read-modify-write cycle the RPC uses.
+// Save writes separators.yaml atomically.
 func Save(profileDir string, sep []Separator) error {
 	if err := os.MkdirAll(profileDir, 0755); err != nil {
 		return fmt.Errorf("creating %s: %w", profileDir, err)
@@ -114,14 +97,12 @@ func Save(profileDir string, sep []Separator) error {
 	return os.Rename(tmp, path)
 }
 
-// FormatIndex converts a uint64 into the canonical 16-hex-char form
-// used in the yaml. Zero-padded so string sort == numeric sort.
+// FormatIndex converts a uint64 to the 16-hex-char form used in the yaml.
 func FormatIndex(v uint64) string {
 	return fmt.Sprintf("%016x", v)
 }
 
-// ParseIndex returns the numeric value of a hex index string, or 0 on
-// parse failure.
+// ParseIndex returns the numeric value of a hex index string, or 0.
 func ParseIndex(s string) uint64 {
 	v, _ := strconv.ParseUint(strings.TrimSpace(s), 16, 64)
 	return v

@@ -16,8 +16,13 @@ struct GameInfo {
     std::filesystem::path dataDir;
     bool detected = false;
 
+    bool synthetic = false;
+    QString linkedFromShortName;
+    bool vfsActive = false;
+
     static const std::vector<GameInfo>& knownGames();
     static std::optional<GameInfo> findIn(const std::vector<GameInfo>& games, uint32_t appId);
+    static std::optional<GameInfo> findByShortName(const QString& shortName);
 };
 
 } // namespace gorganizer

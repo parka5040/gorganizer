@@ -39,7 +39,7 @@ SplashScreen::SplashScreen(GrpcClient* grpc, QWidget* parent)
     layout->addWidget(m_stepLabel);
 
     m_bar = new QProgressBar;
-    m_bar->setRange(0, 0); // indeterminate
+    m_bar->setRange(0, 0);
     m_bar->setTextVisible(false);
     layout->addWidget(m_bar);
 
@@ -50,7 +50,6 @@ SplashScreen::SplashScreen(GrpcClient* grpc, QWidget* parent)
     hint->setStyleSheet("color: gray; font-size: 10pt;");
     layout->addWidget(hint);
 
-    // Center on the primary screen.
     if (auto* screen = QApplication::primaryScreen()) {
         QRect g = screen->geometry();
         move(g.center().x() - width() / 2, g.center().y() - height() / 2);
@@ -84,8 +83,6 @@ void SplashScreen::poll()
             return;
         }
     } else {
-        // Don't surface every transient error to the user — the channel
-        // can briefly miss while the daemon binds. Just keep polling.
         m_stepLabel->setText("Waiting for daemon...");
     }
 

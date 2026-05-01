@@ -75,8 +75,6 @@ void GrpcClient::connectToDaemon()
 
     m_channel = grpc::CreateChannel(socketTarget(), grpc::InsecureChannelCredentials());
 
-    // Unary RPCs on one worker. Streams each get their own so a blocking
-    // Read() can't starve a queued unary call.
     m_worker = new GrpcWorker(m_channel);
     m_workerThread = new QThread(this);
     m_worker->moveToThread(m_workerThread);
@@ -108,10 +106,6 @@ void GrpcClient::connectToDaemon()
     m_installThread->start();
     m_pluginStatusThread->start();
     m_connectionTimer->start();
-    // Kick off a check on the next event-loop tick so we don't sit at
-    // "Disconnected" for 5 s waiting for the timer's first fire. The
-    // singleShot avoids re-entering the channel state machine before
-    // grpc::CreateChannel has finished its asynchronous setup.
     QTimer::singleShot(0, this, &GrpcClient::onCheckConnection);
 }
 
@@ -124,14 +118,6 @@ void GrpcClient::disconnectFromDaemon()
     if (m_installWorker) m_installWorker->stop();
     if (m_pluginStatusWorker) m_pluginStatusWorker->stop();
 
-    // wait(3000) per thread is normally plenty: stop() fires TryCancel
-    // on streams, and Tier 1.7's per-RPC deadlines bound any unary call
-    // in flight. If a thread *still* hasn't finished, deleting the
-    // worker out from under a live stub is the documented Qt path to a
-    // crash on app teardown — so leak the thread instead and let Qt's
-    // parent-child cleanup reap it on ~GrpcClient (which itself happens
-    // after all threads have been signaled stopped). Better a one-time
-    // cleanup leak than a heisenbug crash.
     auto shutdown = [](QThread*& t, GrpcWorker*& w, const char* tag) {
         if (!t) return;
         t->quit();
@@ -139,8 +125,6 @@ void GrpcClient::disconnectFromDaemon()
             qWarning("GrpcClient: %s thread did not exit within 3s; "
                      "leaking it to avoid use-after-free on the gRPC stub",
                      tag);
-            // Detach: don't delete worker or thread; ~QObject will
-            // tear them down when GrpcClient itself goes away.
             t = nullptr;
             w = nullptr;
             return;
@@ -154,9 +138,6 @@ void GrpcClient::disconnectFromDaemon()
     shutdown(m_installThread, m_installWorker, "install-stream");
     shutdown(m_pluginStatusThread, m_pluginStatusWorker, "plugin-status-stream");
 
-    // Reset the channel only after every thread has confirmed exit. A
-    // worker that's still inside m_stub->XYZ(...) holds a stub backed
-    // by this channel; resetting it under their feet is UAF.
     m_channel.reset();
 
     if (m_connected) {
@@ -180,8 +161,6 @@ void GrpcClient::onCheckConnection()
         emit disconnected();
     }
 }
-
-// --- Delegating async methods ---
 
 void GrpcClient::listGames() { QMetaObject::invokeMethod(m_worker, &GrpcWorker::doListGames); }
 void GrpcClient::detectGames() { QMetaObject::invokeMethod(m_worker, &GrpcWorker::doDetectGames); }
@@ -241,6 +220,13 @@ void GrpcClient::setModList(const QString& gameId, const QString& profileName,
 void GrpcClient::mountVfs(const QString& gameId, const QString& profileName)
 {
     QMetaObject::invokeMethod(m_worker, [this, gameId, profileName] { m_worker->doMountVfs(gameId, profileName); });
+}
+
+void GrpcClient::mountVfsWithSwap(const QString& gameId, const QString& profileName)
+{
+    QMetaObject::invokeMethod(m_worker, [this, gameId, profileName] {
+        m_worker->doMountVfsWithSwap(gameId, profileName);
+    });
 }
 
 void GrpcClient::unmountVfs(const QString& gameId)
@@ -324,8 +310,6 @@ void GrpcClient::subscribeEvents(const QString& gameId)
 {
     if (gameId == m_subscribedGame && m_archiveWorker && m_installWorker) return;
 
-    // Cancel the running streams (if any) so the worker loops exit, then
-    // re-invoke with the new gameId.
     if (m_archiveWorker) m_archiveWorker->cancelActiveStream();
     if (m_installWorker) m_installWorker->cancelActiveStream();
     m_subscribedGame = gameId;
@@ -349,8 +333,6 @@ void GrpcClient::unsubscribeEvents()
 void GrpcClient::subscribePluginStatus(const QString& gameId, const QString& profileName)
 {
     if (!m_pluginStatusWorker) return;
-    // Cancel any in-flight stream so the worker loop exits before we
-    // dispatch the new (gameId, profileName).
     m_pluginStatusWorker->cancelActiveStream();
     if (gameId.isEmpty() || profileName.isEmpty()) return;
     QMetaObject::invokeMethod(m_pluginStatusWorker, [this, gameId, profileName] {
@@ -376,8 +358,6 @@ void GrpcClient::shutdownDaemon()
 bool GrpcClient::shutdownDaemonSync(int rpcTimeoutMs, int pollTimeoutMs, QString& errorOut)
 {
     if (!m_channel) { errorOut = "not connected"; return false; }
-    // Inline stub creation: makeStub() lives in an anonymous namespace
-    // declared lower in this file, so we can't call it from up here.
     auto stub = gorganizer::v1::Gorganizer::NewStub(m_channel);
     grpc::ClientContext ctx;
     ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(rpcTimeoutMs));
@@ -386,16 +366,8 @@ bool GrpcClient::shutdownDaemonSync(int rpcTimeoutMs, int pollTimeoutMs, QString
     auto s = stub->Shutdown(&ctx, req, &resp);
     if (!s.ok()) {
         errorOut = QString::fromStdString(s.error_message());
-        // Don't return early — the daemon may already be on its way
-        // out (stream cancellation can race the RPC return). Fall
-        // through to the socket-poll which is the authoritative
-        // signal: ipc.Server.Stop() removes the socket on graceful
-        // shutdown.
     }
 
-    // Poll for socket disappearance. The daemon's graceful Stop()
-    // removes the socket file as its last act, so its absence is a
-    // strong signal that the daemon's gRPC server has fully exited.
     const char* xdgRuntime = std::getenv("XDG_RUNTIME_DIR");
     QString sockPath = QString::fromUtf8(xdgRuntime ? xdgRuntime : "/tmp")
                        + "/gorganizer/gorganizer.sock";
@@ -408,8 +380,6 @@ bool GrpcClient::shutdownDaemonSync(int rpcTimeoutMs, int pollTimeoutMs, QString
     if (errorOut.isEmpty()) errorOut = "daemon did not exit within timeout";
     return false;
 }
-
-// --- Synchronous helpers ---
 
 namespace {
 std::unique_ptr<gorganizer::v1::Gorganizer::Stub> makeStub(std::shared_ptr<grpc::Channel> channel)
@@ -844,6 +814,18 @@ bool GrpcClient::setPreferredProton(const QString& path, QString& errorOut)
     return true;
 }
 
+void GrpcClient::setActiveGame(const QString& gameId)
+{
+    if (!m_channel) return;
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    gorganizer::v1::SetActiveGameRequest req;
+    req.set_game_id(gameId.toStdString());
+    gorganizer::v1::SetActiveGameResponse resp;
+    auto s = stub->SetActiveGame(&ctx, req, &resp);
+    (void)s;
+}
+
 bool GrpcClient::installScriptExtender(const QString& gameId, QString& nameOut, QString& errorOut)
 {
     if (!m_channel) { errorOut = "not connected"; return false; }
@@ -865,9 +847,6 @@ bool GrpcClient::install4GBPatcher(const QString& gameId, QString& patcherExePat
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
-    // 5 min deadline matches InstallScriptExtender — Nexus CDN throughput
-    // varies by region and the archive itself is small but free-tier rate
-    // limits can stall the request.
     ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::minutes(5));
     gorganizer::v1::Install4GBPatcherRequest req;
     req.set_game_id(gameId.toStdString());
@@ -908,6 +887,272 @@ bool GrpcClient::is4GBPatched(const QString& gameId)
     auto s = stub->Get4GBPatchStatus(&ctx, req, &resp);
     if (!s.ok()) return false;
     return resp.patched();
+}
+
+bool GrpcClient::checkTTWPrereqs(int backend, GrpcTTWPrereqStatus& out, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(15));
+    gorganizer::v1::CheckTTWPrereqsRequest req;
+    req.set_backend(static_cast<gorganizer::v1::TTWBackend>(backend));
+    gorganizer::v1::CheckTTWPrereqsResponse resp;
+    auto s = stub->CheckTTWPrereqs(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    out.backend = static_cast<int>(resp.backend());
+    out.gstreamerInstalled = resp.gstreamer_installed();
+    out.gstreamerCodecsHint = QString::fromStdString(resp.gstreamer_codecs_hint());
+    out.xdeltaInstalled = resp.xdelta_installed();
+    out.diskSpaceAvailable = resp.disk_space_available();
+    out.diskSpaceRequired = resp.disk_space_required();
+    out.fnvVanilla = resp.fnv_vanilla();
+    out.mpiInstallerPath = QString::fromStdString(resp.mpi_installer_path());
+    out.mpiInstallerVersion = QString::fromStdString(resp.mpi_installer_version());
+    out.prefixExists = resp.prefix_exists();
+    out.hasDotnet48 = resp.has_dotnet48();
+    out.dotnet48ReleaseRev = resp.dotnet48_release_rev();
+    out.hasMsxml6 = resp.has_msxml6();
+    out.hasVcrun2022 = resp.has_vcrun2022();
+    out.hasCorefonts = resp.has_corefonts();
+    out.monoNeedsRemoval = resp.mono_needs_removal();
+    out.steamRunning = resp.steam_running();
+    out.protontricksAvailable = resp.protontricks_available();
+    out.winetricksAvailable = resp.winetricks_available();
+    out.missing.clear();
+    for (const auto& m : resp.missing())
+        out.missing.append(QString::fromStdString(m));
+    return true;
+}
+
+bool GrpcClient::checkTTWDiskSpace(int64_t& availableOut, int64_t& requiredOut, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+    gorganizer::v1::CheckTTWDiskSpaceRequest req;
+    gorganizer::v1::CheckTTWDiskSpaceResponse resp;
+    auto s = stub->CheckTTWDiskSpace(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    availableOut = resp.available();
+    requiredOut = resp.required();
+    return true;
+}
+
+bool GrpcClient::checkFNVNotMounted(QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+    gorganizer::v1::CheckFNVNotMountedRequest req;
+    gorganizer::v1::CheckFNVNotMountedResponse resp;
+    auto s = stub->CheckFNVNotMounted(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    return true;
+}
+
+bool GrpcClient::prepareTTWInstaller(const QString& userPath, int backend,
+                                     GrpcTTWInstallerInfo& out, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(15));
+    gorganizer::v1::PrepareTTWInstallerRequest req;
+    req.set_user_path(userPath.toStdString());
+    req.set_backend(static_cast<gorganizer::v1::TTWBackend>(backend));
+    gorganizer::v1::PrepareTTWInstallerResponse resp;
+    auto s = stub->PrepareTTWInstaller(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    out.backend = static_cast<int>(resp.backend());
+    out.mpiFile = QString::fromStdString(resp.mpi_file());
+    out.installerExe = QString::fromStdString(resp.installer_exe());
+    out.version = QString::fromStdString(resp.version());
+    out.alternateMpis.clear();
+    for (const auto& m : resp.alternate_mpis())
+        out.alternateMpis.append(QString::fromStdString(m));
+    return true;
+}
+
+bool GrpcClient::createBlankTTWMod(const QString& modName, QString& modDirOut, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
+    gorganizer::v1::CreateBlankTTWModRequest req;
+    req.set_mod_name(modName.toStdString());
+    gorganizer::v1::CreateBlankTTWModResponse resp;
+    auto s = stub->CreateBlankTTWMod(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    modDirOut = QString::fromStdString(resp.mod_dir());
+    return true;
+}
+
+bool GrpcClient::ensureNativeMpiInstaller(QString& pathOut, QString& versionOut, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::minutes(2));
+    gorganizer::v1::EnsureNativeMpiInstallerRequest req;
+    gorganizer::v1::EnsureNativeMpiInstallerResponse resp;
+    auto s = stub->EnsureNativeMpiInstaller(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    pathOut = QString::fromStdString(resp.path());
+    versionOut = QString::fromStdString(resp.version());
+    return true;
+}
+
+bool GrpcClient::bootstrapFNVPrefix(QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::minutes(2));
+    gorganizer::v1::BootstrapFNVPrefixRequest req;
+    gorganizer::v1::BootstrapFNVPrefixResponse resp;
+    auto s = stub->BootstrapFNVPrefix(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    return true;
+}
+
+bool GrpcClient::installTTWPrereqs(QString& installIdOut, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
+    gorganizer::v1::InstallTTWPrereqsRequest req;
+    gorganizer::v1::InstallTTWPrereqsResponse resp;
+    auto s = stub->InstallTTWPrereqs(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    installIdOut = QString::fromStdString(resp.install_id());
+    return true;
+}
+
+bool GrpcClient::launchTTWInstaller(const GrpcTTWInstallerInfo& info, const QString& dataModName,
+                                    QString& installIdOut, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(15));
+    gorganizer::v1::LaunchTTWInstallerRequest req;
+    auto* infoMsg = req.mutable_info();
+    infoMsg->set_backend(static_cast<gorganizer::v1::TTWBackend>(info.backend));
+    infoMsg->set_mpi_file(info.mpiFile.toStdString());
+    infoMsg->set_installer_exe(info.installerExe.toStdString());
+    infoMsg->set_version(info.version.toStdString());
+    for (const auto& alt : info.alternateMpis)
+        infoMsg->add_alternate_mpis(alt.toStdString());
+    req.set_data_mod_name(dataModName.toStdString());
+    gorganizer::v1::LaunchTTWInstallerResponse resp;
+    auto s = stub->LaunchTTWInstaller(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    installIdOut = QString::fromStdString(resp.install_id());
+    return true;
+}
+
+bool GrpcClient::cancelTTWInstaller(const QString& installId, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
+    gorganizer::v1::CancelTTWInstallerRequest req;
+    req.set_install_id(installId.toStdString());
+    gorganizer::v1::CancelTTWInstallerResponse resp;
+    auto s = stub->CancelTTWInstaller(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    return true;
+}
+
+bool GrpcClient::getTTWInstallResult(const QString& installId, bool block,
+                                     GrpcTTWInstallResult& out, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() +
+                     (block ? std::chrono::seconds(3600) : std::chrono::seconds(5)));
+    gorganizer::v1::GetTTWInstallResultRequest req;
+    req.set_install_id(installId.toStdString());
+    req.set_block(block);
+    gorganizer::v1::GetTTWInstallResultResponse resp;
+    auto s = stub->GetTTWInstallResult(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    out.installerExitCode = resp.installer_exit_code();
+    out.layoutFixed = resp.layout_fixed();
+    out.dataModFileCount = resp.data_mod_file_count();
+    out.dataModBytes = resp.data_mod_bytes();
+    out.changedExesInRoot.clear();
+    for (const auto& d : resp.changed_exes_in_root()) {
+        GrpcTTWExeDelta dd;
+        dd.relPath = QString::fromStdString(d.rel_path());
+        dd.kind = QString::fromStdString(d.kind());
+        dd.size = d.size();
+        dd.mtime = QString::fromStdString(d.mtime());
+        dd.sha256 = QString::fromStdString(d.sha256());
+        out.changedExesInRoot.push_back(std::move(dd));
+    }
+    out.dataModExes.clear();
+    for (const auto& d : resp.data_mod_exes()) {
+        GrpcTTWExeDelta dd;
+        dd.relPath = QString::fromStdString(d.rel_path());
+        dd.kind = QString::fromStdString(d.kind());
+        dd.size = d.size();
+        dd.mtime = QString::fromStdString(d.mtime());
+        dd.sha256 = QString::fromStdString(d.sha256());
+        out.dataModExes.push_back(std::move(dd));
+    }
+    return true;
+}
+
+bool GrpcClient::setTTWLauncherExe(const QString& relPath, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+    gorganizer::v1::SetTTWLauncherExeRequest req;
+    req.set_rel_path(relPath.toStdString());
+    gorganizer::v1::SetTTWLauncherExeResponse resp;
+    auto s = stub->SetTTWLauncherExe(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    return true;
+}
+
+bool GrpcClient::verifyTTWIntegrity(QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+    gorganizer::v1::VerifyTTWIntegrityRequest req;
+    gorganizer::v1::VerifyTTWIntegrityResponse resp;
+    auto s = stub->VerifyTTWIntegrity(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    return true;
+}
+
+bool GrpcClient::translateWinePath(const QString& gameId, const QString& unixPath,
+                                   QString& winePathOut, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+    gorganizer::v1::TranslateWinePathRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_unix_path(unixPath.toStdString());
+    gorganizer::v1::TranslateWinePathResponse resp;
+    auto s = stub->TranslateWinePath(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    winePathOut = QString::fromStdString(resp.wine_path());
+    return true;
 }
 
 bool GrpcClient::getGameSettings(const QString& gameId, GrpcGameSettings& settingsOut, QString& errorOut)
@@ -1064,8 +1309,6 @@ bool GrpcClient::health(GrpcReadiness& out, QString& errorOut)
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
-    // Tight deadline: the splash polls this on a short cadence and a
-    // hung daemon must not stall the GUI thread.
     ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
     gorganizer::v1::HealthRequest req;
     gorganizer::v1::Readiness resp;
@@ -1075,10 +1318,6 @@ bool GrpcClient::health(GrpcReadiness& out, QString& errorOut)
     out.recoveryDone = resp.recovery_done();
     out.gamesWarmed = resp.games_warmed();
     out.lastInitStep = QString::fromStdString(resp.last_init_step());
-    // A successful Health round-trip is unambiguous proof of connectivity —
-    // skip the 5s channel-state poll and flip the user-visible flag now so
-    // the splash hands off to MainWindow with the indicator already green
-    // and feature gates already passing.
     if (!m_connected) {
         m_connected = true;
         emit connected();

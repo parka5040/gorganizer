@@ -20,12 +20,7 @@ class QVBoxLayout;
 
 namespace gorganizer {
 
-// IniEditorDialog is a tabbed text editor for a profile's managed INI
-// files. Each tab corresponds to one Bethesda INI (e.g. Fallout.ini,
-// FalloutCustom.ini, FalloutPrefs.ini). A "Custom INI active" toggle
-// controls whether the profile's copies get pushed into the game's
-// Documents/My Games directory at launch. When the toggle is off, edits
-// are stored but have no effect on the game.
+// Tabbed text editor for a profile's managed INI files.
 class IniEditorDialog : public QDialog {
     Q_OBJECT
 public:
@@ -77,26 +72,19 @@ private:
     QComboBox* m_resolutionPreset = nullptr;
     QSpinBox* m_resolutionWidth = nullptr;
     QSpinBox* m_resolutionHeight = nullptr;
-    QComboBox* m_resolutionTarget = nullptr; // which INI file to write to
+    QComboBox* m_resolutionTarget = nullptr;
     QLabel* m_resolutionStatus = nullptr;
 
-    // Find bar (Ctrl+F) — pinned below the tabs, searches the currently
-    // active editor. Stays collapsed until the shortcut fires.
     QWidget* m_findBar = nullptr;
     QLineEdit* m_findInput = nullptr;
     QLabel* m_findStatus = nullptr;
 
     void buildTweaksTab();
-    // Takes the ListProfileIniFiles result so the target-file dropdown
-    // can be populated at construction time. Building against m_handles
-    // would be empty here because the editor tabs are built after this
-    // call (see reload()).
+    // Built at construction time from ListProfileIniFiles since editor tabs come later.
     void buildResolutionTab(const std::vector<GrpcProfileIniFile>& files);
     void buildFindBar(QVBoxLayout* parentLayout);
     QPlainTextEdit* currentEditor() const;
-    // Patches the two resolution keys (iWidth, iHeight) in [Display] of
-    // the target file's current editor content. If the file isn't open
-    // as an editor tab, writes through the daemon's SaveProfileIniFile RPC.
+    // Patches iWidth/iHeight in [Display] of the target file's editor or via SaveProfileIniFile.
     void applyResolutionTo(const QString& filename, int width, int height);
 };
 

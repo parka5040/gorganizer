@@ -14,13 +14,8 @@ import (
 )
 
 // IndexEntry is a single archive row in the per-game Downloads index.
-// `Hidden` persists across sessions (frontend-aesthetic flag). `Installed` is
-// derived from scanning installed mods' source_archives, not stored.
-// `Uninstalled` is sticky — set by delete-mod / uninstall flows so the
-// Downloads tab can render the "previously installed" state distinctly from
-// a fresh DOWNLOADED archive.
 type IndexEntry struct {
-	Path        string // relative to DownloadsDir(gameID)
+	Path        string
 	ModID       int
 	FileID      int
 	Hidden      bool
@@ -32,9 +27,7 @@ type DownloadsIndex struct {
 	Archives []IndexEntry
 }
 
-// ArchiveSidecar is the per-archive Nexus metadata cache written next to
-// each downloaded archive as <archive>.meta.yaml. Field names mirror the v3
-// MinimalMod / MinimalModFile shape from openapi.yaml.
+// ArchiveSidecar is the per-archive Nexus metadata written as <archive>.meta.yaml.
 type ArchiveSidecar struct {
 	ModID           int
 	ModName         string
@@ -42,16 +35,15 @@ type ArchiveSidecar struct {
 	ThumbnailURL    string
 	AdultContent    bool
 	FileID          int
-	FileName        string // human-readable file title
-	FileArchiveName string // on-disk archive filename
+	FileName        string
+	FileArchiveName string
 	Version         string
-	Category        string // main|update|optional|old_version|miscellaneous
-	UploadedAt      string // ISO 8601
-	DownloadedAt    string // ISO 8601
+	Category        string
+	UploadedAt      string
+	DownloadedAt    string
 	SizeBytes       int64
 }
 
-// indexMutexes serializes index reads/writes per game.
 var (
 	indexMuOnce sync.Once
 	indexMu     map[string]*sync.Mutex
@@ -70,8 +62,7 @@ func indexLock(gameID string) *sync.Mutex {
 	return m
 }
 
-// LoadIndex reads {DownloadsDir(gameID)}/metadata.yaml. Returns an empty
-// index (no error) when the file does not exist.
+// LoadIndex reads the per-game downloads index, returning empty on missing file.
 func LoadIndex(gameID string) (*DownloadsIndex, error) {
 	path := filepath.Join(config.DownloadsDir(gameID), "metadata.yaml")
 	f, err := os.Open(path)
@@ -127,7 +118,7 @@ func LoadIndex(gameID string) (*DownloadsIndex, error) {
 	return idx, scanner.Err()
 }
 
-// SaveIndex writes the index atomically (temp + rename).
+// SaveIndex writes the index atomically.
 func SaveIndex(gameID string, idx *DownloadsIndex) error {
 	dir := config.DownloadsDir(gameID)
 	if _, err := config.EnsureDir(dir); err != nil {
@@ -166,8 +157,6 @@ func UpsertEntry(gameID string, entry IndexEntry) error {
 	replaced := false
 	for i, e := range idx.Archives {
 		if e.Path == entry.Path {
-			// Preserve hidden flag if caller didn't change it — caller can
-			// always overwrite explicitly by setting the field.
 			idx.Archives[i] = entry
 			replaced = true
 			break
@@ -179,7 +168,7 @@ func UpsertEntry(gameID string, entry IndexEntry) error {
 	return SaveIndex(gameID, idx)
 }
 
-// RemoveEntry drops an entry by path. No-op if missing.
+// RemoveEntry drops an entry by path; no-op if missing.
 func RemoveEntry(gameID, relPath string) error {
 	mu := indexLock(gameID)
 	mu.Lock()
@@ -199,11 +188,7 @@ func RemoveEntry(gameID, relPath string) error {
 	return SaveIndex(gameID, idx)
 }
 
-// SetUninstalled toggles the sticky Uninstalled flag on a single index
-// entry. Called by UninstallMod (true) and by StartInstall (false) so the
-// Downloads tab renders the right phase after a mod's lifecycle change.
-// No-op if the archive isn't in the index — that's treated as a legitimate
-// "archive was deleted before the mod was uninstalled" case.
+// SetUninstalled toggles the sticky Uninstalled flag on a single index entry.
 func SetUninstalled(gameID, relPath string, uninstalled bool) error {
 	mu := indexLock(gameID)
 	mu.Lock()
@@ -241,8 +226,7 @@ func SetHidden(gameID, relPath string, hidden bool) error {
 	return fmt.Errorf("archive %q not in index", relPath)
 }
 
-// SetHiddenBulk sets the hidden flag for every entry matching `pred`.
-// One index write regardless of how many entries flip.
+// SetHiddenBulk sets the hidden flag for every entry matching pred.
 func SetHiddenBulk(gameID string, hidden bool, pred func(IndexEntry) bool) error {
 	mu := indexLock(gameID)
 	mu.Lock()
@@ -260,13 +244,11 @@ func SetHiddenBulk(gameID string, hidden bool, pred func(IndexEntry) bool) error
 	return SaveIndex(gameID, idx)
 }
 
-// SidecarPath returns the .meta.yaml path for a given archive.
 func SidecarPath(archivePath string) string {
 	return archivePath + ".meta.yaml"
 }
 
-// SaveSidecar writes the per-archive metadata alongside the archive. `at`
-// stamps `downloaded_at` (pass time.Now() for new downloads).
+// SaveSidecar writes the per-archive metadata alongside the archive.
 func SaveSidecar(archivePath string, s ArchiveSidecar, at time.Time) error {
 	if s.DownloadedAt == "" {
 		s.DownloadedAt = at.UTC().Format(time.RFC3339)
@@ -290,8 +272,7 @@ func SaveSidecar(archivePath string, s ArchiveSidecar, at time.Time) error {
 	return os.WriteFile(SidecarPath(archivePath), []byte(b.String()), 0644)
 }
 
-// LoadSidecar reads the per-archive .meta.yaml. Returns an error wrapped
-// around os.ErrNotExist if missing.
+// LoadSidecar reads the per-archive .meta.yaml.
 func LoadSidecar(archivePath string) (*ArchiveSidecar, error) {
 	path := SidecarPath(archivePath)
 	f, err := os.Open(path)
@@ -346,7 +327,6 @@ func LoadSidecar(archivePath string) (*ArchiveSidecar, error) {
 }
 
 // SanitizeForFolder makes a Nexus mod name safe to use as a directory name.
-// Keeps alnum, space, dash, underscore, dot, parens, apostrophe.
 func SanitizeForFolder(s string) string {
 	var b strings.Builder
 	for _, r := range s {
@@ -364,8 +344,7 @@ func SanitizeForFolder(s string) string {
 	return strings.TrimSpace(b.String())
 }
 
-// NormalizeCategory maps v1 Nexus CATEGORY_NAME (uppercase) to the v3
-// enum names used in the sidecar. Unknown values pass through lowercased.
+// NormalizeCategory maps v1 Nexus CATEGORY_NAME to the v3 enum names.
 func NormalizeCategory(v1Name string) string {
 	switch strings.ToUpper(strings.TrimSpace(v1Name)) {
 	case "MAIN":

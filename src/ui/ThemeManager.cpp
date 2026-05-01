@@ -31,8 +31,6 @@ bool ThemeManager::isDarkVariant(const QString& name)
 
 bool ThemeManager::systemPrefersDark()
 {
-    // Qt 6.5+ exposes the OS color scheme via QStyleHints. On older Qt or
-    // when the platform doesn't report a scheme, default to light.
     if (auto* hints = QGuiApplication::styleHints())
         return hints->colorScheme() == Qt::ColorScheme::Dark;
     return false;
@@ -40,8 +38,6 @@ bool ThemeManager::systemPrefersDark()
 
 void ThemeManager::applyTheme(const QString& name)
 {
-    // Legacy entry point. "Default" used to mean unstyled Fusion (light);
-    // map it onto the new Light theme so existing config files keep working.
     if (name.isEmpty() || name == "Default" || name == "Light") {
         QString qss = qssForTheme("Light");
         qApp->setStyleSheet(qss);
@@ -68,7 +64,6 @@ void ThemeManager::applyMode(const QString& mode, const QString& darkVariant)
         applyTheme(variant);
         return;
     }
-    // "system" (or any unknown value): follow the OS.
     applyTheme(systemPrefersDark() ? variant : QStringLiteral("Light"));
 }
 

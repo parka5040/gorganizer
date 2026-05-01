@@ -7,13 +7,7 @@
 namespace gorganizer {
 
 namespace {
-// Default deadline for unary RPCs. Chosen generously enough that even
-// expensive ops (Steam scan, hardlink-farm mount, full conflict walk)
-// fit comfortably; tight enough that a stalled daemon can't wedge a
-// worker thread indefinitely. Without these, GrpcClient::disconnect's
-// QThread::wait(3000) leaves zombie threads when the daemon dies
-// mid-RPC. Streaming RPCs are deliberately NOT clamped — they're
-// long-lived by design.
+// Default deadline for unary RPCs (streams are deliberately unbounded).
 constexpr auto kDefaultUnaryTimeout = std::chrono::seconds(30);
 inline void setUnaryDeadline(
     grpc::ClientContext& ctx,
@@ -40,8 +34,6 @@ void GrpcWorker::cancelActiveStream()
     if (m_streamCtx) m_streamCtx->TryCancel();
 }
 
-// --- Conversion helpers ---
-
 GrpcGame GrpcWorker::gameFromProto(const gorganizer::v1::Game& g)
 {
     return {
@@ -50,6 +42,9 @@ GrpcGame GrpcWorker::gameFromProto(const gorganizer::v1::Game& g)
         .steamAppId = g.steam_app_id(),
         .installPath = QString::fromStdString(g.install_path()),
         .dataPath = QString::fromStdString(g.data_path()),
+        .synthetic = g.synthetic(),
+        .linkedFromGameId = QString::fromStdString(g.linked_from_game_id()),
+        .vfsActive = g.vfs_active(),
     };
 }
 
@@ -162,8 +157,6 @@ GrpcArchiveRow GrpcWorker::archiveRowFromProto(const gorganizer::v1::ArchiveRow&
     return row;
 }
 
-// --- Unary RPCs ---
-
 void GrpcWorker::doListGames()
 {
     grpc::ClientContext ctx;
@@ -180,7 +173,7 @@ void GrpcWorker::doListGames()
 void GrpcWorker::doDetectGames()
 {
     grpc::ClientContext ctx;
-    setUnaryDeadline(ctx, std::chrono::seconds(60)); // Steam scan across libraries
+    setUnaryDeadline(ctx, std::chrono::seconds(60));
     gorganizer::v1::DetectGamesRequest req;
     gorganizer::v1::DetectGamesResponse resp;
     auto status = m_stub->DetectGames(&ctx, req, &resp);
@@ -238,7 +231,7 @@ void GrpcWorker::doGetMod(const QString& gameId, const QString& modName)
 void GrpcWorker::doRescanMod(const QString& gameId, const QString& modName)
 {
     grpc::ClientContext ctx;
-    setUnaryDeadline(ctx, std::chrono::minutes(5)); // file walk + hashing
+    setUnaryDeadline(ctx, std::chrono::minutes(5));
     gorganizer::v1::RescanModRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_mod_name(modName.toStdString());
@@ -326,10 +319,24 @@ void GrpcWorker::doSetModList(const QString& gameId, const QString& profileName,
 void GrpcWorker::doMountVfs(const QString& gameId, const QString& profileName)
 {
     grpc::ClientContext ctx;
-    setUnaryDeadline(ctx, std::chrono::minutes(5)); // hardlink farm build for large modlists
+    setUnaryDeadline(ctx, std::chrono::minutes(5));
     gorganizer::v1::MountVFSRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
+    gorganizer::v1::MountVFSResponse resp;
+    auto status = m_stub->MountVFS(&ctx, req, &resp);
+    if (!status.ok()) { emit rpcError("MountVFS", QString::fromStdString(status.error_message())); return; }
+    emit vfsMounted(vfsStatusFromProto(resp.status()));
+}
+
+void GrpcWorker::doMountVfsWithSwap(const QString& gameId, const QString& profileName)
+{
+    grpc::ClientContext ctx;
+    setUnaryDeadline(ctx, std::chrono::minutes(10));
+    gorganizer::v1::MountVFSRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_profile_name(profileName.toStdString());
+    req.set_auto_swap(true);
     gorganizer::v1::MountVFSResponse resp;
     auto status = m_stub->MountVFS(&ctx, req, &resp);
     if (!status.ok()) { emit rpcError("MountVFS", QString::fromStdString(status.error_message())); return; }
@@ -378,7 +385,7 @@ void GrpcWorker::doGetVfsStatus(const QString& gameId)
 void GrpcWorker::doRebuildVfs(const QString& gameId)
 {
     grpc::ClientContext ctx;
-    setUnaryDeadline(ctx, std::chrono::minutes(5)); // hardlink farm rebuild
+    setUnaryDeadline(ctx, std::chrono::minutes(5));
     gorganizer::v1::RebuildVFSRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::RebuildVFSResponse resp;
@@ -390,7 +397,7 @@ void GrpcWorker::doRebuildVfs(const QString& gameId)
 void GrpcWorker::doGetConflicts(const QString& gameId, const QString& profileName)
 {
     grpc::ClientContext ctx;
-    setUnaryDeadline(ctx, std::chrono::minutes(2)); // full mod walk
+    setUnaryDeadline(ctx, std::chrono::minutes(2));
     gorganizer::v1::GetConflictsRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
@@ -496,11 +503,6 @@ void GrpcWorker::doSetNexusAPIKey(const QString& apiKey)
 
 void GrpcWorker::doShutdownDaemon()
 {
-    // Tight deadline: the daemon should ack the signal almost
-    // instantly. The actual shutdown work happens after the RPC
-    // returns; we don't wait for the daemon to fully exit here.
-    // GrpcClient::shutdownDaemonSync (used at app exit) is the
-    // synchronous path with its own deadline + post-RPC poll.
     grpc::ClientContext ctx;
     setUnaryDeadline(ctx, std::chrono::seconds(3));
     gorganizer::v1::ShutdownRequest req;
@@ -624,7 +626,6 @@ void GrpcWorker::doStreamInstallEvents(const QString& gameId)
 }
 
 namespace {
-// Convert a proto PluginStatusItem into the Qt-side struct.
 GrpcPluginStatus pluginStatusFromProto(const gorganizer::v1::PluginStatusItem& p) {
     GrpcPluginStatus out;
     out.filename = QString::fromStdString(p.filename());

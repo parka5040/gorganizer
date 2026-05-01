@@ -16,14 +16,72 @@ namespace gorganizer {
 
 class GrpcWorker;
 
-// Qt-friendly result types (decoupled from protobuf).
-
 struct GrpcGame {
     QString gameId;
     QString name;
     uint32_t steamAppId = 0;
     QString installPath;
     QString dataPath;
+    bool synthetic = false;
+    QString linkedFromGameId;
+    bool vfsActive = false;
+};
+
+enum GrpcTTWBackend {
+    GrpcTTWBackendNative = 0,
+    GrpcTTWBackendWine = 1,
+};
+
+struct GrpcTTWPrereqStatus {
+    int backend = 0;
+
+    bool gstreamerInstalled = false;
+    QString gstreamerCodecsHint;
+    bool xdeltaInstalled = false;
+    int64_t diskSpaceAvailable = 0;
+    int64_t diskSpaceRequired = 0;
+    bool fnvVanilla = false;
+
+    QString mpiInstallerPath;
+    QString mpiInstallerVersion;
+
+    bool prefixExists = false;
+    bool hasDotnet48 = false;
+    uint32_t dotnet48ReleaseRev = 0;
+    bool hasMsxml6 = false;
+    bool hasVcrun2022 = false;
+    bool hasCorefonts = false;
+    bool monoNeedsRemoval = false;
+    bool steamRunning = false;
+    bool protontricksAvailable = false;
+    bool winetricksAvailable = false;
+
+    QStringList missing;
+};
+
+struct GrpcTTWInstallerInfo {
+    int backend = 0;
+    QString mpiFile;
+    QString installerExe;
+    QString version;
+    QStringList alternateMpis;
+};
+
+struct GrpcTTWExeDelta {
+    QString relPath;
+    QString kind;
+    int64_t size = 0;
+    QString mtime;
+    QString sha256;
+};
+
+struct GrpcTTWInstallResult {
+    int installerExitCode = 0;
+    bool layoutFixed = false;
+    int dataModFileCount = 0;
+    int64_t dataModBytes = 0;
+    std::vector<GrpcTTWExeDelta> changedExesInRoot;
+    std::vector<GrpcTTWExeDelta> dataModExes;
 };
 
 struct GrpcModInfo {
@@ -43,7 +101,7 @@ struct GrpcModListEntry {
 
 struct GrpcSeparator {
     QString name;
-    QString visualIndex; // 16-char hex, see internal/separators.FormatIndex
+    QString visualIndex;
     bool collapsed = false;
 };
 
@@ -80,17 +138,11 @@ struct GrpcDownloadProgress {
     QString modName;
     int64_t bytesDownloaded = 0;
     int64_t bytesTotal = 0;
-    // Mirrors proto DownloadStatus: 0=unknown, 1=queued, 2=downloading,
-    // 3=downloaded, 4=installing, 5=installed, 6=uninstalled, 7=cancelled,
-    // 8=failed.
     int status = 0;
     QString error;
     int32_t queuedAhead = 0;
 };
 
-// InstallStep mirrors the unified proto InstallProgress.Step. The legacy
-// FomodPending step is gone — FOMOD detection is an explicit RPC now
-// (PreviewInstall), not a mid-install state.
 enum GrpcInstallStep {
     GrpcInstallStepIdle = 0,
     GrpcInstallStepExtracting = 1,
@@ -112,39 +164,36 @@ struct GrpcInstallProgress {
     QString error;
 };
 
-// Plugin dependency analysis (StreamPluginStatus). Mirrors proto DepKind /
-// DepIssue / PluginStatusItem.
 enum GrpcDepKind {
     GrpcDepOK = 0,
-    GrpcDepMasterAbsent = 1,       // red
-    GrpcDepMasterDisabled = 2,     // orange
-    GrpcDepMasterOutOfOrder = 3,   // red
-    GrpcDepSoftMissing = 4,        // yellow
+    GrpcDepMasterAbsent = 1,
+    GrpcDepMasterDisabled = 2,
+    GrpcDepMasterOutOfOrder = 3,
+    GrpcDepSoftMissing = 4,
 };
 
 struct GrpcDepIssue {
-    int kind = 0;                  // GrpcDepKind
-    QString master;                // hard kinds
-    QString softModName;           // soft kind
+    int kind = 0;
+    QString master;
+    QString softModName;
     int softModId = 0;
     QString softModUrl;
 };
 
 struct GrpcPluginStatus {
     QString filename;
-    QString ext;                   // ".esp" / ".esm" / ".esl"
-    bool isLight = false;          // ESL flag from header — overrides ext
+    QString ext;
+    bool isLight = false;
     bool enabled = false;
     QString fromMod;
     bool softPending = false;
     std::vector<GrpcDepIssue> issues;
 };
 
-// One activity-log warning routed via WatchStatus.
 struct GrpcDependencyWarning {
     QString pluginFilename;
     QString detail;
-    int kind = 0;                  // GrpcDepKind
+    int kind = 0;
 };
 
 struct GrpcArchiveRow {
@@ -163,26 +212,22 @@ struct GrpcArchiveRow {
     QString gameDomain;
     QString thumbnailUrl;
     bool adultContent = false;
-    int status = 0;                 // DownloadStatus, see above
+    int status = 0;
     QString installedModFolder;
-    QString downloadId;             // set while a download is still racing this row
+    QString downloadId;
     int64_t bytesDownloaded = 0;
     int32_t queuedAhead = 0;
-    bool merged = false;            // archive was merged into a pre-existing mod
+    bool merged = false;
 };
 
-// ArchiveEvent is one message on StreamArchiveEvents. Exactly one of the
-// three discriminant fields is populated; the others are ignored.
 struct GrpcArchiveEvent {
     enum Kind { KindUnknown, KindDownloadProgress, KindRowChanged, KindArchiveRemoved };
     Kind kind = KindUnknown;
     GrpcDownloadProgress progress;
     GrpcArchiveRow row;
-    QString archiveRemoved; // archive_rel_path
+    QString archiveRemoved;
 };
 
-// Legacy alias so existing UI code keeps compiling after the v2 rename.
-// New code should use GrpcArchiveRow directly.
 using GrpcDownloadRow = GrpcArchiveRow;
 
 struct GrpcGameSettings {
@@ -218,10 +263,8 @@ struct GrpcIniTweakState {
     bool enabled = false;
 };
 
-// InstallMode mirrors proto enum.
 enum GrpcInstallMode { GrpcInstallAsNewMod = 0, GrpcInstallMergeIntoMod = 1 };
 
-// Bulk-hide scopes mirror proto enum.
 enum GrpcBulkHideScope { GrpcBulkHideAll = 0, GrpcBulkHideInstalled = 1, GrpcBulkHideUninstalled = 2 };
 
 struct GrpcProtonVersion {
@@ -229,8 +272,7 @@ struct GrpcProtonVersion {
     QString path;
 };
 
-// GrpcReadiness mirrors proto Readiness — daemon cold-start state used by
-// the splash screen.
+// Daemon cold-start state used by the splash screen.
 struct GrpcReadiness {
     bool socketReady = false;
     bool recoveryDone = false;
@@ -238,7 +280,6 @@ struct GrpcReadiness {
     QString lastInitStep;
 };
 
-// FOMOD structures mirror proto for the PreviewInstall response.
 struct GrpcFomodFile {
     QString source;
     QString destination;
@@ -279,26 +320,23 @@ struct GrpcPreviewInstallResult {
     QStringList flatFileList;
 };
 
-// GrpcClient manages a gRPC connection to the gorganizerd daemon.
+// Manages a gRPC connection to the gorganizerd daemon.
 class GrpcClient : public QObject {
     Q_OBJECT
 public:
     explicit GrpcClient(QObject* parent = nullptr);
     ~GrpcClient() override;
 
-    // Connection management
     void connectToDaemon();
     void disconnectFromDaemon();
     bool isConnected() const;
 
-    // Game management
     void listGames();
     void detectGames();
     void configureGame(const QString& gameId, const QString& name,
                        uint32_t steamAppId, const QString& installPath,
                        const QString& dataSubpath);
 
-    // Mod management (v2)
     void listMods(const QString& gameId);
     void getMod(const QString& gameId, const QString& modName);
     void rescanMod(const QString& gameId, const QString& modName);
@@ -308,27 +346,18 @@ public:
                       std::vector<QString>& archivesFlaggedOut, QString& errorOut);
     bool reinstallMod(const QString& gameId, const QString& modName,
                       GrpcReinstallResult& resultOut, QString& errorOut);
-    // Notify the daemon about a mod folder produced outside StartInstall
-    // (the C++ FOMOD wizard's local-extract path). Daemon adds the mod to
-    // every profile's modlist.txt (disabled by default) and invalidates
-    // the installed-archive cache so the Downloads tab reflects the install.
+    // Register a mod folder produced outside StartInstall (FOMOD wizard's local-extract path).
     bool registerManualInstall(const QString& gameId, const QString& modName,
                                const QString& archiveRelPath, QString& errorOut);
 
-    // Overwrite layer access. Files are returned with forward-slashed
-    // paths relative to overwriteDirOut; the UI uses overwriteDirOut to
-    // implement "Open Folder".
     bool listOverwriteFiles(const QString& gameId,
                             std::vector<GrpcOverwriteEntry>& filesOut,
                             QString& overwriteDirOut, QString& errorOut);
-    // files empty → extract everything. Files are forward-slashed paths
-    // returned by listOverwriteFiles. The new mod folder name MUST NOT
-    // already exist; collision is reported as ALREADY_EXISTS.
+    // Empty files extracts everything; collisions reported as ALREADY_EXISTS.
     bool extractOverwriteToMod(const QString& gameId, const QString& modName,
                                const QStringList& files, bool keepInOverwrite,
                                int& fileCountOut, QString& errorOut);
 
-    // Profile management
     void listProfiles(const QString& gameId);
     void createProfile(const QString& gameId, const QString& name);
     void deleteProfile(const QString& gameId, const QString& name);
@@ -340,27 +369,21 @@ public:
     bool setSeparators(const QString& gameId, const QString& profileName,
                        const std::vector<GrpcSeparator>& seps, QString& errorOut);
 
-    // VFS control
     void mountVfs(const QString& gameId, const QString& profileName);
+    // Auto-swap unmounts the conflicting game in the same mutex group (FNV/TTW).
+    void mountVfsWithSwap(const QString& gameId, const QString& profileName);
     void unmountVfs(const QString& gameId);
     void getVfsStatus(const QString& gameId);
     void rebuildVfs(const QString& gameId);
-    // Destructive recovery: rm -rf Data, mv Data.orig → Data. Only call
-    // after the user has confirmed via the recovery-pending modal.
+    // Destructive recovery; only call after user confirms via recovery-pending modal.
     void restoreFromBackup(const QString& gameId);
 
-    // Conflict analysis
     void getConflicts(const QString& gameId, const QString& profileName);
 
-    // Game launch
     void launchGame(const QString& gameId, bool useTool, const QString& profileName);
     bool installScriptExtender(const QString& gameId, QString& nameOut, QString& errorOut);
 
-    // FNV 4GB patcher — Fallout: New Vegas only. Two-step flow: install
-    // downloads the Linux variant from Nexus + extracts it next to
-    // FalloutNV.exe, then apply runs the patcher. is4GBPatched is a cheap
-    // marker-file probe used by RunButtonWidget to grey out the xNVSE
-    // launch target post-patch.
+    // FNV 4GB patcher (FNV only): two-step install + apply, plus marker-file probe.
     bool install4GBPatcher(const QString& gameId, QString& patcherExePathOut,
                            QString& versionOut, QString& errorOut);
     bool apply4GBPatch(const QString& gameId, const QString& patcherExePath,
@@ -369,23 +392,38 @@ public:
     bool detectProtonVersions(std::vector<GrpcProtonVersion>& out, QString& errorOut);
     bool getPreferredProton(QString& pathOut, QString& errorOut);
     bool setPreferredProton(const QString& path, QString& errorOut);
+    // Tells daemon which game the UI is showing for NXM download routing. Fire-and-forget.
+    void setActiveGame(const QString& gameId);
 
-    // Archives (v2 Downloads tab surface). Synchronous for list/set; async
-    // for the long-running operations.
+    bool checkTTWPrereqs(int backend, GrpcTTWPrereqStatus& out, QString& errorOut);
+    bool checkTTWDiskSpace(int64_t& availableOut, int64_t& requiredOut, QString& errorOut);
+    bool checkFNVNotMounted(QString& errorOut);
+    bool prepareTTWInstaller(const QString& userPath, int backend,
+                             GrpcTTWInstallerInfo& out, QString& errorOut);
+    bool createBlankTTWMod(const QString& modName, QString& modDirOut, QString& errorOut);
+    bool ensureNativeMpiInstaller(QString& pathOut, QString& versionOut, QString& errorOut);
+    bool bootstrapFNVPrefix(QString& errorOut);
+    bool installTTWPrereqs(QString& installIdOut, QString& errorOut);
+    bool launchTTWInstaller(const GrpcTTWInstallerInfo& info, const QString& dataModName,
+                            QString& installIdOut, QString& errorOut);
+    bool cancelTTWInstaller(const QString& installId, QString& errorOut);
+    bool getTTWInstallResult(const QString& installId, bool block,
+                             GrpcTTWInstallResult& out, QString& errorOut);
+    bool setTTWLauncherExe(const QString& relPath, QString& errorOut);
+    bool verifyTTWIntegrity(QString& errorOut);
+    bool translateWinePath(const QString& gameId, const QString& unixPath,
+                           QString& winePathOut, QString& errorOut);
+
     bool listArchives(const QString& gameId, std::vector<GrpcArchiveRow>& rowsOut, QString& errorOut);
     bool setArchiveHidden(const QString& gameId, const QString& archiveRelPath, bool hidden, QString& errorOut);
     bool setArchivesHiddenBulk(const QString& gameId, bool hidden, GrpcBulkHideScope scope, int& affectedOut, QString& errorOut);
     bool removeArchive(const QString& gameId, const QString& archiveRelPath, QString& errorOut);
     bool refreshArchiveMetadata(const QString& gameId, const QString& archiveRelPath,
                                 GrpcArchiveRow& rowOut, QString& errorOut);
-    // Async download lifecycle.
     void startDownload(const QString& nxmUri);
     void cancelDownload(const QString& downloadId);
     void retryDownload(const QString& downloadId);
 
-    // Install lifecycle. PreviewInstall + DiscardPreview are synchronous
-    // because they feed a modal dialog; StartInstall is async because it
-    // can take seconds for large archives.
     bool previewInstall(const QString& gameId, const QString& archiveRelPath,
                         GrpcPreviewInstallResult& out, QString& errorOut);
     bool discardPreview(const QString& previewId, QString& errorOut);
@@ -393,13 +431,10 @@ public:
                       GrpcInstallMode mode, const QString& targetMod,
                       const QString& previewId,
                       const std::vector<GrpcFomodFile>& fomodSelectedFiles);
-    // Drag-drop entry point: installs from an archive that isn't already in
-    // the Downloads index.
+    // Drag-drop entry: installs from an archive not in the Downloads index.
     void startInstallExternal(const QString& gameId, const QString& externalArchivePath,
                               GrpcInstallMode mode, const QString& targetMod);
-    // Synchronous StartInstall for modal flows (the Downloads tab context
-    // menu, ModInstallDialog). Blocks on the unix socket — fine since the
-    // caller has a dialog up anyway.
+    // Synchronous StartInstall for modal flows.
     bool startInstallSync(const QString& gameId, const QString& archiveRelPath,
                           const QString& externalArchivePath,
                           GrpcInstallMode mode, const QString& targetMod,
@@ -407,11 +442,9 @@ public:
                           const std::vector<GrpcFomodFile>& fomodSelectedFiles,
                           QString& modFolderOut, int& fileCountOut, QString& errorOut);
 
-    // Per-game settings (auto-install toggle).
     bool getGameSettings(const QString& gameId, GrpcGameSettings& settingsOut, QString& errorOut);
     bool setGameSettings(const QString& gameId, bool autoInstall, GrpcGameSettings& settingsOut, QString& errorOut);
 
-    // Per-profile INI management.
     bool listProfileIniFiles(const QString& gameId, const QString& profileName,
                              std::vector<GrpcProfileIniFile>& filesOut,
                              GrpcProfileIniStatus& statusOut, QString& errorOut);
@@ -427,109 +460,76 @@ public:
                      const QString& tweakId, bool enabled,
                      GrpcIniTweakState& stateOut, QString& errorOut);
 
-    // Status streaming. WatchStatus is global (VFS + Info/Error); the two
-    // per-game streams start when subscribeEvents(gameId) is called and
-    // restart on game switch.
     void startWatching();
     void stopWatching();
     void subscribeEvents(const QString& gameId);
     void unsubscribeEvents();
 
-    // Plugin dependency status stream. The first event is a full snapshot;
-    // subsequent events are deltas as soft-dep checks complete on the
-    // daemon's background workers. Subscribing while a previous stream is
-    // active cancels the prior one (game/profile switch).
     void subscribePluginStatus(const QString& gameId, const QString& profileName);
     void unsubscribePluginStatus();
 
-    // Settings
     void setNexusAPIKey(const QString& apiKey);
 
-    // Daemon lifecycle
     void shutdownDaemon();
-    // Synchronous variant used at app exit. Sends Shutdown with a
-    // bounded deadline and then polls the socket file (the daemon
-    // removes it on graceful stop) so the GUI doesn't return control
-    // to the shell wrapper while the daemon is still alive. Returns
-    // true if the daemon shut down within totalTimeoutMs.
+    // Synchronous shutdown for app exit; polls socket file for graceful daemon exit.
     bool shutdownDaemonSync(int rpcTimeoutMs, int pollTimeoutMs, QString& errorOut);
 
-    // Cold-start readiness probe. Synchronous because the splash polls it
-    // every ~150 ms with a short deadline; goes through its own stub so it
-    // doesn't queue behind anything on the unary worker.
+    // Cold-start readiness probe used by the splash screen.
     bool health(GrpcReadiness& out, QString& errorOut);
 
 signals:
-    // Connection
     void connected();
     void disconnected();
     void connectionError(const QString& error);
 
-    // Game results
     void gamesListed(const std::vector<GrpcGame>& games);
     void gamesDetected(const std::vector<GrpcGame>& games);
     void gameConfigured();
 
-    // Mod results
     void modsListed(const std::vector<GrpcModInfo>& mods);
     void modInfoReceived(const GrpcModInfo& info);
 
-    // Profile results
     void profilesListed(const std::vector<GrpcProfile>& profiles);
     void profileCreated(const GrpcProfile& profile);
     void profileDeleted();
 
-    // Mod list results
     void modListReceived(const std::vector<GrpcModListEntry>& entries);
     void modListUpdated();
 
-    // VFS results
     void vfsMounted(const GrpcVFSStatus& status);
     void vfsUnmounted();
     void vfsStatusReceived(const GrpcVFSStatus& status);
     void vfsRebuilt();
 
-    // Conflict results
     void conflictsReceived(const std::vector<GrpcFileConflict>& conflicts);
 
-    // Game launch results
     void gameLaunched(int pid);
     void gameLaunchFailed(const QString& error);
 
-    // Install results
     void installStarted(const QString& installId);
     void installCompleted(const QString& modFolder, int fileCount);
     void installFailed(const QString& error);
 
-    // Download results
     void downloadStarted(const QString& downloadId, int queuedAhead);
     void downloadCancelled(const QString& downloadId);
     void downloadRetried(const QString& downloadId, int queuedAhead);
 
-    // Per-game archive + install stream events
     void archiveEventReceived(const GrpcArchiveEvent& evt);
     void installProgressEvent(const GrpcInstallProgress& progress);
 
-    // Plugin dependency status stream
     void pluginStatusSnapshot(const std::vector<GrpcPluginStatus>& plugins);
     void pluginStatusUpdate(const GrpcPluginStatus& plugin);
 
-    // Global status events
     void vfsStatusChanged(const GrpcVFSStatus& status);
     void daemonError(const QString& error);
     void daemonInfo(const QString& info);
-    // Activity-log entry produced by the daemon's plugin dep analyzer.
     void dependencyWarning(const GrpcDependencyWarning& warning);
-    // Daemon detected an ambiguous on-disk Data state at startup. The
-    // MainWindow shows a confirmation modal; user consent fires
-    // restoreFromBackup.
+    // Daemon found ambiguous Data state at startup; UI shows a modal and may call restoreFromBackup.
     void recoveryPending(const QString& gameId, const QString& dataPath,
                          const QString& backupPath, const QString& reason);
 
-    // Settings results
     void nexusAPIKeySet(bool valid, const QString& errorMessage);
 
-    // Generic error for any RPC failure
     void rpcError(const QString& method, const QString& error);
 
 private slots:
@@ -539,13 +539,13 @@ private:
     std::shared_ptr<grpc::Channel> m_channel;
     QThread* m_workerThread = nullptr;
     GrpcWorker* m_worker = nullptr;
-    QThread* m_streamThread = nullptr;   // WatchStatus (global VFS + Info/Error)
+    QThread* m_streamThread = nullptr;
     GrpcWorker* m_streamWorker = nullptr;
-    QThread* m_archiveThread = nullptr;  // StreamArchiveEvents
+    QThread* m_archiveThread = nullptr;
     GrpcWorker* m_archiveWorker = nullptr;
-    QThread* m_installThread = nullptr;  // StreamInstallEvents
+    QThread* m_installThread = nullptr;
     GrpcWorker* m_installWorker = nullptr;
-    QThread* m_pluginStatusThread = nullptr;  // StreamPluginStatus
+    QThread* m_pluginStatusThread = nullptr;
     GrpcWorker* m_pluginStatusWorker = nullptr;
     QTimer* m_connectionTimer = nullptr;
     bool m_connected = false;

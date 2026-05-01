@@ -13,35 +13,28 @@ import (
 	"github.com/parka/gorganizer/internal/config"
 )
 
-// ledgerFilename is the per-game durable ledger of in-flight / terminal
-// downloads. Lives next to {DownloadsDir}/metadata.yaml so an `rm -rf
-// Downloads/` wipes both halves of the state.
 const ledgerFilename = "inflight.yaml"
 
-// LedgerStatus is the durable status for a download as persisted to disk.
-// Deliberately a small, stable string set — the ipc.DownloadStatus numeric
-// enum is what flows on the wire, but we store strings here so a human
-// editing inflight.yaml during debugging gets readable text.
+// LedgerStatus is the on-disk status string for a download.
 type LedgerStatus string
 
 const (
 	LedgerQueued      LedgerStatus = "queued"
 	LedgerDownloading LedgerStatus = "downloading"
-	LedgerDownloaded  LedgerStatus = "downloaded" // file complete; ledger will be evicted by UpsertEntry
+	LedgerDownloaded  LedgerStatus = "downloaded"
 	LedgerCancelled   LedgerStatus = "cancelled"
 	LedgerFailed      LedgerStatus = "failed"
 )
 
-// LedgerEntry is one durable row in inflight.yaml. Everything needed to
-// resume the download after a daemon restart lives here.
+// LedgerEntry is one durable row in inflight.yaml.
 type LedgerEntry struct {
-	ID             string       // UUIDv7 — persistent across restarts
-	NXMURI         string       // raw nxm:// URI so we can re-resolve if the CDN URL expires
+	ID             string
+	NXMURI         string
 	GameSlug       string
 	GameID         string
 	ModID          int
 	FileID         int
-	ArchiveRelPath string // relative to DownloadsDir(gameID)
+	ArchiveRelPath string
 	BytesDone      int64
 	BytesTotal     int64
 	StartedAt      time.Time
@@ -50,18 +43,13 @@ type LedgerEntry struct {
 	Error          string
 }
 
-// Terminal returns true for ledger statuses that no longer require work —
-// the caller can skip them on rehydrate or drop them from the list at
-// will.
+// Terminal returns true for ledger statuses that no longer require work.
 func (e LedgerEntry) Terminal() bool {
 	return e.Status == LedgerDownloaded ||
 		e.Status == LedgerCancelled ||
 		e.Status == LedgerFailed
 }
 
-// ledgerMutexes per-game serializes ledger I/O. The download pipeline hits
-// this on every progress update, so a write-through mutex with an atomic
-// tmp+rename is enough; no pg-scale pressure.
 var (
 	ledgerMuOnce sync.Once
 	ledgerMu     map[string]*sync.Mutex
@@ -80,8 +68,7 @@ func ledgerLock(gameID string) *sync.Mutex {
 	return m
 }
 
-// LoadLedger returns every entry in the game's ledger. Missing file is not
-// an error — fresh install → empty list.
+// LoadLedger returns every entry in the game's ledger; missing file = empty list.
 func LoadLedger(gameID string) ([]LedgerEntry, error) {
 	path := filepath.Join(config.DownloadsDir(gameID), ledgerFilename)
 	f, err := os.Open(path)
@@ -156,7 +143,6 @@ func LoadLedger(gameID string) ([]LedgerEntry, error) {
 	return out, scanner.Err()
 }
 
-// SaveLedger rewrites the ledger atomically.
 func SaveLedger(gameID string, entries []LedgerEntry) error {
 	dir := config.DownloadsDir(gameID)
 	if _, err := config.EnsureDir(dir); err != nil {
@@ -196,8 +182,6 @@ func SaveLedger(gameID string, entries []LedgerEntry) error {
 }
 
 // UpsertLedgerEntry inserts or overwrites a single entry, keyed by ID.
-// Serializes writes per-gameID — safe to call from the download goroutine
-// on every progress tick (provided the caller throttles).
 func UpsertLedgerEntry(e LedgerEntry) error {
 	if e.ID == "" {
 		return fmt.Errorf("ledger entry requires ID")
@@ -227,7 +211,7 @@ func UpsertLedgerEntry(e LedgerEntry) error {
 	return SaveLedger(e.GameID, entries)
 }
 
-// RemoveLedgerEntry drops an entry by ID. No-op if missing.
+// RemoveLedgerEntry drops an entry by ID; no-op if missing.
 func RemoveLedgerEntry(gameID, id string) error {
 	mu := ledgerLock(gameID)
 	mu.Lock()
@@ -245,10 +229,6 @@ func RemoveLedgerEntry(gameID, id string) error {
 	return SaveLedger(gameID, kept)
 }
 
-// PartSuffix is the extension used for in-progress archive writes. The
-// downloader streams into <archive>.part; on success the file is atomically
-// renamed to <archive>. Any `.part` file on disk at startup is evidence of
-// an interrupted download and pairs with a ledger entry.
 const PartSuffix = ".part"
 
 // PartPath returns the .part sibling of an archive path.

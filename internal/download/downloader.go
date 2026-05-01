@@ -19,7 +19,6 @@ import (
 	"github.com/parka/gorganizer/internal/ipc"
 )
 
-// Status aliases — the ipc-typed constants are the single source of truth.
 const (
 	StatusQueued      = ipc.DownloadStatusQueued
 	StatusDownloading = ipc.DownloadStatusDownloading
@@ -30,8 +29,7 @@ const (
 	StatusFailed      = ipc.DownloadStatusFailed
 )
 
-// Download tracks a single download operation. Owned by the Manager; the
-// daemon reads a snapshot via ProgressFor (so callers don't share mutexes).
+// Download tracks a single download operation, owned by the Manager.
 type Download struct {
 	ID              string
 	GameID          string
@@ -40,7 +38,7 @@ type Download struct {
 	ModID           int
 	FileID          int
 	GameSlug        string
-	ArchiveRel      string // relative to DownloadsDir(gameID)
+	ArchiveRel      string
 	Status          ipc.DownloadStatus
 	BytesDownloaded int64
 	BytesTotal      int64
@@ -50,55 +48,33 @@ type Download struct {
 	cancel context.CancelFunc
 }
 
-// PostInstallHook is invoked after the auto-install path successfully
-// installs a mod. Used by the daemon to wire a fresh mod into the profiles'
-// modlist.txt so it's visible to the VFS.
+// PostInstallHook is invoked after the auto-install path completes a mod.
 type PostInstallHook func(gameID, modName string)
 
-// Manager orchestrates the full download-extract-install pipeline.
-//
-// Responsibilities:
-//   - Queue NXM requests (bounded concurrency).
-//   - Drive each download through HTTP + optional Range resume.
-//   - Write to <archive>.part and atomic-rename on success.
-//   - Persist every state transition to the per-game ledger so a daemon
-//     restart can resume or mark-as-failed cleanly.
-//   - Emit progress via Hooks (the daemon fans these out to the per-game
-//     stream).
+// Manager orchestrates the download-extract-install pipeline with bounded concurrency.
 type Manager struct {
 	nexus       URLResolver
 	config      *config.Config
 	mu          sync.RWMutex
-	active      map[string]*Download // id → download (running)
-	queued      []*Download          // FIFO; cancel = remove
+	active      map[string]*Download
+	queued      []*Download
 	hooks       ManagerHooks
 	postInstall PostInstallHook
 	maxConcur   int
 
-	// queuePump is signaled whenever a slot frees or a new download is
-	// enqueued; the pump goroutine promotes queued → active.
 	queuePump chan struct{}
 	stop      chan struct{}
 	stopped   bool
 	stopMu    sync.Mutex
 }
 
-// ManagerHooks are the streaming callbacks invoked as downloads progress.
-// All hooks are called synchronously from the manager's goroutines; they
-// MUST be non-blocking (typical impl: non-blocking send to a buffered
-// channel).
+// ManagerHooks are non-blocking streaming callbacks invoked as downloads progress.
 type ManagerHooks struct {
-	// OnDownloadProgress fires for every status transition + throttled byte
-	// updates on active downloads.
 	OnDownloadProgress func(snapshot DownloadSnapshot)
-	// OnArchiveLanded fires when a download completes and the archive is
-	// renamed into its final path. The daemon uses this to index the
-	// archive and (optionally) auto-install.
-	OnArchiveLanded func(d DownloadSnapshot, archivePath string, sidecar ArchiveSidecar)
+	OnArchiveLanded    func(d DownloadSnapshot, archivePath string, sidecar ArchiveSidecar)
 }
 
-// DownloadSnapshot is a lock-free copy of a Download for broadcasting to
-// progress listeners.
+// DownloadSnapshot is a lock-free copy of a Download for progress listeners.
 type DownloadSnapshot struct {
 	ID              string
 	GameID          string
@@ -110,9 +86,7 @@ type DownloadSnapshot struct {
 	QueuedAhead     int32
 }
 
-// NewManager creates a download Manager. The caller is responsible for
-// calling Stop() on shutdown. `maxConcurrent` bounds simultaneous
-// in-flight downloads; queueing kicks in above that.
+// NewManager creates a download Manager; caller must Stop() on shutdown.
 func NewManager(nexus URLResolver, cfg *config.Config, maxConcurrent int, hooks ManagerHooks) *Manager {
 	if maxConcurrent < 1 {
 		maxConcurrent = 3
@@ -130,16 +104,13 @@ func NewManager(nexus URLResolver, cfg *config.Config, maxConcurrent int, hooks 
 	return m
 }
 
-// SetPostInstallHook registers a callback invoked after a mod is
-// auto-installed from a completed download.
 func (m *Manager) SetPostInstallHook(hook PostInstallHook) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.postInstall = hook
 }
 
-// Stop halts the queue pump. Active downloads continue (the caller should
-// cancel them individually first if immediate teardown is required).
+// Stop halts the queue pump; active downloads keep running.
 func (m *Manager) Stop() {
 	m.stopMu.Lock()
 	if m.stopped {
@@ -151,10 +122,13 @@ func (m *Manager) Stop() {
 	m.stopMu.Unlock()
 }
 
-// StartDownload enqueues a new download from an NXM URI. Returns the
-// persistent UUID and the caller's position in the queue at enqueue time
-// (0 means it started immediately).
+// StartDownload enqueues a new download from an NXM URI.
 func (m *Manager) StartDownload(uri string) (id string, queuedAhead int, err error) {
+	return m.StartDownloadForGame(uri, "")
+}
+
+// StartDownloadForGame is StartDownload with an optional gameID override.
+func (m *Manager) StartDownloadForGame(uri, overrideGameID string) (id string, queuedAhead int, err error) {
 	link, err := ParseNXM(uri)
 	if err != nil {
 		return "", 0, err
@@ -162,6 +136,9 @@ func (m *Manager) StartDownload(uri string) (id string, queuedAhead int, err err
 	gameID, err := link.GameID()
 	if err != nil {
 		return "", 0, err
+	}
+	if overrideGameID != "" {
+		gameID = overrideGameID
 	}
 	if link.IsExpired(time.Now()) {
 		return "", 0, &ipc.NXMExpiredError{URI: uri}
@@ -178,8 +155,6 @@ func (m *Manager) StartDownload(uri string) (id string, queuedAhead int, err err
 		Status:   StatusQueued,
 	}
 
-	// Persist immediately — if the daemon dies between here and the pump
-	// activating, a restart still sees the queued entry.
 	_ = UpsertLedgerEntry(LedgerEntry{
 		ID: id, NXMURI: uri, GameID: gameID, GameSlug: link.GameSlug,
 		ModID: link.ModID, FileID: link.FileID,
@@ -188,7 +163,7 @@ func (m *Manager) StartDownload(uri string) (id string, queuedAhead int, err err
 
 	m.mu.Lock()
 	m.queued = append(m.queued, dl)
-	ahead := len(m.queued) + len(m.active) - 1 // rough position
+	ahead := len(m.queued) + len(m.active) - 1
 	if ahead < 0 {
 		ahead = 0
 	}
@@ -200,16 +175,13 @@ func (m *Manager) StartDownload(uri string) (id string, queuedAhead int, err err
 	return id, ahead, nil
 }
 
-// RetryDownload restarts a failed / cancelled download. The ID must still
-// be in the manager (active, queued, or ledger). Resolves a fresh URL and
-// resumes from bytes_done if a .part file exists.
+// RetryDownload restarts a failed/cancelled download, resuming from .part if present.
 func (m *Manager) RetryDownload(id string) (queuedAhead int, err error) {
-	// Try live first.
 	m.mu.Lock()
 	if dl, ok := m.active[id]; ok {
 		_ = dl
 		m.mu.Unlock()
-		return 0, nil // already running — nothing to do
+		return 0, nil
 	}
 	for _, dl := range m.queued {
 		if dl.ID == id {
@@ -219,7 +191,6 @@ func (m *Manager) RetryDownload(id string) (queuedAhead int, err error) {
 	}
 	m.mu.Unlock()
 
-	// Fall back to the ledger. Any game ID works — we scan all games.
 	for gameID := range m.config.Games {
 		entries, err := LoadLedger(gameID)
 		if err != nil {
@@ -245,7 +216,6 @@ func (m *Manager) RetryDownload(id string) (queuedAhead int, err error) {
 				NXMURI: e.NXMURI, Status: StatusQueued,
 				BytesDownloaded: e.BytesDone, BytesTotal: e.BytesTotal,
 			}
-			// Update ledger status back to queued.
 			upd := e
 			upd.Status = LedgerQueued
 			upd.Error = ""
@@ -269,7 +239,6 @@ func (m *Manager) RetryDownload(id string) (queuedAhead int, err error) {
 }
 
 // CancelDownload aborts an active download or de-queues a pending one.
-// Partial .part files are removed. Ledger is marked cancelled.
 func (m *Manager) CancelDownload(id string) error {
 	m.mu.Lock()
 	if dl, ok := m.active[id]; ok {
@@ -279,7 +248,6 @@ func (m *Manager) CancelDownload(id string) error {
 		m.mu.Unlock()
 		return nil
 	}
-	// Queued?
 	for i, dl := range m.queued {
 		if dl.ID == id {
 			m.queued = append(m.queued[:i], m.queued[i+1:]...)
@@ -299,7 +267,6 @@ func (m *Manager) CancelDownload(id string) error {
 	}
 	m.mu.Unlock()
 
-	// Could be a terminal ledger entry; look it up and flip to cancelled.
 	for gameID := range m.config.Games {
 		entries, _ := LoadLedger(gameID)
 		for _, e := range entries {
@@ -315,7 +282,6 @@ func (m *Manager) CancelDownload(id string) error {
 	return &ipc.DownloadNotFoundError{ID: id}
 }
 
-// GetProgress returns a snapshot for one download, or nil if unknown.
 func (m *Manager) GetProgress(downloadID string) (*DownloadSnapshot, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -332,8 +298,7 @@ func (m *Manager) GetProgress(downloadID string) (*DownloadSnapshot, error) {
 	return nil, &ipc.DownloadNotFoundError{ID: downloadID}
 }
 
-// ActiveDownloadIDByArchive returns the live download ID whose on-disk
-// archive path (absolute, .part or final) matches, or "" if none.
+// ActiveDownloadIDByArchive returns the live download ID matching an absolute archive path.
 func (m *Manager) ActiveDownloadIDByArchive(absArchive string) string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -348,8 +313,7 @@ func (m *Manager) ActiveDownloadIDByArchive(absArchive string) string {
 	return ""
 }
 
-// ActiveDownloadIDByNXM looks up an in-flight download by NXM URI. Used on
-// daemon startup resume to dedupe a ledger entry that's already active.
+// ActiveDownloadIDByNXM looks up an in-flight download by NXM URI.
 func (m *Manager) ActiveDownloadIDByNXM(uri string) string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -366,8 +330,7 @@ func (m *Manager) ActiveDownloadIDByNXM(uri string) string {
 	return ""
 }
 
-// RehydrateLedger scans each configured game's ledger and re-enqueues any
-// non-terminal entries for resume. Called once on daemon startup.
+// RehydrateLedger re-enqueues non-terminal ledger entries on daemon startup.
 func (m *Manager) RehydrateLedger() {
 	for gameID := range m.config.Games {
 		entries, err := LoadLedger(gameID)
@@ -411,8 +374,6 @@ func (m *Manager) RehydrateLedger() {
 	m.signalPump()
 }
 
-// --- internal pump / pipeline ---
-
 func (m *Manager) signalPump() {
 	select {
 	case m.queuePump <- struct{}{}:
@@ -435,7 +396,6 @@ func (m *Manager) runQueuePump() {
 			}
 			dl := m.queued[0]
 			m.queued = m.queued[1:]
-			// Recompute queued_ahead for everyone still waiting.
 			for i, q := range m.queued {
 				q.QueuedAhead = int32(len(m.active) + i)
 			}
@@ -447,8 +407,6 @@ func (m *Manager) runQueuePump() {
 			m.mu.Unlock()
 
 			m.emitProgress(dl)
-			// Update still-queued entries' positions so clients see the
-			// promotion shift.
 			m.mu.RLock()
 			for _, q := range m.queued {
 				m.emitProgress(q)
@@ -474,7 +432,6 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 		return
 	}
 
-	// Fetch display metadata. Best-effort — continue even if it fails.
 	modInfo, err := m.nexus.GetModInfo(link.GameSlug, link.ModID)
 	modName := fmt.Sprintf("mod_%d", link.ModID)
 	if err == nil && modInfo != nil {
@@ -485,8 +442,6 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 
 	fileDetails, _ := m.nexus.GetFileDetails(link.GameSlug, link.ModID, link.FileID)
 
-	// Determine archive target. Preserve the ledger's pre-existing rel
-	// path when resuming so we don't orphan a previously-started .part.
 	archiveFilename := pickArchiveFilename(fileDetails, "", link)
 	folder := fmt.Sprintf("%d_%s", link.ModID, SanitizeForFolder(modName))
 	if strings.TrimSpace(modName) == "" {
@@ -503,14 +458,12 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 	}
 	partPath := PartPath(archivePath)
 
-	// Resolve a fresh CDN URL every time — the previous one is single-use.
 	cdnURL, err := m.nexus.ResolveDownloadURL(link)
 	if err != nil {
 		m.fail(dl, fmt.Errorf("resolving CDN URL: %w", err))
 		return
 	}
 
-	// Determine resume offset from on-disk .part size.
 	var resumeFrom int64
 	if fi, statErr := os.Stat(partPath); statErr == nil {
 		resumeFrom = fi.Size()
@@ -537,7 +490,6 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 				BytesDone: dl.BytesDownloaded, BytesTotal: dl.BytesTotal,
 				Status: LedgerCancelled, Error: "cancelled",
 			})
-			// Remove .part on cancel — user explicitly asked to abort.
 			os.Remove(partPath)
 			return
 		}
@@ -545,13 +497,11 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 		return
 	}
 
-	// Atomic rename .part → final.
 	if err := os.Rename(partPath, archivePath); err != nil {
 		m.fail(dl, fmt.Errorf("renaming .part: %w", err))
 		return
 	}
 
-	// Build sidecar + upsert index.
 	relArchive := dl.ArchiveRel
 	sidecar := ArchiveSidecar{
 		ModID:           link.ModID,
@@ -580,14 +530,11 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 		slog.Warn("updating downloads index failed", "err", err)
 	}
 
-	// Ledger: mark downloaded; the long-term state lives in the index +
-	// sidecar from here on.
 	_ = RemoveLedgerEntry(dl.GameID, dl.ID)
 
 	dl.Status = StatusDownloaded
 	m.emitProgress(dl)
 
-	// Fire the archive-landed hook — daemon may index or auto-install.
 	if m.hooks.OnArchiveLanded != nil {
 		m.hooks.OnArchiveLanded(snapshotOf(dl), archivePath, sidecar)
 	}
@@ -596,9 +543,7 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 		"archive", archivePath, "bytes", dl.BytesDownloaded)
 }
 
-// streamToFile GETs cdnURL (with a Range header when resuming), writes
-// bytes into destPath (append mode), throttles ledger writes, and pushes
-// progress via the manager's hook.
+// streamToFile GETs cdnURL with optional resume Range header and writes to destPath.
 func (m *Manager) streamToFile(ctx context.Context, cdnURL, destPath string, resumeFrom int64, dl *Download) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cdnURL, nil)
 	if err != nil {
@@ -615,7 +560,6 @@ func (m *Manager) streamToFile(ctx context.Context, cdnURL, destPath string, res
 
 	switch resp.StatusCode {
 	case http.StatusOK:
-		// Server ignored Range; start from 0.
 		if resumeFrom > 0 {
 			slog.Warn("server ignored Range header; restarting from 0", "url", cdnURL)
 			resumeFrom = 0
@@ -623,18 +567,14 @@ func (m *Manager) streamToFile(ctx context.Context, cdnURL, destPath string, res
 			dl.BytesDownloaded = 0
 		}
 	case http.StatusPartialContent:
-		// Happy resume path.
 	default:
 		return fmt.Errorf("%w: HTTP %d", ErrDownloadFailed, resp.StatusCode)
 	}
 
-	// Content-Length on a Range response is the *remaining* bytes; add
-	// resumeFrom to get the total.
 	if cl := resp.ContentLength; cl > 0 {
 		dl.BytesTotal = cl + resumeFrom
 	}
 
-	// Open destination append/write.
 	var out *os.File
 	if resumeFrom > 0 {
 		out, err = os.OpenFile(destPath, os.O_WRONLY|os.O_APPEND, 0644)
@@ -712,9 +652,7 @@ func snapshotOf(dl *Download) DownloadSnapshot {
 	}
 }
 
-// pickArchiveFilename chooses the on-disk filename for an archive. Prefers
-// the Nexus-reported file_name, falls back to the URL path tail, then to
-// "{modID}_{fileID}.archive" as a last resort.
+// pickArchiveFilename chooses the on-disk filename for an archive.
 func pickArchiveFilename(details *NexusFileDetails, downloadURL string, link *NXMLink) string {
 	if details != nil && details.FileName != "" {
 		return details.FileName
@@ -728,8 +666,7 @@ func pickArchiveFilename(details *NexusFileDetails, downloadURL string, link *NX
 	return fmt.Sprintf("%d_%d.archive", link.ModID, link.FileID)
 }
 
-// IsExpired is true when the NXM URI's `expires` query has passed.
-// Used on startup rehydrate and on StartDownload to fail fast.
+// IsExpired is true when the NXM URI's expires timestamp has passed.
 func (l *NXMLink) IsExpired(now time.Time) bool {
 	if l.Expires == 0 {
 		return false
@@ -737,8 +674,7 @@ func (l *NXMLink) IsExpired(now time.Time) bool {
 	return now.Unix() >= l.Expires
 }
 
-// nexusModPageURL returns the canonical Nexus Mods URL for a mod, or "" if
-// the inputs are incomplete.
+// nexusModPageURL returns the canonical Nexus Mods URL for a mod.
 func nexusModPageURL(gameDomain string, modID int) string {
 	if gameDomain == "" || modID <= 0 {
 		return ""

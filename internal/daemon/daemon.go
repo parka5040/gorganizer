@@ -29,8 +29,6 @@ import (
 
 // managerHooks wires the download manager's progress + archive-landed
 // callbacks to the daemon's per-game stream bus and post-install plumbing.
-// Broken out so both the startup constructor and the SetNexusAPIKey
-// reinitialization share one definition.
 func (d *Daemon) managerHooks() download.ManagerHooks {
 	return download.ManagerHooks{
 		OnDownloadProgress: func(snap download.DownloadSnapshot) {
@@ -45,13 +43,6 @@ func (d *Daemon) managerHooks() download.ManagerHooks {
 			})
 		},
 		OnArchiveLanded: func(snap download.DownloadSnapshot, archivePath string, sidecar download.ArchiveSidecar) {
-			// Best-effort: post-download, emit a RowChanged so the UI
-			// flips the transient row to its archive-row form. Carry the
-			// snap.ID across as DownloadID — without it the frontend's
-			// promotion logic in DownloadsModel::replaceFromDaemon can't
-			// match the new archive row to the in-flight transient row,
-			// and the user ends up with two duplicate entries (one with
-			// full metadata, one with just bytes/size).
 			if row, err := d.buildArchiveRow(snap.GameID, relFromDownloads(snap.GameID, archivePath)); err == nil {
 				row.DownloadID = snap.ID
 				d.archiveBus.Publish(snap.GameID, ipc.ArchiveEventResult{
@@ -64,9 +55,6 @@ func (d *Daemon) managerHooks() download.ManagerHooks {
 			if !settings.AutoInstall {
 				return
 			}
-			// Auto-install through the canonical StartInstall path — same
-			// invariants (metadata.yaml written, structured errors, etc.)
-			// as a user-initiated install.
 			go d.autoInstallAfterDownload(snap.GameID, archivePath, sidecar)
 		},
 	}
@@ -83,9 +71,6 @@ func relFromDownloads(gameID, absArchive string) string {
 }
 
 // autoInstallAfterDownload is the daemon-side companion to the download
-// manager's OnArchiveLanded hook: when per-game auto-install is on, run the
-// archive through StartInstall so source_archives gets written and the
-// mod appears in the tab without user input.
 func (d *Daemon) autoInstallAfterDownload(gameID, archivePath string, sidecar download.ArchiveSidecar) {
 	rel := relFromDownloads(gameID, archivePath)
 	modName := sidecar.ModName
@@ -113,78 +98,40 @@ type Daemon struct {
 	toolMgr     *tools.Manager
 	ipcServer   *ipc.Server
 
-	// launched tracks every Proton process the daemon has started but not
-	// yet seen exit. shutdownAll waits on each Done channel before
-	// unmounting VFS — tearing a FUSE mount out from under a running
-	// Bethesda engine manifests as "main menu stalls and nothing loads"
-	// because mid-game asset reads silently fail. Keyed by PID; entries
-	// are removed by the launch goroutine in launchAndTrack when the
-	// process tree exits.
 	launched   map[int]*launchedGame
 	launchedMu sync.Mutex
 
-	// pendingRecoveries records games whose Data/ is in an ambiguous
-	// post-crash state (CleanupStale refused to auto-restore). The
-	// frontend reads this via RestoreFromBackup-or-not flow: it learns
-	// from the streamed RecoveryPending event, prompts the user, and
-	// invokes RestoreFromBackup on consent. Mount/launch RPCs refuse
-	// for any game with a pending entry until the user resolves it.
 	pendingRecoveries   map[string]*ipc.RecoveryPendingResult
+	gamesAtPath         map[string][]string
 	pendingRecoveriesMu sync.Mutex
 
-	// statusCh / coalescedCh carry VFSStatus + Info/Error events to the
-	// generic WatchStatus stream. Download and install progress moved to
-	// per-game buses (archiveBus, installBus) in the v2 surface.
+	activeGameID   string
+	activeGameIDMu sync.RWMutex
+
 	statusCh      chan ipc.StatusEventResult
 	coalescer     *statusCoalescer
 	coalescedCh   chan ipc.StatusEventResult
 	coalescerDone chan struct{}
 	ingesterDone  chan struct{}
 
-	// archiveBus and installBus fan per-game progress events out to the
-	// StreamArchiveEvents / StreamInstallEvents RPCs. Non-blocking publish
-	// semantics (see streams.go) keep the download pipeline from stalling
-	// on slow consumers.
 	archiveBus *streamBus[ipc.ArchiveEventResult]
 	installBus *streamBus[ipc.InstallEventResult]
 
-	// previews caches FOMOD-aware install extractions so
-	// PreviewInstall → StartInstall reuses the same unpacked tree. See
-	// archives.go for the eviction policy.
 	previews *previewCache
 
-	// shutdownCh is closed (not sent on) to broadcast cancellation. Both
-	// Run() and runPreviewSweeper() consume it; a one-shot send would
-	// race them and the loser would block forever. Idempotency is
-	// guaranteed by shutdownOnce.
 	shutdownCh   chan struct{}
 	shutdownOnce sync.Once
 	mu           sync.RWMutex
 
-	// installedArchiveCache memoizes installedArchiveMap per gameID so
-	// ListArchives / BulkHide don't re-walk every mod's metadata.yaml on
-	// every call. Invalidated on install, uninstall, reinstall. The value
-	// carries both the owning mod folder and whether the archive was a
-	// merge into a pre-existing mod (drives the "Merged" status display).
 	installedArchiveCache   map[string]map[string]archiveInstall
 	installedArchiveCacheMu sync.RWMutex
 
-	// readiness tracks cold-start progress for the splash screen. The
-	// frontend polls Health() while showing the splash and unlocks
-	// MainWindow when GamesWarmed flips true.
 	readiness   ipc.ReadinessResult
 	readinessMu sync.RWMutex
 
-	// pluginHeaderCache memoises parsed TES4 record headers. Keyed by
-	// (mod-folder source path, mtime, size) so VFS activate/deactivate
-	// cycles don't cause repeated header re-reads. Initialized lazily on
-	// first plugin-status request — most users never open the plugin list.
-	pluginHeaderCache *plugins.HeaderCache
+	pluginHeaderCache     *plugins.HeaderCache
 	pluginHeaderCacheOnce sync.Once
 
-	// softDepFetcher resolves Nexus v3 soft-dependency declarations and
-	// caches results on disk. Lazily constructed — requires a configured
-	// API key and an initialized download client. nil when no key.
 	softDepFetcher   *plugins.SoftDepFetcher
 	softDepFetcherMu sync.Mutex
 }
@@ -193,17 +140,12 @@ type mountState struct {
 	profileName string
 }
 
-// archiveInstall captures everything ListArchives needs to know about an
-// already-installed archive: which mod folder owns it and whether the
-// install was a merge into a pre-existing mod (vs. a fresh new-mod install).
 type archiveInstall struct {
 	Folder string
 	Merged bool
 }
 
 // launchedGame captures everything we need to know about an in-flight
-// Proton launch: which game it's for (so shutdown logs are specific) and
-// a Done channel that closes when the Proton tree exits.
 type launchedGame struct {
 	gameID string
 	done   <-chan struct{}
@@ -228,23 +170,18 @@ func New(cfg *config.Config) (*Daemon, error) {
 		installedArchiveCache: make(map[string]map[string]archiveInstall),
 		launched:              make(map[int]*launchedGame),
 		pendingRecoveries:     make(map[string]*ipc.RecoveryPendingResult),
+		gamesAtPath:           make(map[string][]string),
 	}
 	go d.runStatusIngest()
 	go d.runStatusDrain()
 
-	// Per-game fanout buses for the v2 per-game streaming RPCs. Decoupled
-	// from the WatchStatus channel so a slow download consumer can't stall
-	// install or VFS events.
 	d.archiveBus = newStreamBus[ipc.ArchiveEventResult](64)
 	d.installBus = newStreamBus[ipc.InstallEventResult](64)
 	d.previews = newPreviewCache(15*time.Minute, 5)
 	go d.runPreviewSweeper()
 
-	// Wire the canonical install path's mods-dir lookup so the download
-	// package doesn't need to import config.
 	download.SetModsDirResolver(config.ModsDir)
 
-	// Initialize download manager if API key is configured.
 	if cfg.NexusAPIKey != "" {
 		nexus := download.NewNexusClient(cfg.NexusAPIKey)
 		d.downloadMgr = download.NewManager(nexus, cfg, 3, d.managerHooks())
@@ -252,7 +189,6 @@ func New(cfg *config.Config) (*Daemon, error) {
 		d.downloadMgr.RehydrateLedger()
 	}
 
-	// Create mount managers for all configured games.
 	for gameID, gc := range cfg.Games {
 		d.ensureMountManager(gameID, gc)
 	}
@@ -261,59 +197,75 @@ func New(cfg *config.Config) (*Daemon, error) {
 }
 
 // ensureMountManager creates a MountManager for a game if one doesn't exist.
-// The Overwrite mod path is computed eagerly so the mount manager can
-// capture writes on Deactivate without needing a separate setter call. We
-// don't materialize the directory here — Activate handles that via the
-// materializer when an overwrite layer is actually present.
 func (d *Daemon) ensureMountManager(gameID string, gc config.GameConfig) *vfs.MountManager {
 	if mm, ok := d.mountMgrs[gameID]; ok {
 		return mm
 	}
+	installPath := gc.InstallPath
 	subpath := gc.DataSubpath
 	if subpath == "" {
 		subpath = "Data"
 	}
+	if gc.LinkedFromGameID != "" {
+		if parent, ok := d.config.Games[gc.LinkedFromGameID]; ok && parent.InstallPath != "" {
+			installPath = parent.InstallPath
+			if subpath == "" {
+				subpath = parent.DataSubpath
+				if subpath == "" {
+					subpath = "Data"
+				}
+			}
+		}
+	}
 	mm := vfs.NewMountManager(
-		filepath.Join(gc.InstallPath, subpath),
+		filepath.Join(installPath, subpath),
 		filepath.Join(config.ModsDir(gameID), "Overwrite"),
 	)
 	d.mountMgrs[gameID] = mm
 	return mm
 }
 
-// RecoverAll runs crash recovery for all configured games. When recovery
-// detects an ambiguous on-disk state (unrecognized Data alongside intact
-// Data.orig), the game is recorded in pendingRecoveries and a
-// RecoveryPending event is queued so the GUI can prompt the user. Mount
-// and launch RPCs for that game refuse until the user responds via
-// RestoreFromBackup.
 func (d *Daemon) RecoverAll() {
 	d.setReadinessStep("checking crash recovery", nil)
 	defer d.setReadinessStep("recovery complete", func(r *ipc.ReadinessResult) { r.RecoveryDone = true })
+
+	pathToGames := map[string][]string{}
+	pathOrder := []string{}
 	for gameID, mm := range d.mountMgrs {
+		dataPath := mm.DataPath()
+		resolved, err := filepath.Abs(dataPath)
+		if err != nil {
+			resolved = dataPath
+		}
+		if _, seen := pathToGames[resolved]; !seen {
+			pathOrder = append(pathOrder, resolved)
+		}
+		pathToGames[resolved] = append(pathToGames[resolved], gameID)
+	}
+
+	for _, dataPath := range pathOrder {
+		gameIDs := pathToGames[dataPath]
+		mm := d.mountMgrs[gameIDs[0]]
 		outcome, err := mm.RecoverIfNeeded()
 		if err != nil {
-			slog.Error("crash recovery failed", "game", gameID, "err", err)
+			slog.Error("crash recovery failed", "data_path", dataPath, "games", gameIDs, "err", err)
 			continue
 		}
 		if outcome.Pending == nil {
 			continue
 		}
 		pending := &ipc.RecoveryPendingResult{
-			GameID:     gameID,
+			GameID:     gameIDs[0],
 			DataPath:   outcome.Pending.DataPath,
 			BackupPath: outcome.Pending.BackupPath,
 			Reason:     outcome.Pending.Reason,
 		}
 		d.pendingRecoveriesMu.Lock()
-		d.pendingRecoveries[gameID] = pending
+		d.pendingRecoveries[dataPath] = pending
+		d.gamesAtPath[dataPath] = append([]string{}, gameIDs...)
 		d.pendingRecoveriesMu.Unlock()
 		slog.Warn("recovery pending — refusing to mount/launch until user confirms",
-			"game", gameID, "reason", pending.Reason)
-		// Best-effort: queue an event for any WatchStatus subscriber that
-		// is already connected at recover time. The GUI also re-checks
-		// pendingRecoveries on connect, so a subscriber that hasn't
-		// reached this point yet still gets the state.
+			"data_path", dataPath, "games", gameIDs, "reason", pending.Reason)
 		select {
 		case d.statusCh <- ipc.StatusEventResult{RecoveryPending: pending}:
 		default:
@@ -321,13 +273,44 @@ func (d *Daemon) RecoverAll() {
 	}
 }
 
-// shutdownTimeout caps how long shutdownAll is allowed to block. A
-// zombied Proton process must not be able to wedge daemon teardown
-// indefinitely — the kernel will SIGKILL us at the systemd grace
-// boundary, and a SIGKILL leaves the lock + socket on disk. 30s is
-// generous enough for a real game to honor SIGTERM and short enough
-// to keep `systemctl stop` snappy.
 const shutdownTimeout = 30 * time.Second
+
+var mutexGroups = map[string]string{
+	"falloutnv": "fnv-data",
+	"ttw":       "fnv-data",
+}
+
+// mutexGroupOf returns the mutex group for a gameID, "" if none.
+func mutexGroupOf(gameID string) string {
+	return mutexGroups[gameID]
+}
+
+// isSynthetic returns true if the gameID corresponds to a synthetic game
+// definition (currently only TTW). Daemon paths that need to behave
+func isSynthetic(gameID string) bool {
+	def, ok := game.FindByID(gameID)
+	return ok && def.Synthetic
+}
+
+// findMutexConflict returns the gameID of the currently-mounted sibling
+// in gameID's mutex group, or "" if no conflict exists. Caller must hold
+func (d *Daemon) findMutexConflict(gameID string) string {
+	group := mutexGroupOf(gameID)
+	if group == "" {
+		return ""
+	}
+	for other, otherGroup := range mutexGroups {
+		if other == gameID || otherGroup != group {
+			continue
+		}
+		mm, ok := d.mountMgrs[other]
+		if !ok || !mm.IsMounted() {
+			continue
+		}
+		return other
+	}
+	return ""
+}
 
 // Run starts the gRPC server and blocks until shutdown.
 func (d *Daemon) Run(socketPath string) error {
@@ -346,17 +329,12 @@ func (d *Daemon) Run(socketPath string) error {
 	return nil
 }
 
-// Health returns the current cold-start readiness snapshot under the
-// readiness mutex. Used by the splash screen via the Health RPC.
 func (d *Daemon) Health() ipc.ReadinessResult {
 	d.readinessMu.RLock()
 	defer d.readinessMu.RUnlock()
 	return d.readiness
 }
 
-// setReadinessStep updates the readiness state under the mutex and
-// records a human-readable step string for the splash subtitle. The
-// mutate function may be nil for step-only updates.
 func (d *Daemon) setReadinessStep(step string, mutate func(*ipc.ReadinessResult)) {
 	d.readinessMu.Lock()
 	d.readiness.LastInitStep = step
@@ -368,9 +346,6 @@ func (d *Daemon) setReadinessStep(step string, mutate func(*ipc.ReadinessResult)
 
 // warmupAsync runs the slow cold-start tasks (crash recovery, Steam scan,
 // per-game metadata caching) in the background so the gRPC server doesn't
-// have to block on them. The frontend's splash polls Health() and stays
-// up until GamesWarmed flips true. A single Info("ready") event also fires
-// on WatchStatus so any already-connected client wakes immediately.
 func (d *Daemon) warmupAsync() {
 	d.RecoverAll()
 
@@ -379,8 +354,6 @@ func (d *Daemon) warmupAsync() {
 		slog.Warn("warmup: DetectInstalledGames failed", "err", err)
 	}
 
-	// Pre-walk the configured games' mod directories so the first
-	// ListMods / ListArchives RPC the frontend issues hits a warm cache.
 	d.mu.RLock()
 	gameIDs := make([]string, 0, len(d.config.Games))
 	for id := range d.config.Games {
@@ -389,14 +362,6 @@ func (d *Daemon) warmupAsync() {
 	d.mu.RUnlock()
 	for _, id := range gameIDs {
 		d.setReadinessStep("warming "+id, nil)
-		// Sweep orphan .stage-* directories under ModsDir before any other
-		// pass touches the filesystem. Stages are short-lived staging dirs
-		// created by download.Install while extracting → finalizing into a
-		// real mod folder; if the daemon was killed mid-install (or ran
-		// against a buggy build that didn't wipe them on success) they
-		// persist and waste disk. Safe to remove unconditionally — they
-		// are dot-prefixed (excluded from scanModsFolder) and not
-		// referenced by anything except the in-flight install.
 		d.sweepOrphanStageDirs(id)
 		_ = d.installedArchiveMap(id)
 	}
@@ -409,16 +374,6 @@ func (d *Daemon) warmupAsync() {
 }
 
 func (d *Daemon) shutdownAll(ctx context.Context) {
-	// Block unmount until every in-flight Proton launch has exited.
-	// The FUSE-mounted Data/ dir is the live file source for the engine;
-	// unmounting while the game still holds asset handles fails every
-	// subsequent read and the user sees "splash plays, menu stalls". We
-	// have to outlive the game even when the frontend has already quit.
-	//
-	// ctx caps the wait: a zombied Proton process must not stall
-	// shutdown forever. On timeout we proceed to teardown anyway and
-	// log loudly — the alternative is the kernel SIGKILLing us at the
-	// systemd grace boundary, which leaves lock+socket on disk.
 	d.waitForLaunchedExit(ctx)
 
 	d.mu.Lock()
@@ -437,16 +392,11 @@ func (d *Daemon) shutdownAll(ctx context.Context) {
 		d.ipcServer.Stop()
 	}
 
-	// Close statusCh → ingester exits → coalescer closes → drain exits
-	// → coalescedCh closes → WatchStatus gRPC handlers return.
 	close(d.statusCh)
 	<-d.ingesterDone
 	<-d.coalescerDone
 }
 
-// trackLaunched registers a Proton process so shutdownAll can wait on it,
-// and spawns the bookkeeping goroutine that removes the entry when the
-// process tree exits.
 func (d *Daemon) trackLaunched(gameID string, h *tools.LaunchHandle) {
 	if h == nil {
 		return
@@ -466,9 +416,6 @@ func (d *Daemon) trackLaunched(gameID string, h *tools.LaunchHandle) {
 
 // waitForLaunchedExit blocks until every registered Proton launch has
 // signaled Done, or until ctx is cancelled (the watchdog in Run). Emits
-// a log at entry so a user staring at a journal can tell *why* daemon
-// shutdown is pausing, and emits nothing on the fast path (no games
-// running) so a clean quit stays terse.
 func (d *Daemon) waitForLaunchedExit(ctx context.Context) {
 	d.launchedMu.Lock()
 	dones := make([]<-chan struct{}, 0, len(d.launched))
@@ -497,8 +444,6 @@ func (d *Daemon) waitForLaunchedExit(ctx context.Context) {
 	slog.Info("all launched games have exited — proceeding with shutdown")
 }
 
-// --- ipc.GameController ---
-
 func (d *Daemon) ListConfiguredGames() ([]ipc.GameInfo, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -509,12 +454,27 @@ func (d *Daemon) ListConfiguredGames() ([]ipc.GameInfo, error) {
 		if subpath == "" {
 			subpath = "Data"
 		}
+		installPath := gc.InstallPath
+		appID := uint32(gc.SteamAppID)
+		if gc.LinkedFromGameID != "" {
+			if parent, ok := d.config.Games[gc.LinkedFromGameID]; ok {
+				installPath = parent.InstallPath
+				appID = uint32(parent.SteamAppID)
+			}
+		}
+		vfsActive := false
+		if mm, ok := d.mountMgrs[gameID]; ok {
+			vfsActive = mm.IsMounted()
+		}
 		games = append(games, ipc.GameInfo{
-			GameID:      gameID,
-			Name:        gc.Name,
-			SteamAppID:  uint32(gc.SteamAppID),
-			InstallPath: gc.InstallPath,
-			DataPath:    filepath.Join(gc.InstallPath, subpath),
+			GameID:           gameID,
+			Name:             gc.Name,
+			SteamAppID:       appID,
+			InstallPath:      installPath,
+			DataPath:         filepath.Join(installPath, subpath),
+			Synthetic:        isSynthetic(gameID),
+			LinkedFromGameID: gc.LinkedFromGameID,
+			VFSActive:        vfsActive,
 		})
 	}
 	return games, nil
@@ -526,18 +486,24 @@ func (d *Daemon) DetectInstalledGames() ([]ipc.GameInfo, error) {
 		return nil, err
 	}
 
-	// Auto-configure any detected game not already in config.
+	detected = d.applyTTWPlayableProbe(detected)
+
 	d.mu.Lock()
 	for _, g := range detected {
 		if _, exists := d.config.Games[g.ID]; !exists {
-			d.config.Games[g.ID] = config.GameConfig{
+			gc := config.GameConfig{
 				Name:        g.Name,
 				InstallPath: g.InstallPath,
 				DataSubpath: g.DataSubpath,
 				SteamAppID:  int(g.SteamAppID),
 			}
-			d.ensureMountManager(g.ID, d.config.Games[g.ID])
-			slog.Info("auto-configured detected game", "id", g.ID, "path", g.InstallPath)
+			if g.Synthetic && g.ParentGameID != "" {
+				gc.LinkedFromGameID = g.ParentGameID
+				gc.SteamAppID = 0
+			}
+			d.config.Games[g.ID] = gc
+			d.ensureMountManager(g.ID, gc)
+			slog.Info("auto-configured detected game", "id", g.ID, "path", g.InstallPath, "synthetic", g.Synthetic)
 		}
 	}
 	d.config.Save()
@@ -545,15 +511,53 @@ func (d *Daemon) DetectInstalledGames() ([]ipc.GameInfo, error) {
 
 	var games []ipc.GameInfo
 	for _, g := range detected {
+		vfsActive := false
+		if mm, ok := d.mountMgrs[g.ID]; ok {
+			vfsActive = mm.IsMounted()
+		}
 		games = append(games, ipc.GameInfo{
-			GameID:      g.ID,
-			Name:        g.Name,
-			SteamAppID:  g.SteamAppID,
-			InstallPath: g.InstallPath,
-			DataPath:    g.DataPath,
+			GameID:           g.ID,
+			Name:             g.Name,
+			SteamAppID:       g.SteamAppID,
+			InstallPath:      g.InstallPath,
+			DataPath:         g.DataPath,
+			Synthetic:        g.Synthetic,
+			LinkedFromGameID: g.ParentGameID,
+			VFSActive:        vfsActive,
 		})
 	}
 	return games, nil
+}
+
+// applyTTWPlayableProbe is the daemon-side TTWPlayableProbe wired into
+// game.AppendSyntheticGames so a TTW install marker (after FO3 refund)
+func (d *Daemon) applyTTWPlayableProbe(detected []game.DetectedGame) []game.DetectedGame {
+	probe := func() (string, bool) {
+		var fnvInstall string
+		for _, g := range detected {
+			if g.ID == "falloutnv" {
+				fnvInstall = g.InstallPath
+				break
+			}
+		}
+		if fnvInstall == "" {
+			return "", false
+		}
+		if !game.HasTTWMarker(fnvInstall) {
+			return "", false
+		}
+		entries, err := os.ReadDir(config.ModsDir("ttw"))
+		if err != nil {
+			return "", false
+		}
+		for _, e := range entries {
+			if e.IsDir() && e.Name() != "Downloads" && e.Name() != "Overwrite" {
+				return fnvInstall, true
+			}
+		}
+		return "", false
+	}
+	return game.AppendSyntheticGames(detected, probe)
 }
 
 // ConfigureGame persists a game to the daemon's config and creates its
@@ -582,11 +586,6 @@ func (d *Daemon) ConfigureGame(gameID, name string, steamAppID uint32, installPa
 	slog.Info("game configured", "id", gameID, "path", installPath)
 	return nil
 }
-
-// ListMods / GetMod / RescanMod / RenameMod / UninstallMod / ReinstallMod
-// live in archives.go (the v2 ModController surface).
-
-// --- ipc.ProfileController ---
 
 func (d *Daemon) ListProfiles(gameID string) ([]ipc.ProfileResult, error) {
 	profiles, err := d.profileMgr.List(gameID)
@@ -655,15 +654,8 @@ func (d *Daemon) SetModList(gameID, profileName string, entries []ipc.ModListEnt
 		return err
 	}
 
-	// Mirror each mod's position into its metadata.yaml as `true_index`
-	// (16-char hex). The source of truth is still modlist.txt — this is
-	// for the frontend so it can render a mod even when its profile-
-	// specific position isn't loaded yet, and for users inspecting the
-	// yaml directly.
 	d.writeTrueIndexes(gameID, modEntries)
 
-	// If the game's VFS is mounted for this profile, rebuild the layer tree
-	// in-place so enable/disable toggles take effect without a remount.
 	d.mu.RLock()
 	mm, mmOk := d.mountMgrs[gameID]
 	ms, msOk := d.mountStates[gameID]
@@ -701,9 +693,16 @@ func (d *Daemon) SetModList(gameID, profileName string, entries []ipc.ModListEnt
 	return nil
 }
 
-// --- ipc.VFSController ---
-
 func (d *Daemon) MountVFS(gameID, profileName string) (*ipc.VFSStatusResult, error) {
+	return d.mountVFSWithSwap(gameID, profileName, false)
+}
+
+// MountVFSWithSwap is the auto-swap variant: when gameID's mutex group
+func (d *Daemon) MountVFSWithSwap(gameID, profileName string) (*ipc.VFSStatusResult, error) {
+	return d.mountVFSWithSwap(gameID, profileName, true)
+}
+
+func (d *Daemon) mountVFSWithSwap(gameID, profileName string, autoSwap bool) (*ipc.VFSStatusResult, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -712,14 +711,42 @@ func (d *Daemon) MountVFS(gameID, profileName string) (*ipc.VFSStatusResult, err
 			gameID, pending.Reason)
 	}
 
+	if conflict := d.findMutexConflict(gameID); conflict != "" {
+		if !autoSwap {
+			return nil, &ipc.VFSMutexError{
+				GameID:      gameID,
+				Conflicting: conflict,
+				Group:       mutexGroupOf(gameID),
+			}
+		}
+		if conflictMM, ok := d.mountMgrs[conflict]; ok && conflictMM.IsMounted() {
+			if err := conflictMM.Deactivate(); err != nil {
+				return nil, fmt.Errorf("auto-swap deactivate of %s failed: %w", conflict, err)
+			}
+			delete(d.mountStates, conflict)
+			select {
+			case d.statusCh <- ipc.StatusEventResult{VFSStatus: &ipc.VFSStatusResult{GameID: conflict}}:
+			default:
+			}
+			slog.Info("auto-swap: deactivated conflicting VFS", "deactivated", conflict, "now_activating", gameID)
+		}
+	}
+
 	gc, ok := d.config.Games[gameID]
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
+	if gc.LinkedFromGameID != "" {
+		if _, parentOk := d.config.Games[gc.LinkedFromGameID]; !parentOk {
+			return nil, &ipc.ErrLinkedParentMissing{
+				GameID:       gameID,
+				ParentGameID: gc.LinkedFromGameID,
+			}
+		}
+	}
 
 	mm := d.ensureMountManager(gameID, gc)
 
-	// Load modlist.
 	_, entries, err := d.profileMgr.Load(gameID, profileName)
 	if err != nil {
 		return nil, fmt.Errorf("loading profile %q: %w", profileName, err)
@@ -806,25 +833,37 @@ func (d *Daemon) GetVFSStatus(gameID string) (*ipc.VFSStatusResult, error) {
 }
 
 // recoveryPendingFor returns the pending recovery record for gameID, or
-// nil when none is registered. Used as a guard at the top of MountVFS
-// and LaunchGame so we never act on a Data dir whose state we've already
-// flagged as ambiguous.
+// nil when none is registered. Looks up via the gameID's resolved Data/
 func (d *Daemon) recoveryPendingFor(gameID string) *ipc.RecoveryPendingResult {
+	mm, ok := d.mountMgrs[gameID]
+	if !ok {
+		return nil
+	}
+	resolved, err := filepath.Abs(mm.DataPath())
+	if err != nil {
+		resolved = mm.DataPath()
+	}
 	d.pendingRecoveriesMu.Lock()
 	defer d.pendingRecoveriesMu.Unlock()
-	return d.pendingRecoveries[gameID]
+	return d.pendingRecoveries[resolved]
 }
 
-// RestoreFromBackup is the IPC counterpart of the GUI "Restore from
-// Data.orig" button. Invokes vfs.RestoreFromBackup on the configured
-// data path, and on success clears the recovery-pending entry so
-// subsequent MountVFS / LaunchGame calls proceed normally.
 func (d *Daemon) RestoreFromBackup(gameID string) error {
-	d.pendingRecoveriesMu.Lock()
-	pending, ok := d.pendingRecoveries[gameID]
-	d.pendingRecoveriesMu.Unlock()
+	mm, ok := d.mountMgrs[gameID]
 	if !ok {
-		return fmt.Errorf("no recovery pending for %s", gameID)
+		return fmt.Errorf("no mount manager for %s", gameID)
+	}
+	resolved, err := filepath.Abs(mm.DataPath())
+	if err != nil {
+		resolved = mm.DataPath()
+	}
+
+	d.pendingRecoveriesMu.Lock()
+	pending, exists := d.pendingRecoveries[resolved]
+	siblings := append([]string{}, d.gamesAtPath[resolved]...)
+	d.pendingRecoveriesMu.Unlock()
+	if !exists {
+		return fmt.Errorf("no recovery pending for %s (path %s)", gameID, resolved)
 	}
 
 	if err := vfs.RestoreFromBackup(pending.DataPath); err != nil {
@@ -832,17 +871,17 @@ func (d *Daemon) RestoreFromBackup(gameID string) error {
 	}
 
 	d.pendingRecoveriesMu.Lock()
-	delete(d.pendingRecoveries, gameID)
+	delete(d.pendingRecoveries, resolved)
+	delete(d.gamesAtPath, resolved)
 	d.pendingRecoveriesMu.Unlock()
 
 	slog.Info("restore from backup completed via user consent",
-		"game", gameID, "path", pending.DataPath)
-	// Notify any subscriber that the pending state has cleared. Reuses
-	// VFSStatus event with mounted=false so existing UI binding flips
-	// "needs recovery" off without needing a new event type.
-	select {
-	case d.statusCh <- ipc.StatusEventResult{Info: fmt.Sprintf("recovery resolved for %s", gameID)}:
-	default:
+		"game", gameID, "path", pending.DataPath, "siblings", siblings)
+	for _, sibling := range siblings {
+		select {
+		case d.statusCh <- ipc.StatusEventResult{Info: fmt.Sprintf("recovery resolved for %s", sibling)}:
+		default:
+		}
 	}
 	return nil
 }
@@ -883,11 +922,6 @@ func (d *Daemon) buildLayers(gameID string, gc config.GameConfig, entries []mod.
 		if !e.Enabled {
 			continue
 		}
-		// Defense-in-depth: Save+Load already strip Overwrite, but if a
-		// legacy modlist.txt slips through (older daemon writes, manual
-		// edits) we must not double-add it below — Overwrite always lands
-		// as the final, highest-priority layer regardless of where it
-		// appeared in the entries list.
 		if e.Name == profile.OverwriteModName {
 			continue
 		}
@@ -899,12 +933,6 @@ func (d *Daemon) buildLayers(gameID string, gc config.GameConfig, entries []mod.
 		})
 	}
 
-	// Overwrite is always-on and always last (highest priority). It's the
-	// catch-all destination for files written by the running game/tools
-	// during play (atomic-save sweeps, xEdit output, etc.) and the user's
-	// dropbox for loose .esp/.dds/.bsa files. We append it unconditionally
-	// — directory may be empty or missing, in which case it contributes
-	// zero files but still serves as the write-capture target.
 	owDir := filepath.Join(modsDir, profile.OverwriteModName)
 	layers = append(layers, vfs.Layer{
 		Name:     profile.OverwriteModName,
@@ -913,8 +941,6 @@ func (d *Daemon) buildLayers(gameID string, gc config.GameConfig, entries []mod.
 	})
 	return layers
 }
-
-// --- ipc.ConflictController ---
 
 func (d *Daemon) GetConflicts(gameID, profileName string) ([]ipc.FileConflictResult, error) {
 	gc, ok := d.config.Games[gameID]
@@ -944,16 +970,8 @@ func (d *Daemon) GetConflicts(gameID, profileName string) ([]ipc.FileConflictRes
 	return results, nil
 }
 
-// v1 surface deleted — StartDownload / CancelDownload / RetryDownload /
-// ListArchives / RemoveArchive / SetArchiveHidden / SetArchivesHiddenBulk /
-// RefreshArchiveMetadata / PreviewInstall / StartInstall / DiscardPreview /
-// UninstallMod / RenameMod / ReinstallMod (v2) live in archives.go.
-
 // installedArchiveMap builds archive-rel-path → archiveInstall for every mod
 // under ModsDir(gameID) whose metadata.yaml lists source_archives. Memoized
-// per-gameID; invalidated whenever any mod's source_archives could have
-// changed (install/delete/reinstall/auto-install). Returns a shared
-// reference — callers must not mutate.
 func (d *Daemon) installedArchiveMap(gameID string) map[string]archiveInstall {
 	d.installedArchiveCacheMu.RLock()
 	if cached, ok := d.installedArchiveCache[gameID]; ok {
@@ -966,8 +984,6 @@ func (d *Daemon) installedArchiveMap(gameID string) map[string]archiveInstall {
 	out := map[string]archiveInstall{}
 	entries, err := os.ReadDir(modsDir)
 	if err != nil {
-		// Still cache the empty result — probing a missing modsDir per
-		// call is not free.
 		d.installedArchiveCacheMu.Lock()
 		d.installedArchiveCache[gameID] = out
 		d.installedArchiveCacheMu.Unlock()
@@ -992,9 +1008,6 @@ func (d *Daemon) installedArchiveMap(gameID string) map[string]archiveInstall {
 	return out
 }
 
-// invalidateInstalledArchiveCache drops the cached archive→mod map for a
-// gameID (or all games if gameID is empty). Cheap — next ListDownloads /
-// BulkHideDownloads repopulates on demand.
 func (d *Daemon) invalidateInstalledArchiveCache(gameID string) {
 	d.installedArchiveCacheMu.Lock()
 	defer d.installedArchiveCacheMu.Unlock()
@@ -1005,27 +1018,15 @@ func (d *Daemon) invalidateInstalledArchiveCache(gameID string) {
 	delete(d.installedArchiveCache, gameID)
 }
 
-// SetArchiveHidden / SetArchivesHiddenBulk live in archives.go (v2 surface).
-
-// ensureInModList adds a mod to every configured profile's modlist.txt if
-// it isn't already present. New entries are added as disabled to match MO2
-// convention and the initial `enabled: false` in the mod's metadata.yaml —
-// the user explicitly toggles the checkbox to enable, at which point the
-// UI syncs both files back in lockstep. Silent no-op for missing profiles.
-//
-// Registered as the download manager's PostInstallHook, so this is also
-// where we invalidate the installed-archive cache after auto-install.
 func (d *Daemon) ensureInModList(gameID, modName string) {
 	d.invalidateInstalledArchiveCache(gameID)
 	profiles, err := d.profileMgr.List(gameID)
 	if err != nil || len(profiles) == 0 {
-		// Fall back to "Default" even if List failed — worst case Save creates it.
 		profiles = []*profile.Profile{{Name: "Default", GameID: gameID}}
 	}
 	for _, p := range profiles {
 		_, entries, err := d.profileMgr.Load(gameID, p.Name)
 		if err != nil {
-			// Profile dir may not exist yet; fabricate a minimal one.
 			entries = nil
 		}
 		present := false
@@ -1047,16 +1048,6 @@ func (d *Daemon) ensureInModList(gameID, modName string) {
 
 // RegisterManualInstall is the post-install hook for paths that produce a
 // mod folder without going through StartInstall (e.g., the C++ FOMOD wizard
-// when it does its own local extraction). It mirrors the bookkeeping the
-// download manager + StartInstall do automatically:
-//
-//  1. Drop the installed-archive cache so the next ListArchives sees the new
-//     mod and the matching Downloads row flips to INSTALLED.
-//  2. Add the mod to every profile's modlist.txt (disabled, MO2 convention).
-//  3. If archive_rel_path is non-empty, emit an ArchiveEvent.RowChanged so
-//     the Downloads tab updates without a manual reload.
-//
-// Idempotent — calling twice is harmless.
 func (d *Daemon) RegisterManualInstall(gameID, modName, archiveRelPath string) (int, error) {
 	if _, ok := d.config.Games[gameID]; !ok {
 		return 0, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
@@ -1111,10 +1102,6 @@ func (d *Daemon) RegisterManualInstall(gameID, modName, archiveRelPath string) (
 		}
 	}
 
-	// Emit a synthetic install-complete event so the activity log shows
-	// "Installed X (Y files)" the same way it would for a daemon-driven
-	// install. Without this, the local-extract FOMOD path leaves the log
-	// stuck on the last "Installing..." entry, which reads as a hang.
 	fileCount := 0
 	if meta, err := download.LoadModMetadata(modDir); err == nil && meta != nil {
 		fileCount = meta.FileCount
@@ -1136,11 +1123,6 @@ func (d *Daemon) RegisterManualInstall(gameID, modName, archiveRelPath string) (
 	return updated, nil
 }
 
-// ListOverwriteFiles walks the always-on Overwrite directory for a game,
-// returning each file (and intermediate directory) with size + mtime so the
-// UI can render an expandable tree with multi-select. Missing directory
-// is treated as "empty" — Overwrite is created lazily by the materializer
-// the first time the running game writes to it.
 func (d *Daemon) ListOverwriteFiles(gameID string) ([]ipc.OverwriteEntryResult, string, error) {
 	if _, ok := d.config.Games[gameID]; !ok {
 		return nil, "", fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
@@ -1178,18 +1160,6 @@ func (d *Daemon) ListOverwriteFiles(gameID string) ([]ipc.OverwriteEntryResult, 
 }
 
 // ExtractOverwriteToMod graduates a subset of loose files from Overwrite
-// into a fresh mod folder. Intended workflow:
-//
-//   1. User runs the game / xEdit / a tool that writes into Overwrite.
-//   2. They want to keep that batch as a real mod (versionable, conflict-
-//      visible, profile-toggleable). Right-click Overwrite → Extract.
-//   3. Daemon copies-or-moves the chosen paths into ModsDir/<modName>,
-//      writes a metadata.yaml, and registers it in every profile's
-//      modlist.txt (disabled by default).
-//
-// Empty `files` means "extract everything currently in Overwrite". The
-// destination is always a brand-new mod folder; collision is an error so
-// the user can't accidentally clobber an existing mod.
 func (d *Daemon) ExtractOverwriteToMod(gameID, modName string, files []string, keep bool) (int, error) {
 	if _, ok := d.config.Games[gameID]; !ok {
 		return 0, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
@@ -1208,8 +1178,6 @@ func (d *Daemon) ExtractOverwriteToMod(gameID, modName string, files []string, k
 		return 0, &ipc.ModCollisionError{Name: modName}
 	}
 
-	// Materialize the file list. Empty means everything; otherwise resolve
-	// the user's selection (which may include directories — recurse those).
 	var paths []string
 	if len(files) == 0 {
 		_ = filepath.WalkDir(owDir, func(path string, de fs.DirEntry, err error) error {
@@ -1258,20 +1226,12 @@ func (d *Daemon) ExtractOverwriteToMod(gameID, modName string, files []string, k
 			continue
 		}
 		if keep {
-			// Copy. Going via os.Rename would also work cross-FS via the
-			// fallback path, but the user explicitly asked for files to
-			// stay in Overwrite — so always copy here.
 			if err := copyFileForExtract(src, dst); err != nil {
 				slog.Warn("copy for extract failed", "src", src, "dst", dst, "err", err)
 				continue
 			}
 		} else {
 			if err := os.Rename(src, dst); err != nil {
-				// Cross-device rename → copy + remove. This is rare in
-				// practice (Overwrite shares a filesystem with ModsDir)
-				// but the materializer has no such guarantee and we want
-				// to be robust to mods/Overwrite living on different
-				// mounts.
 				if err := copyFileForExtract(src, dst); err != nil {
 					slog.Warn("move-via-copy for extract failed", "src", src, "err", err)
 					continue
@@ -1282,8 +1242,6 @@ func (d *Daemon) ExtractOverwriteToMod(gameID, modName string, files []string, k
 		count++
 	}
 
-	// Prune empty directories left behind in Overwrite when we moved files
-	// out. WalkDir bottom-up by sorting depth-descending.
 	if !keep {
 		var dirs []string
 		_ = filepath.WalkDir(owDir, func(path string, de fs.DirEntry, err error) error {
@@ -1295,21 +1253,16 @@ func (d *Daemon) ExtractOverwriteToMod(gameID, modName string, files []string, k
 			}
 			return nil
 		})
-		// Deepest first.
 		sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
 		for _, d := range dirs {
-			_ = os.Remove(d) // succeeds only when empty; ignored otherwise
+			_ = os.Remove(d)
 		}
 	}
 
-	// Write a minimal metadata.yaml so the new mod is indistinguishable
-	// from any other manual install. AppendSourceArchive will fill the
-	// fields it cares about; a zero SourceArchiveRef is intentional —
-	// Overwrite-graduated mods have no provenance archive.
 	if err := download.AppendSourceArchive(
 		destDir, modName,
 		download.SourceArchiveRef{},
-		modName /*displayName*/, "" /*category*/, "" /*version*/, "" /*modPage*/,
+		modName /*displayName*/, "" /*category*/, "" /*version*/, "", /*modPage*/
 		paths,
 	); err != nil {
 		slog.Warn("ExtractOverwriteToMod: metadata write failed", "err", err)
@@ -1322,10 +1275,6 @@ func (d *Daemon) ExtractOverwriteToMod(gameID, modName string, files []string, k
 	return count, nil
 }
 
-// copyFileForExtract is the small file-copy helper used by
-// ExtractOverwriteToMod when os.Rename can't be applied (cross-FS, or
-// caller asked to keep the original). Preserves mode; doesn't try to
-// preserve mtime — the new file's metadata reflects the install.
 func copyFileForExtract(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -1348,13 +1297,6 @@ func copyFileForExtract(src, dst string) error {
 }
 
 // sweepOrphanStageDirs removes any `.stage-<rand>/` directories sitting
-// inside ModsDir(gameID). Stages are produced by download.Install as
-// pre-finalize scratch space; on a clean run they get renamed (NEW_MOD)
-// or removed (MERGE_INTO) before Install returns. A leftover stage means
-// either the daemon was killed mid-install or a prior buggy build forgot
-// to clean up. Either way the contents are safe to discard — nothing
-// outside the in-flight install ever references them, and scanModsFolder
-// already skips dot-prefixed names so they don't appear in the UI.
 func (d *Daemon) sweepOrphanStageDirs(gameID string) {
 	modsDir := config.ModsDir(gameID)
 	entries, err := os.ReadDir(modsDir)
@@ -1381,11 +1323,6 @@ func (d *Daemon) sweepOrphanStageDirs(gameID string) {
 	}
 }
 
-// InstallDownload replaced by StartInstall (archives.go).
-
-// runStatusIngest forwards events from the producer-facing statusCh into
-// the coalescer. Exits when statusCh is closed (on shutdown), then closes
-// the coalescer so the drain goroutine can finish.
 func (d *Daemon) runStatusIngest() {
 	defer close(d.ingesterDone)
 	for evt := range d.statusCh {
@@ -1394,9 +1331,6 @@ func (d *Daemon) runStatusIngest() {
 	d.coalescer.Close()
 }
 
-// runStatusDrain pulls coalesced events into coalescedCh, which
-// WatchStatus exposes. Exits when the coalescer is closed and drained,
-// then closes coalescedCh so gRPC stream handlers can return.
 func (d *Daemon) runStatusDrain() {
 	defer close(d.coalescerDone)
 	defer close(d.coalescedCh)
@@ -1408,8 +1342,6 @@ func (d *Daemon) runStatusDrain() {
 		d.coalescedCh <- evt
 	}
 }
-
-// RemoveArchive / ReinstallMod(v2) live in archives.go.
 
 // GetGameSettings returns the per-game settings (auto_install toggle).
 // A game with no settings file yields defaults — not an error.
@@ -1435,27 +1367,52 @@ func (d *Daemon) SetGameSettings(gameID string, autoInstall bool) (*ipc.GameSett
 	return &ipc.GameSettingsResult{GameID: gameID, AutoInstall: s.AutoInstall}, nil
 }
 
-// --- ipc.LaunchController ---
-
 func (d *Daemon) LaunchGame(gameID string, useTool bool, profileName string) (int, error) {
 	if pending := d.recoveryPendingFor(gameID); pending != nil {
 		return 0, fmt.Errorf("recovery pending for %s: %s — confirm via the GUI prompt or `gorganizerctl recover-confirm` first",
 			gameID, pending.Reason)
 	}
+	if conflict := d.findMutexConflict(gameID); conflict != "" {
+		return 0, &ipc.VFSMutexError{
+			GameID:      gameID,
+			Conflicting: conflict,
+			Group:       mutexGroupOf(gameID),
+		}
+	}
 	gc, ok := d.config.Games[gameID]
 	if !ok {
 		return 0, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
+	if gc.LinkedFromGameID != "" {
+		if _, parentOk := d.config.Games[gc.LinkedFromGameID]; !parentOk {
+			return 0, &ipc.ErrLinkedParentMissing{
+				GameID:       gameID,
+				ParentGameID: gc.LinkedFromGameID,
+			}
+		}
+	}
+	if gc.LinkedFromGameID != "" {
+		eff, err := d.config.EffectiveGameConfig(gameID)
+		if err != nil {
+			return 0, err
+		}
+		gc = eff
+	}
 
-	// Auto-mount VFS if not already mounted and we have mods.
+	if isSynthetic(gameID) {
+		if err := d.VerifyTTWIntegrity(); err != nil {
+			return 0, err
+		}
+	}
+
 	mm := d.ensureMountManager(gameID, gc)
 	if !mm.IsMounted() && profileName != "" {
 		slog.Info("auto-mounting VFS before launch", "game", gameID, "profile", profileName)
-		// Use unlocked MountVFS since we're already called under various lock states.
-		// MountVFS acquires its own lock.
 		if _, err := d.MountVFS(gameID, profileName); err != nil {
+			if isSynthetic(gameID) {
+				return 0, fmt.Errorf("auto-mount of %s VFS failed: %w", gameID, err)
+			}
 			slog.Warn("VFS auto-mount failed, launching without mods", "game", gameID, "err", err)
-			// Notify frontend.
 			select {
 			case d.statusCh <- ipc.StatusEventResult{Info: fmt.Sprintf("VFS mount skipped: %v", err)}:
 			default:
@@ -1463,13 +1420,6 @@ func (d *Daemon) LaunchGame(gameID string, useTool bool, profileName string) (in
 		}
 	}
 
-	// Push profile-specific INI files into the game's Documents/My Games dir
-	// when the profile has opted in. Failure is non-fatal — the game still
-	// launches using whatever INIs are already on disk.
-	//
-	// Verbose here because when tweaks don't appear to take effect (intros
-	// still play, mods dormant) the first question is always "did the push
-	// even run?" Log every skip path with its reason.
 	if profileName == "" {
 		slog.Warn("no profile selected — skipping INI push (tweaks like disable-intro will NOT apply)",
 			"game", gameID)
@@ -1487,16 +1437,11 @@ func (d *Daemon) LaunchGame(gameID string, useTool bool, profileName string) (in
 			} else {
 				reports, err := d.iniMgr.PushToDocuments(gameID, profileName, gc.SteamAppID)
 				if err != nil {
-					// Hard fail for useTool launches — silently proceeding is
-					// exactly what produced the "custom INIs ignored" bug.
 					if useTool {
 						return 0, fmt.Errorf("pushing profile INIs failed: %w", err)
 					}
 					slog.Warn("pushing profile INIs failed", "game", gameID, "profile", profileName, "err", err)
 				}
-				// Per-file verification. Every written file must round-trip
-				// its size/hash; a mismatch means the Proton prefix redirected
-				// the write somewhere the game won't read.
 				var unverified []string
 				for _, r := range reports {
 					if r.Skipped {
@@ -1519,33 +1464,16 @@ func (d *Daemon) LaunchGame(gameID string, useTool bool, profileName string) (in
 		}
 	}
 
-	// Deploy plugins.txt so the engine actually loads the enabled plugins.
-	// The FUSE mount makes mod files *visible* in Data/, but Bethesda
-	// engines only activate plugins listed in the per-user plugins.txt in
-	// AppData/Local/{GameSubdir}/. Without this the default launcher can
-	// show the mods' ESPs but the running game ignores them.
 	if profileName != "" {
 		if err := d.writePluginsTxt(gameID, gc, profileName); err != nil {
 			slog.Warn("writing plugins.txt failed", "game", gameID, "err", err)
 		}
 	}
 
-	// If useTool and tool manager is available, launch via Proton with script extender.
-	// When useTool is true we *must not* silently fall back to Steam's
-	// default launch on error — that path runs FalloutNVLauncher.exe
-	// (or the equivalent Bethesda launcher) instead of the extender, so
-	// the user ends up with the vanilla game thinking xNVSE ran. They'd
-	// see splashes, no mod-aware menu, and no idea why. Surface the
-	// error so the frontend can show it.
 	if useTool {
 		if d.toolMgr == nil {
 			return 0, fmt.Errorf("tool launch requested but tool manager is not initialized")
 		}
-		// Drift check: after a Steam game update, extender files may have
-		// been removed or an edited game exe may have desynced against the
-		// loader. Manifest records the sha of every file we installed for
-		// the extender; a mismatch surfaces as LoaderMissingError so the UI
-		// asks the user to reinstall rather than silently launching vanilla.
 		if drifted, verr := VerifyScriptExtenderManifest(gc.InstallPath); verr == nil && len(drifted) > 0 {
 			slog.Warn("script extender manifest drift — refusing to launch",
 				"game", gameID, "drifted_files", drifted)
@@ -1566,7 +1494,6 @@ func (d *Daemon) LaunchGame(gameID string, useTool bool, profileName string) (in
 		return handle.PID, nil
 	}
 
-	// useTool=false → launch via steam:// protocol (works for all games).
 	steamURL := fmt.Sprintf("steam://rungameid/%d", gc.SteamAppID)
 	cmd := exec.Command("xdg-open", steamURL)
 	if err := cmd.Start(); err != nil {
@@ -1578,12 +1505,9 @@ func (d *Daemon) LaunchGame(gameID string, useTool bool, profileName string) (in
 
 // writePluginsTxt materializes the engine-readable plugins.txt (and
 // loadorder.txt, when the engine uses one) into AppData/Local/{GameSubdir}/
-// inside the Proton prefix. Called from LaunchGame after VFS mount so the
-// file reflects the merged Data/ view including all enabled mods.
 func (d *Daemon) writePluginsTxt(gameID string, gc config.GameConfig, profileName string) error {
 	spec, ok := plugins.SpecFor(gameID)
 	if !ok {
-		// Morrowind and future titles without plugins.txt fall through — not an error.
 		return nil
 	}
 
@@ -1608,9 +1532,6 @@ func (d *Daemon) writePluginsTxt(gameID string, gc config.GameConfig, profileNam
 	if subpath == "" {
 		subpath = "Data"
 	}
-	// Scan from Data.orig/ when mounted (the real source); Data/ only when
-	// no mount is active — that path is the FUSE mountpoint otherwise and
-	// reading from it still works but is slower.
 	baseData := filepath.Join(gc.InstallPath, subpath)
 	if _, err := os.Stat(baseData + ".orig"); err == nil {
 		baseData = baseData + ".orig"
@@ -1655,10 +1576,7 @@ func (d *Daemon) DetectProton() ([]ipc.ProtonVersionResult, error) {
 	return d.toolMgr.DetectProton()
 }
 
-// --- ipc.SettingsController ---
-
 func (d *Daemon) SetNexusAPIKey(ctx context.Context, apiKey string) (*ipc.NexusAPIKeyResult, error) {
-	// Validate the key first.
 	nexus := download.NewNexusClient(apiKey)
 	if err := nexus.ValidateAPIKey(ctx); err != nil {
 		slog.Warn("nexus API key validation failed", "err", err)
@@ -1676,9 +1594,6 @@ func (d *Daemon) SetNexusAPIKey(ctx context.Context, apiKey string) (*ipc.NexusA
 		return nil, fmt.Errorf("saving config: %w", err)
 	}
 
-	// Reinitialize download manager with the new key. If a previous mgr
-	// was running, its in-flight context is discarded — cancel callers
-	// should use CancelDownload before rotating the key.
 	if d.downloadMgr != nil {
 		d.downloadMgr.Stop()
 	}
@@ -1690,16 +1605,12 @@ func (d *Daemon) SetNexusAPIKey(ctx context.Context, apiKey string) (*ipc.NexusA
 	return &ipc.NexusAPIKeyResult{Valid: true}, nil
 }
 
-// --- ipc.IniController ---
-
 // ListProfileIniFiles seeds the profile's ini directory from the game's
 // current Documents/My Games INIs (only on the first call — existing profile
-// copies are preserved) and returns the contents of every managed INI file.
-// Games without a known INI spec yield an empty list.
 func (d *Daemon) ListProfileIniFiles(gameID, profileName string) (*ipc.ProfileIniListResult, error) {
-	gc, ok := d.config.Games[gameID]
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
+	gc, err := d.config.EffectiveGameConfig(gameID)
+	if err != nil {
+		return nil, err
 	}
 	spec, hasSpec := inipkg.SpecFor(gameID)
 	if !hasSpec {
@@ -1709,7 +1620,6 @@ func (d *Daemon) ListProfileIniFiles(gameID, profileName string) (*ipc.ProfileIn
 	if err != nil {
 		return nil, fmt.Errorf("loading profile: %w", err)
 	}
-	// Best-effort seed. Missing source files (game never run) are fine.
 	if err := d.iniMgr.SeedFromDocuments(gameID, profileName, gc.SteamAppID); err != nil {
 		slog.Warn("seeding profile INIs failed", "err", err)
 	}
@@ -1741,13 +1651,13 @@ func (d *Daemon) SaveProfileIniFile(gameID, profileName, filename, content strin
 	if err := d.iniMgr.Write(gameID, profileName, filename, content); err != nil {
 		return err
 	}
-	// If the profile's INI overlay is currently active, also push the single
-	// file we just edited so subsequent game launches don't need to wait.
 	p, _, err := d.profileMgr.Load(gameID, profileName)
 	if err == nil && p.UseCustomIni {
-		gc := d.config.Games[gameID]
-		if _, err := d.iniMgr.PushToDocuments(gameID, profileName, gc.SteamAppID); err != nil {
-			slog.Warn("pushing INI after save failed", "err", err)
+		gc, gcErr := d.config.EffectiveGameConfig(gameID)
+		if gcErr == nil {
+			if _, pushErr := d.iniMgr.PushToDocuments(gameID, profileName, gc.SteamAppID); pushErr != nil {
+				slog.Warn("pushing INI after save failed", "err", pushErr)
+			}
 		}
 	}
 	return nil
@@ -1792,8 +1702,6 @@ func (d *Daemon) ListIniTweaks(gameID, profileName string) ([]ipc.IniTweakStateR
 }
 
 // SetIniTweak toggles an INI preset on or off in the profile's Custom.ini.
-// If the profile has UseCustomIni=true, the updated Custom.ini is pushed to
-// the game's My Documents dir immediately.
 func (d *Daemon) SetIniTweak(gameID, profileName, tweakID string, enabled bool) (*ipc.IniTweakStateResult, error) {
 	if _, ok := d.config.Games[gameID]; !ok {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
@@ -1802,12 +1710,13 @@ func (d *Daemon) SetIniTweak(gameID, profileName, tweakID string, enabled bool) 
 	if err != nil {
 		return nil, err
 	}
-	// Push if the profile's INI overlay is live.
 	p, _, perr := d.profileMgr.Load(gameID, profileName)
 	if perr == nil && p.UseCustomIni {
-		gc := d.config.Games[gameID]
-		if _, err := d.iniMgr.PushToDocuments(gameID, profileName, gc.SteamAppID); err != nil {
-			slog.Warn("pushing INI after tweak toggle failed", "err", err)
+		gc, gcErr := d.config.EffectiveGameConfig(gameID)
+		if gcErr == nil {
+			if _, err := d.iniMgr.PushToDocuments(gameID, profileName, gc.SteamAppID); err != nil {
+				slog.Warn("pushing INI after tweak toggle failed", "err", err)
+			}
 		}
 	}
 	return &ipc.IniTweakStateResult{
@@ -1820,9 +1729,9 @@ func (d *Daemon) SetIniTweak(gameID, profileName, tweakID string, enabled bool) 
 }
 
 func (d *Daemon) GetProfileIniStatus(gameID, profileName string) (*ipc.ProfileIniStatusResult, error) {
-	gc, ok := d.config.Games[gameID]
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
+	gc, err := d.config.EffectiveGameConfig(gameID)
+	if err != nil {
+		return nil, err
 	}
 	spec, hasSpec := inipkg.SpecFor(gameID)
 	result := &ipc.ProfileIniStatusResult{
@@ -1841,11 +1750,8 @@ func (d *Daemon) GetProfileIniStatus(gameID, profileName string) (*ipc.ProfileIn
 	return result, nil
 }
 
-// --- ipc.LifecycleController ---
-
 // Shutdown signals every consumer of d.shutdownCh by closing it. Idempotent
 // via sync.Once: repeated calls (e.g. SIGTERM after a frontend RPC already
-// asked for shutdown) collapse to a single close.
 func (d *Daemon) Shutdown() {
 	d.shutdownOnce.Do(func() { close(d.shutdownCh) })
 }

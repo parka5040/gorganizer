@@ -6,25 +6,13 @@ import (
 	"github.com/parka/gorganizer/internal/ipc"
 )
 
-// statusCoalescer buffers StatusEventResult values. Interim events for the
-// same logical ID (download id, install archive path, vfs game id) are
-// replaced in-place by newer events. Terminal events (COMPLETE / FAILED)
-// and untyped notices (Info, Error) are "sticky" — they pass through
-// distinctly so consumers never miss a state transition.
-//
-// Design rationale: the old non-blocking drop-send pattern on statusCh
-// (buffer 64) silently dropped every send past the buffer. With a slow
-// consumer under a noisy download loop, interim progress ticks piled up
-// and the terminal event was lost to the buffer wall. Coalescing keeps
-// only the newest interim per ID, so the buffer never fills from one
-// noisy download; stickies still get through.
 type statusCoalescer struct {
-	mu       sync.Mutex
-	cond     *sync.Cond
-	latest   map[string]ipc.StatusEventResult // keyed by coalesceKey, interim only
-	order    []string                         // FIFO of keys in latest
-	sticky   []ipc.StatusEventResult          // terminal / untyped — preserved
-	closed   bool
+	mu     sync.Mutex
+	cond   *sync.Cond
+	latest map[string]ipc.StatusEventResult
+	order  []string
+	sticky []ipc.StatusEventResult
+	closed bool
 }
 
 func newStatusCoalescer() *statusCoalescer {
@@ -47,8 +35,6 @@ func (c *statusCoalescer) Push(evt ipc.StatusEventResult) {
 	}
 
 	if !coalescable || terminal {
-		// Flush any pending interim for this id before appending the
-		// terminal — consumers get the last interim AND the terminal.
 		if id != "" {
 			if prev, ok := c.latest[id]; ok {
 				c.sticky = append(c.sticky, prev)
@@ -102,21 +88,10 @@ func (c *statusCoalescer) Close() {
 	c.mu.Unlock()
 }
 
-// coalesceKey groups events for coalescing. Returns:
-//   id          — grouping key; "" for non-groupable events
-//   terminal    — true when this event is the last in its logical sequence
-//   coalescable — false for events that must always pass through (Info/Error)
-//
-// After the v2 stream split, only VFSStatus flows through this coalescer.
-// Download and install progress moved to their own per-game buses where
-// each subscriber paces independently (see streams.go). The sticky
-// Info/Error events kept the coalescer in the picture so shutdown
-// semantics don't diverge across stream types.
 func coalesceKey(evt ipc.StatusEventResult) (string, bool, bool) {
 	if vs := evt.VFSStatus; vs != nil {
 		return "vfs:" + vs.GameID, false, true
 	}
-	// Info / Error have no ID — never coalesce, always pass through.
 	return "", false, false
 }
 

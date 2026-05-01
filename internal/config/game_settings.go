@@ -7,23 +7,16 @@ import (
 	"strings"
 )
 
-// GameSettings is per-game configuration stored next to the mods folder at
-// {ModsDir}/.gorganizer-game.yaml. Distinct from GameConfig (which lives in
-// the global config.json and tracks install paths).
+// GameSettings is per-game configuration stored at {ModsDir}/.gorganizer-game.yaml.
 type GameSettings struct {
-	// AutoInstall, when true, runs the installer immediately after a download
-	// completes if the archive layout is unambiguous. When false (default),
-	// downloads always wait for the user to double-click in the Downloads view.
 	AutoInstall bool
 }
 
-// DefaultGameSettings returns the default settings for a newly-seen game.
 func DefaultGameSettings() GameSettings {
 	return GameSettings{AutoInstall: false}
 }
 
-// LoadGameSettings reads {ModsDir}/.gorganizer-game.yaml. Returns defaults
-// (no error) if the file does not exist.
+// LoadGameSettings reads {ModsDir}/.gorganizer-game.yaml; returns defaults when missing.
 func LoadGameSettings(gameID string) (GameSettings, error) {
 	s := DefaultGameSettings()
 	path := GameSettingsPath(gameID)
@@ -56,8 +49,7 @@ func LoadGameSettings(gameID string) (GameSettings, error) {
 	return s, scanner.Err()
 }
 
-// SaveGameSettings writes {ModsDir}/.gorganizer-game.yaml. Creates the mods
-// directory if it doesn't exist.
+// SaveGameSettings writes {ModsDir}/.gorganizer-game.yaml, creating the mods dir if needed.
 func SaveGameSettings(gameID string, s GameSettings) error {
 	dir := ModsDir(gameID)
 	if _, err := EnsureDir(dir); err != nil {

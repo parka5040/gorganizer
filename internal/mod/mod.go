@@ -6,19 +6,16 @@ import (
 	"path/filepath"
 )
 
-// Mod represents a single installed mod.
-// The mod folder itself contains the files that overlay the game's Data/ directory.
-// There is no nested Data/ subfolder — the mod root IS the data content.
+// Mod represents a single installed mod; its folder overlays the game's Data/ directly.
 type Mod struct {
-	Name      string   // directory name = display name
-	GameID    string   // e.g., "skyrimse"
-	BasePath  string   // absolute path to mod directory (this is the VFS layer root)
-	Files     []string // relative file paths within BasePath (populated by Scan)
+	Name      string
+	GameID    string
+	BasePath  string
+	Files     []string
 	FileCount int
 	TotalSize int64
 }
 
-// NewMod creates a Mod.
 func NewMod(name, gameID, basePath string) *Mod {
 	return &Mod{
 		Name:     name,
@@ -27,7 +24,7 @@ func NewMod(name, gameID, basePath string) *Mod {
 	}
 }
 
-// Scan walks the mod's BasePath and populates Files, FileCount, and TotalSize.
+// Scan populates Files, FileCount, and TotalSize from BasePath.
 func (m *Mod) Scan() error {
 	if _, err := os.Stat(m.BasePath); os.IsNotExist(err) {
 		return fmt.Errorf("%w: %s", ErrNoDataDir, m.BasePath)
@@ -63,8 +60,7 @@ func (m *Mod) Scan() error {
 	return nil
 }
 
-// ListMods reads the mods directory for a game and returns all subdirectories
-// as mods, without scanning their files (deferred to Scan).
+// ListMods returns each subdirectory as a Mod, without scanning files.
 func ListMods(modsDir, gameID string) ([]Mod, error) {
 	entries, err := os.ReadDir(modsDir)
 	if err != nil {
@@ -79,7 +75,6 @@ func ListMods(modsDir, gameID string) ([]Mod, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		// Reserved siblings that live inside {Game}_Mods/ but aren't mods.
 		if isReservedDirName(entry.Name()) {
 			continue
 		}
@@ -89,9 +84,7 @@ func ListMods(modsDir, gameID string) ([]Mod, error) {
 	return mods, nil
 }
 
-// isReservedDirName returns true for directory names that live inside the
-// per-game mods directory but represent infrastructure, not installable
-// mods (the Downloads library, hidden dotfiles, etc.).
+// isReservedDirName flags non-mod entries (Downloads, dotfiles) inside the mods dir.
 func isReservedDirName(name string) bool {
 	if name == "" || name[0] == '.' {
 		return true

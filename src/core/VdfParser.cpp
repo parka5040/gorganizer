@@ -4,8 +4,6 @@
 
 namespace gorganizer {
 
-// --- Tokenizer ---
-
 VdfParser::Tokenizer::Tokenizer(const QString& input)
     : m_input(input)
 {
@@ -68,7 +66,6 @@ VdfParser::Token VdfParser::Tokenizer::next()
         return {Token::String, value};
     }
 
-    // Bare word (shouldn't appear in well-formed VDF but handle gracefully)
     QString value;
     while (m_pos < m_input.size() && !m_input[m_pos].isSpace()
            && m_input[m_pos] != '{' && m_input[m_pos] != '}') {
@@ -77,8 +74,6 @@ VdfParser::Token VdfParser::Tokenizer::next()
     }
     return {Token::String, value};
 }
-
-// --- Parser ---
 
 std::optional<QVariantMap> VdfParser::parseObject(Tokenizer& tok)
 {
@@ -108,7 +103,6 @@ std::optional<QVariantMap> VdfParser::parse(const QString& content)
 {
     Tokenizer tok(content);
 
-    // Read root key
     Token rootKey = tok.next();
     if (rootKey.type != Token::String)
         return std::nullopt;

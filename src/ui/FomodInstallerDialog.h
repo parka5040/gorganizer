@@ -13,17 +13,13 @@ class QPushButton;
 
 namespace gorganizer {
 
-// FomodInstallerDialog walks the user through a FOMOD installer: one page
-// per installStep with the group/plugin controls (radio or checkboxes based
-// on group type). On accept, selectedFiles() returns the flattened list of
-// FomodFile operations (required files + user-picked plugin files).
+// Walks the user through a FOMOD installer one step at a time.
 class FomodInstallerDialog : public QDialog {
     Q_OBJECT
 public:
     FomodInstallerDialog(const FomodPlan& plan, QWidget* parent = nullptr);
 
-    // Flat list of source/destination copy operations. Paths in `source`
-    // are relative to plan.modulePath (caller resolves against extractRoot).
+    // Source/destination copy ops with sources relative to plan.modulePath.
     QList<FomodFile> selectedFiles() const { return m_selectedFiles; }
 
 private slots:
@@ -32,8 +28,8 @@ private slots:
 
 private:
     struct StepWidgets {
-        QList<QButtonGroup*> groupButtons;            // one per group (radio groups)
-        QList<QList<QAbstractButton*>> pluginButtons; // [group][plugin]
+        QList<QButtonGroup*> groupButtons;
+        QList<QList<QAbstractButton*>> pluginButtons;
     };
 
     void buildPages();

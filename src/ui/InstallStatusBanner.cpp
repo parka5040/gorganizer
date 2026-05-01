@@ -54,7 +54,6 @@ InstallStatusBanner::InstallStatusBanner(GrpcClient* grpc, QWidget* parent)
     m_autoHide->setSingleShot(true);
     m_autoHide->setInterval(2000);
     connect(m_autoHide, &QTimer::timeout, this, [this] {
-        // Hide only if nothing is still active.
         bool anyActive = false;
         for (const auto& a : m_active) {
             if (a.step != GrpcInstallStepComplete && a.step != GrpcInstallStepFailed) {
@@ -103,8 +102,6 @@ void InstallStatusBanner::onInstallProgress(const GrpcInstallProgress& p)
     m_focusedKey = p.archiveRelPath;
 
     if (p.step == GrpcInstallStepComplete || p.step == GrpcInstallStepFailed) {
-        // Remove from active after a short grace period. If this was the
-        // last active install the auto-hide timer handles dismissal.
         m_autoHide->start();
     }
     redraw();
@@ -117,8 +114,6 @@ void InstallStatusBanner::showFomodPending(const QString& archiveRelPath, const 
     ActiveInstall& a = m_active[archiveRelPath];
     a.archiveRelPath = archiveRelPath;
     a.modName = modName;
-    // FOMOD-pending is now a modal dialog state, not an install-progress
-    // step. The banner displays Extracting while the preview is cached.
     a.step = GrpcInstallStepExtracting;
     a.pct = -1;
     m_focusedKey = archiveRelPath;
@@ -166,17 +161,15 @@ void InstallStatusBanner::redraw()
     m_detailLabel->setText(detail);
 
     if (a.pct < 0) {
-        m_bar->setRange(0, 0);  // indeterminate
+        m_bar->setRange(0, 0);
     } else {
         m_bar->setRange(0, 100);
         m_bar->setValue(a.pct);
     }
     m_bar->setFormat("%p%");
 
-    // FOMOD is a modal dialog now; hide the legacy "resume wizard" button.
     m_fomodBtn->setVisible(false);
 
-    // Count other still-active installs.
     int more = 0;
     for (auto it = m_active.constBegin(); it != m_active.constEnd(); ++it) {
         if (it.key() == m_focusedKey)

@@ -22,7 +22,6 @@ func writePluginFile(t *testing.T, dir, name string, masters []string, isLight b
 	}
 }
 
-// findIssue returns the first issue of the given kind on plugin filename.
 func findIssue(out []PluginStatus, filename string, kind DepKind) *DepIssue {
 	for _, p := range out {
 		if p.Plugin.Filename != filename {
@@ -37,7 +36,6 @@ func findIssue(out []PluginStatus, filename string, kind DepKind) *DepIssue {
 	return nil
 }
 
-// findStatus returns the PluginStatus matching filename, or nil.
 func findStatus(out []PluginStatus, filename string) *PluginStatus {
 	for i := range out {
 		if out[i].Plugin.Filename == filename {
@@ -56,7 +54,7 @@ func TestAnalyzeHardDeps_AllPresent(t *testing.T) {
 		{Filename: "ModA.esp", Ext: ".esp", Source: modA, FromMod: "ModA", Enabled: true},
 	}
 	mods := []ModEntry{{Name: "ModA", Path: modA}}
-	spec, _ := SpecFor("skyrim") // implicit: Skyrim.esm
+	spec, _ := SpecFor("skyrim")
 
 	cache := NewHeaderCache(0)
 	out := AnalyzeHardDeps(context.Background(), cache, plugins, mods, spec, nil)
@@ -84,8 +82,6 @@ func TestAnalyzeHardDeps_AbsentMaster(t *testing.T) {
 }
 
 func TestAnalyzeHardDeps_DisabledMaster(t *testing.T) {
-	// USSEP exists in a mod folder on disk but is NOT in the active load
-	// order — analyzer should classify as Disabled (orange), not Absent.
 	dir := t.TempDir()
 	modA := filepath.Join(dir, "ModA")
 	modUssep := filepath.Join(dir, "USSEP")
@@ -112,15 +108,12 @@ func TestAnalyzeHardDeps_DisabledMaster(t *testing.T) {
 }
 
 func TestAnalyzeHardDeps_OutOfOrder(t *testing.T) {
-	// Patch.esp depends on Base.esp, but Base.esp comes AFTER Patch.esp in
-	// load order — analyzer must flag MASTER_OUT_OF_ORDER on Patch.esp.
 	dir := t.TempDir()
 	modBase := filepath.Join(dir, "Base")
 	modPatch := filepath.Join(dir, "Patch")
 	writePluginFile(t, modBase, "Base.esp", []string{}, false)
 	writePluginFile(t, modPatch, "Patch.esp", []string{"Base.esp"}, false)
 
-	// Order: Patch first, Base second — wrong.
 	plugins := []Plugin{
 		{Filename: "Patch.esp", Ext: ".esp", Source: modPatch, FromMod: "Patch", Enabled: true},
 		{Filename: "Base.esp", Ext: ".esp", Source: modBase, FromMod: "Base", Enabled: true},
@@ -139,9 +132,6 @@ func TestAnalyzeHardDeps_OutOfOrder(t *testing.T) {
 }
 
 func TestAnalyzeHardDeps_ImplicitMasterNeverOutOfOrder(t *testing.T) {
-	// Implicit masters (e.g. Skyrim.esm) are auto-loaded by the engine —
-	// they conceptually load at index -1, never trigger OUT_OF_ORDER no
-	// matter where the user lists them.
 	dir := t.TempDir()
 	mod := filepath.Join(dir, "Mod")
 	writePluginFile(t, mod, "Mod.esp", []string{"Skyrim.esm"}, false)
@@ -161,7 +151,6 @@ func TestAnalyzeHardDeps_ImplicitMasterNeverOutOfOrder(t *testing.T) {
 func TestAnalyzeHardDeps_ESLFlagDetected(t *testing.T) {
 	dir := t.TempDir()
 	mod := filepath.Join(dir, "ESLMod")
-	// Despite .esp extension, set the 0x200 light-master flag.
 	writePluginFile(t, mod, "Light.esp", []string{}, true)
 
 	plugins := []Plugin{
@@ -177,9 +166,6 @@ func TestAnalyzeHardDeps_ESLFlagDetected(t *testing.T) {
 }
 
 func TestAnalyzeHardDeps_ExtraMastersAcceptedAsImplicit(t *testing.T) {
-	// TTW edge case: under FNV with TTW active, Fallout3.esm is required
-	// but isn't in falloutnv's ImplicitMasters list. extraMasters lets the
-	// caller declare it.
 	dir := t.TempDir()
 	mod := filepath.Join(dir, "TTWMod")
 	writePluginFile(t, mod, "TTWMod.esp", []string{"Fallout3.esm"}, false)

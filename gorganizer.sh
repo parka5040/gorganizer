@@ -93,6 +93,7 @@ GAME_MODS_DIRS=(
     "falloutnv:FalloutNV_Mods"
     "fallout4:Fallout4_Mods"
     "starfield:Starfield_Mods"
+    "ttw:TTW_Mods"
 )
 
 # --- output helpers --------------------------------------------------------
@@ -179,19 +180,46 @@ detect_distro_family() {
 
 # Build deps per family. Covers both build and runtime — building locally
 # requires the dev headers anyway, and the runtime libs come along for free.
+#
+# xdelta3 is required by the TTW native installer backend (Backend B,
+# SulfurNitride/TTW_Linux_Installer) for `.mpi` patching. It's available
+# in every distro's main repos, so it costs nothing to add unconditionally.
+#
+# Recommended host packages NOT installed by this script (each lives
+# outside our packaging story):
+#
+#   - protontricks: needed for TTW Backend A (.NET 4.8 install in FNV's
+#     Proton prefix). Not in standard Debian stable / Ubuntu LTS pre-22.04
+#     repos. Install via:
+#       Flatpak: flatpak install com.github.Matoking.protontricks
+#       pipx:    pipx install protontricks
+#     The TTW dialog's Page 1 will show a friendly "install protontricks"
+#     hint when missing.
+#
+#   - winetricks: in every distro's repos; install via package manager.
+#
+#   - gstreamer codec suite: needed for FNV/TTW in-game music. Lives
+#     outside the Proton prefix and cannot be installed via protontricks.
+#     Distro-specific package set:
+#       Debian/Ubuntu: gstreamer1.0-libav, gstreamer1.0-plugins-good,
+#                      gstreamer1.0-plugins-bad
+#       Arch:          gst-libav, gst-plugins-good, gst-plugins-bad
+#       Fedora:        gstreamer1-libav, gstreamer1-plugins-good,
+#                      gstreamer1-plugins-bad-free
+#     The TTW dialog's Page 1 surfaces a hint when missing.
 deps_for_family() {
     case "$1" in
         arch)
-            echo "base-devel cmake ninja go protobuf grpc qt6-base fuse3 p7zip unzip"
+            echo "base-devel cmake ninja go protobuf grpc qt6-base fuse3 p7zip unzip xdelta3"
             ;;
         debian)
-            echo "build-essential cmake ninja-build golang-go protobuf-compiler protobuf-compiler-grpc libgrpc++-dev qt6-base-dev libfuse3-dev fuse3 p7zip-full unzip"
+            echo "build-essential cmake ninja-build golang-go protobuf-compiler protobuf-compiler-grpc libgrpc++-dev qt6-base-dev libfuse3-dev fuse3 p7zip-full unzip xdelta3"
             ;;
         fedora)
-            echo "gcc-c++ cmake ninja-build golang protobuf-compiler grpc-plugins grpc-devel qt6-qtbase-devel fuse3-devel fuse3 p7zip unzip"
+            echo "gcc-c++ cmake ninja-build golang protobuf-compiler grpc-plugins grpc-devel qt6-qtbase-devel fuse3-devel fuse3 p7zip unzip xdelta3"
             ;;
         suse)
-            echo "gcc-c++ cmake ninja go protobuf-devel grpc-devel qt6-base-devel fuse3-devel fuse3 p7zip-full unzip"
+            echo "gcc-c++ cmake ninja go protobuf-devel grpc-devel qt6-base-devel fuse3-devel fuse3 p7zip-full unzip xdelta"
             ;;
         *)
             echo ""

@@ -15,8 +15,6 @@
 
 namespace gorganizer {
 
-// --- LoadOrderTreeView ---
-
 LoadOrderTreeView::LoadOrderTreeView(PluginListWidget* owner, QWidget* parent)
     : QTreeView(parent)
     , m_owner(owner)
@@ -104,7 +102,6 @@ void LoadOrderTreeView::dropEvent(QDropEvent* event)
     if (!model())
         return;
 
-    // Reject drops while a non-load-order sort is active.
     if (!(m_owner->m_sortColumn == ColIndex && m_owner->m_sortOrder == Qt::AscendingOrder)) {
         event->ignore();
         return;
@@ -132,7 +129,6 @@ void LoadOrderTreeView::dropEvent(QDropEvent* event)
         insertAt--;
     m->insertRow(insertAt, items);
 
-    // Update stored load-order positions.
     for (int i = 0; i < m->rowCount(); ++i) {
         auto* pi = m->item(i, ColPlugin);
         if (pi)
@@ -147,8 +143,6 @@ void LoadOrderTreeView::dropEvent(QDropEvent* event)
     event->setDropAction(Qt::CopyAction);
     event->accept();
 }
-
-// --- PluginListWidget ---
 
 PluginListWidget::PluginListWidget(QWidget* parent)
     : QWidget(parent)
@@ -174,7 +168,6 @@ PluginListWidget::PluginListWidget(QWidget* parent)
     m_view->setDragDropMode(QAbstractItemView::DragDrop);
     m_view->setDefaultDropAction(Qt::MoveAction);
 
-    // Clickable headers for sorting. We handle sorting ourselves.
     m_view->setSortingEnabled(false);
     m_view->header()->setSectionsClickable(true);
     m_view->header()->setSortIndicatorShown(true);
@@ -209,7 +202,6 @@ void PluginListWidget::onHeaderClicked(int column)
         if (m_sortOrder == Qt::AscendingOrder) {
             m_sortOrder = Qt::DescendingOrder;
         } else {
-            // Third click: reset to Index ascending (the natural load order).
             m_sortColumn = ColIndex;
             m_sortOrder = Qt::AscendingOrder;
             m_view->header()->setSortIndicator(ColIndex, Qt::AscendingOrder);
@@ -224,7 +216,6 @@ void PluginListWidget::onHeaderClicked(int column)
 
     m_view->header()->setSortIndicator(m_sortColumn, m_sortOrder);
 
-    // Index ascending IS the load order — just restore, don't disable drag.
     if (m_sortColumn == ColIndex && m_sortOrder == Qt::AscendingOrder) {
         restoreLoadOrder();
         m_view->setDragEnabled(true);
@@ -252,14 +243,12 @@ void PluginListWidget::applySort(int column, Qt::SortOrder order)
     }
 
     if (column == ColIndex) {
-        // Sort by load-order position numerically.
         std::sort(rows.begin(), rows.end(), [order](const RowData& a, const RowData& b) {
             if (order == Qt::AscendingOrder)
                 return a.loadOrder < b.loadOrder;
             return a.loadOrder > b.loadOrder;
         });
     } else {
-        // Sort by text (alphabetical).
         std::sort(rows.begin(), rows.end(), [order](const RowData& a, const RowData& b) {
             int cmp = a.text.compare(b.text, Qt::CaseInsensitive);
             return order == Qt::AscendingOrder ? cmp < 0 : cmp > 0;
@@ -366,9 +355,6 @@ void PluginListWidget::resubscribeStream()
 }
 
 namespace {
-// Status icons rendered at runtime — small filled triangles in the standard
-// red/orange/yellow that match ActivityLogPanel severity colors. We avoid
-// shipping image assets for a single 16-pixel glyph.
 QPixmap statusIcon(QColor color)
 {
     QPixmap pm(16, 16);
@@ -401,24 +387,21 @@ QPixmap pendingIcon()
     return pm;
 }
 
-// Tint colors per worst-issue kind. Alpha applied to the row background.
 QColor tintFor(int kind)
 {
     switch (kind) {
     case GrpcDepMasterAbsent:
     case GrpcDepMasterOutOfOrder:
-        return QColor(180, 50, 50, 60);   // red
+        return QColor(180, 50, 50, 60);
     case GrpcDepMasterDisabled:
-        return QColor(220, 130, 40, 50);  // orange
+        return QColor(220, 130, 40, 50);
     case GrpcDepSoftMissing:
-        return QColor(200, 180, 30, 50);  // yellow
+        return QColor(200, 180, 30, 50);
     default:
         return QColor(0, 0, 0, 0);
     }
 }
 
-// Worst-kind ordering: red > orange > yellow. Determines which color tints
-// the row when multiple issue kinds coexist.
 int rankKind(int kind)
 {
     switch (kind) {
@@ -483,7 +466,6 @@ void PluginListWidget::applyStatusToRow(int row, const GrpcPluginStatus& s)
     statusItem->setData(details, DepIssuesRole);
     statusItem->setData(worst, DepWorstKindRole);
 
-    // Row tint via Qt::BackgroundRole on every cell.
     QBrush tint(tintFor(worst));
     for (int col = 0; col < m_model->columnCount(); ++col) {
         if (auto* cell = m_model->item(row, col)) {
@@ -494,8 +476,6 @@ void PluginListWidget::applyStatusToRow(int row, const GrpcPluginStatus& s)
 
 void PluginListWidget::onPluginStatusSnapshot(const std::vector<GrpcPluginStatus>& plugins)
 {
-    // Build a name→row index once. Plugin filenames are case-insensitive on
-    // Bethesda engines, so match accordingly.
     QHash<QString, int> rowByName;
     rowByName.reserve(m_model->rowCount());
     for (int r = 0; r < m_model->rowCount(); ++r) {
@@ -523,21 +503,17 @@ void PluginListWidget::onPluginStatusUpdate(const GrpcPluginStatus& plugin)
 
 std::vector<PluginEntry> PluginListWidget::collectPlugins()
 {
-    // Scan the base game Data/ directory.
     auto plugins = PluginScanner::scan(m_game.dataDir);
 
-    // Also scan enabled mod folders for additional plugins.
     if (!m_modsDir.isEmpty()) {
         QDir modsDir(m_modsDir);
         if (modsDir.exists()) {
-            // Track which plugin filenames we already have (case-insensitive).
             QSet<QString> seen;
             for (const auto& p : plugins)
                 seen.insert(p.filename.toLower());
 
             auto modDirs = modsDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
             for (const auto& modDirName : modDirs) {
-                // Check if this mod is enabled via metadata.yaml.
                 QString metaPath = m_modsDir + "/" + modDirName + "/metadata.yaml";
                 bool enabled = false;
                 QFile metaFile(metaPath);
@@ -554,7 +530,6 @@ std::vector<PluginEntry> PluginListWidget::collectPlugins()
                 if (!enabled)
                     continue;
 
-                // Scan this mod folder for plugins.
                 QString modPath = m_modsDir + "/" + modDirName;
                 auto modPlugins = PluginScanner::scan(std::filesystem::path(modPath.toStdString()));
                 for (const auto& p : modPlugins) {
@@ -565,7 +540,6 @@ std::vector<PluginEntry> PluginListWidget::collectPlugins()
                 }
             }
 
-            // Re-sort: ESMs first, then ESLs, then ESPs, alphabetical within each group.
             std::sort(plugins.begin(), plugins.end(),
                       [](const PluginEntry& a, const PluginEntry& b) {
                           if (a.type != b.type)
@@ -577,11 +551,10 @@ std::vector<PluginEntry> PluginListWidget::collectPlugins()
     return plugins;
 }
 
-bool PluginListWidget::isGameMaster(const QString& filename, const QString& gameShortName)
+// Returns implicit masters per game — pinned at top of load order, mirror of internal/plugins/plugins.go.
+static const QHash<QString, QStringList>& canonicalGameMasters()
 {
-    // TODO: When TTW (Tale of Two Wastelands) flag is implemented, allow
-    // reordering FalloutNV.esm/Fallout3.esm relative to each other.
-    static const QHash<QString, QStringList> gameMasters = {
+    static const QHash<QString, QStringList> data = {
         {"morrowind",  {"Morrowind.esm", "Tribunal.esm", "Bloodmoon.esm"}},
         {"oblivion",   {"Oblivion.esm"}},
         {"skyrim",     {"Skyrim.esm"}},
@@ -590,7 +563,40 @@ bool PluginListWidget::isGameMaster(const QString& filename, const QString& game
         {"falloutnv",  {"FalloutNV.esm"}},
         {"fallout4",   {"Fallout4.esm"}},
         {"starfield",  {"Starfield.esm"}},
+        {"ttw",        {"FalloutNV.esm"}},
     };
+    return data;
+}
+
+// Per-game default load order for non-pinned plugins; mirror of CanonicalDLCOrder in internal/plugins/plugins.go.
+static const QHash<QString, QStringList>& canonicalDefaultOrder()
+{
+    static const QHash<QString, QStringList> data = {
+        {"falloutnv", {
+            "DeadMoney.esm", "HonestHearts.esm", "OldWorldBlues.esm",
+            "LonesomeRoad.esm", "GunRunnersArsenal.esm",
+            "ClassicPack.esm", "MercenaryPack.esm", "TribalPack.esm", "CaravanPack.esm",
+        }},
+        {"fallout3", {
+            "Anchorage.esm", "ThePitt.esm", "BrokenSteel.esm",
+            "PointLookout.esm", "Zeta.esm",
+        }},
+        {"ttw", {
+            "DeadMoney.esm", "HonestHearts.esm", "OldWorldBlues.esm",
+            "LonesomeRoad.esm", "GunRunnersArsenal.esm",
+            "ClassicPack.esm", "MercenaryPack.esm", "TribalPack.esm", "CaravanPack.esm",
+            "Fallout3.esm",
+            "Anchorage.esm", "ThePitt.esm", "BrokenSteel.esm",
+            "PointLookout.esm", "Zeta.esm",
+            "TaleOfTwoWastelands.esm",
+        }},
+    };
+    return data;
+}
+
+bool PluginListWidget::isGameMaster(const QString& filename, const QString& gameShortName)
+{
+    const auto& gameMasters = canonicalGameMasters();
 
     auto it = gameMasters.find(gameShortName);
     if (it == gameMasters.end())
@@ -606,19 +612,15 @@ bool PluginListWidget::isGameMaster(const QString& filename, const QString& game
 void PluginListWidget::populateLoadOrder(const std::vector<PluginEntry>& plugins,
                                           const QString& gameShortName)
 {
-    static const QHash<QString, QStringList> gameMasters = {
-        {"morrowind",  {"Morrowind.esm", "Tribunal.esm", "Bloodmoon.esm"}},
-        {"oblivion",   {"Oblivion.esm"}},
-        {"skyrim",     {"Skyrim.esm"}},
-        {"skyrimse",   {"Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm"}},
-        {"fallout3",   {"Fallout3.esm"}},
-        {"falloutnv",  {"FalloutNV.esm"}},
-        {"fallout4",   {"Fallout4.esm"}},
-        {"starfield",  {"Starfield.esm"}},
-    };
+    const auto& gameMasters = canonicalGameMasters();
     QStringList masterOrder;
     if (gameMasters.contains(gameShortName))
         masterOrder = gameMasters[gameShortName];
+
+    QStringList defaultOrder;
+    const auto& defaultMap = canonicalDefaultOrder();
+    if (defaultMap.contains(gameShortName))
+        defaultOrder = defaultMap[gameShortName];
 
     std::vector<const PluginEntry*> pinned;
     std::vector<const PluginEntry*> rest;
@@ -636,6 +638,20 @@ void PluginListWidget::populateLoadOrder(const std::vector<PluginEntry>& plugins
         if (ia < 0) ia = 9999;
         if (ib < 0) ib = 9999;
         return ia < ib;
+    });
+
+    std::stable_sort(rest.begin(), rest.end(),
+                     [&](const PluginEntry* a, const PluginEntry* b) {
+        if (a->type != b->type)
+            return a->type < b->type;
+        if (a->type != PluginEntry::ESM)
+            return false;
+        int ia = defaultOrder.indexOf(a->filename);
+        int ib = defaultOrder.indexOf(b->filename);
+        if (ia >= 0 && ib >= 0) return ia < ib;
+        if (ia >= 0)            return true;
+        if (ib >= 0)            return false;
+        return false;
     });
 
     int rowIndex = 0;
@@ -677,8 +693,6 @@ void PluginListWidget::populateLoadOrder(const std::vector<PluginEntry>& plugins
         nameItem->setForeground(color);
         typeItem->setForeground(color);
 
-        // Status column: empty by default, populated by the StreamPluginStatus
-        // subscription handlers below.
         auto* statusItem = new QStandardItem;
         statusItem->setEditable(false);
         statusItem->setDragEnabled(false);

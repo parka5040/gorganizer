@@ -61,7 +61,6 @@ func TestSoftDepFetcher_PersistGlobalIDsAcrossInstances(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// New fetcher reading the same dir — global id should come from disk.
 	fake2 := &fakeV3{rangesByID: map[string]V3DepRangesFields{}}
 	f2 := NewSoftDepFetcher(fake2, dir)
 	if _, err := f2.resolveGlobalID(context.Background(), "skyrimspecialedition", "12345"); err != nil {
@@ -104,7 +103,7 @@ func TestFilterSatisfiedSoftDeps_DropsSatisfied(t *testing.T) {
 			{Kind: DepSoftMissing, Master: "v1|999", SoftRef: &SoftDepRef{ModName: "OtherMod"}},
 		},
 	}
-	installed := map[int]bool{266: true} // user has USSEP installed
+	installed := map[int]bool{266: true}
 	FilterSatisfiedSoftDeps(res, installed)
 	if len(res.Issues) != 1 {
 		t.Fatalf("expected 1 remaining issue, got %d", len(res.Issues))

@@ -6,14 +6,9 @@ import (
 	"testing"
 )
 
-// fakeSteamRoot lays out a minimal Steam directory tree resembling what
-// our ResolveProtonRuntime parses on the user's actual install: a Proton
-// dir with a toolmanifest declaring require_tool_appid, an appmanifest
-// for that appid pointing at a runtime install dir, and that runtime's
-// _v2-entry-point script. Each test specifies which subset of those
-// pieces should exist so we can exercise both the happy and skip paths.
+// fakeSteamRoot lays out a minimal Steam directory tree for ResolveProtonRuntime tests.
 func fakeSteamRoot(t *testing.T, opts struct {
-	manifestRequiresAppID string // "" → omit the require_tool_appid line entirely
+	manifestRequiresAppID string
 	withAppManifest       bool
 	withEntryPoint        bool
 }) (steamRoot, protonPath string) {
@@ -93,9 +88,6 @@ func TestResolveProtonRuntime_HappyPath(t *testing.T) {
 }
 
 func TestResolveProtonRuntime_NoRequireAppID(t *testing.T) {
-	// Older Protons / Proton-GE may omit the require_tool_appid field.
-	// We don't guess: return ("","") so the caller falls back to direct
-	// invocation rather than maybe-running inside the wrong runtime.
 	steamRoot, protonPath := fakeSteamRoot(t, struct {
 		manifestRequiresAppID string
 		withAppManifest       bool
@@ -113,9 +105,6 @@ func TestResolveProtonRuntime_NoRequireAppID(t *testing.T) {
 }
 
 func TestResolveProtonRuntime_RuntimeNotInstalled(t *testing.T) {
-	// Proton declares it needs a runtime, but the user hasn't installed it
-	// (no appmanifest). Return empty so the caller falls back with a
-	// useful warning.
 	steamRoot, protonPath := fakeSteamRoot(t, struct {
 		manifestRequiresAppID string
 		withAppManifest       bool
@@ -133,8 +122,6 @@ func TestResolveProtonRuntime_RuntimeNotInstalled(t *testing.T) {
 }
 
 func TestResolveProtonRuntime_EntryPointMissing(t *testing.T) {
-	// Appmanifest present but the runtime install is incomplete (no
-	// _v2-entry-point). Same fallback as above.
 	steamRoot, protonPath := fakeSteamRoot(t, struct {
 		manifestRequiresAppID string
 		withAppManifest       bool

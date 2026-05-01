@@ -30,9 +30,6 @@
 
 namespace gorganizer {
 
-// Hex-index helpers — shared by flat-mode sort, Visual-mode sort, and the
-// persist-order paths. Static file-scope so every member function in this
-// TU can see them without pulling them into the public header.
 static quint64 parseHexIndex(const QString& s)
 {
     if (s.isEmpty()) return 0;
@@ -45,8 +42,6 @@ static QString formatHexIndex(quint64 v)
 {
     return QString("%1").arg(v, 16, 16, QLatin1Char('0'));
 }
-
-// --- ModListTreeView ---
 
 ModListTreeView::ModListTreeView(ModListWidget* owner, QWidget* parent)
     : QTreeView(parent)
@@ -96,15 +91,12 @@ void ModListTreeView::dropEvent(QDropEvent* event)
 
     auto* m = static_cast<QStandardItemModel*>(model());
 
-    // The Overwrite row is pinned to the bottom; refuse drags that would
-    // either move it elsewhere or land another mod past it.
     auto srcKindItem = m->item(sourceRow, ModColName);
     if (srcKindItem && srcKindItem->data(Qt::UserRole + 50).toInt() == RowKindOverwrite) {
         event->ignore();
         return;
     }
     if (destRow >= count) {
-        // dropping at end-of-list — that's the Overwrite row's slot.
         event->ignore();
         return;
     }
@@ -114,10 +106,6 @@ void ModListTreeView::dropEvent(QDropEvent* event)
         return;
     }
 
-    // Flat mode: disallow separator rows being dragged (there are none to
-    // drag in flat mode, but guard anyway). Visual mode: separators and
-    // mods are both draggable. Cross-separator drops are fine — the mod
-    // just reassigns to whichever separator it ends up under.
     auto* srcItem = m->item(sourceRow, ModColName);
     if (!srcItem) { event->ignore(); return; }
 
@@ -137,8 +125,6 @@ void ModListTreeView::dropEvent(QDropEvent* event)
     event->accept();
 }
 
-// --- Default Nexus categories ---
-
 QStringList ModListWidget::defaultCategories()
 {
     return {
@@ -153,8 +139,7 @@ QStringList ModListWidget::defaultCategories()
     };
 }
 
-// --- Metadata YAML parsing (simple line-based, no YAML library needed) ---
-
+// Simple line-based YAML parser for metadata.yaml — no external library required.
 ModMetadata ModListWidget::readMetadata(const QString& yamlPath)
 {
     ModMetadata meta;
@@ -177,7 +162,6 @@ ModMetadata ModListWidget::readMetadata(const QString& yamlPath)
         if (line.startsWith('#') || line.isEmpty())
             continue;
 
-        // Section terminators: any unindented `key:` ends the list we're in.
         if (!raw.startsWith(' ') && line.endsWith(':')) {
             QString section = line.left(line.length() - 1).trimmed();
             inSourceList = (section == "source_archives");
@@ -185,10 +169,6 @@ ModMetadata ModListWidget::readMetadata(const QString& yamlPath)
         }
 
         if (inSourceList) {
-            // Two legal forms here:
-            //   - path: "..."            (objects with mod_id/file_id)
-            //   - "..."                  (plain-string list, future-proof)
-            // We just want the path.
             if (line.startsWith("- path:")) {
                 meta.sourceArchives.append(stripQuotes(line.mid(QString("- path:").length())));
             } else if (line.startsWith("path:")) {
@@ -212,7 +192,7 @@ ModMetadata ModListWidget::readMetadata(const QString& yamlPath)
         else if (key == "installed")  meta.installed = val;
         else if (key == "source_archive") meta.sourceArchive = val;
         else if (key == "nexus_url")  meta.nexusUrl = val;
-        else if (key == "mod_page")   meta.nexusUrl = val; // new canonical key
+        else if (key == "mod_page")   meta.nexusUrl = val;
         else if (key == "category")   meta.category = val;
         else if (key == "version")    meta.version = val;
         else if (key == "enabled")    meta.enabled = (val == "true");
@@ -222,14 +202,11 @@ ModMetadata ModListWidget::readMetadata(const QString& yamlPath)
         else if (key == "separator")    meta.separator = val;
     }
 
-    // Back-compat: promote legacy scalar into the list when the list is empty.
     if (meta.sourceArchives.isEmpty() && !meta.sourceArchive.isEmpty())
         meta.sourceArchives.append(meta.sourceArchive);
 
     return meta;
 }
-
-// --- ModListWidget ---
 
 ModListWidget::ModListWidget(GrpcClient* grpc, QWidget* parent)
     : QWidget(parent)
@@ -260,11 +237,6 @@ ModListWidget::ModListWidget(GrpcClient* grpc, QWidget* parent)
     m_view = new ModListTreeView(this);
     m_view->setModel(m_model);
     m_view->setRootIsDecorated(false);
-    // Extended selection: Ctrl+Click adds/removes one row, Shift+Click
-    // selects a contiguous range. Drag-and-drop reorder still works because
-    // it uses the dragged item's row, not the selection set. Bulk Reinstall
-    // and bulk Enable/Disable are exposed in the context menu when 2+ mod
-    // rows are selected.
     m_view->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_view->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_view->setDragEnabled(true);
@@ -290,11 +262,6 @@ ModListWidget::ModListWidget(GrpcClient* grpc, QWidget* parent)
     connect(m_model, &QStandardItemModel::dataChanged, this, &ModListWidget::onModelDataChanged);
     connect(m_view, &QTreeView::doubleClicked, this, &ModListWidget::onItemDoubleClicked);
     connect(m_view, &QTreeView::customContextMenuRequested, this, &ModListWidget::onContextMenu);
-    // Selection-change repaints conflict highlights: when exactly one mod
-    // is selected, mods *it overwrites* go red and mods *that overwrite it*
-    // go green. Clearing the selection (or multi-select) restores the
-    // default style. Connected after the model is set so selectionModel()
-    // is non-null.
     connect(m_view->selectionModel(), &QItemSelectionModel::selectionChanged,
             this, &ModListWidget::onSelectionChanged);
 
@@ -337,12 +304,12 @@ void ModListWidget::loadForGame(const GameInfo& game, const QString& profileName
     m_gameId = game.shortName;
     m_profileName = profileName;
 
-    // Resolve the mods directory (same logic as MainWindow::modsDirectoryFor).
     static const QHash<QString, QString> dirNames = {
         {"morrowind", "Morrowind_Mods"}, {"oblivion", "Oblivion_Mods"},
         {"skyrim", "Skyrim_Mods"}, {"skyrimse", "SkyrimSE_Mods"},
         {"fallout3", "Fallout3_Mods"}, {"falloutnv", "FalloutNV_Mods"},
         {"fallout4", "Fallout4_Mods"}, {"starfield", "Starfield_Mods"},
+        {"ttw", "TTW_Mods"},
     };
     QByteArray root = qgetenv("GORGANIZER_ROOT");
     if (!root.isEmpty()) {
@@ -370,11 +337,8 @@ void ModListWidget::scanModsFolder()
     if (modsDir.exists()) {
         auto entries = modsDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
         for (const auto& dirName : entries) {
-            // Reserved siblings inside {Game}_Mods/ — not installable mods.
             if (dirName == "Downloads" || dirName.startsWith('.'))
                 continue;
-            // Overwrite is rendered as a pinned-bottom pseudo-row by
-            // appendOverwriteRow(); never a regular mod entry.
             if (dirName == kOverwriteModName)
                 continue;
             QString metaPath = m_modsDir + "/" + dirName + "/metadata.yaml";
@@ -395,8 +359,6 @@ void ModListWidget::scanModsFolder()
         }
     }
 
-    // Pull separators from the daemon for this profile. Non-fatal on
-    // failure — Visual mode just shows no separators.
     if (!m_gameId.isEmpty() && !m_profileName.isEmpty()) {
         std::vector<GrpcSeparator> seps;
         QString err;
@@ -413,17 +375,12 @@ void ModListWidget::scanModsFolder()
 
     rebuildView();
 
-    // Request conflict data from daemon.
     if (!m_gameId.isEmpty() && !m_profileName.isEmpty())
         m_grpc->getConflicts(m_gameId, m_profileName);
 }
 
 void ModListWidget::onConflictsReceived(const std::vector<GrpcFileConflict>& conflicts)
 {
-    // Cache the full per-file conflict set. The selection-driven highlight
-    // pass and the right-click "Show Conflicts..." dialog both walk this
-    // structure rather than re-querying the daemon. Daemon refreshes the
-    // snapshot whenever the active mod set or priorities change.
     m_conflicts = conflicts;
 
     QHash<QString, int> winCounts;
@@ -443,8 +400,6 @@ void ModListWidget::onConflictsReceived(const std::vector<GrpcFileConflict>& con
         int wins = winCounts.value(modName, 0);
         int losses = loseCounts.value(modName, 0);
 
-        // Reset to a clean slate before recomputing — prior selection
-        // highlights may have left stale colours/tooltips.
         conflictItem->setText("");
         conflictItem->setToolTip("");
         conflictItem->setForeground(QBrush());
@@ -473,16 +428,9 @@ void ModListWidget::onSelectionChanged()
     repaintConflictHighlights();
 }
 
-// repaintConflictHighlights paints row backgrounds based on the active
-// selection's relationship to the cached conflict map:
-//   - selected row: untouched (preserves selection chrome)
-//   - mod the selection OVERWRITES (selection wins, this row loses): red
-//   - mod that OVERWRITES the selection (this row wins, selection loses): green
-//   - everyone else: cleared
-// No-op when no row or multiple rows are selected so bulk-edit stays calm.
+// Paints row backgrounds red/green to show what the single-selected mod overwrites or is overwritten by.
 void ModListWidget::repaintConflictHighlights()
 {
-    // Clear all background colors first so prior highlights don't linger.
     for (int row = 0; row < m_model->rowCount(); ++row) {
         for (int col = 0; col < m_model->columnCount(); ++col) {
             if (auto* it = m_model->item(row, col))
@@ -500,11 +448,8 @@ void ModListWidget::repaintConflictHighlights()
         return;
     QString selectedMod = selName->text();
 
-    // Build sets — `loserOf` collects mods the selection wins over (which
-    // we paint red); `winnerOver` collects mods that win over the selection
-    // (which we paint green).
-    QSet<QString> loserOf;   // mods overwritten by selectedMod
-    QSet<QString> winnerOver; // mods that overwrite selectedMod
+    QSet<QString> loserOf;
+    QSet<QString> winnerOver;
     for (const auto& c : m_conflicts) {
         if (c.winningMod == selectedMod) {
             for (const auto& l : c.losingMods)
@@ -519,7 +464,6 @@ void ModListWidget::repaintConflictHighlights()
         }
     }
 
-    // Translucent so default text stays readable in any theme.
     QBrush redBrush(QColor(220, 80, 80, 100));
     QBrush greenBrush(QColor(80, 180, 100, 100));
 
@@ -544,16 +488,11 @@ void ModListWidget::repaintConflictHighlights()
     }
 }
 
-// showConflictDetailsForMod pops a modal dialog listing every per-file
-// conflict involving `modName`, partitioned into "files this mod
-// overwrites" (red) and "files this mod is overwritten on" (green). Two
-// columns: virtual path + the other mod. Folder-only overlaps don't show
-// up because the daemon's BuildConflictMap only records when the same
-// VirtualPath is provided by multiple mods (file-level granularity).
+// Pops a dialog listing every file-level conflict involving modName, partitioned into wins/losses.
 void ModListWidget::showConflictDetailsForMod(const QString& modName)
 {
-    QList<QPair<QString, QString>> winsOver;     // (file, loser)
-    QList<QPair<QString, QString>> overwrittenBy; // (file, winner)
+    QList<QPair<QString, QString>> winsOver;
+    QList<QPair<QString, QString>> overwrittenBy;
     for (const auto& c : m_conflicts) {
         if (c.winningMod == modName) {
             for (const auto& l : c.losingMods)
@@ -621,9 +560,6 @@ void ModListWidget::onModelDataChanged(const QModelIndex& topLeft, const QModelI
     if (m_updatingModel)
         return;
 
-    // Checkbox state changed — update the metadata.yaml. Separator rows
-    // aren't checkable so we don't have to guard specially, but confirm
-    // the kind before indexing into m_mods.
     if ((roles.contains(Qt::CheckStateRole) || roles.isEmpty()) && topLeft.column() == ModColName) {
         int row = topLeft.row();
         auto* item = m_model->item(row, ModColName);
@@ -639,11 +575,6 @@ void ModListWidget::onModelDataChanged(const QModelIndex& topLeft, const QModelI
         QString metaPath = m_modsDir + "/" + folder + "/metadata.yaml";
         patchMetadataField(metaPath, "enabled", enabled ? "true" : "false");
 
-        // Push the whole list to the daemon so the profile's modlist.txt
-        // stays in sync. In Visual mode the model order isn't the true
-        // load order, so we rebuild the list from m_mods sorted by
-        // trueIndex. In flat mode the model order IS the true order, so
-        // we use it directly.
         if (!m_gameId.isEmpty() && !m_profileName.isEmpty()) {
             std::vector<GrpcModListEntry> entries;
             if (!m_visualMode) {
@@ -735,7 +666,6 @@ void ModListWidget::onContextMenu(const QPoint& pos)
 
     QMenu menu;
 
-    // Separator rows get their own (visual-mode only) menu.
     if (row >= 0) {
         auto* nameItem = m_model->item(row, ModColName);
         int kind = nameItem ? nameItem->data(Qt::UserRole + 50).toInt() : RowKindMod;
@@ -752,8 +682,6 @@ void ModListWidget::onContextMenu(const QPoint& pos)
         }
     }
 
-    // Insertion menu when Visual mode is on — available whether clicked on
-    // a mod row or empty space. Appended at the top so it's easy to find.
     if (m_visualMode) {
         int insertAt = (row >= 0) ? row : m_model->rowCount();
         menu.addAction("Add Separator Here...", [this, insertAt] {
@@ -762,7 +690,6 @@ void ModListWidget::onContextMenu(const QPoint& pos)
         menu.addSeparator();
     }
 
-    // Everything below needs a valid mod row.
     if (row < 0) {
         if (!menu.isEmpty())
             menu.exec(m_view->viewport()->mapToGlobal(pos));
@@ -776,13 +703,6 @@ void ModListWidget::onContextMenu(const QPoint& pos)
         return;
     const auto& meta = m_mods[modIdx];
 
-    // --- Bulk actions when 2+ mod rows are selected ---
-    //
-    // We only show this branch (instead of the per-mod menu) when the user
-    // explicitly multi-selected. Single-row right-click goes through the
-    // normal per-mod menu below. The right-clicked row is forced into the
-    // selection so the resulting action set always covers what the user
-    // sees highlighted.
     QList<int> selectedModIndexes;
     QStringList selectedFolders;
     QStringList selectedNames;
@@ -796,7 +716,7 @@ void ModListWidget::onContextMenu(const QPoint& pos)
         for (int r : sortedRows) {
             auto* it = m_model->item(r, ModColName);
             if (!it || it->data(Qt::UserRole + 50).toInt() != RowKindMod)
-                continue; // Skip separators AND the Overwrite pseudo-row.
+                continue;
             int idx = it->data(Qt::UserRole + 101).toInt();
             if (idx < 0 || idx >= int(m_mods.size()))
                 continue;
@@ -843,11 +763,6 @@ void ModListWidget::onContextMenu(const QPoint& pos)
         });
         menu.addSeparator();
 
-        // Bulk Reinstall: only enabled when every selected mod has at least
-        // one source archive recorded. Mixing some-archived and
-        // some-unarchived would silently no-op the latter, which is
-        // confusing — better to disable the whole action with a tooltip
-        // explaining why.
         bool allReinstallable = true;
         for (int idx : selectedModIndexes) {
             if (m_mods[idx].sourceArchives.isEmpty()) {
@@ -893,9 +808,6 @@ void ModListWidget::onContextMenu(const QPoint& pos)
         return;
     }
 
-    // "Visit Mod Page" appears only when the mod's metadata.yaml defines a
-    // mod_page URL (either written at install-time from a Nexus sidecar, or
-    // set manually via "Set Mod Page URL..."). Absence of mod_page → no entry.
     if (!meta.nexusUrl.isEmpty()) {
         menu.addAction("Visit Mod Page", [&meta] {
             QDesktopServices::openUrl(QUrl(meta.nexusUrl));
@@ -997,14 +909,10 @@ void ModListWidget::onContextMenu(const QPoint& pos)
             QMessageBox::Yes | QMessageBox::No);
         if (reply != QMessageBox::Yes) return;
 
-        // First pass: no force. Daemon returns ModInUseError (profiles=...)
-        // when the mod is enabled anywhere; we re-prompt and retry with
-        // force=true.
         std::vector<QString> flagged;
         QString err;
         bool ok = m_grpc->uninstallMod(m_gameId, meta.folder, /*force=*/false, flagged, err);
         if (!ok && err.contains("mod_in_use:")) {
-            // Strip profile list out of the machine-readable suffix.
             QString profiles = err;
             int idx = profiles.indexOf("profiles=");
             profiles = idx >= 0 ? profiles.mid(idx + 9) : QString();
@@ -1089,10 +997,6 @@ void ModListWidget::applySort(int column, Qt::SortOrder order)
 
 void ModListWidget::restorePriorityOrder()
 {
-    // Priority numbers aren't meaningful in Visual mode (separators have
-    // -1, mods interleave with them). Rebuild from the source-of-truth
-    // ordering instead — which in Visual mode means separator+visual
-    // layout, and in flat mode means trueIndex order.
     if (m_visualMode) {
         rebuildView();
         return;
@@ -1121,10 +1025,6 @@ void ModListWidget::restorePriorityOrder()
 
 void ModListWidget::recalculatePriorities()
 {
-    // Mod rows get sequential priorities; separator and Overwrite rows
-    // don't participate in the load-order numbering. Overwrite is
-    // intentionally last and unnumbered — its priority is implicit
-    // ("highest"), and showing a number would suggest it can be reordered.
     int p = 0;
     for (int i = 0; i < m_model->rowCount(); ++i) {
         auto* item = m_model->item(i, ModColPriority);
@@ -1153,9 +1053,6 @@ void ModListWidget::updateModPageUrl(int row, const QString& url)
     QString content = f.readAll();
     f.close();
 
-    // Strip any existing mod_page: or legacy nexus_url: line. Preserve
-    // everything else line-for-line so we don't disturb the list
-    // formatting produced by the Go writer.
     QStringList lines = content.split('\n');
     QStringList kept;
     kept.reserve(lines.size());
@@ -1167,8 +1064,6 @@ void ModListWidget::updateModPageUrl(int row, const QString& url)
     }
 
     if (!url.isEmpty()) {
-        // Insert before source_archives: if we can find it, else append
-        // before trailing blank lines.
         int anchor = -1;
         for (int i = 0; i < kept.size(); ++i) {
             if (kept[i].trimmed() == "source_archives:") {
@@ -1191,20 +1086,15 @@ void ModListWidget::updateModPageUrl(int row, const QString& url)
     m_mods[row].nexusUrl = url;
 }
 
-// --- Visual mode, separator rendering, and mode-aware drag ---
-
 bool ModListWidget::visualModeEnabled() const
 {
     return m_visualMode;
 }
 
-// Visual-mode sort key: (separatorVisualIndex, 0-or-1 for separator vs mod,
-// the row's own visualIndex). This puts each separator ahead of its mods,
-// and mods without a separator (empty separator field) at the top.
 namespace {
 struct VisualKey {
     quint64 sepIdx = 0;
-    int kind = 0;   // 0 = separator row, 1 = mod row
+    int kind = 0;
     quint64 own = 0;
     int stableTie = 0;
     bool operator<(const VisualKey& o) const {
@@ -1231,8 +1121,8 @@ void ModListWidget::rebuildView()
         QList<QStandardItem*> items;
         VisualKey vk;
         ModRowKind kind;
-        int modIndex = -1;       // index into m_mods for mod rows
-        int separatorIndex = -1; // index into m_separators for separator rows
+        int modIndex = -1;
+        int separatorIndex = -1;
     };
     std::vector<Row> rows;
 
@@ -1269,8 +1159,6 @@ void ModListWidget::rebuildView()
 
     auto makeSeparatorRow = [&](int sepIdx) -> Row {
         const auto& sep = m_separators[sepIdx];
-        // A separator occupies the name column; other columns are inert.
-        // Visually distinguished by bold italic text and background shade.
         auto* priorityItem = new QStandardItem(sep.collapsed ? "▶" : "▼");
         priorityItem->setEditable(false);
         priorityItem->setTextAlignment(Qt::AlignCenter);
@@ -1308,8 +1196,6 @@ void ModListWidget::rebuildView()
     };
 
     if (!m_visualMode) {
-        // Flat mode: plain mod list ordered by true_index (fall back to
-        // scan order when a mod hasn't got one yet).
         std::vector<int> idx(m_mods.size());
         for (size_t i = 0; i < m_mods.size(); ++i) idx[i] = int(i);
         std::stable_sort(idx.begin(), idx.end(), [&](int a, int b) {
@@ -1323,26 +1209,19 @@ void ModListWidget::rebuildView()
         for (int i : idx)
             rows.push_back(makeModRow(i));
     } else {
-        // Visual mode: interleave separators with mods, sorted by
-        // (separator visualIndex, separator-first, own visualIndex).
-        // Mods with no separator render above the first separator.
-        QHash<QString, quint64> sepRank;     // separator name → visualIndex
+        QHash<QString, quint64> sepRank;
         QHash<QString, bool> sepCollapsed;
         for (const auto& s : m_separators) {
             sepRank[s.name] = parseHexIndex(s.visualIndex);
             sepCollapsed[s.name] = s.collapsed;
         }
 
-        // Separator rows first, placed at their own rank.
         for (int i = 0; i < int(m_separators.size()); ++i) {
             Row r = makeSeparatorRow(i);
             r.vk.sepIdx = parseHexIndex(m_separators[i].visualIndex);
             r.vk.kind = 0;
             rows.push_back(std::move(r));
         }
-        // Mod rows — fall back to trueIndex for visual when the user has
-        // never rearranged them in Visual mode. Mods whose separator
-        // reference no longer exists (renamed/removed) float to the top.
         for (int i = 0; i < int(m_mods.size()); ++i) {
             const auto& m = m_mods[i];
             quint64 sepIdx = 0;
@@ -1351,8 +1230,6 @@ void ModListWidget::rebuildView()
             quint64 own = parseHexIndex(m.visualIndex);
             if (own == 0) own = parseHexIndex(m.trueIndex);
 
-            // Collapsed separator → hide the mod row entirely. The true
-            // order is unaffected so conflict resolution still sees it.
             if (!m.separator.isEmpty() && sepCollapsed.value(m.separator, false))
                 continue;
 
@@ -1384,17 +1261,9 @@ void ModListWidget::rebuildView()
     m_updatingModel = false;
 }
 
-// appendOverwriteRow pins the always-on Overwrite layer to the bottom of
-// the table. Visually distinct from real mod rows: italic, centered, no
-// checkbox, no priority number, span-styled across the full row width via
-// QTreeView::setFirstColumnSpanned. Drag/drop reorder is disabled by the
-// drop guard in ModListTreeView (see RowKindOverwrite check there).
+// Pins the always-on Overwrite layer at the bottom of the table as a row-spanned pseudo-row.
 void ModListWidget::appendOverwriteRow()
 {
-    // The text lives in the FIRST column because QTreeView's row-spanning
-    // primitive (setFirstColumnSpanned) widens column 0 to fill the row
-    // and hides the others. Putting the label in priorityItem keeps the
-    // bar visually centered across the entire mod-list width.
     auto* spanItem = new QStandardItem(QString("— Overwrite —"));
     spanItem->setEditable(false);
     spanItem->setSelectable(false);
@@ -1413,10 +1282,6 @@ void ModListWidget::appendOverwriteRow()
         "Loose .esp/.dds/.bsa files dropped here are visible in-game at the\n"
         "highest priority. Right-click to extract into a real mod folder.");
 
-    // The remaining columns stay in the model so column count matches but
-    // are hidden by the row-span; tag them with the kind so the context
-    // menu / drop-target / selection guards recognize the row regardless
-    // of which column the user clicked.
     auto* col2 = new QStandardItem;  col2->setEditable(false);  col2->setData(int(RowKindOverwrite), Qt::UserRole + 50);
     auto* col3 = new QStandardItem;  col3->setEditable(false);  col3->setData(int(RowKindOverwrite), Qt::UserRole + 50);
     auto* col4 = new QStandardItem;  col4->setEditable(false);  col4->setData(int(RowKindOverwrite), Qt::UserRole + 50);
@@ -1448,13 +1313,10 @@ void ModListWidget::patchMetadataField(const QString& yamlPath, const QString& k
             kept.append(ln);
             continue;
         }
-        // Only rewrite top-level keys; keep indented list-item keys (those
-        // inside source_archives:) untouched.
         if (!ln.startsWith(' ') && !ln.startsWith('\t')) {
             matched = true;
             if (!value.isEmpty())
                 kept.append(QString("%1: \"%2\"").arg(key, value));
-            // else: drop the line entirely (clearing the field)
         } else {
             kept.append(ln);
         }
@@ -1478,13 +1340,6 @@ void ModListWidget::patchMetadataField(const QString& yamlPath, const QString& k
 
 void ModListWidget::persistRowOrder()
 {
-    // Reads the current model's row ordering and persists it. Mode-aware:
-    //   Visual OFF → push a new modlist.txt (daemon writes true_index) and
-    //                separators are irrelevant since they're hidden anyway.
-    //   Visual ON  → recompute each mod's separator assignment + a fresh
-    //                visual_index spaced 0x10 apart; write to metadata.yaml
-    //                only. modlist.txt stays untouched so load order is
-    //                preserved.
     if (m_updatingModel) return;
 
     if (!m_visualMode) {
@@ -1506,8 +1361,6 @@ void ModListWidget::persistRowOrder()
         return;
     }
 
-    // Visual mode persist: walk rows top-to-bottom. Each separator
-    // "owns" subsequent mods until the next separator.
     QString currentSeparator;
     quint64 runningIdx = 0x10;
     std::vector<SeparatorDef> updatedSeparators;
@@ -1523,7 +1376,6 @@ void ModListWidget::persistRowOrder()
             SeparatorDef d;
             d.name = sepName;
             d.visualIndex = formatHexIndex(runningIdx);
-            // Preserve collapsed state (lookup by name).
             for (const auto& s : m_separators) {
                 if (s.name == sepName) { d.collapsed = s.collapsed; break; }
             }
@@ -1531,7 +1383,6 @@ void ModListWidget::persistRowOrder()
             runningIdx += 0x10;
             continue;
         }
-        // Mod row
         int modIdx = nameItem->data(Qt::UserRole + 101).toInt();
         if (modIdx < 0 || modIdx >= int(m_mods.size())) continue;
         auto& meta = m_mods[modIdx];
@@ -1577,7 +1428,6 @@ void ModListWidget::createSeparatorAt(int visualRow)
     name = name.trimmed();
     if (!ok || name.isEmpty())
         return;
-    // Names must be unique — they're the stable reference from each mod.
     for (const auto& s : m_separators) {
         if (s.name.compare(name, Qt::CaseInsensitive) == 0) {
             QMessageBox::warning(this, "Duplicate",
@@ -1588,16 +1438,9 @@ void ModListWidget::createSeparatorAt(int visualRow)
     SeparatorDef d;
     d.name = name;
     d.collapsed = false;
-    // Place the separator at the requested row. Temporary visual_index —
-    // persistRowOrder will assign the canonical value.
     d.visualIndex = formatHexIndex(0);
     m_separators.push_back(d);
-    // Rebuild with this separator placed provisionally at the very top,
-    // then let the user drag it into place. Simpler: stamp a visual_index
-    // that lands between the mod currently at visualRow and the one above.
-    // For MVP place it at the start and let the user drag.
     rebuildView();
-    // Move separator row to visualRow if possible.
     int sepRow = -1;
     for (int r = 0; r < m_model->rowCount(); ++r) {
         auto* item = m_model->item(r, ModColName);
@@ -1626,7 +1469,6 @@ void ModListWidget::renameSeparator(int row)
         "New name:", QLineEdit::Normal, oldName, &ok);
     newName = newName.trimmed();
     if (!ok || newName.isEmpty() || newName == oldName) return;
-    // Update all mods that reference this separator.
     for (auto& meta : m_mods) {
         if (meta.separator == oldName) {
             meta.separator = newName;
@@ -1646,7 +1488,6 @@ void ModListWidget::removeSeparator(int row)
     auto* item = m_model->item(row, ModColName);
     if (!item || item->data(Qt::UserRole + 50).toInt() != RowKindSeparator) return;
     QString name = item->data(Qt::UserRole + 102).toString();
-    // Clear the separator field on all mods that reference it.
     for (auto& meta : m_mods) {
         if (meta.separator == name) {
             meta.separator.clear();
@@ -1674,8 +1515,6 @@ void ModListWidget::toggleCollapseAt(int row)
 
 void ModListWidget::setCategoryForRow(int modIdx, const QString& category)
 {
-    // `modIdx` indexes m_mods; with separators, model rows no longer map
-    // 1:1 to mods so we look the model row up by the stored mod-index.
     if (modIdx < 0 || modIdx >= static_cast<int>(m_mods.size()))
         return;
     m_mods[modIdx].category = category;
@@ -1699,18 +1538,11 @@ void ModListWidget::setCategoryForRow(int modIdx, const QString& category)
     patchMetadataField(metaPath, "category", category);
 }
 
-// onOverwriteContextMenu builds the right-click menu for the pinned
-// Overwrite row. Distinct from the regular per-mod menu — there is no
-// Reinstall (no source archive), no Rename (renaming the layer would
-// break the daemon's write-capture target), no enable/disable (always-on
-// by definition).
+// Builds the right-click menu for the pinned Overwrite row.
 void ModListWidget::onOverwriteContextMenu(const QPoint& globalPos)
 {
     QMenu menu;
 
-    // Quick query: if the layer is empty, the extract actions are useless.
-    // Listing first gives us both an emptiness signal and the dir path
-    // for "Open Folder", with one round-trip.
     std::vector<GrpcOverwriteEntry> files;
     QString owDir, err;
     bool ok = m_grpc->listOverwriteFiles(m_gameId, files, owDir, err);
@@ -1723,9 +1555,6 @@ void ModListWidget::onOverwriteContextMenu(const QPoint& globalPos)
     connect(openAct, &QAction::triggered, this, [this, owDir]() {
         QString dir = owDir;
         if (dir.isEmpty()) {
-            // Fallback path — same expression the daemon uses; lets the
-            // user open the folder even when the daemon hasn't materialized
-            // it yet. mkpath ensures the open succeeds.
             dir = m_modsDir + "/" + kOverwriteModName;
             QDir().mkpath(dir);
         }
@@ -1767,13 +1596,7 @@ void ModListWidget::extractOverwriteAll()
     scanModsFolder();
 }
 
-// extractOverwriteSelected pops a custom file picker (recursive list with
-// multi-select via Ctrl+Click / Shift+Click / drag-rubber-band) and lets
-// the user graduate a subset of Overwrite into a named mod folder. Built
-// out of QListWidget rather than QFileDialog because the picker has to
-// run against a paths-only listing returned by the daemon, not the live
-// filesystem (and because QFileDialog can't multi-select directories
-// portably across platforms).
+// Pops a multi-select picker so the user can graduate a subset of Overwrite into a named mod folder.
 void ModListWidget::extractOverwriteSelected()
 {
     std::vector<GrpcOverwriteEntry> files;
@@ -1797,7 +1620,7 @@ void ModListWidget::extractOverwriteSelected()
 
     auto* list = new QListWidget;
     list->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    list->setSelectionRectVisible(true); // enables click-and-drag rubber band
+    list->setSelectionRectVisible(true);
     list->setUniformItemSizes(true);
     list->setAlternatingRowColors(true);
     int fileRows = 0;

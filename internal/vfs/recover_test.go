@@ -7,10 +7,6 @@ import (
 	"testing"
 )
 
-// Real /proc/self/mountinfo line captured from the user's stale-FUSE state
-// after the daemon crashed. The mountpoint contains a space, encoded as the
-// kernel's \040 octal escape — that's the case the parser must handle, since
-// the real Bethesda install paths all contain spaces.
 const stalePosixMountinfoFixture = `21 26 0:20 / /proc rw,nosuid,nodev,noexec,relatime shared:5 - proc proc rw
 22 26 0:21 / /sys rw,nosuid,nodev,noexec,relatime shared:6 - sysfs sysfs rw
 26 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw
@@ -43,9 +39,6 @@ func TestParseMountinfo_NoMatchReturnsNil(t *testing.T) {
 }
 
 func TestParseMountinfo_IgnoresNonFuseMountsAtSamePath(t *testing.T) {
-	// Hypothetical: same path mounted as ext4. We must NOT treat that as a
-	// stale FUSE we own — running fusermount on an ext4 mount would be
-	// catastrophic.
 	fixture := `99 26 0:99 / /home/parka/Data rw,relatime shared:99 - ext4 /dev/sda1 rw
 `
 	got := parseMountinfo(strings.NewReader(fixture), "/home/parka/Data")
@@ -55,8 +48,6 @@ func TestParseMountinfo_IgnoresNonFuseMountsAtSamePath(t *testing.T) {
 }
 
 func TestParseMountinfo_HandlesOptionalFields(t *testing.T) {
-	// Lines with no optional fields between (7) and (8) — the dash is right
-	// after the propagation-flags column. Verifies the dash-walk is correct.
 	fixture := `42 1 0:42 / /m rw,relatime - fuse.x src rw
 `
 	got := parseMountinfo(strings.NewReader(fixture), "/m")
@@ -68,16 +59,11 @@ func TestParseMountinfo_HandlesOptionalFields(t *testing.T) {
 	}
 }
 
-// TestCleanupStale_SentinelCrashRecovery: a daemon that activated then
-// died (without calling Deactivate) leaves Data/ as a hardlink farm and
-// Data.orig/ as the original. The next CleanupStale must detect the
-// sentinel, tear down the farm, and restore Data.orig.
 func TestCleanupStale_SentinelCrashRecovery(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
 	backupPath := dataPath + ".orig"
 
-	// Simulate post-crash state.
 	if err := os.MkdirAll(backupPath, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -88,11 +74,9 @@ func TestCleanupStale_SentinelCrashRecovery(t *testing.T) {
 	if err := os.MkdirAll(dataPath, 0755); err != nil {
 		t.Fatal(err)
 	}
-	// Overlay placeholder: pretend the materialized tree had a hardlink.
 	if err := os.WriteFile(filepath.Join(dataPath, "FalloutNV.esm"), []byte("master"), 0444); err != nil {
 		t.Fatal(err)
 	}
-	// Write a valid sentinel pointing at backupPath.
 	s := &Sentinel{
 		SchemaVersion:       CurrentSentinelSchema,
 		Magic:               SentinelMagic,
@@ -108,7 +92,6 @@ func TestCleanupStale_SentinelCrashRecovery(t *testing.T) {
 		t.Fatalf("CleanupStale: %v", err)
 	}
 
-	// Data.orig must be gone, Data must contain only the original master.
 	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
 		t.Errorf("backup should be removed, got err=%v", err)
 	}
@@ -124,17 +107,12 @@ func TestCleanupStale_SentinelCrashRecovery(t *testing.T) {
 	}
 }
 
-// TestCleanupStale_RejectsBadSentinel: a sentinel-shaped file that doesn't
-// validate must NOT trigger destructive recovery — that file could be from
-// some unrelated tool, and rm -rf'ing the dir on that signal would be a
-// dataloss bug. CleanupStale should bail with the dir intact.
 func TestCleanupStale_RejectsBadSentinel(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
 	if err := os.MkdirAll(dataPath, 0755); err != nil {
 		t.Fatal(err)
 	}
-	// Invalid sentinel: bad magic.
 	if err := os.WriteFile(filepath.Join(dataPath, SentinelFilename),
 		[]byte(`{"schema_version":1,"magic":"not-us","backup_path":"/bogus"}`), 0644); err != nil {
 		t.Fatal(err)
@@ -154,12 +132,6 @@ func TestCleanupStale_RejectsBadSentinel(t *testing.T) {
 	}
 }
 
-// TestCleanupStale_PendingForUnrecognizedDataAndBackup: the daemon must
-// NOT auto-restore when Data/ is non-empty with no recognizable sentinel
-// AND Data.orig/ exists. That state could be a hand-edited install or a
-// failed activate from a different gorganizer build — destroying Data/
-// without confirmation is a dataloss bug. CleanupStale returns Pending
-// so the GUI can prompt.
 func TestCleanupStale_PendingForUnrecognizedDataAndBackup(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -173,7 +145,6 @@ func TestCleanupStale_PendingForUnrecognizedDataAndBackup(t *testing.T) {
 	if err := os.MkdirAll(dataPath, 0755); err != nil {
 		t.Fatal(err)
 	}
-	// Hand-edited Data/: real content but no sentinel.
 	if err := os.WriteFile(filepath.Join(dataPath, "user_edit.txt"), []byte("mine"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +162,6 @@ func TestCleanupStale_PendingForUnrecognizedDataAndBackup(t *testing.T) {
 	if outcome.Pending.DataPath == "" || outcome.Pending.BackupPath == "" {
 		t.Errorf("Pending paths must be populated, got %+v", outcome.Pending)
 	}
-	// Both Data/ and Data.orig/ must remain untouched.
 	if _, err := os.Stat(filepath.Join(dataPath, "user_edit.txt")); err != nil {
 		t.Errorf("user_edit.txt should still be in Data/: %v", err)
 	}
@@ -200,9 +170,6 @@ func TestCleanupStale_PendingForUnrecognizedDataAndBackup(t *testing.T) {
 	}
 }
 
-// TestRestoreFromBackup_HappyPath: the post-consent destructive restore.
-// Verifies the rm -rf + rename actually removes Data/ and renames Data.orig
-// → Data, and refuses cleanly when there's no backup to restore.
 func TestRestoreFromBackup_HappyPath(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -255,7 +222,7 @@ func TestUnescapeMountinfoField(t *testing.T) {
 		{`/Fallout\040New\040Vegas`, `/Fallout New Vegas`},
 		{`tab\011here`, "tab\there"},
 		{`\134backslash`, "\\backslash"},
-		{`no\esc`, `no\esc`}, // unknown escape — leave intact
+		{`no\esc`, `no\esc`},
 	}
 	for _, c := range cases {
 		if got := unescapeMountinfoField(c.in); got != c.want {

@@ -16,22 +16,22 @@ type NXMLink struct {
 	Expires  int64
 }
 
-// slugToGameID maps Nexus game slugs to internal game IDs.
 var slugToGameID = map[string]string{
 	"skyrimspecialedition": "skyrimse",
-	"skyrim":              "skyrim",
-	"newvegas":            "falloutnv",
-	"fallout3":            "fallout3",
-	"fallout4":            "fallout4",
-	"oblivion":            "oblivion",
-	"morrowind":           "morrowind",
-	"starfield":           "starfield",
+	"skyrim":               "skyrim",
+	"newvegas":             "falloutnv",
+	"fallout3":             "fallout3",
+	"fallout4":             "fallout4",
+	"oblivion":             "oblivion",
+	"morrowind":            "morrowind",
+	"starfield":            "starfield",
 }
 
-// GameSlug returns the canonical Nexus slug for an internal gameID.
-// Returns "" when there's no mapping (e.g. an unknown game). Stay-aligned
-// with slugToGameID — the inverse direction.
+// GameSlug returns the canonical Nexus slug for an internal gameID, or "".
 func GameSlug(gameID string) string {
+	if gameID == "ttw" {
+		return "newvegas"
+	}
 	for slug, id := range slugToGameID {
 		if id == gameID {
 			return slug
@@ -41,7 +41,6 @@ func GameSlug(gameID string) string {
 }
 
 // ParseNXM parses an nxm:// URI into its components.
-// Format: nxm://skyrimspecialedition/mods/12345/files/67890?key=abc123&expires=1234567890
 func ParseNXM(uri string) (*NXMLink, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
@@ -51,8 +50,6 @@ func ParseNXM(uri string) (*NXMLink, error) {
 		return nil, fmt.Errorf("%w: scheme is %q, expected \"nxm\"", ErrInvalidNXMURI, u.Scheme)
 	}
 
-	// Path: /<game_slug>/mods/<mod_id>/files/<file_id>
-	// Host is the game slug, path starts after the host.
 	gameSlug := u.Host
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 
@@ -83,7 +80,6 @@ func ParseNXM(uri string) (*NXMLink, error) {
 	return link, nil
 }
 
-// GameID returns the internal game ID for this NXM link's game slug.
 func (n *NXMLink) GameID() (string, error) {
 	id, ok := slugToGameID[n.GameSlug]
 	if !ok {

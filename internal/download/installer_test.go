@@ -6,19 +6,16 @@ import (
 	"testing"
 )
 
-// findContentRoot must NOT strip a single top-level dir that is a known
-// Bethesda Data/ subdirectory. Stripping `nvse/` was the bug that put
-// xNVSE plugin DLLs at Data/plugins/foo.dll instead of Data/nvse/plugins/foo.dll.
 func TestFindContentRoot_PreservesKnownDataSubdir(t *testing.T) {
 	cases := []struct {
 		name      string
 		layout    []string
-		wantInner string // path component the returned root should END with
+		wantInner string
 	}{
 		{
 			name:      "lowercase nvse wrapper preserved",
 			layout:    []string{"nvse/plugins/foo.dll"},
-			wantInner: "extract", // root should equal the extract dir
+			wantInner: "extract",
 		},
 		{
 			name:      "uppercase NVSE wrapper preserved",

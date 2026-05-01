@@ -6,8 +6,6 @@ import (
 	"testing"
 )
 
-// createLayerTree creates a temporary directory tree representing a mod layer.
-// files is a map of relative paths to file contents.
 func createLayerTree(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -38,28 +36,24 @@ func TestMergedTreeBuild(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 
-	// Verify files are discoverable.
 	if realPath, ok := tree.LookupFile("textures/sky.dds"); !ok {
 		t.Error("expected to find textures/sky.dds")
 	} else if realPath != filepath.Join(base, "Textures/sky.dds") {
 		t.Errorf("unexpected realPath: %s", realPath)
 	}
 
-	// Verify case-insensitive lookup.
 	if _, ok := tree.LookupFile("TEXTURES/SKY.DDS"); !ok {
 		t.Error("case-insensitive lookup failed for TEXTURES/SKY.DDS")
 	}
 
-	// Verify directory listing.
 	children, ok := tree.Children("")
 	if !ok {
 		t.Fatal("root directory not found")
 	}
-	if len(children) != 2 { // textures, meshes
+	if len(children) != 2 {
 		t.Errorf("expected 2 root children, got %d", len(children))
 	}
 
-	// Verify IsDir.
 	if !tree.IsDir("textures") {
 		t.Error("expected textures to be a directory")
 	}
@@ -67,12 +61,11 @@ func TestMergedTreeBuild(t *testing.T) {
 		t.Error("expected textures/sky.dds to not be a directory")
 	}
 
-	// Verify stats.
 	fileCount, dirCount := tree.Stats()
 	if fileCount != 3 {
 		t.Errorf("expected 3 files, got %d", fileCount)
 	}
-	if dirCount != 3 { // root, textures, meshes
+	if dirCount != 3 {
 		t.Errorf("expected 3 dirs, got %d", dirCount)
 	}
 }
@@ -99,7 +92,6 @@ func TestMergedTreePriorityOverride(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 
-	// ModB has highest priority, so its sky.dds should win.
 	realPath, ok := tree.LookupFile("textures/sky.dds")
 	if !ok {
 		t.Fatal("expected to find textures/sky.dds")
@@ -109,7 +101,6 @@ func TestMergedTreePriorityOverride(t *testing.T) {
 		t.Errorf("expected %s, got %s", expected, realPath)
 	}
 
-	// sea.dds only exists in base, should still be found.
 	realPath, ok = tree.LookupFile("textures/sea.dds")
 	if !ok {
 		t.Fatal("expected to find textures/sea.dds")
@@ -138,16 +129,14 @@ func TestMergedTreeDirectoryMerge(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 
-	// textures/ should contain files from both layers.
 	children, ok := tree.Children("textures")
 	if !ok {
 		t.Fatal("textures directory not found")
 	}
-	if len(children) != 2 { // sky.dds, cloud.dds
+	if len(children) != 2 {
 		t.Errorf("expected 2 children in textures, got %d", len(children))
 	}
 
-	// scripts/ should only come from the mod.
 	children, ok = tree.Children("scripts")
 	if !ok {
 		t.Fatal("scripts directory not found")
@@ -156,7 +145,6 @@ func TestMergedTreeDirectoryMerge(t *testing.T) {
 		t.Errorf("expected 1 child in scripts, got %d", len(children))
 	}
 
-	// Root should have both textures and scripts.
 	rootChildren, ok := tree.Children("")
 	if !ok {
 		t.Fatal("root not found")
@@ -184,13 +172,11 @@ func TestMergedTreeDisabledLayer(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 
-	// sky.dds should come from base, not the disabled mod.
 	realPath, _ := tree.LookupFile("textures/sky.dds")
 	if realPath != filepath.Join(base, "textures/sky.dds") {
 		t.Errorf("disabled mod's file should not override base: got %s", realPath)
 	}
 
-	// extra.dds should not exist since the mod is disabled.
 	if _, ok := tree.LookupFile("textures/extra.dds"); ok {
 		t.Error("disabled mod's new file should not appear")
 	}
@@ -212,13 +198,11 @@ func TestMergedTreeRebuild(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 
-	// sky.dds should come from base.
 	realPath, _ := tree.LookupFile("textures/sky.dds")
 	if realPath != filepath.Join(base, "textures/sky.dds") {
 		t.Fatalf("expected base path, got %s", realPath)
 	}
 
-	// Rebuild with mod enabled.
 	newLayers := []Layer{
 		{Name: "__base__", RootPath: base, Enabled: true},
 		{Name: "Mod", RootPath: mod, Enabled: true},
@@ -227,7 +211,6 @@ func TestMergedTreeRebuild(t *testing.T) {
 		t.Fatalf("Rebuild: %v", err)
 	}
 
-	// Now sky.dds should come from mod.
 	realPath, _ = tree.LookupFile("textures/sky.dds")
 	if realPath != filepath.Join(mod, "textures/sky.dds") {
 		t.Errorf("after rebuild, expected mod path, got %s", realPath)
@@ -235,7 +218,6 @@ func TestMergedTreeRebuild(t *testing.T) {
 }
 
 func BenchmarkTreeBuild(b *testing.B) {
-	// Create a base layer with realistic file count.
 	dir := b.TempDir()
 	dirs := []string{"textures", "meshes", "scripts", "sound", "interface"}
 	for _, d := range dirs {

@@ -51,9 +51,6 @@ void VfsControlWidget::checkBackupState()
         return;
     }
 
-    // Check if Data.orig/ exists on disk — indicates a stale backup from
-    // a crash or another mount manager. The button should be disabled to
-    // prevent the daemon from failing with ErrBackupExists.
     std::filesystem::path origPath = m_game.dataDir;
     origPath += ".orig";
     m_blocked = std::filesystem::exists(origPath) && std::filesystem::is_directory(origPath);
@@ -111,7 +108,6 @@ void VfsControlWidget::onRpcError(const QString& method, const QString& error)
     m_toggleBtn->setEnabled(true);
     m_statusLabel->setText(error);
 
-    // Re-check backup state in case mount failed because of it.
     checkBackupState();
 }
 

@@ -11,17 +11,10 @@ import (
 	"github.com/parka/gorganizer/internal/separators"
 )
 
-// trueIndexStep is the numeric gap between adjacent mods in the hex
-// true-index scheme. 0x10 (16) gives the frontend ~15 guaranteed midpoint
-// inserts between any two neighbors before it has to trigger a full
-// renumber — enough for normal drag-and-drop cadence.
 const trueIndexStep uint64 = 0x10
 
 // writeTrueIndexes stamps each mod's position-in-modlist.txt into its
 // metadata.yaml as `true_index:` (16-char hex, spaced by trueIndexStep).
-// Called after every SetModList so the yaml stays in sync. Failures are
-// logged and skipped — one broken metadata.yaml shouldn't poison the
-// whole refresh.
 func (d *Daemon) writeTrueIndexes(gameID string, entries []mod.ModListEntry) {
 	modsDir := config.ModsDir(gameID)
 	for i, e := range entries {
@@ -67,9 +60,6 @@ func (d *Daemon) ListSeparators(gameID, profileName string) ([]ipc.SeparatorResu
 	return out, nil
 }
 
-// SetSeparators replaces the profile's separator layout wholesale. The
-// frontend calls this after every separator-level edit (add, rename,
-// collapse, reorder) so we don't need finer-grained RPCs.
 func (d *Daemon) SetSeparators(gameID, profileName string, seps []ipc.SeparatorResult) error {
 	dir := d.profileMgr.ProfileDir(gameID, profileName)
 	out := make([]separators.Separator, len(seps))

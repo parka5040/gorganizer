@@ -146,11 +146,10 @@ func TestParseVDF_Comments(t *testing.T) {
 }
 
 func TestKnownGames(t *testing.T) {
-	if len(KnownGames) != 8 {
-		t.Errorf("expected 8 known games, got %d", len(KnownGames))
+	if len(KnownGames) != 9 {
+		t.Errorf("expected 9 known games, got %d", len(KnownGames))
 	}
 
-	// Verify specific games match frontend.
 	expectedIDs := map[uint32]string{
 		22320:   "morrowind",
 		22330:   "oblivion",
@@ -171,6 +170,20 @@ func TestKnownGames(t *testing.T) {
 		if g.ID != expectedID {
 			t.Errorf("FindByAppID(%d).ID = %q, want %q", appID, g.ID, expectedID)
 		}
+	}
+
+	ttw, ok := FindByID("ttw")
+	if !ok {
+		t.Fatal("FindByID(ttw) not found")
+	}
+	if !ttw.Synthetic {
+		t.Errorf("TTW must be marked synthetic")
+	}
+	if ttw.ParentGameID != "falloutnv" {
+		t.Errorf("TTW parent = %q, want %q", ttw.ParentGameID, "falloutnv")
+	}
+	if _, ok := FindByAppID(0); ok {
+		t.Errorf("FindByAppID(0) must not return the synthetic TTW entry")
 	}
 }
 

@@ -9,9 +9,6 @@ import (
 	"testing"
 )
 
-// fixture builds a temporary dir with the given files, where each map key is
-// a relative path and the value is the file content. Used to seed mock layer
-// roots for materializer tests.
 func fixture(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -96,7 +93,6 @@ func TestMaterialize_BasicHardlinkFarm(t *testing.T) {
 		t.Errorf("layout mismatch:\n got %v\nwant %v", got, want)
 	}
 
-	// iron.nif should resolve to the MOD's content (mod wins on conflict).
 	body, err := os.ReadFile(filepath.Join(out, "Meshes", "armor", "iron.nif"))
 	if err != nil {
 		t.Fatal(err)
@@ -143,7 +139,6 @@ func TestMaterialize_OverwriteModPreservesMode(t *testing.T) {
 		t.Fatalf("BuildInto: %v", err)
 	}
 
-	// a.esp came from __base__; should be 0444.
 	infoA, err := os.Stat(filepath.Join(out, "a.esp"))
 	if err != nil {
 		t.Fatal(err)
@@ -152,7 +147,6 @@ func TestMaterialize_OverwriteModPreservesMode(t *testing.T) {
 		t.Errorf("a.esp expected read-only, got %o", infoA.Mode().Perm())
 	}
 
-	// b.esp came from Overwrite; should retain source mode (0644).
 	infoB, err := os.Stat(filepath.Join(out, "b.esp"))
 	if err != nil {
 		t.Fatal(err)
@@ -204,7 +198,6 @@ func TestCaptureNewFiles_MovesNewFileIntoOverwrite(t *testing.T) {
 		t.Fatalf("BuildInto: %v", err)
 	}
 
-	// Simulate a tool writing a new file into Data/.
 	if err := os.WriteFile(filepath.Join(out, "tool_output.txt"), []byte("hello"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +243,6 @@ func TestCaptureNewFiles_LeavesHardlinksAlone(t *testing.T) {
 	if moved != 0 {
 		t.Errorf("expected 0 captured files, got %d", moved)
 	}
-	// a.esp must still be in Data/.
 	if _, err := os.Stat(filepath.Join(out, "a.esp")); err != nil {
 		t.Errorf("a.esp should still be hardlinked into Data/, got %v", err)
 	}

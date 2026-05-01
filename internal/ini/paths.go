@@ -7,9 +7,7 @@ import (
 	"strconv"
 )
 
-// SteamRoot resolves the active Steam library root. Mirrors the detection
-// done in internal/tools/proton.go (kept duplicated here to avoid importing
-// the tools package, which depends on ipc and config).
+// SteamRoot resolves the active Steam library root.
 func SteamRoot() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -32,21 +30,8 @@ func SteamRoot() (string, error) {
 	return "", fmt.Errorf("Steam root not found")
 }
 
-// DocumentsPath returns the Documents/My Games/{subdir}/ directory the game
-// reads its INI files from. Tries the Proton compatdata pfx first, since
-// Bethesda titles run through Proton on Linux; falls back to a user-profile
-// Documents path for native installs.
-//
-// Inside the Wine prefix the documents folder is commonly named
-// "My Documents" — historical Windows-style — sometimes with a "Documents"
-// symlink alongside it, depending on Proton / Wine version. This function
-// probes both names and returns whichever branch actually exists. When
-// neither exists yet (fresh prefix, game never launched) it prefers the
-// "My Documents" branch since that's what Proton's Wine fork creates.
-//
-// Pattern:
-//   {steamRoot}/steamapps/compatdata/{appID}/pfx/drive_c/users/steamuser/
-//     {My Documents|Documents}/My Games/{subdir}/
+// DocumentsPath returns the Documents/My Games/{subdir}/ dir, probing both
+// "My Documents" and "Documents" inside the Proton pfx.
 func DocumentsPath(steamAppID int, subdir string) (string, error) {
 	if subdir == "" {
 		return "", fmt.Errorf("empty my-games subdir")
@@ -58,9 +43,6 @@ func DocumentsPath(steamAppID int, subdir string) (string, error) {
 				root, "steamapps", "compatdata", appID,
 				"pfx", "drive_c", "users", "steamuser",
 			)
-			// Preferred order: existing "My Documents" → existing "Documents"
-			// → fall through to "My Documents" (what Wine creates on first
-			// launch of a Proton prefix).
 			for _, docsDir := range []string{"My Documents", "Documents"} {
 				candidate := filepath.Join(prefix, docsDir, "My Games", subdir)
 				if _, err := os.Stat(candidate); err == nil {
@@ -80,16 +62,7 @@ func DocumentsPath(steamAppID int, subdir string) (string, error) {
 	return filepath.Join(home, "Documents", "My Games", subdir), nil
 }
 
-// AppDataLocalPath returns the AppData/Local/{subdir}/ directory inside the
-// Proton prefix. This is where Bethesda engines keep plugins.txt,
-// loadorder.txt, and some game-state caches — distinct from My Games which
-// holds INIs. Shape:
-//
-//   {steamRoot}/steamapps/compatdata/{appID}/pfx/drive_c/users/steamuser/
-//     AppData/Local/{subdir}/
-//
-// Falls back to ~/.local/share/{subdir} on native installs (rare for
-// Bethesda titles).
+// AppDataLocalPath returns AppData/Local/{subdir}/ inside the Proton prefix.
 func AppDataLocalPath(steamAppID int, subdir string) (string, error) {
 	if subdir == "" {
 		return "", fmt.Errorf("empty AppData subdir")

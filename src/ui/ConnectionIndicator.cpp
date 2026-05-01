@@ -22,12 +22,6 @@ ConnectionIndicator::ConnectionIndicator(GrpcClient* grpc, QWidget* parent)
     connect(grpc, &GrpcClient::connected, this, &ConnectionIndicator::onConnected);
     connect(grpc, &GrpcClient::disconnected, this, &ConnectionIndicator::onDisconnected);
 
-    // The connect()s above only react to *transitions*. If the GrpcClient
-    // already considers itself connected at our construction time (the
-    // splash flipped m_connected during Health() polling), no further
-    // signal is coming until the channel actually drops. Seed our visual
-    // state from the current value so we don't sit at "Disconnected" while
-    // every gate-checking RPC actually works.
     if (grpc->isConnected())
         onConnected();
     else

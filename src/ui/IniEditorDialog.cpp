@@ -57,14 +57,11 @@ IniEditorDialog::IniEditorDialog(GrpcClient* grpc,
     layout->addWidget(m_tabs, 1);
     connect(m_tabs, &QTabWidget::currentChanged, this, &IniEditorDialog::onTabChanged);
 
-    // Find bar sits between tabs and status — hidden until Ctrl+F.
     buildFindBar(layout);
 
     m_statusLabel->setStyleSheet("color: #888;");
     layout->addWidget(m_statusLabel);
 
-    // Ctrl+F opens the find bar and focuses it. Parented to `this` so
-    // the shortcut catches any key press while the dialog has focus.
     auto* findSc = new QShortcut(QKeySequence::Find, this);
     connect(findSc, &QShortcut::activated, this, &IniEditorDialog::onFindShortcut);
 
@@ -123,9 +120,6 @@ void IniEditorDialog::reload()
         return;
     }
 
-    // Tweaks first (if the game has presets), then the resolution tool,
-    // then the plain editor tabs. Index bookkeeping has to account for
-    // both prefix tabs when opening a specific INI from a signal.
     buildTweaksTab();
     buildResolutionTab(files);
 
@@ -139,8 +133,6 @@ void IniEditorDialog::reload()
         h.editor->setFont(monoFont);
         h.editor->setTabStopDistance(32);
         h.editor->setPlainText(f.content);
-        // Track by handle-index (stable), not tab-index, since the Tweaks
-        // tab at position 0 puts the two indices out of sync.
         int handleIdx = m_handles.size();
         m_tabs->addTab(h.editor, f.filename);
         m_handles.append(h);
@@ -160,7 +152,6 @@ void IniEditorDialog::buildTweaksTab()
     std::vector<GrpcIniTweakState> tweaks;
     QString err;
     if (!m_grpc->listIniTweaks(m_gameId, m_profileName, tweaks, err)) {
-        // Not fatal — just skip the tweaks tab.
         return;
     }
     if (tweaks.empty())
@@ -235,7 +226,6 @@ void IniEditorDialog::onTweakToggled(const QString& tweakId, bool enabled)
         .arg(state.enabled ? "enabled" : "disabled")
         .arg("(" + state.targetFile + ")"));
 
-    // Reload the affected Custom.ini tab so the editor reflects the change.
     for (int i = 0; i < m_handles.size(); ++i) {
         if (m_handles[i].filename == state.targetFile) {
             std::vector<GrpcProfileIniFile> files;
@@ -263,14 +253,10 @@ void IniEditorDialog::onTweakToggled(const QString& tweakId, bool enabled)
 
 void IniEditorDialog::onTabChanged(int index)
 {
-    // Tweaks + Resolution tabs have their own status; skip the
-    // file-path label update when one of them is focused.
     if (index == m_tweaksTabIndex || index == m_resolutionTabIndex) {
         m_statusLabel->clear();
         return;
     }
-    // Map back to m_handles index, subtracting however many prefix tabs
-    // (Tweaks + Resolution) appear before the file tabs.
     int prefix = 0;
     if (m_tweaksTabIndex >= 0) ++prefix;
     if (m_resolutionTabIndex >= 0) ++prefix;
@@ -287,8 +273,6 @@ void IniEditorDialog::markDirty(int handleIndex, bool dirty)
     QString label = m_handles[handleIndex].filename;
     if (dirty)
         label += " *";
-    // Map handle index → tab index. Tweaks + Resolution prefix tabs, if
-    // present, live at positions 0/1 and shift file tabs accordingly.
     int prefix = 0;
     if (m_tweaksTabIndex >= 0) ++prefix;
     if (m_resolutionTabIndex >= 0) ++prefix;
@@ -356,8 +340,6 @@ void IniEditorDialog::onApplyNow()
             return;
         onSave();
     }
-    // Saving with UseCustomIni on already triggers the push. When off, we
-    // briefly flip it on to push, then restore.
     GrpcProfileIniStatus status;
     QString err;
     if (!m_grpc->getProfileIniStatus(m_gameId, m_profileName, status, err)) {
@@ -365,8 +347,6 @@ void IniEditorDialog::onApplyNow()
         return;
     }
     if (status.useCustomIni) {
-        // Re-save one file to trigger a push — but we also want to push even
-        // when nothing changed. Use a no-op save of the first file.
         if (!m_handles.isEmpty()) {
             const auto& h = m_handles.first();
             m_grpc->saveProfileIniFile(m_gameId, m_profileName, h.filename, h.originalContent, err);
@@ -374,7 +354,6 @@ void IniEditorDialog::onApplyNow()
         m_statusLabel->setText("<span style='color:#6c6;'>Applied to " + status.myGamesDir + "</span>");
         return;
     }
-    // Toggle on briefly.
     m_grpc->setProfileIniEnabled(m_gameId, m_profileName, true, status, err);
     if (!m_handles.isEmpty()) {
         const auto& h = m_handles.first();
@@ -384,13 +363,8 @@ void IniEditorDialog::onApplyNow()
     m_statusLabel->setText("<span style='color:#6c6;'>Pushed one-shot. Toggle \"Use profile-specific INI\" to make it persistent.</span>");
 }
 
-// --- Resolution tab ---
-
 namespace {
 
-// Common display resolutions people actually use. Kept sorted smallest to
-// largest so the combo reads naturally. Each pair is (width, height) in
-// physical pixels.
 struct Resolution { int w; int h; const char* label; };
 const QVector<Resolution>& commonResolutions()
 {
@@ -408,10 +382,7 @@ const QVector<Resolution>& commonResolutions()
     return list;
 }
 
-// Patches a single top-level key inside a specified INI [section]. Line-
-// preserving: adds the key under an existing section; creates the section
-// at end-of-file when it doesn't exist yet. Exactly the minimum surgery
-// needed to land iWidth / iHeight without disturbing user comments.
+// Line-preserving patch of one section.key=value, creating the section if missing.
 QString patchIniSectionKey(const QString& original, const QString& section,
                             const QString& key, const QString& value)
 {
@@ -421,9 +392,6 @@ QString patchIniSectionKey(const QString& original, const QString& section,
     QRegularExpression keyRe(QString(R"(^\s*%1\s*=)").arg(QRegularExpression::escape(key)),
                               QRegularExpression::CaseInsensitiveOption);
 
-    // Locate [section]. If found, walk lines until next section or EOF,
-    // replacing the first key= we find; else append key=value at the end
-    // of the section block.
     int sectionIdx = -1;
     for (int i = 0; i < lines.size(); ++i) {
         if (sectionRe.match(lines[i]).hasMatch()) {
@@ -460,7 +428,7 @@ QString patchIniSectionKey(const QString& original, const QString& section,
 void IniEditorDialog::buildResolutionTab(const std::vector<GrpcProfileIniFile>& files)
 {
     if (files.empty())
-        return; // No INIs to write to — skip entirely.
+        return;
 
     auto* container = new QWidget;
     auto* outer = new QVBoxLayout(container);
@@ -497,8 +465,6 @@ void IniEditorDialog::buildResolutionTab(const std::vector<GrpcProfileIniFile>& 
     form->addRow("iHeight:", m_resolutionHeight);
 
     m_resolutionTarget = new QComboBox;
-    // Default to *Prefs.ini when present (that's where Bethesda engines
-    // read display values from); otherwise the primary INI.
     QString defaultTarget;
     for (const auto& f : files) {
         m_resolutionTarget->addItem(f.filename);
@@ -513,13 +479,11 @@ void IniEditorDialog::buildResolutionTab(const std::vector<GrpcProfileIniFile>& 
 
     connect(m_resolutionPreset, &QComboBox::currentIndexChanged, this, [this](int) {
         int idx = m_resolutionPreset->currentData().toInt();
-        if (idx < 0) return; // "Custom..." — leave the spinners alone
+        if (idx < 0) return;
         const auto& r = commonResolutions()[idx];
         m_resolutionWidth->setValue(r.w);
         m_resolutionHeight->setValue(r.h);
     });
-    // When the user types a value that matches a preset, snap the combo
-    // to it; otherwise show "Custom...".
     auto syncPreset = [this]() {
         int w = m_resolutionWidth->value();
         int h = m_resolutionHeight->value();
@@ -539,8 +503,7 @@ void IniEditorDialog::buildResolutionTab(const std::vector<GrpcProfileIniFile>& 
 
     auto* btnRow = new QHBoxLayout;
     auto* applyBtn = new QPushButton("Apply to INI");
-    applyBtn->setToolTip("Writes the two keys into [Display] of the selected "
-                          "INI. You still need to click Save afterwards.");
+    applyBtn->setToolTip("Writes the keys into [Display] of the selected INI. Click Save to persist.");
     connect(applyBtn, &QPushButton::clicked, this, &IniEditorDialog::onApplyResolution);
     btnRow->addWidget(applyBtn);
     btnRow->addStretch();
@@ -575,9 +538,6 @@ void IniEditorDialog::onApplyResolution()
 
 void IniEditorDialog::applyResolutionTo(const QString& filename, int width, int height)
 {
-    // Prefer to edit the open editor tab (so the user sees the change
-    // in the text view and "dirty" state kicks in). Fall through to a
-    // daemon write only when the file isn't open as an editor tab.
     for (int i = 0; i < m_handles.size(); ++i) {
         if (m_handles[i].filename != filename)
             continue;
@@ -585,10 +545,8 @@ void IniEditorDialog::applyResolutionTo(const QString& filename, int width, int 
         content = patchIniSectionKey(content, "Display", "iWidth", QString::number(width));
         content = patchIniSectionKey(content, "Display", "iHeight", QString::number(height));
         m_handles[i].editor->setPlainText(content);
-        // setPlainText triggers textChanged which already flips dirty.
         return;
     }
-    // Fallback: read-modify-write via daemon.
     std::vector<GrpcProfileIniFile> files;
     GrpcProfileIniStatus st;
     QString err;
@@ -603,8 +561,6 @@ void IniEditorDialog::applyResolutionTo(const QString& filename, int width, int 
         return;
     }
 }
-
-// --- Find bar (Ctrl+F) ---
 
 void IniEditorDialog::buildFindBar(QVBoxLayout* parentLayout)
 {
@@ -630,8 +586,6 @@ void IniEditorDialog::buildFindBar(QVBoxLayout* parentLayout)
     connect(nextBtn, &QPushButton::clicked, this, &IniEditorDialog::onFindNext);
     connect(closeBtn, &QPushButton::clicked, this, &IniEditorDialog::onFindClose);
 
-    // Esc closes the bar. Using a shortcut on the line edit so it only
-    // fires when the bar has focus.
     auto* esc = new QShortcut(QKeySequence(Qt::Key_Escape), m_findInput);
     esc->setContext(Qt::WidgetShortcut);
     connect(esc, &QShortcut::activated, this, &IniEditorDialog::onFindClose);
@@ -672,7 +626,6 @@ void IniEditorDialog::onFindNext()
     if (needle.isEmpty()) return;
     bool found = editor->find(needle);
     if (!found) {
-        // Wrap around to the top of the document.
         QTextCursor c = editor->textCursor();
         c.movePosition(QTextCursor::Start);
         editor->setTextCursor(c);

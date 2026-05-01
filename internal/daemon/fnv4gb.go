@@ -11,72 +11,35 @@ import (
 	"strings"
 	"time"
 
-	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/ipc"
 )
 
-// FNV4GB Patcher: a community tool by RoyBatty that flips the LARGE_ADDRESS_AWARE
-// bit on FalloutNV.exe so the game can address >2 GiB of memory — required for
-// any heavy mod load order. The author publishes three variants on Nexus mod
-// page 62552:
-//
-//   • Windows native    — runs on real Windows; not useful here
-//   • "for Proton"      — Linux ELF that targets a Proton prefix
-//   • "for Linux"       — Linux ELF that runs against the on-disk FalloutNV.exe
-//
-// We hardcode the "for Linux" file id because that's the only flavor that
-// works against a Steam-installed FNV under our Linux daemon. Hardcoding is
-// safe per the user spec — these IDs never change.
 const (
 	fnv4gbModID    = 62552
-	fnv4gbFileID   = 1000079136 // "FNV4GB for Linux"
+	fnv4gbFileID   = 1000079136
 	fnv4gbGameSlug = "newvegas"
 
-	// Marker dropped into the game install dir on a successful patch run.
-	// Both daemon and frontend stat this to decide whether the
-	// "Run xNVSE" launch target is greyed out — the patched FalloutNV.exe
-	// must boot through the patcher's own launcher path, not nvse_loader.
 	fnv4gbMarkerFilename = ".gorganizer-fnv4gb.applied"
 )
 
-// fnv4gbErrXNVSEMissing / fnv4gbErrAPIKeyMissing are sentinel errors so the
-// IPC layer can map them to grpc.FailedPrecondition with a stable detail
-// string the frontend can pattern-match for the right popup.
 var (
 	fnv4gbErrXNVSEMissing  = errors.New("xNVSE is required to install the 4GB patcher; install xNVSE first via the Run combo")
 	fnv4gbErrAPIKeyMissing = errors.New("Nexus API key is required to download the 4GB patcher; paste one in Tools → Settings")
 )
 
-// Install4GBPatcher downloads the FNV4GB Patcher (Linux variant, file id
-// hardcoded above) into the game's install directory next to FalloutNV.exe,
-// chmod +x's the executable, and returns its path. The patcher is NOT run
-// here — the GUI prompts the user with "Apply patch?" and calls
-// Apply4GBPatch on accept.
-//
-// Pre-flight validation:
-//   - gameID must be falloutnv (the patch is FNV-specific)
-//   - xNVSE must already be installed (its loader exe present in InstallPath)
-//   - A Nexus API key must be configured
-//
-// Errors from this method are designed to be surfaced verbatim in a GUI
-// dialog — the message tells the user exactly what to fix.
 func (d *Daemon) Install4GBPatcher(gameID string) (ipc.FNV4GBInstallResult, error) {
 	var zero ipc.FNV4GBInstallResult
-	if gameID != "falloutnv" {
+	if gameID != "falloutnv" && gameID != "ttw" {
 		return zero, fmt.Errorf("the 4GB patcher only applies to Fallout: New Vegas (got %q)", gameID)
 	}
-	gc, ok := d.config.Games[gameID]
-	if !ok {
-		return zero, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
+	gc, err := d.config.EffectiveGameConfig(gameID)
+	if err != nil {
+		return zero, err
 	}
 	if d.config.NexusAPIKey == "" {
 		return zero, fnv4gbErrAPIKeyMissing
 	}
-	// xNVSE check: the loader exe lives directly under the game install
-	// dir after a script-extender install. We look at the actual file on
-	// disk rather than gc.Tool because the user may have installed xNVSE
-	// outside gorganizer (manual drop-in).
 	def, ok := KnownScriptExtenders[gameID]
 	if !ok || def.LoaderExe == "" {
 		return zero, fmt.Errorf("internal: no script extender definition for %s", gameID)
@@ -90,11 +53,6 @@ func (d *Daemon) Install4GBPatcher(gameID string) (ipc.FNV4GBInstallResult, erro
 	if err != nil {
 		return zero, err
 	}
-	// We deliberately do NOT defer RemoveAll — the extracted patcher
-	// executable lives outside tmpDir (we copy it into InstallPath), so
-	// cleaning the temp dir is fine after copyTree returns. Any later
-	// failure during the chmod / executable-detection steps will leak
-	// the tmp dir; acceptable.
 	defer os.RemoveAll(tmpDir)
 
 	nx := download.NewNexusClient(d.config.NexusAPIKey)
@@ -132,9 +90,6 @@ func (d *Daemon) Install4GBPatcher(gameID string) (ipc.FNV4GBInstallResult, erro
 		return zero, fmt.Errorf("extracting FNV4GB archive: %w", err)
 	}
 
-	// Copy every extracted file into the game install dir. The Linux
-	// archive ships as a single ELF (FalloutNVPatcher) at root, but we
-	// walk to be future-proof in case the author re-packages.
 	if err := copyTree(extractDir, gc.InstallPath); err != nil {
 		return zero, fmt.Errorf("copying patcher into game dir: %w", err)
 	}
@@ -143,8 +98,6 @@ func (d *Daemon) Install4GBPatcher(gameID string) (ipc.FNV4GBInstallResult, erro
 	if err != nil {
 		return zero, fmt.Errorf("locating patcher executable: %w", err)
 	}
-	// chmod +x — the archive may have stripped executable bits depending
-	// on how the user's extractor handles ELF perms.
 	if err := os.Chmod(patcherPath, 0755); err != nil {
 		return zero, fmt.Errorf("making patcher executable: %w", err)
 	}
@@ -162,11 +115,9 @@ func (d *Daemon) Install4GBPatcher(gameID string) (ipc.FNV4GBInstallResult, erro
 
 // Get4GBPatchStatus reports whether FalloutNV.exe in the active game's
 // install directory has been patched by us. Apply4GBPatch is the only
-// thing that writes the marker, so this never reports a false positive
-// caused by an out-of-band patcher run.
 func (d *Daemon) Get4GBPatchStatus(gameID string) (bool, error) {
-	gc, ok := d.config.Games[gameID]
-	if !ok {
+	gc, err := d.config.EffectiveGameConfig(gameID)
+	if err != nil {
 		return false, nil
 	}
 	return IsFNV4GBApplied(gc.InstallPath), nil
@@ -174,21 +125,13 @@ func (d *Daemon) Get4GBPatchStatus(gameID string) (bool, error) {
 
 // Apply4GBPatch executes the previously-installed patcher and, on success,
 // drops the marker file the GUI uses to decide whether to disable the xNVSE
-// launch target. The patcher mutates FalloutNV.exe in place; running it
-// twice is harmless (it detects an already-patched binary and exits clean)
-// but the GUI guards against that by hiding "Patch Fallout to 4GB" once
-// the marker exists.
-//
-// The returned string carries combined stdout+stderr from the patcher run;
-// the GUI surfaces it in a result dialog so the user can see what the
-// patcher reported.
 func (d *Daemon) Apply4GBPatch(gameID, patcherExePath string) (string, error) {
-	if gameID != "falloutnv" {
+	if gameID != "falloutnv" && gameID != "ttw" {
 		return "", fmt.Errorf("the 4GB patcher only applies to Fallout: New Vegas (got %q)", gameID)
 	}
-	gc, ok := d.config.Games[gameID]
-	if !ok {
-		return "", fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
+	gc, err := d.config.EffectiveGameConfig(gameID)
+	if err != nil {
+		return "", err
 	}
 	if patcherExePath == "" {
 		return "", errors.New("empty patcher exe path")
@@ -197,10 +140,6 @@ func (d *Daemon) Apply4GBPatch(gameID, patcherExePath string) (string, error) {
 		return "", fmt.Errorf("patcher executable missing — re-run install: %w", err)
 	}
 
-	// Run with the game install dir as cwd so the patcher finds
-	// FalloutNV.exe in its working directory. The patcher's source is
-	// public (RoyBatty/FNV4GBPatcher) — it `fopen("FalloutNV.exe", "rb+")`
-	// off the cwd, no path argument.
 	cmd := exec.Command(patcherExePath)
 	cmd.Dir = gc.InstallPath
 	out, err := cmd.CombinedOutput()
@@ -208,16 +147,10 @@ func (d *Daemon) Apply4GBPatch(gameID, patcherExePath string) (string, error) {
 		return string(out), fmt.Errorf("running patcher: %w", err)
 	}
 
-	// Marker file: timestamp + version label so a subsequent re-install
-	// of the patcher can compare. Format is one-line-per-field, no YAML
-	// dep — same convention the script-extender manifest uses.
 	marker := filepath.Join(gc.InstallPath, fnv4gbMarkerFilename)
 	contents := fmt.Sprintf("# applied_at: %s\n# patcher: %s\n",
 		time.Now().UTC().Format(time.RFC3339), patcherExePath)
 	if writeErr := os.WriteFile(marker, []byte(contents), 0644); writeErr != nil {
-		// Don't fail the operation — the binary IS patched on disk; the
-		// marker is just a UI hint. Log loudly so the disabled
-		// "Run xNVSE" affordance flag isn't silently lost.
 		slog.Warn("FNV4GB applied but marker file could not be written — UI may not reflect patched state",
 			"err", writeErr, "marker", marker)
 	}
@@ -227,8 +160,6 @@ func (d *Daemon) Apply4GBPatch(gameID, patcherExePath string) (string, error) {
 }
 
 // IsFNV4GBApplied reports whether the marker file is present in the game
-// install dir. Frontend reads this through a dedicated query RPC so the
-// Run combo can grey out the xNVSE entry post-patch.
 func IsFNV4GBApplied(installPath string) bool {
 	if installPath == "" {
 		return false
@@ -239,18 +170,15 @@ func IsFNV4GBApplied(installPath string) bool {
 
 // locate4GBPatcherExe walks the extracted tree (which mirrors what was
 // copied into installPath) and returns the absolute path to the patcher
-// executable inside installPath. Strategy: prefer files matching the
-// known Linux-variant binary name; fall back to the first regular file
-// without an obvious data-only extension.
 func locate4GBPatcherExe(extractRoot, installPath string) (string, error) {
 	knownNames := map[string]bool{
-		"falloutnvpatcher": true, // ships in both "for Proton" and "for Linux" variants
+		"falloutnvpatcher": true,
 		"fnv4gb":           true,
 		"fnv4gb_linux":     true,
 	}
 	skipExt := map[string]bool{
 		".txt": true, ".md": true, ".html": true, ".pdf": true,
-		".dll": true, ".exe": true, // the Windows-variant exe — never the Linux entry point
+		".dll": true, ".exe": true,
 	}
 
 	var fallback string
@@ -269,7 +197,7 @@ func locate4GBPatcherExe(extractRoot, installPath string) (string, error) {
 		dest := filepath.Join(installPath, rel)
 		if knownNames[stem] {
 			fallback = dest
-			return io.EOF // sentinel to stop the walk
+			return io.EOF
 		}
 		if !skipExt[ext] && fallback == "" {
 			fallback = dest

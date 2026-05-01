@@ -17,9 +17,7 @@ struct ToolEntry {
     QString loaderExe;
 };
 
-// Mirrors internal/tools/tools.go on the Go side. Kept duplicated (small
-// static table) rather than plumbed over gRPC since the mapping never
-// changes between releases.
+// Mirrors internal/tools/tools.go on the Go side.
 const QList<ToolEntry>& knownTools()
 {
     static const QList<ToolEntry> list = {
@@ -96,12 +94,47 @@ void RunButtonWidget::setFourGBPatched(bool patched)
     rebuildCombo(m_lastPreferredToolId);
 }
 
+void RunButtonWidget::setTTWVfsActive(bool active)
+{
+    if (m_ttwVfsActive == active) return;
+    m_ttwVfsActive = active;
+    rebuildCombo(m_lastPreferredToolId);
+}
+
 void RunButtonWidget::rebuildCombo(const QString& preferredToolId)
 {
     m_combo->blockSignals(true);
     m_combo->clear();
 
     QString gameLabel = m_game.detected ? m_game.name : QString("Game");
+    auto* itemModel = qobject_cast<QStandardItemModel*>(m_combo->model());
+
+    if (m_game.synthetic) {
+        bool nvseInstalled = false;
+        if (!m_game.installDir.empty()) {
+            std::error_code ec;
+            nvseInstalled = std::filesystem::exists(m_game.installDir / "nvse_loader.exe", ec);
+        }
+        if (nvseInstalled) {
+            Target t;
+            t.type = TargetTool;
+            t.toolId = "xnvse";
+            t.label = "Run nvse_loader.exe";
+            m_combo->addItem(t.label, t.toolId);
+            m_combo->setItemData(0, int(TargetTool), Qt::UserRole + 1);
+        } else {
+            Target t;
+            t.type = TargetInstallTool;
+            t.toolId = "xnvse";
+            t.label = "Install xNVSE...";
+            m_combo->addItem(t.label, t.toolId);
+            m_combo->setItemData(0, int(TargetInstallTool), Qt::UserRole + 1);
+        }
+        m_combo->blockSignals(false);
+        syncRunLabel();
+        return;
+    }
+
     {
         Target t;
         t.type = TargetGame;
@@ -109,9 +142,18 @@ void RunButtonWidget::rebuildCombo(const QString& preferredToolId)
         t.toolId = "";
         m_combo->addItem(t.label, QVariant::fromValue(t.toolId));
         m_combo->setItemData(0, int(TargetGame), Qt::UserRole + 1);
+
+        if (m_game.shortName == "falloutnv" && m_game.vfsActive == false
+            && m_ttwVfsActive && itemModel) {
+            if (auto* item = itemModel->item(0)) {
+                item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
+                item->setToolTip(
+                    "Tale of Two Wastelands is currently active. Switch "
+                    "active game to deactivate it first.");
+            }
+        }
     }
 
-    auto* itemModel = qobject_cast<QStandardItemModel*>(m_combo->model());
     for (const auto& t : toolsFor(m_game.shortName)) {
         Target target;
         target.toolId = t.toolId;
@@ -126,10 +168,6 @@ void RunButtonWidget::rebuildCombo(const QString& preferredToolId)
         m_combo->addItem(target.label, target.toolId);
         m_combo->setItemData(row, int(target.type), Qt::UserRole + 1);
 
-        // Post-FNV4GB-patch: nvse_loader.exe still exists on disk but
-        // launching through it bypasses the patcher's own entry point —
-        // the user must run the launcher exe instead. Mark the row
-        // disabled so a click can't fire the wrong launch path.
         if (m_fourGBPatched
             && m_game.shortName == "falloutnv"
             && target.toolId == "xnvse"
@@ -149,18 +187,11 @@ void RunButtonWidget::rebuildCombo(const QString& preferredToolId)
         return item == nullptr || (item->flags() & Qt::ItemIsEnabled);
     };
 
-    // Restore preferred tool when it resolves to a real combo row.
     if (!preferredToolId.isEmpty()) {
         int idx = m_combo->findData(preferredToolId);
         if (idx >= 0)
             m_combo->setCurrentIndex(idx);
     } else {
-        // First run for this game: no saved preference yet. If a script
-        // extender is already installed, default to running it rather
-        // than the vanilla Steam launch. Otherwise the first click fires
-        // steam://rungameid/, Steam runs FalloutNVLauncher.exe, and the
-        // user gets the Bethesda launcher instead of xNVSE with no
-        // indication that gorganizer had another option.
         for (int i = 0; i < m_combo->count(); ++i) {
             auto type = static_cast<TargetType>(
                 m_combo->itemData(i, Qt::UserRole + 1).toInt());
@@ -171,9 +202,6 @@ void RunButtonWidget::rebuildCombo(const QString& preferredToolId)
         }
     }
 
-    // If we ended up on a disabled row (saved preference matched the
-    // post-patch xNVSE entry, or any other disabled tool), fall back to
-    // the always-enabled "Launch <Game>" row at index 0.
     if (!rowIsEnabled(m_combo->currentIndex()))
         m_combo->setCurrentIndex(0);
 

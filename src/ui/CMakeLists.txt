@@ -20,6 +20,7 @@ add_library(gorganizer_ui STATIC
     FomodPlan.cpp
     FomodInstallerDialog.cpp
     IniEditorDialog.cpp
+    TTWInstallDialog.cpp
     ThemeManager.cpp
     ../../resources/themes.qrc
 )

@@ -13,11 +13,10 @@ import (
 	"time"
 )
 
-// ErrInvalidKey is returned by ValidateAPIKey when the Nexus API rejects the key
-// (HTTP 401/403). Callers should distinguish this from transport errors.
+// ErrInvalidKey is returned by ValidateAPIKey when the Nexus API rejects the key.
 var ErrInvalidKey = errors.New("invalid API key")
 
-// URLResolver abstracts Nexus API calls for testability (DIP).
+// URLResolver abstracts Nexus API calls for testability.
 type URLResolver interface {
 	ResolveDownloadURL(link *NXMLink) (string, error)
 	GetModInfo(gameSlug string, modID int) (*NexusModInfo, error)
@@ -31,24 +30,22 @@ type NexusFileList struct {
 
 // NexusModInfo holds basic mod metadata from the Nexus v1 API.
 type NexusModInfo struct {
-	Name         string `json:"name"`
-	Version      string `json:"version"`
-	Summary      string `json:"summary,omitempty"`
-	PictureURL   string `json:"picture_url,omitempty"`
-	ContainsAdult bool  `json:"contains_adult_content,omitempty"`
-	DomainName   string `json:"domain_name,omitempty"`
-	ModID        int    `json:"mod_id,omitempty"`
+	Name          string `json:"name"`
+	Version       string `json:"version"`
+	Summary       string `json:"summary,omitempty"`
+	PictureURL    string `json:"picture_url,omitempty"`
+	ContainsAdult bool   `json:"contains_adult_content,omitempty"`
+	DomainName    string `json:"domain_name,omitempty"`
+	ModID         int    `json:"mod_id,omitempty"`
 }
 
-// NexusFileDetails carries the fields we need from the v1 file-details
-// endpoint, named to match the v3 MinimalModFile shape from openapi.yaml so
-// the metadata.yaml schema stays spec-aligned.
+// NexusFileDetails mirrors the v3 MinimalModFile shape we surface from v1.
 type NexusFileDetails struct {
 	FileID       int    `json:"file_id"`
 	Name         string `json:"name"`
 	Version      string `json:"version"`
-	CategoryName string `json:"category_name"`   // "MAIN" | "UPDATE" | "OPTIONAL" | ...
-	UploadedTime string `json:"uploaded_time"`   // ISO 8601
+	CategoryName string `json:"category_name"`
+	UploadedTime string `json:"uploaded_time"`
 	SizeKB       int64  `json:"size_kb"`
 	FileName     string `json:"file_name"`
 	Description  string `json:"description,omitempty"`
@@ -60,16 +57,12 @@ type NexusClient struct {
 	httpClient *http.Client
 	baseURL    string
 
-	// rlMu guards the rate-limit fields below. We update them on every
-	// response from any endpoint (v1 or v3) and consult them before
-	// firing soft-dep batches so we don't burn through the daily quota.
-	rlMu             sync.Mutex
-	rlDailyRemaining int
+	rlMu              sync.Mutex
+	rlDailyRemaining  int
 	rlHourlyRemaining int
-	rlLastSeen       time.Time
+	rlLastSeen        time.Time
 }
 
-// NewNexusClient creates a new Nexus API client.
 func NewNexusClient(apiKey string) *NexusClient {
 	return &NexusClient{
 		apiKey:  apiKey,
@@ -77,13 +70,12 @@ func NewNexusClient(apiKey string) *NexusClient {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		rlDailyRemaining:  -1, // -1 = unknown until first response observed
+		rlDailyRemaining:  -1,
 		rlHourlyRemaining: -1,
 	}
 }
 
 // captureRateLimit reads the X-RL-* headers Nexus emits on every response.
-// Field names per https://help.nexusmods.com (legacy v1) and v3 OpenAPI.
 func (c *NexusClient) captureRateLimit(h http.Header) {
 	d, dOk := strconv.Atoi(h.Get("X-RL-Daily-Remaining"))
 	hh, hOk := strconv.Atoi(h.Get("X-RL-Hourly-Remaining"))
@@ -101,18 +93,14 @@ func (c *NexusClient) captureRateLimit(h http.Header) {
 	c.rlLastSeen = time.Now()
 }
 
-// RateLimitRemaining returns the most-recently-observed (daily, hourly)
-// remaining counts. Either field is -1 when no response has been observed
-// yet. Callers use these to throttle large soft-dep batches.
+// RateLimitRemaining returns most-recently-observed (daily, hourly) counts; -1 = unknown.
 func (c *NexusClient) RateLimitRemaining() (daily, hourly int) {
 	c.rlMu.Lock()
 	defer c.rlMu.Unlock()
 	return c.rlDailyRemaining, c.rlHourlyRemaining
 }
 
-// setHeaders applies MO2-compatible API headers that the Nexus API expects.
-// MO2 sends: apikey, User-Agent, Application-Name, Application-Version,
-// Protocol-Version, Content-Type.
+// setHeaders applies MO2-compatible API headers.
 func (c *NexusClient) setHeaders(req *http.Request) {
 	req.Header.Set("apikey", c.apiKey)
 	req.Header.Set("User-Agent", fmt.Sprintf("Gorganizer/0.1.0 (%s) Go", runtime.GOOS))
@@ -123,12 +111,7 @@ func (c *NexusClient) setHeaders(req *http.Request) {
 }
 
 // ResolveDownloadURL calls the Nexus API to get a CDN download URL.
-// Supports both premium (no key needed) and non-premium (key+expires from NXM URI) flows,
-// matching MO2's behavior.
 func (c *NexusClient) ResolveDownloadURL(link *NXMLink) (string, error) {
-	// Build URL matching the official Nexus API client endpoint.
-	// Non-premium users need key+expires from the NXM link.
-	// Premium users can omit these. The API accepts both.
 	endpoint := fmt.Sprintf("%s/v1/games/%s/mods/%d/files/%d/download_link",
 		c.baseURL, link.GameSlug, link.ModID, link.FileID)
 
@@ -166,7 +149,6 @@ func (c *NexusClient) ResolveDownloadURL(link *NXMLink) (string, error) {
 }
 
 // GetModInfo fetches mod metadata from the Nexus API.
-// GET /v1/games/{game}/mods/{mod_id}
 func (c *NexusClient) GetModInfo(gameSlug string, modID int) (*NexusModInfo, error) {
 	endpoint := fmt.Sprintf("%s/v1/games/%s/mods/%d", c.baseURL, gameSlug, modID)
 
@@ -194,11 +176,7 @@ func (c *NexusClient) GetModInfo(gameSlug string, modID int) (*NexusModInfo, err
 	return &info, nil
 }
 
-// GetFileDetails fetches detailed file metadata (name, version, category,
-// uploaded_time, size_kb, etc.) from the v1 endpoint. Field selection and
-// naming mirror the v3 MinimalModFile schema in openapi.yaml.
-//
-// GET /v1/games/{game}/mods/{mod_id}/files/{file_id}.json
+// GetFileDetails fetches detailed file metadata from the v1 endpoint.
 func (c *NexusClient) GetFileDetails(gameSlug string, modID, fileID int) (*NexusFileDetails, error) {
 	endpoint := fmt.Sprintf("%s/v1/games/%s/mods/%d/files/%d.json",
 		c.baseURL, gameSlug, modID, fileID)
@@ -227,9 +205,7 @@ func (c *NexusClient) GetFileDetails(gameSlug string, modID, fileID int) (*Nexus
 	return &details, nil
 }
 
-// ListModFiles returns all files for a mod via /v1/games/{game}/mods/{id}/files.json.
-// Useful when you know the mod ID but not which file to grab — the caller
-// picks the best candidate (e.g. latest MAIN category).
+// ListModFiles returns all files for a mod.
 func (c *NexusClient) ListModFiles(gameSlug string, modID int) (*NexusFileList, error) {
 	endpoint := fmt.Sprintf("%s/v1/games/%s/mods/%d/files.json",
 		c.baseURL, gameSlug, modID)
@@ -255,10 +231,7 @@ func (c *NexusClient) ListModFiles(gameSlug string, modID int) (*NexusFileList, 
 	return &list, nil
 }
 
-// ResolveDownloadURLByID returns a CDN URL for a given mod+file ID without an
-// NXM-style key/expires tuple. This works for premium accounts only; non-
-// premium returns 403 with a message about requiring premium or a managed
-// NXM link. The caller is expected to handle that cleanly.
+// ResolveDownloadURLByID returns a CDN URL by mod+file ID; premium accounts only.
 func (c *NexusClient) ResolveDownloadURLByID(gameSlug string, modID, fileID int) (string, error) {
 	endpoint := fmt.Sprintf("%s/v1/games/%s/mods/%d/files/%d/download_link",
 		c.baseURL, gameSlug, modID, fileID)
@@ -289,13 +262,7 @@ func (c *NexusClient) ResolveDownloadURLByID(gameSlug string, modID, fileID int)
 	return links[0].URI, nil
 }
 
-// ValidateAPIKey checks if the API key is valid by making an authenticated v3
-// probe call against a stable public mod (SkyUI, SSE #12604). 200 means valid,
-// 401/403 means the key was rejected (ErrInvalidKey), anything else is a
-// transport/service error.
-//
-// v3 does not expose a /users/validate equivalent, so this probe approach is
-// the intended pattern per the v3 OpenAPI spec.
+// ValidateAPIKey probes a stable public mod via v3; 401/403 returns ErrInvalidKey.
 func (c *NexusClient) ValidateAPIKey(ctx context.Context) error {
 	endpoint := fmt.Sprintf("%s/v3/games/skyrimspecialedition/mods/12604", c.baseURL)
 	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
@@ -321,45 +288,29 @@ func (c *NexusClient) ValidateAPIKey(ctx context.Context) error {
 	}
 }
 
-// --- Nexus API v3 (dependency endpoints) ---
-//
-// The v3 surface is documented in api/proto/openapi.yaml. We only consume
-// two endpoints here:
-//
-//   GET /games/{game_domain}/mod-files/{game_scoped_id}
-//   GET /mod-files/{id}/dependencies/ranges
-//
-// The first call resolves the *game-scoped* file id (what we record in
-// metadata.yaml from nxm:// URIs) into the *global* file id used by the
-// dependency endpoints. Global ids are immutable, so callers persist the
-// translation and only round-trip once per file.
-
 // V3ModFile is the subset of v3 GetModFile we need.
 type V3ModFile struct {
-	ID                string `json:"id"`             // global file id
-	GameScopedID      string `json:"game_scoped_id"` // matches what we have on disk
-	GameID            string `json:"game_id"`
-	ModGameScopedID   string `json:"mod_game_scoped_id"`
+	ID              string `json:"id"`
+	GameScopedID    string `json:"game_scoped_id"`
+	GameID          string `json:"game_id"`
+	ModGameScopedID string `json:"mod_game_scoped_id"`
 }
 
-// V3MinimalMod is a small slice of MinimalMod surfaced by the dependency
-// range responses; carrying just the fields we need for soft-dep display.
+// V3MinimalMod is the slice of MinimalMod surfaced by dependency range responses.
 type V3MinimalMod struct {
-	ID            string `json:"id"`
-	GameScopedID  string `json:"game_scoped_id"`
-	Name          string `json:"name"`
-	ThumbnailURL  string `json:"thumbnail_url"`
+	ID           string `json:"id"`
+	GameScopedID string `json:"game_scoped_id"`
+	Name         string `json:"name"`
+	ThumbnailURL string `json:"thumbnail_url"`
 }
 
 // V3DepDefinition is one dependency definition with its ranges.
 type V3DepDefinition struct {
-	ID     string         `json:"id"`
-	Ranges []V3DepRange   `json:"ranges"`
+	ID     string       `json:"id"`
+	Ranges []V3DepRange `json:"ranges"`
 }
 
-// V3DepRange represents one alternative within a dep definition. We keep
-// only the parts we resolve against (target_group.mod) — version satisfaction
-// is intentionally not enforced (presence is enough).
+// V3DepRange is one alternative within a dep definition.
 type V3DepRange struct {
 	ID          string `json:"id"`
 	TargetGroup struct {
@@ -374,8 +325,7 @@ type V3DepRangesResponse struct {
 	DependencyDefinitions []V3DepDefinition `json:"dependency_definitions"`
 }
 
-// GetModFile resolves a game-scoped file id into the global file id used by
-// the v3 dependency endpoints.
+// GetModFile resolves a game-scoped file id into the global file id.
 func (c *NexusClient) GetModFile(ctx context.Context, gameDomain, gameScopedID string) (*V3ModFile, error) {
 	endpoint := fmt.Sprintf("%s/v3/games/%s/mod-files/%s", c.baseURL, gameDomain, gameScopedID)
 	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
@@ -404,9 +354,7 @@ func (c *NexusClient) GetModFile(ctx context.Context, gameDomain, gameScopedID s
 	return &env.Data, nil
 }
 
-// GetModFileDependencyRanges fetches stored dependency ranges for a global
-// file id. The empty `dependency_definitions` array is a normal response —
-// the file simply has no declared deps.
+// GetModFileDependencyRanges fetches stored dependency ranges for a global file id.
 func (c *NexusClient) GetModFileDependencyRanges(ctx context.Context, globalFileID string) (*V3DepRangesResponse, error) {
 	endpoint := fmt.Sprintf("%s/v3/mod-files/%s/dependencies/ranges", c.baseURL, globalFileID)
 	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
@@ -426,8 +374,6 @@ func (c *NexusClient) GetModFileDependencyRanges(ctx context.Context, globalFile
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("nexus v3 dep-ranges returned %d: %s", resp.StatusCode, string(body))
 	}
-	// The dep-ranges endpoint replies with the response body directly,
-	// not wrapped in a `data` envelope (per openapi.yaml ModFileDependencyRangesResponse).
 	var out V3DepRangesResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decoding v3 dep-ranges: %w", err)

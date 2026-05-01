@@ -7,15 +7,7 @@ import (
 	"sync"
 )
 
-// HeaderCache memoises ParseHeader results by (realPath, mtime, size). The
-// daemon parses every enabled plugin's header on profile activation; without
-// caching, mounting a 200-mod profile re-reads the same files on every
-// status refresh.
-//
-// Keying on the underlying mod-folder path (Plugin.Source) — never the
-// Data/ rename target — survives VFS activate/deactivate cycles where Data/
-// is recreated. A plugin file's mtime/size pair changes the moment a user
-// reinstalls the mod, so stale entries self-evict on the next stat.
+// HeaderCache is a bounded LRU memoising ParseHeader by (path, mtime, size).
 type HeaderCache struct {
 	mu      sync.Mutex
 	max     int
@@ -35,8 +27,7 @@ type cacheValue struct {
 	err error
 }
 
-// NewHeaderCache returns a bounded LRU cache. Pass max <= 0 for the default
-// (1024 entries — comfortably above any realistic load order).
+// NewHeaderCache returns a bounded LRU cache; max <= 0 uses a default of 1024.
 func NewHeaderCache(max int) *HeaderCache {
 	if max <= 0 {
 		max = 1024
@@ -48,9 +39,7 @@ func NewHeaderCache(max int) *HeaderCache {
 	}
 }
 
-// Get returns the parsed header for path, parsing on miss. Stat failures and
-// parse errors are cached too — re-parsing a corrupt plugin every refresh
-// would log-spam the Activity Log.
+// Get returns the parsed header for path, parsing on miss; errors are also cached.
 func (c *HeaderCache) Get(ctx context.Context, path string) (*Header, error) {
 	st, err := os.Stat(path)
 	if err != nil {
@@ -71,7 +60,6 @@ func (c *HeaderCache) Get(ctx context.Context, path string) (*Header, error) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// Re-check: another goroutine may have populated while we were parsing.
 	if elem, ok := c.entries[key]; ok {
 		c.order.MoveToFront(elem)
 		v := elem.Value.(*cacheValue)

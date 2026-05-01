@@ -21,7 +21,6 @@ func TestCreateAndLoad(t *testing.T) {
 		t.Errorf("GameID = %q, want \"skyrimse\"", p.GameID)
 	}
 
-	// Load the profile back.
 	loaded, entries, err := pm.Load("skyrimse", "Default")
 	if err != nil {
 		t.Fatalf("Load: %v", err)

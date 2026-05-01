@@ -10,10 +10,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/parka/gorganizer/internal/steam"
 )
 
-// KnownGames is the registry of supported Bethesda games.
-// Must match the C++ frontend's GameInfo::knownGames() exactly.
+// KnownGames is the registry of supported Bethesda games; must match the C++ frontend's GameInfo::knownGames().
 var KnownGames = []GameDefinition{
 	{ID: "morrowind", Name: "The Elder Scrolls III: Morrowind", SteamAppID: 22320, DataSubpath: "Data"},
 	{ID: "oblivion", Name: "The Elder Scrolls IV: Oblivion", SteamAppID: 22330, DataSubpath: "Data"},
@@ -23,14 +24,22 @@ var KnownGames = []GameDefinition{
 	{ID: "falloutnv", Name: "Fallout: New Vegas", SteamAppID: 22380, DataSubpath: "Data"},
 	{ID: "fallout4", Name: "Fallout 4", SteamAppID: 377160, DataSubpath: "Data"},
 	{ID: "starfield", Name: "Starfield", SteamAppID: 1716740, DataSubpath: "Data"},
+	{ID: "ttw", Name: "Tale of Two Wastelands", SteamAppID: 0, DataSubpath: "Data",
+		Synthetic: true, ParentGameID: "falloutnv",
+		Requires: []string{"fallout3", "falloutnv"}},
 }
 
-// knownByAppID maps Steam app IDs to game definitions.
+// TTWMarkerFilename is the sentinel file dropped in FNV's install root after a successful TTW install.
+const TTWMarkerFilename = ".gorganizer-ttw.applied"
+
 var knownByAppID map[uint32]GameDefinition
 
 func init() {
 	knownByAppID = make(map[uint32]GameDefinition, len(KnownGames))
 	for _, g := range KnownGames {
+		if g.Synthetic {
+			continue
+		}
 		knownByAppID[g.SteamAppID] = g
 	}
 }
@@ -51,8 +60,7 @@ func FindByID(gameID string) (GameDefinition, bool) {
 	return GameDefinition{}, false
 }
 
-// DetectInstalledGames scans all Steam library folders for known games.
-// Matches the C++ GameDetector::detectAll() logic exactly.
+// DetectInstalledGames scans all Steam library folders for known games and appends synthetic entries.
 func DetectInstalledGames() ([]DetectedGame, error) {
 	steamRoot, err := FindSteamRoot()
 	if err != nil {
@@ -87,49 +95,75 @@ func DetectInstalledGames() ([]DetectedGame, error) {
 		}
 	}
 
-	// Sort by app ID for consistent ordering (matches C++ frontend).
 	sort.Slice(detected, func(i, j int) bool {
 		return detected[i].SteamAppID < detected[j].SteamAppID
 	})
+
+	detected = AppendSyntheticGames(detected, nil)
 	return detected, nil
 }
 
-// FindSteamRoot checks the three locations in priority order,
-// matching the C++ Paths::steamRoot() exactly.
-func FindSteamRoot() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("finding home directory: %w", err)
-	}
+// TTWPlayableProbe is an optional callback that reports whether TTW is playable from an existing install.
+type TTWPlayableProbe func() (fnvInstallPath string, ok bool)
 
-	dataHome := os.Getenv("XDG_DATA_HOME")
-	if dataHome == "" {
-		dataHome = filepath.Join(home, ".local", "share")
+// AppendSyntheticGames returns detected with synthetic TTW entries appended when installable or playable.
+func AppendSyntheticGames(detected []DetectedGame, playable TTWPlayableProbe) []DetectedGame {
+	has := map[string]*DetectedGame{}
+	for i := range detected {
+		has[detected[i].ID] = &detected[i]
 	}
-
-	// Primary location.
-	primary := filepath.Join(dataHome, "Steam")
-	if dirExists(filepath.Join(primary, "steamapps")) {
-		return primary, nil
+	if _, alreadyTTW := has["ttw"]; alreadyTTW {
+		return detected
 	}
+	def, ok := FindByID("ttw")
+	if !ok {
+		return detected
+	}
+	fnv, fnvOk := has["falloutnv"]
+	_, fo3Ok := has["fallout3"]
 
-	// Symlink fallback.
-	symlink := filepath.Join(home, ".steam", "steam")
-	if dirExists(filepath.Join(symlink, "steamapps")) {
-		resolved, err := filepath.EvalSymlinks(symlink)
-		if err == nil {
-			return resolved, nil
+	switch {
+	case fnvOk && fo3Ok:
+		detected = append(detected, DetectedGame{
+			GameDefinition: def,
+			InstallPath:    fnv.InstallPath,
+			DataPath:       fnv.DataPath,
+			LibraryPath:    fnv.LibraryPath,
+		})
+	case fnvOk && playable != nil:
+		if installPath, playableOk := playable(); playableOk && installPath != "" {
+			detected = append(detected, DetectedGame{
+				GameDefinition: def,
+				InstallPath:    fnv.InstallPath,
+				DataPath:       fnv.DataPath,
+				LibraryPath:    fnv.LibraryPath,
+			})
 		}
-		return symlink, nil
 	}
+	return detected
+}
 
-	// Flatpak fallback.
-	flatpak := filepath.Join(home, ".var", "app", "com.valvesoftware.Steam", ".local", "share", "Steam")
-	if dirExists(filepath.Join(flatpak, "steamapps")) {
-		return flatpak, nil
+// TTWInstallable reports whether both Fallout 3 and Fallout: New Vegas are in the detected slice.
+func TTWInstallable(detected []DetectedGame) bool {
+	has := map[string]bool{}
+	for _, d := range detected {
+		has[d.ID] = true
 	}
+	return has["fallout3"] && has["falloutnv"]
+}
 
-	return "", fmt.Errorf("steam root not found")
+// HasTTWMarker checks for the .gorganizer-ttw.applied marker file in an FNV install directory.
+func HasTTWMarker(fnvInstallPath string) bool {
+	if fnvInstallPath == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(fnvInstallPath, TTWMarkerFilename))
+	return err == nil && info.Mode().IsRegular()
+}
+
+// FindSteamRoot is a back-compat shim delegating to steam.FindRoot.
+func FindSteamRoot() (string, error) {
+	return steam.FindRoot()
 }
 
 // findLibraryFolders parses libraryfolders.vdf for Steam library paths.
@@ -146,7 +180,6 @@ func findLibraryFolders(steamRoot string) ([]string, error) {
 		return nil, fmt.Errorf("parsing %s: %w", vdfPath, err)
 	}
 
-	// Navigate to "libraryfolders" -> each numeric key -> "path".
 	lf, ok := parsed["libraryfolders"]
 	if !ok {
 		return nil, fmt.Errorf("libraryfolders key not found in %s", vdfPath)
@@ -174,7 +207,6 @@ func findLibraryFolders(steamRoot string) ([]string, error) {
 }
 
 // parseAppManifest reads an appmanifest_*.acf and matches against KnownGames.
-// Returns nil (not an error) if the game is not a known Bethesda game.
 func parseAppManifest(acfPath, libraryFolder string) (*DetectedGame, error) {
 	f, err := os.Open(acfPath)
 	if err != nil {
@@ -204,7 +236,7 @@ func parseAppManifest(acfPath, libraryFolder string) (*DetectedGame, error) {
 
 	gameDef, ok := knownByAppID[uint32(appID)]
 	if !ok {
-		return nil, nil // Not a known game.
+		return nil, nil
 	}
 
 	installDir, _ := asMap["installdir"].(string)
@@ -222,7 +254,6 @@ func parseAppManifest(acfPath, libraryFolder string) (*DetectedGame, error) {
 		return nil, nil
 	}
 
-	// Use the name from the manifest if available.
 	name := gameDef.Name
 	if n, ok := asMap["name"].(string); ok && n != "" {
 		name = n
@@ -241,18 +272,12 @@ func parseAppManifest(acfPath, libraryFolder string) (*DetectedGame, error) {
 	}, nil
 }
 
-// dirExists checks if a path exists and is a directory.
 func dirExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
 }
 
-// --- VDF Parser ---
-// Matches the C++ VdfParser grammar: quoted strings with escape sequences,
-// // line comments, bare words, nested brace objects.
-
 // ParseVDF parses Valve's VDF text format into a map structure.
-// Used for both libraryfolders.vdf and appmanifest_*.acf files.
 func ParseVDF(r io.Reader) (map[string]interface{}, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
@@ -265,9 +290,9 @@ func ParseVDF(r io.Reader) (map[string]interface{}, error) {
 type vdfTokenType int
 
 const (
-	vdfString     vdfTokenType = iota
-	vdfBraceOpen               // {
-	vdfBraceClose              // }
+	vdfString vdfTokenType = iota
+	vdfBraceOpen
+	vdfBraceClose
 	vdfEOF
 )
 
@@ -338,7 +363,6 @@ func (p *vdfParser) next() vdfToken {
 		return vdfToken{typ: vdfString, val: sb.String()}
 	}
 
-	// Bare word.
 	var sb strings.Builder
 	for p.pos < len(p.input) {
 		ch := p.input[p.pos]
@@ -397,7 +421,7 @@ func (p *vdfParser) parseObject() (map[string]interface{}, error) {
 	}
 }
 
-// ParseVDFFromFile is a convenience wrapper that opens a file and parses it.
+// ParseVDFFromFile opens a file and parses it as VDF.
 func ParseVDFFromFile(path string) (map[string]interface{}, error) {
 	f, err := os.Open(path)
 	if err != nil {

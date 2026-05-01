@@ -13,19 +13,11 @@ import (
 )
 
 // LoaderMissingError is returned by LaunchGame when a useTool=true launch
-// cannot find a valid script-extender loader exe in the game dir. Lives in
-// ipc (not tools) so the IPC layer can grpc-status-map it without creating
-// an import cycle — tools already depends on ipc.
-//
-// This error is load-bearing: without it, the launcher either runs a
-// non-existent path or, worse, executes the vanilla Bethesda launcher a
-// Steam update restored over a renamed loader. The frontend should show
-// an actionable "reinstall xNVSE" dialog, not a generic error toast.
 type LoaderMissingError struct {
 	GameID        string
 	ConfiguredExe string
 	InstallPath   string
-	Reason        string // "missing" | "modified" | "looks-like-vanilla-launcher" | "no-loader-configured"
+	Reason        string
 }
 
 func (e *LoaderMissingError) Error() string {
@@ -53,6 +45,85 @@ type DaemonController interface {
 	SettingsController
 	IniController
 	LifecycleController
+	TTWController
+}
+
+// TTWController exposes the synthetic-game install + lifecycle for Tale
+// of Two Wastelands. The two backends share most of the surface; only
+type TTWController interface {
+	CheckTTWPrereqs(backend int) (TTWPrereqResult, error)
+	CheckTTWDiskSpace() (available, required int64, err error)
+	CheckFNVNotMounted() error
+	PrepareTTWInstaller(userPath string, backend int) (TTWInstallerInfoResult, error)
+	CreateBlankTTWMod(modName string) (string, error)
+	EnsureNativeMpiInstaller() (path, version string, err error)
+	BootstrapFNVPrefix() error
+	InstallTTWPrereqs() (string, error)
+	LaunchTTWInstaller(info TTWInstallerInfoResult, dataModName string) (string, error)
+	CancelTTWInstaller(installID string) error
+	GetTTWInstallResult(installID string, block bool) (TTWInstallResultData, error)
+	SetTTWLauncherExe(relPath string) error
+	VerifyTTWIntegrity() error
+	TranslateWinePath(gameID, unixPath string) (string, error)
+	MountVFSWithSwap(gameID, profileName string) (*VFSStatusResult, error)
+}
+
+// TTWPrereqResult mirrors the TTW pre-flight status. Backend-tagged via
+// the int field; values match daemon.TTWBackend.
+type TTWPrereqResult struct {
+	Backend int
+
+	GstreamerInstalled  bool
+	GstreamerCodecsHint string
+	XdeltaInstalled     bool
+	DiskSpaceAvailable  int64
+	DiskSpaceRequired   int64
+	FNVVanilla          bool
+
+	MpiInstallerPath    string
+	MpiInstallerVersion string
+
+	PrefixExists          bool
+	HasDotnet48           bool
+	DotNet48ReleaseRev    uint32
+	HasMsxml6             bool
+	HasVcrun2022          bool
+	HasCorefonts          bool
+	MonoNeedsRemoval      bool
+	SteamRunning          bool
+	ProtontricksAvailable bool
+	WinetricksAvailable   bool
+
+	Missing []string
+}
+
+// TTWInstallerInfoResult is the resolved-input record returned by
+// PrepareTTWInstaller.
+type TTWInstallerInfoResult struct {
+	Backend       int
+	MpiFile       string
+	InstallerExe  string
+	Version       string
+	AlternateMpis []string
+}
+
+// TTWInstallResultData mirrors daemon.TTWInstallResult through the IPC
+// boundary without requiring ipc to import daemon.
+type TTWInstallResultData struct {
+	InstallerExitCode int
+	LayoutFixed       bool
+	DataModFileCount  int
+	DataModBytes      int64
+	ChangedExesInRoot []TTWExeDeltaResult
+	DataModExes       []TTWExeDeltaResult
+}
+
+type TTWExeDeltaResult struct {
+	RelPath string
+	Kind    string
+	Size    int64
+	MTime   string
+	SHA256  string
 }
 
 // GameController handles game-related operations.
@@ -99,10 +170,6 @@ type VFSController interface {
 	UnmountVFS(gameID string) error
 	GetVFSStatus(gameID string) (*VFSStatusResult, error)
 	RebuildVFS(gameID string) error
-	// RestoreFromBackup performs the destructive Data → Data.orig restore
-	// the user explicitly confirmed via the recovery-pending modal.
-	// Returns an error if no recovery is pending for that game (so a
-	// stale frontend can't accidentally trigger destruction).
 	RestoreFromBackup(gameID string) error
 }
 
@@ -112,10 +179,6 @@ type ConflictController interface {
 }
 
 // PluginStatusController streams plugin dependency-analysis results.
-//
-// The first event on the returned channel is always a PluginStatusEvent
-// with Snapshot != nil; subsequent events are Update != nil deltas as
-// soft-dep checks complete on background workers.
 type PluginStatusController interface {
 	StreamPluginStatus(ctx context.Context, gameID, profileName string) (<-chan PluginStatusEventResult, error)
 }
@@ -182,8 +245,6 @@ type LaunchController interface {
 }
 
 // FNV4GBController handles the Fallout: New Vegas 4GB patcher flow. Split
-// from LaunchController because the install/apply distinction matters: the
-// GUI prompts the user with "Apply patch?" between the two RPCs.
 type FNV4GBController interface {
 	Install4GBPatcher(gameID string) (FNV4GBInstallResult, error)
 	Apply4GBPatch(gameID, patcherExePath string) (output string, err error)
@@ -201,6 +262,7 @@ type SettingsController interface {
 	SetNexusAPIKey(ctx context.Context, apiKey string) (*NexusAPIKeyResult, error)
 	GetGameSettings(gameID string) (*GameSettingsResult, error)
 	SetGameSettings(gameID string, autoInstall bool) (*GameSettingsResult, error)
+	SetActiveGame(gameID string) error
 }
 
 // IniController handles per-profile INI file management for Bethesda games.
@@ -217,8 +279,6 @@ type IniController interface {
 type LifecycleController interface {
 	Shutdown()
 	WatchStatus() <-chan StatusEventResult
-	// Health returns the current cold-start readiness snapshot. The splash
-	// screen polls this until GamesWarmed is true.
 	Health() ReadinessResult
 }
 
@@ -231,14 +291,15 @@ type ReadinessResult struct {
 	LastInitStep string
 }
 
-// Result types used by DaemonController to decouple from protobuf types.
-
 type GameInfo struct {
-	GameID      string
-	Name        string
-	SteamAppID  uint32
-	InstallPath string
-	DataPath    string
+	GameID           string
+	Name             string
+	SteamAppID       uint32
+	InstallPath      string
+	DataPath         string
+	Synthetic        bool
+	LinkedFromGameID string
+	VFSActive        bool
 }
 
 type ModInfoResult struct {
@@ -282,7 +343,7 @@ type FileConflictResult struct {
 type OverwriteEntryResult struct {
 	RelPath    string
 	SizeBytes  int64
-	ModifiedAt string // RFC3339
+	ModifiedAt string
 	IsDir      bool
 }
 
@@ -312,9 +373,7 @@ type DownloadProgressResult struct {
 	Status          DownloadStatus
 	Error           string
 	QueuedAhead     int32
-	// GameID is used internally to route the event to the right per-game
-	// stream; not present on the wire.
-	GameID string
+	GameID          string
 }
 
 // ArchiveRowResult is the snapshot-row payload (ListArchives +
@@ -340,19 +399,15 @@ type ArchiveRowResult struct {
 	DownloadID         string
 	BytesDownloaded    int64
 	QueuedAhead        int32
-	// Merged is true when this archive was installed via "Merge Into Existing
-	// Mod..." into a pre-existing target. Drives the "Merged" Status display
-	// and "Show Containing Mod" right-click action in the Downloads view.
-	Merged bool
+	Merged             bool
 }
 
 // ArchiveEventResult is one event on the per-game archive stream.
 type ArchiveEventResult struct {
-	GameID string
-	// Exactly one of the following is set.
-	Progress        *DownloadProgressResult
-	RowChanged      *ArchiveRowResult
-	ArchiveRemoved  string // archive_rel_path of a removed archive
+	GameID         string
+	Progress       *DownloadProgressResult
+	RowChanged     *ArchiveRowResult
+	ArchiveRemoved string
 }
 
 // BulkHideScope mirrors proto SetArchivesHiddenBulkRequest.Scope.
@@ -368,7 +423,7 @@ const (
 type InstallMode int
 
 const (
-	InstallAsNewMod    InstallMode = 0
+	InstallAsNewMod     InstallMode = 0
 	InstallMergeIntoMod InstallMode = 1
 )
 
@@ -396,7 +451,7 @@ type InstallProgressResult struct {
 	FilesDone      int64
 	FilesTotal     int64
 	Error          string
-	GameID         string // routing only; not on the wire
+	GameID         string
 }
 
 // InstallEventResult wraps per-game install-stream events.
@@ -441,10 +496,6 @@ type FomodPlanResult struct {
 	RequiredFiles []FomodFileResult
 	Steps         []FomodStepResult
 
-	// Legacy NMM-style FOMOD (info.xml only, no ModuleConfig.xml).
-	// Frontend renders an info-only popup and the install path falls back
-	// to a flat copy. The C# script.cs that legacy FOMODs sometimes carry
-	// is intentionally NOT executed.
 	LegacyInfoOnly bool
 	Description    string
 	ScreenshotPath string
@@ -489,16 +540,14 @@ type NexusAPIKeyResult struct {
 }
 
 type StatusEventResult struct {
-	VFSStatus          *VFSStatusResult
-	Error              string
-	Info               string
-	RecoveryPending    *RecoveryPendingResult
-	DependencyWarning  *DependencyWarningResult
+	VFSStatus         *VFSStatusResult
+	Error             string
+	Info              string
+	RecoveryPending   *RecoveryPendingResult
+	DependencyWarning *DependencyWarningResult
 }
 
 // DependencyWarningResult is the daemon-side struct that gets serialized
-// to proto DependencyWarning. Severity is implied by Kind on the wire —
-// the C++ frontend maps it to ActivityLogPanel severity.
 type DependencyWarningResult struct {
 	PluginFilename string
 	Detail         string
@@ -510,11 +559,11 @@ type DependencyWarningResult struct {
 type DepKindResult int
 
 const (
-	DepKindOK                DepKindResult = 0
-	DepKindMasterAbsent      DepKindResult = 1
-	DepKindMasterDisabled    DepKindResult = 2
-	DepKindMasterOutOfOrder  DepKindResult = 3
-	DepKindSoftMissing       DepKindResult = 4
+	DepKindOK               DepKindResult = 0
+	DepKindMasterAbsent     DepKindResult = 1
+	DepKindMasterDisabled   DepKindResult = 2
+	DepKindMasterOutOfOrder DepKindResult = 3
+	DepKindSoftMissing      DepKindResult = 4
 )
 
 // DepIssueResult mirrors proto DepIssue.
@@ -546,7 +595,6 @@ type PluginStatusEventResult struct {
 
 // RecoveryPendingResult is the daemon-side struct that gets serialized
 // to the proto RecoveryPending event. Mirrors vfs.RecoveryPending plus
-// game_id (the IPC layer consumer needs to know which game).
 type RecoveryPendingResult struct {
 	GameID     string
 	DataPath   string
@@ -571,13 +619,11 @@ func NewServer(socketPath string, ctrl DaemonController) *Server {
 
 // Start creates the socket directory, listens, and serves gRPC.
 func (s *Server) Start() error {
-	// Ensure socket directory exists.
 	dir := filepath.Dir(s.socketPath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("creating socket directory %s: %w", dir, err)
 	}
 
-	// Remove stale socket file if present.
 	os.Remove(s.socketPath)
 
 	lis, err := net.Listen("unix", s.socketPath)
@@ -598,10 +644,6 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// Stop performs a graceful stop of the gRPC server and removes the
-// socket file. Without the os.Remove the socket inode persists between
-// daemon sessions, so `gorganizerd --handle-nxm` connects to a stale
-// path and gets ECONNREFUSED instead of "no daemon running".
 func (s *Server) Stop() {
 	if s.grpcServer != nil {
 		slog.Info("stopping gRPC server")

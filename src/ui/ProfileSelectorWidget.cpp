@@ -75,9 +75,6 @@ void ProfileSelectorWidget::onProfilesListed(const std::vector<GrpcProfile>& pro
     if (m_combo->count() == 0)
         m_combo->addItem("Default", "Default");
 
-    // Selection priority: caller-supplied preferred (from AppConfig) > previous
-    // in-session selection > whatever the combo defaults to. Empty `preferred`
-    // falls through to the previous-selection branch.
     QString target = m_pendingPreferred.isEmpty() ? previous : m_pendingPreferred;
     m_pendingPreferred.clear();
     int idx = m_combo->findData(target);
@@ -85,7 +82,6 @@ void ProfileSelectorWidget::onProfilesListed(const std::vector<GrpcProfile>& pro
         m_combo->setCurrentIndex(idx);
     m_combo->blockSignals(false);
 
-    // Enable/disable delete (can't delete the last profile).
     m_deleteBtn->setEnabled(m_combo->count() > 1);
 
     emit profileChanged(m_combo->currentData().toString());
@@ -93,7 +89,6 @@ void ProfileSelectorWidget::onProfilesListed(const std::vector<GrpcProfile>& pro
 
 void ProfileSelectorWidget::onProfileCreated(const GrpcProfile& /*profile*/)
 {
-    // Refresh the list — the new profile will appear.
     if (!m_gameId.isEmpty())
         m_grpc->listProfiles(m_gameId);
 }
@@ -159,11 +154,6 @@ void ProfileSelectorWidget::onCopyClicked()
     if (!ok || name.trimmed().isEmpty())
         return;
 
-    // Create the new profile, then copy the modlist from the current one.
-    // We handle this client-side: create profile, wait for creation, then
-    // get current modlist and set it on the new profile.
-    // For simplicity, just create the profile. The modlist copy can be
-    // improved later with a CopyProfile RPC.
     m_grpc->createProfile(m_gameId, name.trimmed());
 
     // TODO: After profileCreated fires, copy modlist from source to new profile.

@@ -34,7 +34,7 @@ private:
     GameInfo m_game;
     QString m_profileName;
     bool m_mounted = false;
-    bool m_blocked = false; // true when Data.orig exists without active mount
+    bool m_blocked = false;
 };
 
 } // namespace gorganizer

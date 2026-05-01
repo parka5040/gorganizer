@@ -1,12 +1,4 @@
-// vfs-smoke is a one-shot integration test: activate the materialized
-// overlay against a real install dir, verify the merged Data/ is readable,
-// deactivate, then assert the post-deactivate Data/ is byte-identical to
-// the pre-activate state. Useful as a final smoke before launching a real
-// game. Not built by default — invoke directly with `go run`.
-//
-// Usage:
-//
-//	go run ./cmd/vfs-smoke /path/to/Game/Data
+// vfs-smoke is an integration test that activates and deactivates the overlay and asserts byte-identity round-trip.
 package main
 
 import (
@@ -80,10 +72,7 @@ func main() {
 	fmt.Fprintln(os.Stderr, "smoke OK: pre == mid == post")
 }
 
-// hashTree returns a deterministic fingerprint of dataPath built from each
-// regular file's relative path + size + sha256(content). Skips the sentinel
-// file (since it only exists during activate) and skips symlinks. Slow on
-// huge trees; this is a smoke utility, not production code.
+// hashTree returns a deterministic fingerprint of dataPath built from each file's path, size, and content hash.
 func hashTree(dataPath string) (string, error) {
 	type entry struct {
 		rel    string

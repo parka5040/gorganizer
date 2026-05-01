@@ -1,10 +1,4 @@
-// Package plugins is responsible for discovering ESP/ESM/ESL files belonging
-// to a profile's enabled mods and writing the plugins.txt / loadorder.txt
-// files the Bethesda engine actually reads at launch time.
-//
-// The FUSE mount gives the game a merged Data/ view, but the engine only
-// *loads* plugins listed in the per-user plugins.txt. Without this writer,
-// enabled mods show up in Data/ but never get activated.
+// Package plugins discovers ESP/ESM/ESL files and writes plugins.txt / loadorder.txt.
 package plugins
 
 import (
@@ -15,45 +9,14 @@ import (
 	"strings"
 )
 
-// Spec describes where and how to write plugins.txt / loadorder.txt for a
-// particular Bethesda game.
+// Spec describes where and how to write plugins.txt / loadorder.txt for a Bethesda game.
 type Spec struct {
-	// AppDataSubdir is the folder name beneath AppData/Local/ (inside the
-	// Proton pfx) where the game reads plugins.txt.
-	AppDataSubdir string
-	// PluginsFileName is "plugins.txt" for every game except Starfield which
-	// uses "Plugins.txt" (capital P). Bethesda's engines are case-insensitive
-	// about the read, but we match the shipped casing so `ls` is readable.
-	PluginsFileName string
-	// LoadOrderFileName is the loadorder.txt companion file, or "" when the
-	// game doesn't use one. FNV/FO3/Oblivion/Skyrim LE use plugins.txt only;
-	// newer engines (SSE/FO4/Starfield) also read loadorder.txt via LOOT
-	// conventions but the base engine only requires plugins.txt.
+	AppDataSubdir     string
+	PluginsFileName   string
 	LoadOrderFileName string
-	// DLCListFileName is the auxiliary DLC selection file the legacy
-	// FNV/FO3 launcher writes (NVDLCList.txt / DLCList.txt). When the
-	// engine launches without this file the official DLCs may fail to
-	// load even when listed in plugins.txt — gorganizer mirrors the .esm
-	// entries here so the game-launcher and xNVSE paths both load DLCs.
-	DLCListFileName string
-	// StarPrefix indicates the `*`-prefix convention (Skyrim SE / Fallout 4
-	// / Starfield): enabled plugins have `*` prepended, disabled plugins
-	// are listed without it. When false, presence alone means enabled and
-	// disabled plugins are simply omitted.
-	StarPrefix bool
-	// ImplicitMasters are plugins the engine auto-loads regardless of what
-	// plugins.txt says (e.g. Skyrim.esm for Skyrim). We skip writing these
-	// — duplicating them is harmless on most engines but confuses some
-	// tools (LOOT, xEdit) that expect the Bethesda convention.
-	ImplicitMasters []string
-	// CanonicalDLCOrder lists the official DLC ESMs in the order the
-	// retail launcher writes them. Discovered .esm files matching this
-	// list are emitted in this exact order ahead of any other ESMs;
-	// non-DLC ESMs and ESPs follow in modlist order. Without this, an
-	// alphabetical sort produces real load-order violations — for FNV
-	// LonesomeRoad.esm precedes OldWorldBlues.esm but references its
-	// forms — which in turn produce the "MASTERFILE: Could not find
-	// referenced object" cascade you see in falloutnv_error.log.
+	DLCListFileName   string
+	StarPrefix        bool
+	ImplicitMasters   []string
 	CanonicalDLCOrder []string
 }
 
@@ -81,11 +44,11 @@ var specs = map[string]Spec{
 		},
 	},
 	"fallout3": {
-		AppDataSubdir:   "Fallout3",
-		PluginsFileName: "plugins.txt",
-		DLCListFileName: "DLCList.txt",
-		StarPrefix:      false,
-		ImplicitMasters: []string{"Fallout3.esm"},
+		AppDataSubdir:     "Fallout3",
+		PluginsFileName:   "plugins.txt",
+		DLCListFileName:   "DLCList.txt",
+		StarPrefix:        false,
+		ImplicitMasters:   []string{"Fallout3.esm"},
 		CanonicalDLCOrder: []string{
 			"Anchorage.esm",
 			"ThePitt.esm",
@@ -100,9 +63,6 @@ var specs = map[string]Spec{
 		DLCListFileName: "NVDLCList.txt",
 		StarPrefix:      false,
 		ImplicitMasters: []string{"FalloutNV.esm"},
-		// Canonical FNV DLC order (release date). LonesomeRoad references
-		// content from DeadMoney/HonestHearts/OldWorldBlues, so the four
-		// story DLCs must come before it. Pre-order packs follow.
 		CanonicalDLCOrder: []string{
 			"DeadMoney.esm",
 			"HonestHearts.esm",
@@ -113,6 +73,31 @@ var specs = map[string]Spec{
 			"MercenaryPack.esm",
 			"TribalPack.esm",
 			"CaravanPack.esm",
+		},
+	},
+	"ttw": {
+		AppDataSubdir:   "FalloutNV",
+		PluginsFileName: "plugins.txt",
+		DLCListFileName: "NVDLCList.txt",
+		StarPrefix:      false,
+		ImplicitMasters: []string{"FalloutNV.esm"},
+		CanonicalDLCOrder: []string{
+			"DeadMoney.esm",
+			"HonestHearts.esm",
+			"OldWorldBlues.esm",
+			"LonesomeRoad.esm",
+			"GunRunnersArsenal.esm",
+			"ClassicPack.esm",
+			"MercenaryPack.esm",
+			"TribalPack.esm",
+			"CaravanPack.esm",
+			"Fallout3.esm",
+			"Anchorage.esm",
+			"ThePitt.esm",
+			"BrokenSteel.esm",
+			"PointLookout.esm",
+			"Zeta.esm",
+			"TaleOfTwoWastelands.esm",
 		},
 	},
 	"fallout4": {
@@ -137,24 +122,22 @@ var specs = map[string]Spec{
 	},
 }
 
-// SpecFor returns the plugins.txt spec for a gameID, or (zero, false) if
-// the game has no plugins.txt convention (e.g. Morrowind — uses ini sections).
+// SpecFor returns the plugins.txt spec for a gameID; (zero, false) if none.
 func SpecFor(gameID string) (Spec, bool) {
 	s, ok := specs[gameID]
 	return s, ok
 }
 
-// Plugin is one ESP/ESM/ESL file discovered in a mod or the base Data dir.
+// Plugin is one ESP/ESM/ESL discovered in a mod or the base Data dir.
 type Plugin struct {
-	Filename string // e.g. "SkyUI.esp"
-	Ext      string // ".esp" | ".esm" | ".esl"
-	Source   string // absolute directory the plugin lives in — mod dir, or base Data
-	FromMod  string // mod name that contributed this plugin, "" for base game
-	Enabled  bool   // checkbox state (mirrors mod enabled for now)
+	Filename string
+	Ext      string
+	Source   string
+	FromMod  string
+	Enabled  bool
 }
 
-// TypeOrder returns a relative rank so .esm < .esl < .esp sort naturally
-// (the order the engine loads them in).
+// TypeOrder ranks .esm < .esl < .esp.
 func (p Plugin) TypeOrder() int {
 	switch strings.ToLower(p.Ext) {
 	case ".esm":
@@ -168,13 +151,41 @@ func (p Plugin) TypeOrder() int {
 	}
 }
 
-// DiscoverPlugins walks the base Data directory plus every enabled mod's
-// folder to produce the combined plugin list. Enabled mods override base
-// files by filename (case-insensitive). Ordering within the returned slice
-// is: (1) ESMs then ESLs then ESPs; (2) within each group, modlist order
-// (later entries win later in load order).
+// ApplyCanonicalOrder sorts ESMs in spec.CanonicalDLCOrder first, then other ESMs.
+func ApplyCanonicalOrder(plugins []Plugin, spec Spec) {
+	if len(spec.CanonicalDLCOrder) == 0 {
+		return
+	}
+	dlcRank := make(map[string]int, len(spec.CanonicalDLCOrder))
+	for i, name := range spec.CanonicalDLCOrder {
+		dlcRank[strings.ToLower(name)] = i
+	}
+	sort.SliceStable(plugins, func(i, j int) bool {
+		a, b := plugins[i], plugins[j]
+		ai := a.TypeOrder()
+		bi := b.TypeOrder()
+		if ai != bi {
+			return ai < bi
+		}
+		if ai == 0 {
+			ar, aOk := dlcRank[strings.ToLower(a.Filename)]
+			br, bOk := dlcRank[strings.ToLower(b.Filename)]
+			switch {
+			case aOk && bOk:
+				return ar < br
+			case aOk:
+				return true
+			case bOk:
+				return false
+			}
+		}
+		return false
+	})
+}
+
+// DiscoverPlugins walks base Data plus enabled mods, returning the combined ordered list.
 func DiscoverPlugins(baseDataDir string, enabledMods []ModEntry) ([]Plugin, error) {
-	seen := map[string]int{} // lowercase-filename → index in `out`
+	seen := map[string]int{}
 	var out []Plugin
 
 	scan := func(dir, modName string) error {
@@ -202,8 +213,6 @@ func DiscoverPlugins(baseDataDir string, enabledMods []ModEntry) ([]Plugin, erro
 				Enabled:  true,
 			}
 			if i, ok := seen[key]; ok {
-				// Later mod wins — overwrite the earlier entry in place so
-				// load-order position stays where it was.
 				out[i] = p
 				continue
 			}
@@ -228,33 +237,18 @@ func DiscoverPlugins(baseDataDir string, enabledMods []ModEntry) ([]Plugin, erro
 	return out, nil
 }
 
-// ModEntry is what DiscoverPlugins needs to know about each enabled mod.
-// Kept deliberately minimal so we don't import the mod package here.
+// ModEntry is the minimal mod info DiscoverPlugins needs.
 type ModEntry struct {
 	Name string
 	Path string
 }
 
-// Write writes plugins.txt (and loadorder.txt / DLCList.txt when the spec
-// defines them) into `destDir`, using the spec's format rules. `destDir`
-// is the game's AppData/Local/{AppDataSubdir}/ path inside the Proton
-// prefix. Missing directories are created; existing files are overwritten
-// atomically.
-//
-// Format note: the file is plain CRLF-terminated lines, ASCII, no header
-// comment. Earlier revisions wrote a "# managed by Gorganizer" line at
-// the top, which the FNV/FO3/Oblivion engines do NOT treat as a comment
-// — they parse it as a plugin filename, fail to find it, and (depending
-// on the patch level) either silently skip the rest of the file or
-// register an empty load order. Symptom on the user side: every plugin
-// shows as "checked" in the list but no forms register and BSAs don't
-// auto-load. Match the bare-bones format the official launcher writes.
+// Write emits plugins.txt (plus loadorder.txt / DLCList.txt when defined) atomically into destDir.
 func Write(spec Spec, destDir string, plugins []Plugin) error {
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return fmt.Errorf("creating %s: %w", destDir, err)
 	}
 
-	// Filter out implicit masters — Bethesda engines auto-load them.
 	implicit := map[string]bool{}
 	for _, m := range spec.ImplicitMasters {
 		implicit[strings.ToLower(m)] = true
@@ -267,45 +261,8 @@ func Write(spec Spec, destDir string, plugins []Plugin) error {
 		visible = append(visible, p)
 	}
 
-	// Re-sort: official DLC ESMs in their canonical release-date order
-	// first, then any other ESMs (alphabetical fallback), then ESLs,
-	// then ESPs in modlist order. The earlier ext-only sort placed
-	// LonesomeRoad before OldWorldBlues even though LonesomeRoad
-	// declares OldWorldBlues as a master — Bethesda engines try to
-	// pre-resolve masters on load, but a wrong ordering still produces
-	// "MASTERFILE: Could not find referenced object" errors that can
-	// silently invalidate downstream plugins.
-	if len(spec.CanonicalDLCOrder) > 0 {
-		dlcRank := make(map[string]int, len(spec.CanonicalDLCOrder))
-		for i, name := range spec.CanonicalDLCOrder {
-			dlcRank[strings.ToLower(name)] = i
-		}
-		sort.SliceStable(visible, func(i, j int) bool {
-			a, b := visible[i], visible[j]
-			ai := a.TypeOrder()
-			bi := b.TypeOrder()
-			if ai != bi {
-				return ai < bi
-			}
-			// Within the .esm bucket, canonical DLCs first (in canonical
-			// order), everything else after (preserving stable order).
-			if ai == 0 {
-				ar, aOk := dlcRank[strings.ToLower(a.Filename)]
-				br, bOk := dlcRank[strings.ToLower(b.Filename)]
-				switch {
-				case aOk && bOk:
-					return ar < br
-				case aOk:
-					return true
-				case bOk:
-					return false
-				}
-			}
-			return false
-		})
-	}
+	ApplyCanonicalOrder(visible, spec)
 
-	// plugins.txt — bare list, CRLF, no comment header.
 	var b strings.Builder
 	for _, p := range visible {
 		if spec.StarPrefix {
@@ -314,8 +271,6 @@ func Write(spec Spec, destDir string, plugins []Plugin) error {
 			}
 			b.WriteString(p.Filename)
 		} else {
-			// Legacy engines: listing == enabling. Disabled plugins are
-			// omitted entirely.
 			if !p.Enabled {
 				continue
 			}
@@ -328,7 +283,6 @@ func Write(spec Spec, destDir string, plugins []Plugin) error {
 		return err
 	}
 
-	// loadorder.txt (SSE/FO4 only — plain list with no `*`).
 	if spec.LoadOrderFileName != "" {
 		var lb strings.Builder
 		for _, p := range visible {
@@ -341,15 +295,6 @@ func Write(spec Spec, destDir string, plugins []Plugin) error {
 		}
 	}
 
-	// NVDLCList.txt / DLCList.txt (FNV / FO3) — the legacy launcher's
-	// "Data Files" UI writes this, and the engine reads it as the
-	// authoritative DLC selection list. When the file is absent or
-	// empty (a fresh Steam install that never ran the launcher), the
-	// official DLC ESMs may fail to load even when listed in
-	// plugins.txt — and missing-master errors then cascade to silently
-	// dropping every dependent plugin from the load. Mirror the
-	// active .esm entries here so xNVSE-only sessions get a usable
-	// DLC selection without round-tripping through the launcher UI.
 	if spec.DLCListFileName != "" {
 		var db strings.Builder
 		for _, p := range visible {
@@ -370,8 +315,7 @@ func Write(spec Spec, destDir string, plugins []Plugin) error {
 	return nil
 }
 
-// writeAtomic writes to a temp sibling and renames — avoids leaving a
-// truncated plugins.txt if the daemon is killed mid-write.
+// writeAtomic writes to a temp sibling and renames into place.
 func writeAtomic(path string, data []byte) error {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0644); err != nil {

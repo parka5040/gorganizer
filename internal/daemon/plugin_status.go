@@ -14,14 +14,6 @@ import (
 )
 
 // StreamPluginStatus is the daemon-side implementation of the IPC streaming
-// RPC. The first message on the returned channel is a snapshot with hard-
-// dependency status fully computed; subsequent messages are deltas as
-// background soft-dep checks complete.
-//
-// The channel closes when:
-//   - all soft-dep work has finished (or there was none to do), OR
-//   - ctx is cancelled (the gRPC stream's context — closes when client
-//     disconnects)
 func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName string) (<-chan ipc.PluginStatusEventResult, error) {
 	gc, ok := d.config.Games[gameID]
 	if !ok {
@@ -34,7 +26,6 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 
 	spec, _ := plugins.SpecFor(gameID)
 
-	// Discovered plugins (load order) — base Data/ + every enabled mod.
 	subpath := gc.DataSubpath
 	if subpath == "" {
 		subpath = "Data"
@@ -56,14 +47,13 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 	if err != nil {
 		return nil, fmt.Errorf("discovering plugins: %w", err)
 	}
+	plugins.ApplyCanonicalOrder(discovered, spec)
 
 	cache := d.pluginHeaderCacheLazy()
 	statuses := plugins.AnalyzeHardDeps(ctx, cache, discovered, allFolders, spec, nil)
 
 	out := make(chan ipc.PluginStatusEventResult, 8)
 
-	// Build snapshot. Soft-dep checks are still pending for every plugin
-	// that has a Nexus mod-id we can look up.
 	soft := d.softDepFetcherLazy()
 	snapshot := make([]ipc.PluginStatusItemResult, 0, len(statuses))
 	enabledModIDs := d.installedModIDs(gameID)
@@ -76,7 +66,6 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 	for i := range statuses {
 		ps := &statuses[i]
 		item := pluginStatusToIPC(ps)
-		// Decide whether a soft-dep lookup is worth scheduling for this plugin.
 		modID, fileID := d.lookupNexusIDsForPlugin(gameID, ps.Plugin)
 		if soft != nil && gameSlug != "" && modID != 0 && fileID != 0 {
 			item.SoftPending = true
@@ -91,15 +80,8 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 		snapshot = append(snapshot, item)
 	}
 
-	// Emit a DependencyWarning for each hard issue so the Activity Log
-	// surfaces them on profile activation. We do this here (in the same
-	// path the GUI subscribes to) instead of inside MountVFS so cold-launch
-	// (no plugin panel open) doesn't burn the analyzer pass twice.
 	d.emitHardDepWarnings(statuses)
 
-	// Send the snapshot synchronously before kicking off the worker pool —
-	// the receiver's first read must always be the snapshot. The send is
-	// guarded by ctx.Done in case the client already disconnected.
 	go func() {
 		defer close(out)
 		select {
@@ -123,7 +105,6 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 
 		for r := range results {
 			plugins.FilterSatisfiedSoftDeps(&r, enabledModIDs)
-			// Build the delta. Find the matching snapshot row to merge with.
 			var update *ipc.PluginStatusItemResult
 			for i := range snapshot {
 				if !strings.EqualFold(snapshot[i].Filename, r.Filename) {
@@ -131,7 +112,6 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 				}
 				merged := snapshot[i]
 				merged.SoftPending = false
-				// Strip any existing soft issues; replace with the result's.
 				kept := merged.Issues[:0]
 				for _, iss := range merged.Issues {
 					if iss.Kind != ipc.DepKindSoftMissing {
@@ -155,7 +135,6 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 				merged.Issues = kept
 				snapshot[i] = merged
 				update = &merged
-				// Emit Activity Log warnings for the soft issues.
 				for _, iss := range r.Issues {
 					if iss.Kind != plugins.DepSoftMissing {
 						continue
@@ -189,9 +168,6 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 	return out, nil
 }
 
-// emitHardDepWarnings pushes one DependencyWarning per hard issue onto the
-// daemon's status stream. Severity is implied by Kind on the wire — the C++
-// frontend maps absent / out-of-order to Error and disabled to Warning.
 func (d *Daemon) emitHardDepWarnings(statuses []plugins.PluginStatus) {
 	for _, ps := range statuses {
 		for _, iss := range ps.HardIssues {
@@ -218,8 +194,6 @@ func (d *Daemon) emitHardDepWarnings(statuses []plugins.PluginStatus) {
 }
 
 // publishStatus is a non-blocking send to the daemon's status channel.
-// Drops the event when the channel is full — same backpressure policy as
-// other daemon-internal status producers.
 func (d *Daemon) publishStatus(evt ipc.StatusEventResult) {
 	select {
 	case d.statusCh <- evt:
@@ -274,10 +248,6 @@ func (d *Daemon) installedModIDs(gameID string) map[int]bool {
 	return out
 }
 
-// lookupNexusIDsForPlugin returns (modID, fileID) recorded in the mod
-// folder's metadata.yaml for the mod that contributes this plugin. Returns
-// (0, 0) when the plugin came from the base Data dir or the mod has no
-// Nexus archive recorded.
 func (d *Daemon) lookupNexusIDsForPlugin(gameID string, p plugins.Plugin) (modID, fileID int) {
 	if p.FromMod == "" {
 		return 0, 0
@@ -287,8 +257,6 @@ func (d *Daemon) lookupNexusIDsForPlugin(gameID string, p plugins.Plugin) (modID
 	if err != nil || meta == nil || len(meta.SourceArchives) == 0 {
 		return 0, 0
 	}
-	// Pick the most recent archive — it carries the freshest mod/file ids
-	// (a mod that's been re-uploaded rolls forward through SourceArchives).
 	last := meta.SourceArchives[len(meta.SourceArchives)-1]
 	return last.ModID, last.FileID
 }

@@ -32,8 +32,6 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
 
     auto* form = new QFormLayout;
 
-    // Theme selector — also reachable via View → Theme. Duplicated here so a
-    // first-time user opening Settings can find it without hunting the menu.
     m_themeCombo = new QComboBox;
     populateThemeCombo();
     connect(m_themeCombo, &QComboBox::currentTextChanged, this, &SettingsDialog::onThemeChanged);
@@ -53,9 +51,6 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
     m_statusLabel = new QLabel;
     form->addRow("", m_statusLabel);
 
-    // Proton version picker — global default used whenever a game has no
-    // per-game override. Combo shows every detected Proton build sorted
-    // prefer-first (Proton 11 > 10 > 9 > Experimental > Hotfix).
     m_protonCombo = new QComboBox;
     m_protonCombo->setMinimumWidth(240);
     auto* protonRow = new QHBoxLayout;
@@ -76,10 +71,6 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
     socketLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     form->addRow("Daemon Socket:", socketLabel);
 
-    // NXM handler diagnostics. Lets the user verify that browser
-    // "Download with Manager" actually reaches Gorganizer (Firefox-family
-    // browsers in particular silently drop nxm:// when the system
-    // mimeapps.list isn't wired up).
     auto* nxmRow = new QHBoxLayout;
     auto* testNxmBtn = new QPushButton("Test NXM Handler");
     auto* reregNxmBtn = new QPushButton("Re-register");
@@ -145,8 +136,6 @@ void SettingsDialog::onKeyValidated(bool valid, const QString& errorMessage)
 void SettingsDialog::populateProtonCombo()
 {
     m_protonCombo->clear();
-    // The "auto" entry stores an empty path — daemon interprets that as
-    // "use detection ranking at launch time".
     m_protonCombo->addItem("Auto (prefer newest: Proton 11 > 10 > 9 > Experimental > Hotfix)",
                            QString());
 
@@ -173,8 +162,7 @@ void SettingsDialog::populateProtonCombo()
 
 namespace {
 
-// Locate the gorganizer.sh script next to the running frontend binary so
-// the NXM diagnostics know what *should* be in the .desktop's Exec= line.
+// Locates gorganizer.sh next to the running frontend binary.
 QString findGorganizerScript()
 {
     QString appDir = QCoreApplication::applicationDirPath();
@@ -223,7 +211,6 @@ void SettingsDialog::onTestNxm()
     const QString mimeapps = xdgConfigHome() + "/mimeapps.list";
     const QString script = findGorganizerScript();
 
-    // 1. xdg-mime query.
     QProcess p;
     p.start("xdg-mime", {"query", "default", "x-scheme-handler/nxm"});
     if (p.waitForFinished(3000)) {
@@ -238,7 +225,6 @@ void SettingsDialog::onTestNxm()
         warn("xdg-mime not available — skipping query check");
     }
 
-    // 2. mimeapps.list entry.
     QFile mf(mimeapps);
     if (mf.open(QIODevice::ReadOnly | QIODevice::Text)) {
         const QString contents = QString::fromUtf8(mf.readAll());
@@ -250,7 +236,6 @@ void SettingsDialog::onTestNxm()
         fail(QString("<code>%1</code> not readable").arg(mimeapps));
     }
 
-    // 3. .desktop file present + Exec line.
     QFile df(desktopFile);
     if (df.open(QIODevice::ReadOnly | QIODevice::Text)) {
         const QString contents = QString::fromUtf8(df.readAll());
@@ -274,7 +259,6 @@ void SettingsDialog::onTestNxm()
         fail(QString("<code>%1</code> missing").arg(desktopFile));
     }
 
-    // 4. gorganizer.sh executable.
     if (script.isEmpty()) {
         fail("gorganizer.sh not found next to frontend binary");
     } else {
@@ -328,11 +312,6 @@ void SettingsDialog::onThemeChanged(const QString& name)
 {
     if (!m_config)
         return;
-    // Picking "Light" here is shorthand for switching the whole appearance
-    // mode to light. Picking a dark variant updates the saved variant and
-    // forces dark mode so the change is visible immediately. Either way we
-    // re-resolve via applyMode so System users don't get stuck on a forced
-    // theme.
     if (name == "Light") {
         m_config->setAppearanceMode("light");
     } else if (ThemeManager::isDarkVariant(name)) {

@@ -73,7 +73,6 @@ func TestBuildConflictMapTwoMods(t *testing.T) {
 	if len(conflict.Losers) != 2 {
 		t.Fatalf("expected 2 losers, got %d", len(conflict.Losers))
 	}
-	// Losers should be in priority order: __base__ first, then ModA.
 	if conflict.Losers[0] != "__base__" {
 		t.Errorf("expected __base__ as first loser, got %s", conflict.Losers[0])
 	}
@@ -123,7 +122,6 @@ func TestConflictMapForMod(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// ModA should be involved in 1 conflict as winner.
 	modAConflicts := cm.ForMod("ModA")
 	if len(modAConflicts) != 1 {
 		t.Errorf("expected 1 conflict for ModA, got %d", len(modAConflicts))
@@ -132,7 +130,6 @@ func TestConflictMapForMod(t *testing.T) {
 		t.Errorf("expected ModA to win 1 conflict, got %d", cm.WinnerCount("ModA"))
 	}
 
-	// __base__ should be involved in 1 conflict as loser.
 	baseConflicts := cm.ForMod("__base__")
 	if len(baseConflicts) != 1 {
 		t.Errorf("expected 1 conflict for __base__, got %d", len(baseConflicts))

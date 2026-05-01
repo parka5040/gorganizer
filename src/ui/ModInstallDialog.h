@@ -20,11 +20,7 @@ namespace gorganizer {
 class GrpcClient;
 class InstallWorker;
 
-// Dialog that handles the full mod archive install flow:
-// 1. Extract archive to temp dir (with progress)
-// 2. Detect Data/ folder inside
-// 3. If ambiguous, let user pick the data root
-// 4. Copy contents to the game's mod folder
+// Handles the full mod archive install flow: extract, detect Data/ root, copy to mod folder.
 class ModInstallDialog : public QDialog {
     Q_OBJECT
 public:
@@ -34,11 +30,7 @@ public:
                               QWidget* parent = nullptr);
     ~ModInstallDialog() override;
 
-    // Optional daemon callback. When set, a successful install ends with a
-    // RegisterManualInstall RPC so the daemon updates each profile's
-    // modlist.txt and the Downloads tab flips to INSTALLED. Without this,
-    // the mod folder ends up on disk but the daemon never learns about it,
-    // so its plugins.txt and source_archives caches stay stale.
+    // When set, a successful install fires RegisterManualInstall so the daemon updates modlists.
     void setDaemonContext(GrpcClient* grpc, const QString& gameId);
 
     QString installedModName() const { return m_modName; }
@@ -49,9 +41,6 @@ protected:
     void reject() override;
 
 signals:
-    // Emitted when the client-side FOMOD wizard opens/closes. MainWindow
-    // forwards these to the InstallStatusBanner so the user has a visible
-    // "Waiting on FOMOD" signal even when the modal is covering other windows.
     void fomodWizardOpened(const QString& archivePath, const QString& modName);
     void fomodWizardClosed(const QString& archivePath);
 
@@ -78,15 +67,10 @@ private:
     GrpcClient* m_grpc = nullptr;
     QString m_gameId;
 
-    // When non-empty, install uses the FOMOD installer's selections instead
-    // of the auto-detected data root.
     QList<FomodFile> m_fomodSelections;
     QString m_fomodModulePath;
-    // Legacy NMM-style FOMOD: flat-copy everything outside fomod/ from this
-    // module path. Mutually exclusive with m_fomodSelections.
     bool m_legacyFomodFlatCopy = false;
 
-    // UI
     QLabel* m_statusLabel;
     QProgressBar* m_progressBar;
     QLabel* m_treeLabel;
@@ -95,18 +79,10 @@ private:
     QPushButton* m_installBtn;
     QPushButton* m_cancelBtn = nullptr;
 
-    // Background install: long file copies run on m_workerThread so the
-    // dialog stays responsive (drag, focus, indeterminate-bar animation).
-    // The worker checks an atomic cancel flag between files; on cancel the
-    // partially-populated destination is removed in onWorkerFinished.
     QThread* m_workerThread = nullptr;
     InstallWorker* m_worker = nullptr;
     QString m_installDestDir;
 
-    // QPointer so the dtor can probe liveness without dangling. The
-    // QProcess is parented to this dialog (so Qt deletes it for us);
-    // we just need a back-reference to ask it to terminate cleanly
-    // before destruction.
     QPointer<QProcess> m_extractProc;
 
     enum Phase { Extracting, Choosing, Installing, Cancelling, Done };

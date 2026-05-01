@@ -79,3 +79,30 @@ func TestParseNXM_UnknownSlug(t *testing.T) {
 		t.Error("expected error for unknown game slug")
 	}
 }
+
+func TestGameSlug_TTW(t *testing.T) {
+	if got := GameSlug("ttw"); got != "newvegas" {
+		t.Errorf("GameSlug(\"ttw\") = %q, want \"newvegas\"", got)
+	}
+}
+
+func TestGameSlug_KnownGames(t *testing.T) {
+	tests := []struct {
+		gameID string
+		slug   string
+	}{
+		{"falloutnv", "newvegas"},
+		{"skyrimse", "skyrimspecialedition"},
+		{"skyrim", "skyrim"},
+		{"fallout3", "fallout3"},
+		{"fallout4", "fallout4"},
+		{"oblivion", "oblivion"},
+		{"morrowind", "morrowind"},
+		{"starfield", "starfield"},
+	}
+	for _, tt := range tests {
+		if got := GameSlug(tt.gameID); got != tt.slug {
+			t.Errorf("GameSlug(%q) = %q, want %q", tt.gameID, got, tt.slug)
+		}
+	}
+}

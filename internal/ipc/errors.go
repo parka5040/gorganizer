@@ -9,22 +9,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// Structured error types returned by daemon methods. Each maps to a gRPC
-// FailedPrecondition with a machine-parseable prefix so the Qt UI can branch
-// into a specific dialog instead of showing a raw error string.
-//
-// Wire format:
-//
-//	<kind>:<k1>=<v1>:<k2>=<v2>:...
-//
-// Colons inside values are legal if the value is the last key (the frontend
-// parses left-to-right and keeps the tail). The prefixes also serve as the
-// error's discriminant — the frontend matches on `strings.HasPrefix(msg,
-// "<kind>:")`.
-
 // ArchiveMissingError is returned when an operation references an archive
-// that isn't on disk under the Downloads dir — either because it was
-// manually deleted or never fully downloaded.
 type ArchiveMissingError struct {
 	GameID string
 	Path   string
@@ -35,9 +20,6 @@ func (e *ArchiveMissingError) Error() string {
 }
 
 // FomodRequiredError is returned by StartInstall when the archive is a FOMOD
-// package and the caller did not pre-select files via PreviewInstall +
-// fomod_selected_files. The PreviewID, if non-empty, is the daemon-cached
-// extraction the frontend can reuse when it posts the user's selections.
 type FomodRequiredError struct {
 	GameID    string
 	Path      string
@@ -70,10 +52,6 @@ func (e *ModNotFoundError) Error() string {
 	return fmt.Sprintf("mod %q not found for game %s", e.Name, e.GameID)
 }
 
-// ModInUseError is returned by UninstallMod without force=true when the mod
-// is currently enabled in one or more profiles. The frontend uses the
-// Profiles list to build a "Still uninstall?" prompt and retries with
-// force=true on confirmation.
 type ModInUseError struct {
 	Name     string
 	Profiles []string
@@ -86,7 +64,6 @@ func (e *ModInUseError) Error() string {
 
 // NXMExpiredError is returned by StartDownload and by the ledger resume path
 // when the NXM URI's signed token has expired. The UI should tell the user
-// to re-click "Download with Manager" on the Nexus page.
 type NXMExpiredError struct {
 	URI string
 }
@@ -113,6 +90,86 @@ type PreviewNotFoundError struct {
 
 func (e *PreviewNotFoundError) Error() string {
 	return fmt.Sprintf("install preview %q not found (expired or discarded)", e.PreviewID)
+}
+
+// VFSMutexError is returned by MountVFS / LaunchGame when the requested
+type VFSMutexError struct {
+	GameID      string
+	Conflicting string
+	Group       string
+}
+
+func (e *VFSMutexError) Error() string {
+	return fmt.Sprintf("cannot mount %s: %s is currently mounted (mutex group %q)",
+		e.GameID, e.Conflicting, e.Group)
+}
+
+// ErrLinkedParentMissing is returned when a synthetic game references a
+// parent gameID that isn't configured. Only happens if the user manually
+type ErrLinkedParentMissing struct {
+	GameID       string
+	ParentGameID string
+}
+
+func (e *ErrLinkedParentMissing) Error() string {
+	return fmt.Sprintf("synthetic game %s requires parent %s to be configured first",
+		e.GameID, e.ParentGameID)
+}
+
+type TTWDriftError struct {
+	InstallPath string
+	Reason      string
+}
+
+func (e *TTWDriftError) Error() string {
+	return fmt.Sprintf("TTW integrity drift at %s: %s", e.InstallPath, e.Reason)
+}
+
+// ErrPrefixMissing is returned by Wine-backed installer launches when the
+// Proton prefix for the parent game does not yet exist. The dialog's
+type ErrPrefixMissing struct {
+	GameID       string
+	ExpectedPath string
+}
+
+func (e *ErrPrefixMissing) Error() string {
+	return fmt.Sprintf("proton prefix for %s does not exist at %s — bootstrap it first",
+		e.GameID, e.ExpectedPath)
+}
+
+type ErrSteamNotRunning struct{}
+
+func (e *ErrSteamNotRunning) Error() string {
+	return "steam is not running — Backend A requires Steam to be running before launching the TTW installer"
+}
+
+// ErrTTWRequiresVanillaFNV is returned by the TTW installer pre-flight
+// check when FNV's VFS is currently mounted. The TTW installer reads
+type ErrTTWRequiresVanillaFNV struct{}
+
+func (e *ErrTTWRequiresVanillaFNV) Error() string {
+	return "TTW installer requires Fallout: New Vegas's vanilla Data/ — unmount its VFS first"
+}
+
+// ErrXNVSEMissingForTTW is returned by the TTW launch path when no xNVSE
+type ErrXNVSEMissingForTTW struct {
+	InstallPath string
+}
+
+func (e *ErrXNVSEMissingForTTW) Error() string {
+	return fmt.Sprintf("xNVSE DLLs not found in %s — install xNVSE for FNV before launching TTW",
+		e.InstallPath)
+}
+
+// ErrFNV4GBNotAppliedForTTW is returned by the TTW launch pre-flight when
+// FalloutNV.exe still has the 32-bit address cap. TTW's merged data set
+type ErrFNV4GBNotAppliedForTTW struct {
+	InstallPath string
+}
+
+func (e *ErrFNV4GBNotAppliedForTTW) Error() string {
+	return fmt.Sprintf("FalloutNV.exe is not LAA-patched — TTW will CTD on the main menu. Apply the 4GB patcher in Tools → \"Patch FalloutNV.exe to 4GB\" before launching (install: %s)",
+		e.InstallPath)
 }
 
 // MapError turns a structured error into a gRPC status. Any error it doesn't
@@ -169,6 +226,48 @@ func MapError(err error) (error, bool) {
 	if errors.As(err, &prev) {
 		msg := fmt.Sprintf("preview_not_found:id=%s", prev.PreviewID)
 		return status.Error(codes.NotFound, msg), true
+	}
+	var mutex *VFSMutexError
+	if errors.As(err, &mutex) {
+		msg := fmt.Sprintf("vfs_mutex:game=%s:conflicting=%s:group=%s",
+			mutex.GameID, mutex.Conflicting, mutex.Group)
+		return status.Error(codes.FailedPrecondition, msg), true
+	}
+	var linkedParent *ErrLinkedParentMissing
+	if errors.As(err, &linkedParent) {
+		msg := fmt.Sprintf("linked_parent_missing:game=%s:parent=%s",
+			linkedParent.GameID, linkedParent.ParentGameID)
+		return status.Error(codes.FailedPrecondition, msg), true
+	}
+	var drift *TTWDriftError
+	if errors.As(err, &drift) {
+		msg := fmt.Sprintf("ttw_drift:reason=%s:install_path=%s",
+			drift.Reason, drift.InstallPath)
+		return status.Error(codes.FailedPrecondition, msg), true
+	}
+	var prefix *ErrPrefixMissing
+	if errors.As(err, &prefix) {
+		msg := fmt.Sprintf("prefix_missing:game=%s:expected=%s",
+			prefix.GameID, prefix.ExpectedPath)
+		return status.Error(codes.FailedPrecondition, msg), true
+	}
+	var steam *ErrSteamNotRunning
+	if errors.As(err, &steam) {
+		return status.Error(codes.FailedPrecondition, "steam_not_running:"), true
+	}
+	var ttwVanilla *ErrTTWRequiresVanillaFNV
+	if errors.As(err, &ttwVanilla) {
+		return status.Error(codes.FailedPrecondition, "ttw_requires_vanilla_fnv:"), true
+	}
+	var xnvse *ErrXNVSEMissingForTTW
+	if errors.As(err, &xnvse) {
+		msg := fmt.Sprintf("xnvse_missing_for_ttw:install_path=%s", xnvse.InstallPath)
+		return status.Error(codes.FailedPrecondition, msg), true
+	}
+	var fnv4gb *ErrFNV4GBNotAppliedForTTW
+	if errors.As(err, &fnv4gb) {
+		msg := fmt.Sprintf("fnv4gb_not_applied_for_ttw:install_path=%s", fnv4gb.InstallPath)
+		return status.Error(codes.FailedPrecondition, msg), true
 	}
 	return nil, false
 }

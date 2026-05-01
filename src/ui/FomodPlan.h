@@ -7,10 +7,7 @@
 
 namespace gorganizer {
 
-// FomodFile is a single source→destination copy operation. `source` is
-// relative to the FOMOD project root (i.e. the directory that contains
-// fomod/). `destination` is relative to the target mod folder; empty means
-// "mirror the source path underneath the mod root".
+// One source-to-destination copy operation in a FOMOD install plan.
 struct FomodFile {
     QString source;
     QString destination;
@@ -55,16 +52,13 @@ struct FomodStep {
 
 struct FomodPlan {
     QString moduleName;
-    QString modulePath;                 // root directory that holds fomod/
-    QList<FomodFile> requiredFiles;     // always installed
+    QString modulePath;
+    QList<FomodFile> requiredFiles;
     QList<FomodStep> steps;
 
-    // Legacy NMM-style FOMOD: fomod/info.xml only, no ModuleConfig.xml.
-    // The wizard renders an info-only popup; the install path falls back
-    // to a flat copy of everything outside fomod/ (excluding *.cs).
     bool legacyInfoOnly = false;
     QString description;
-    QString screenshotPath;             // absolute path or empty
+    QString screenshotPath;
     QString version;
     QString author;
 
@@ -74,16 +68,12 @@ struct FomodPlan {
     }
 };
 
-// Parses a FOMOD installer. Pass the root extract directory — the parser
-// first extracts any nested *.fomod archive (NMM convention) in place,
-// then locates fomod/ModuleConfig.xml or, failing that, fomod/info.xml.
+// Parses a FOMOD installer at the extract root.
 class FomodParser {
 public:
     static std::optional<FomodPlan> parse(const QString& extractRoot);
 
-    // Extract any *.fomod files at the extract root (or one level deep)
-    // in place. Idempotent. Public so ModInstallDialog can call it before
-    // its own walk.
+    // Idempotently extract any *.fomod files at the root or one level deep.
     static void expandNestedFomods(const QString& extractRoot);
 };
 

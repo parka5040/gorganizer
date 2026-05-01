@@ -13,10 +13,13 @@ public:
 
     void setGames(const std::vector<GameInfo>& games);
     void setActiveGame(uint32_t appId);
+    // Prefer shortName-keyed selection since synthetic games share appId=0.
+    void setActiveGameByShortName(const QString& shortName);
     GameInfo currentGame() const;
 
 signals:
     void gameChanged(uint32_t appId);
+    void gameChangedByShortName(const QString& shortName);
 
 private:
     std::vector<GameInfo> m_games;

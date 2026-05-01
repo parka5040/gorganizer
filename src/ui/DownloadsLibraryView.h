@@ -12,11 +12,7 @@ namespace gorganizer {
 class DownloadsModel;
 class DownloadsRowDelegate;
 
-// DownloadsLibraryView is the single Downloads tab: one row per archive,
-// status cell progresses Downloading → Waiting → Installing → Installed
-// in place. In-flight downloads without an archive yet live as transient
-// rows keyed by downloadId; they promote to archive-keyed rows on the
-// next daemon reconcile.
+// Downloads tab: one row per archive with in-place status progression.
 class DownloadsLibraryView : public QWidget {
     Q_OBJECT
 public:
@@ -34,10 +30,7 @@ private slots:
     void onInstallProgress(const GrpcInstallProgress& progress);
 
 signals:
-    // Emitted after an install completes so MainWindow can refresh ModList.
     void modInstalledFromDownload();
-    // Forwarded from the internal ModInstallDialog so MainWindow can wire
-    // them into the InstallStatusBanner without the view knowing about it.
     void fomodWizardOpened(const QString& archivePath, const QString& modName);
     void fomodWizardClosed(const QString& archivePath);
 
@@ -58,14 +51,11 @@ private:
     void actionBulkHide(GrpcBulkHideScope scope, bool hidden);
     void actionDelete(const GrpcArchiveRow& row);
 
-    // Re-reads rows via ListArchives. Preserves transient in-flight rows.
+    // Re-reads rows via ListArchives, preserving transient in-flight rows.
     void reloadFromDaemon();
 
-    // Converts a DownloadRowData (as stored in the model) into the
-    // existing GrpcArchiveRow shape the action methods consume.
     static GrpcArchiveRow rowFromModel(const struct DownloadRowData& d);
 
-    // Opens https://www.nexusmods.com/{domain}/mods/{modId}.
     static void openNexusPage(const GrpcArchiveRow& row);
 };
 

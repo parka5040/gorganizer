@@ -18,8 +18,8 @@ enum PluginRole {
     PluginTypeRole   = Qt::UserRole + 1,
     PinnedRole       = Qt::UserRole + 2,
     LoadOrderRow     = Qt::UserRole + 3,
-    DepIssuesRole    = Qt::UserRole + 4, // QStringList of human-readable issues
-    DepWorstKindRole = Qt::UserRole + 5, // int — highest GrpcDepKind on the row
+    DepIssuesRole    = Qt::UserRole + 4,
+    DepWorstKindRole = Qt::UserRole + 5,
 };
 
 enum PluginColumn { ColIndex = 0, ColPlugin = 1, ColType = 2, ColStatus = 3 };
@@ -46,17 +46,10 @@ public:
     explicit PluginListWidget(QWidget* parent = nullptr);
 
     void loadForGame(const GameInfo& game);
-    // Set the mods directory so plugins from enabled mods are included.
     void setModsDir(const QString& modsDir);
-    // Refresh the plugin list (call after a mod is enabled/disabled).
     void refresh();
 
-    // Wire the gRPC client whose StreamPluginStatus this widget consumes.
-    // Pass nullptr to detach (e.g. on shutdown).
     void setGrpcClient(GrpcClient* grpc);
-    // Set the active profile name. Together with the active game, this
-    // is the (gameID, profile) tuple StreamPluginStatus subscribes on.
-    // Empty string unsubscribes.
     void setActiveProfile(const QString& profileName);
 
 private slots:

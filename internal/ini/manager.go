@@ -11,52 +11,38 @@ import (
 	"time"
 )
 
-// PushedIniReport is the per-file outcome of PushToDocuments. The caller
-// (daemon.LaunchGame) uses it to verify the on-disk state matches our
-// intent — catches failures where the push succeeded from the OS's point
-// of view but the Proton prefix was laid out such that the game reads a
-// different file. When Verified=false after the push, the launch must
-// abort — this is a surfaceable condition, not a warning.
+// PushedIniReport is the per-file outcome of PushToDocuments, used to verify
+// the on-disk state matches intent before launch.
 type PushedIniReport struct {
 	Filename   string
-	SourcePath string // profile INI that fed this write
-	TargetPath string // absolute path inside the Proton prefix
+	SourcePath string
+	TargetPath string
 	Bytes      int64
 	SHA256     string
 	ModTime    time.Time
-	Verified   bool   // stat succeeded AND size matches; false means follow-up check failed
-	Skipped    bool   // profile had no source for this filename
-	Note       string // human diagnostic (merge summary, skip reason, etc.)
+	Verified   bool
+	Skipped    bool
+	Note       string
 }
 
-// Manager handles per-profile INI storage. Files live under the profile's
-// directory at `{profileDir}/ini/{filename}`. On-disk format is the raw INI
-// content — Gorganizer doesn't re-parse or reorder keys, so mod-specific
-// tweaks (e.g. SweetFX-style blocks with duplicate sections) survive round
-// trips intact.
+// Manager handles per-profile INI storage at {profileDir}/ini/{filename}.
 type Manager struct {
 	profileDir func(gameID, profileName string) string
 }
 
-// NewManager wires a Manager to the profile-directory resolver. Passed in
-// as a function to avoid a package-level dependency on internal/profile.
 func NewManager(profileDir func(gameID, profileName string) string) *Manager {
 	return &Manager{profileDir: profileDir}
 }
 
-// IniDir returns the per-profile INI directory.
 func (m *Manager) IniDir(gameID, profileName string) string {
 	return filepath.Join(m.profileDir(gameID, profileName), "ini")
 }
 
-// IniPath returns the full path to a specific INI file in the profile.
 func (m *Manager) IniPath(gameID, profileName, filename string) string {
 	return filepath.Join(m.IniDir(gameID, profileName), filename)
 }
 
-// Read returns the content of a profile INI file. Returns an empty string
-// (no error) when the file does not yet exist — that's expected for a
-// freshly-enabled profile.
+// Read returns the profile INI content; missing files return an empty string.
 func (m *Manager) Read(gameID, profileName, filename string) (string, error) {
 	if !IsINIFile(gameID, filename) {
 		return "", fmt.Errorf("%q is not a managed INI for %s", filename, gameID)
@@ -72,8 +58,7 @@ func (m *Manager) Read(gameID, profileName, filename string) (string, error) {
 	return string(data), nil
 }
 
-// Write persists INI content to the profile. Creates the directory tree as
-// needed. Accepts empty content (writes an empty file).
+// Write persists INI content to the profile, creating dirs as needed.
 func (m *Manager) Write(gameID, profileName, filename, content string) error {
 	if !IsINIFile(gameID, filename) {
 		return fmt.Errorf("%q is not a managed INI for %s", filename, gameID)
@@ -83,17 +68,11 @@ func (m *Manager) Write(gameID, profileName, filename, content string) error {
 		return fmt.Errorf("creating ini dir: %w", err)
 	}
 	path := filepath.Join(dir, filename)
-	// Profile INIs live outside the Wine prefix so they generally don't
-	// have the read-only attribute, but use the same safe writer so the
-	// rare profile-restore-from-backup case can't trip on perms either.
 	return writeFileOverwritable(path, []byte(content))
 }
 
-// SeedFromDocuments copies each managed INI from the game's
-// Documents/My Games/{subdir}/ into the profile's ini dir when the profile
-// copy is missing. Called on the first editor open so users see their
-// current game INIs instead of blank tabs. Missing source files are skipped
-// silently (game hasn't been launched yet, etc.).
+// SeedFromDocuments seeds the profile's ini dir from the game's My Games dir
+// when profile copies are missing, matching filenames case-insensitively.
 func (m *Manager) SeedFromDocuments(gameID, profileName string, steamAppID int) error {
 	spec, ok := SpecFor(gameID)
 	if !ok {
@@ -109,34 +88,50 @@ func (m *Manager) SeedFromDocuments(gameID, profileName string, steamAppID int) 
 	}
 	for _, name := range spec.Files {
 		dst := filepath.Join(iniDir, name)
-		if _, err := os.Stat(dst); err == nil {
-			continue // already have a profile copy
+		if info, err := os.Stat(dst); err == nil && info.Size() > 0 {
+			continue
 		}
-		src := filepath.Join(docsDir, name)
-		if err := copyFileIfExists(src, dst); err != nil {
-			return err
+		src := resolveDocsFile(docsDir, name)
+		if src == "" {
+			continue
+		}
+		if err := copyFile(src, dst); err != nil {
+			return fmt.Errorf("seeding %s: %w", name, err)
 		}
 	}
 	return nil
 }
 
-// PushToDocuments copies every profile INI into the game's
-// Documents/My Games/{subdir}/ directory, overwriting the existing files.
-// Called by the daemon at launch time for profiles with UseCustomIni=true.
-//
-// For engines whose runtime reads {Game}Custom.ini natively (Skyrim SE,
-// Fallout 4, Starfield), the Custom.ini is copied through as-is alongside
-// the primary INI. For the older engines (Oblivion, Skyrim LE, Fallout 3,
-// Fallout NV) — which ignore Custom.ini by themselves — the profile's
-// Custom.ini is merged into the primary INI in memory and only the merged
-// result is written to disk. This mirrors MO2's virtualized behavior so
-// the user's tweaks take effect regardless of engine generation.
-//
-// Returns one PushedIniReport per managed INI (including skipped ones, so
-// the caller can verify every file). Verified=false on any row means the
-// post-write stat didn't match the write — the caller should refuse to
-// launch in that case, since silently pressing on is what produced the
-// "custom INIs ignored" symptom.
+// resolveDocsFile returns the absolute path of name inside dir matched case-insensitively.
+func resolveDocsFile(dir, name string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	wantLower := toLowerASCII(name)
+	for _, ent := range entries {
+		if ent.IsDir() {
+			continue
+		}
+		if toLowerASCII(ent.Name()) == wantLower {
+			return filepath.Join(dir, ent.Name())
+		}
+	}
+	return ""
+}
+
+func toLowerASCII(s string) string {
+	out := []byte(s)
+	for i := range out {
+		if out[i] >= 'A' && out[i] <= 'Z' {
+			out[i] += 'a' - 'A'
+		}
+	}
+	return string(out)
+}
+
+// PushToDocuments copies profile INIs into the game's My Games dir,
+// merging Custom.ini into the primary INI for engines without native support.
 func (m *Manager) PushToDocuments(gameID, profileName string, steamAppID int) ([]PushedIniReport, error) {
 	spec, ok := SpecFor(gameID)
 	if !ok {
@@ -155,8 +150,6 @@ func (m *Manager) PushToDocuments(gameID, profileName string, steamAppID int) ([
 		"game", gameID, "profile", profileName,
 		"from", iniDir, "to", docsDir)
 
-	// Precompute the Custom.ini merge for non-native engines. When the
-	// profile has no Custom.ini or it's empty, this is a no-op.
 	var customOverlay *Document
 	mergeCustomIntoPrimary := spec.CustomIni != "" && !spec.NativeCustomIni
 	if mergeCustomIntoPrimary {
@@ -180,8 +173,22 @@ func (m *Manager) PushToDocuments(gameID, profileName string, steamAppID int) ([
 	for _, name := range spec.Files {
 		src := filepath.Join(iniDir, name)
 		dst := filepath.Join(docsDir, name)
+		if existing := resolveDocsFile(docsDir, name); existing != "" {
+			dst = existing
+			specCased := filepath.Join(docsDir, name)
+			if specCased != existing {
+				if _, err := os.Stat(specCased); err == nil {
+					if rmErr := os.Remove(specCased); rmErr != nil {
+						slog.Warn("could not remove case-duplicate INI",
+							"path", specCased, "kept", existing, "err", rmErr)
+					} else {
+						slog.Info("removed case-duplicate INI",
+							"path", specCased, "kept", existing)
+					}
+				}
+			}
+		}
 
-		// Non-native Custom.ini: folded into primary, not written separately.
 		if mergeCustomIntoPrimary && name == spec.CustomIni {
 			reports = append(reports, PushedIniReport{
 				Filename: name, SourcePath: src, TargetPath: dst,
@@ -194,7 +201,6 @@ func (m *Manager) PushToDocuments(gameID, profileName string, steamAppID int) ([
 			primaryContent, primaryErr := os.ReadFile(src)
 			primarySource := src
 			if primaryErr != nil {
-				// Fall back to the game's existing file so we don't wipe it.
 				primaryContent, _ = os.ReadFile(dst)
 				primarySource = dst + " (fallback; profile had no copy)"
 			}
@@ -236,10 +242,7 @@ func (m *Manager) PushToDocuments(gameID, profileName string, steamAppID int) ([
 	return reports, nil
 }
 
-// verifyPushed re-stats the just-written target and compares against the
-// bytes we intended to write. A mismatch here means the Proton prefix
-// redirected the write elsewhere (layout mismatch, permissions, symlink
-// chain) — exactly the failure mode behind "custom INIs ignored".
+// verifyPushed re-stats the target and compares against the intended bytes.
 func verifyPushed(name, src, dst string, wrote []byte, note string) PushedIniReport {
 	r := PushedIniReport{
 		Filename: name, SourcePath: src, TargetPath: dst,
@@ -263,9 +266,7 @@ func verifyPushed(name, src, dst string, wrote []byte, note string) PushedIniRep
 	return r
 }
 
-// overlayKeySummary renders "[Section] Key=Value; ..." for every entry in an
-// overlay document. Used at launch-log time so the daemon output makes it
-// trivially obvious which tweaks the profile is about to apply.
+// overlayKeySummary renders "[Section] Key=Value; ..." for an overlay document.
 func overlayKeySummary(doc *Document) string {
 	if doc == nil {
 		return "(empty)"
@@ -291,9 +292,7 @@ func overlayKeySummary(doc *Document) string {
 	return string(out)
 }
 
-// mergedKey fetches a single (section, key) out of a document for logging.
-// Returns "<unset>" when the key isn't present, so the log line reads
-// unambiguously without caller-side branching.
+// mergedKey fetches one (section, key) for logging; "<unset>" when absent.
 func mergedKey(doc *Document, section, key string) string {
 	if doc == nil {
 		return "<unset>"
@@ -307,18 +306,11 @@ func mergedKey(doc *Document, section, key string) string {
 	return "<unset>"
 }
 
-// writeFileOverwritable writes data to path, transparently handling the
-// case where path exists but has been marked read-only — which is what
-// happens inside a Wine prefix whenever Windows has flipped the DOS
-// read-only attribute on an INI file (Bethesda launchers love doing this
-// to "protect" their configs). A plain os.WriteFile returns EACCES in
-// that scenario even though the user owns the file. We stat, chmod the
-// user-write bit back on if needed, and only then write.
+// writeFileOverwritable writes data to path, restoring u+w first if Wine's DOS
+// read-only attribute has stripped it.
 func writeFileOverwritable(path string, data []byte) error {
 	if info, err := os.Stat(path); err == nil {
 		if info.Mode()&0200 == 0 {
-			// u+w stripped (e.g. 0444 from Wine's DOS read-only mapping) —
-			// restore to 0644 so the subsequent open-for-write succeeds.
 			if chErr := os.Chmod(path, 0644); chErr != nil {
 				return fmt.Errorf("clearing read-only on %s: %w", path, chErr)
 			}
@@ -327,8 +319,7 @@ func writeFileOverwritable(path string, data []byte) error {
 	return os.WriteFile(path, data, 0644)
 }
 
-// ReadDocument loads an INI file out of a profile and returns it as a
-// parsed Document. Missing files yield an empty Document.
+// ReadDocument loads a profile INI as a parsed Document; missing files yield an empty doc.
 func (m *Manager) ReadDocument(gameID, profileName, filename string) (*Document, error) {
 	content, err := m.Read(gameID, profileName, filename)
 	if err != nil {
@@ -337,7 +328,6 @@ func (m *Manager) ReadDocument(gameID, profileName, filename string) (*Document,
 	return ParseDocument(content), nil
 }
 
-// WriteDocument serializes and writes an INI document back to a profile.
 func (m *Manager) WriteDocument(gameID, profileName, filename string, doc *Document) error {
 	return m.Write(gameID, profileName, filename, doc.Serialize())
 }
@@ -351,8 +341,7 @@ type TweakState struct {
 	Enabled     bool
 }
 
-// ListTweaks returns every preset available for the game paired with its
-// current applied-ness against the profile's Custom.ini.
+// ListTweaks returns every preset paired with its current applied state.
 func (m *Manager) ListTweaks(gameID, profileName string) ([]TweakState, error) {
 	spec, ok := SpecFor(gameID)
 	if !ok {
@@ -383,8 +372,7 @@ func (m *Manager) ListTweaks(gameID, profileName string) ([]TweakState, error) {
 	return out, nil
 }
 
-// SetTweak applies or removes a tweak preset in the profile's Custom.ini.
-// Returns the updated state.
+// SetTweak applies or removes a tweak in the profile's Custom.ini.
 func (m *Manager) SetTweak(gameID, profileName, tweakID string, enabled bool) (*TweakState, error) {
 	spec, ok := SpecFor(gameID)
 	if !ok || spec.CustomIni == "" {
@@ -421,9 +409,6 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	defer in.Close()
-	// Same read-only dance as writeFileOverwritable: if dst exists with
-	// u-w stripped (Wine DOS read-only attribute), restore it first so
-	// os.Create doesn't fail with EACCES on files the user owns.
 	if info, statErr := os.Stat(dst); statErr == nil && info.Mode()&0200 == 0 {
 		if chErr := os.Chmod(dst, 0644); chErr != nil {
 			return fmt.Errorf("clearing read-only on %s: %w", dst, chErr)

@@ -15,9 +15,7 @@ import (
 	"github.com/bodgit/sevenzip"
 )
 
-// Extractor abstracts archive extraction. Interface Segregation: each format
-// has its own implementation. Open/Closed: new formats can be added without
-// modifying existing code.
+// Extractor abstracts archive extraction per format.
 type Extractor interface {
 	Extract(archivePath, destDir string) error
 	CanHandle(archivePath string) bool
@@ -27,9 +25,9 @@ type Extractor interface {
 type ModStructure int
 
 const (
-	StructureFlat  ModStructure = iota // files at root or in a single top-level dir
-	StructureBAIN                      // numbered directories (00 Core, 01 Optional)
-	StructureFOMOD                     // fomod/ directory present
+	StructureFlat ModStructure = iota
+	StructureBAIN
+	StructureFOMOD
 )
 
 // DetectExtractor picks the right extractor by reading magic bytes.
@@ -46,16 +44,13 @@ func DetectExtractor(archivePath string) (Extractor, error) {
 		return nil, fmt.Errorf("%w: file too small", ErrUnsupportedArchive)
 	}
 
-	// Zip: PK (0x50 0x4B)
 	if magic[0] == 0x50 && magic[1] == 0x4B {
 		return &ZipExtractor{}, nil
 	}
-	// 7z: 0x37 0x7A 0xBC 0xAF 0x27 0x1C
 	if n >= 6 && magic[0] == 0x37 && magic[1] == 0x7A && magic[2] == 0xBC &&
 		magic[3] == 0xAF && magic[4] == 0x27 && magic[5] == 0x1C {
 		return &SevenZipExtractor{}, nil
 	}
-	// RAR: Rar! (0x52 0x61 0x72 0x21)
 	if n >= 4 && magic[0] == 0x52 && magic[1] == 0x61 && magic[2] == 0x72 && magic[3] == 0x21 {
 		return &RarExtractor{}, nil
 	}
@@ -63,7 +58,6 @@ func DetectExtractor(archivePath string) (Extractor, error) {
 	return nil, fmt.Errorf("%w: unrecognized magic bytes", ErrUnsupportedArchive)
 }
 
-// DetectStructure examines an extracted directory to determine its layout.
 func DetectStructure(extractDir string) ModStructure {
 	if dirExists(filepath.Join(extractDir, "fomod")) {
 		return StructureFOMOD
@@ -84,16 +78,6 @@ func DetectStructure(extractDir string) ModStructure {
 	return StructureFlat
 }
 
-// bethesdaDataSubdirs is the set of directory names that, when seen as the
-// SOLE top-level entry in an extracted archive, must NOT be stripped as a
-// "ModName/" wrapper — they're game-canonical Data/ subdirectories whose
-// presence is meaningful (e.g. xNVSE plugins live in Data/NVSE/Plugins/, so
-// stripping `nvse/` gives us `plugins/foo.dll` at the mod root and the
-// engine never finds it).
-//
-// Match is case-insensitive to handle both `NVSE/` and `nvse/`. This list
-// covers Bethesda titles from Morrowind through Starfield + their
-// script-extender + xEdit conventions.
 var bethesdaDataSubdirs = map[string]struct{}{
 	"meshes":       {},
 	"textures":     {},
@@ -114,13 +98,13 @@ var bethesdaDataSubdirs = map[string]struct{}{
 	"trees":        {},
 	"fonts":        {},
 	"docs":         {},
-	"edit scripts": {}, // xEdit
-	"nvse":         {}, // Fallout NV
-	"obse":         {}, // Oblivion
-	"skse":         {}, // Skyrim LE/SSE
-	"fose":         {}, // Fallout 3
-	"f4se":         {}, // Fallout 4
-	"sfse":         {}, // Starfield
+	"edit scripts": {},
+	"nvse":         {},
+	"obse":         {},
+	"skse":         {},
+	"fose":         {},
+	"f4se":         {},
+	"sfse":         {},
 }
 
 func isBethesdaDataSubdir(name string) bool {
@@ -128,16 +112,7 @@ func isBethesdaDataSubdir(name string) bool {
 	return ok
 }
 
-// findContentRoot determines which directory inside the extracted archive
-// contains the actual mod content that should go into the game's Data/ folder.
-//
-// Handles common mod archive layouts:
-//  1. Archive contains Data/ folder directly → use contents of Data/
-//  2. Archive has single wrapper dir containing Data/ → use contents of that Data/
-//  3. Archive has single wrapper dir whose name is a known Data/ subdir
-//     (e.g. NVSE/, meshes/) → archive root IS the data; do NOT strip
-//  4. Archive has single wrapper dir (other name, no Data/) → use contents of wrapper
-//  5. Archive root has game files directly → use archive root
+// findContentRoot returns the directory holding the mod content that overlays Data/.
 func findContentRoot(extractDir string) string {
 	entries, err := os.ReadDir(extractDir)
 	if err != nil {
@@ -150,7 +125,6 @@ func findContentRoot(extractDir string) string {
 		if dirExists(filepath.Join(wrapperPath, "Data")) {
 			return filepath.Join(wrapperPath, "Data")
 		}
-		// Don't strip a known Data/ subdir — it's content, not a wrapper.
 		if isBethesdaDataSubdir(wrapperName) {
 			return extractDir
 		}
@@ -162,9 +136,7 @@ func findContentRoot(extractDir string) string {
 	return extractDir
 }
 
-// FindContentRoot is the exported shim over findContentRoot for callers
-// outside the download package (e.g. daemon.PreviewInstall, which walks
-// the preview tree to produce a flat file list).
+// FindContentRoot is the exported shim over findContentRoot.
 func FindContentRoot(extractDir string) string { return findContentRoot(extractDir) }
 
 func dirExists(path string) bool {
@@ -172,8 +144,6 @@ func dirExists(path string) bool {
 	return err == nil && info.IsDir()
 }
 
-// copyFile copies src → dst (creating the parent dir as needed). Used
-// internally by the install path.
 func copyFile(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
@@ -194,9 +164,7 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-// FomodKind distinguishes a modern XML-driven FOMOD (ModuleConfig.xml, full
-// wizard) from a legacy NMM-style installer (fomod/info.xml only, often paired
-// with a C# script we deliberately do NOT execute).
+// FomodKind distinguishes modern (ModuleConfig.xml) from legacy (info.xml only) FOMODs.
 type FomodKind int
 
 const (
@@ -205,25 +173,19 @@ const (
 	FomodKindLegacyInfoOnly
 )
 
-// HasFomodInstaller returns true when the extracted archive root contains a
-// fomod/ directory with either ModuleConfig.xml (modern wizard) or info.xml
-// (legacy NMM-style — surfaced as an info-only popup).
+// HasFomodInstaller returns true when the extracted archive contains a FOMOD.
 func HasFomodInstaller(extractDir string) bool {
 	root, _ := FindFomodRootKind(extractDir)
 	return root != ""
 }
 
-// FindFomodRoot returns the absolute path to the FOMOD project root (the
-// directory that contains the fomod/ subdir), or "" if none is found. Kept
-// for callers that don't care about the kind.
+// FindFomodRoot returns the absolute path to the FOMOD project root, or "".
 func FindFomodRoot(extractDir string) string {
 	root, _ := FindFomodRootKind(extractDir)
 	return root
 }
 
-// FindFomodRootKind walks up to 3 levels deep looking for a fomod/ subdir
-// containing ModuleConfig.xml (preferred) or info.xml (legacy fallback).
-// Returns ("", FomodKindNone) when nothing matches.
+// FindFomodRootKind walks up to 3 levels deep looking for a fomod/ subdir.
 func FindFomodRootKind(extractDir string) (string, FomodKind) {
 	if root, kind := checkFomodAt(extractDir); kind != FomodKindNone {
 		return root, kind
@@ -265,15 +227,7 @@ func checkFomodAt(dir string) (string, FomodKind) {
 	return "", FomodKindNone
 }
 
-// ExpandNestedFomods finds *.fomod files (an NMM convention: a 7z- or
-// zip-encoded archive nested inside the outer download) anywhere within
-// extractDir up to two levels deep, extracts each in place into a sibling
-// directory of the same base name, and removes the original .fomod file.
-// This is what unblocks legacy mods like Mod Configuration Menu, whose
-// outer 7z carries a single MyMod.fomod containing the actual fomod/ tree.
-//
-// Errors are logged and skipped per-file: a corrupted nested archive
-// shouldn't fail the whole install.
+// ExpandNestedFomods extracts any *.fomod archives found up to two levels deep.
 func ExpandNestedFomods(extractDir string) {
 	visit := func(dir string) {
 		entries, err := os.ReadDir(dir)
@@ -294,8 +248,6 @@ func ExpandNestedFomods(extractDir string) {
 				slog.Warn("ExpandNestedFomods: mkdir failed", "path", outDir, "err", err)
 				continue
 			}
-			// Try 7z first (most common), then zip. We don't trust the
-			// extension alone — .fomod is just a convention.
 			ex := []Extractor{&SevenZipExtractor{}, &ZipExtractor{}}
 			extracted := false
 			for _, x := range ex {
@@ -335,8 +287,7 @@ func findCaseInsensitiveChild(parent, target string) (string, error) {
 	return "", nil
 }
 
-// ClearModFiles removes every file and directory under modDir except the
-// metadata.yaml at the root. Used by ReinstallMod before replaying archives.
+// ClearModFiles removes everything under modDir except metadata.yaml.
 func ClearModFiles(modDir string) error {
 	entries, err := os.ReadDir(modDir)
 	if err != nil {
@@ -353,20 +304,13 @@ func ClearModFiles(modDir string) error {
 	return nil
 }
 
-// --- Mod metadata.yaml reader/writer ---
-
 // SourceArchiveRef is one entry in the mod's source_archives list.
 type SourceArchiveRef struct {
 	Path        string
 	ModID       int
 	FileID      int
-	InstalledAt string // ISO 8601
-	// Merged is true when this archive was installed via "Merge Into Existing
-	// Mod..." into a target that already had at least one prior archive.
-	// Distinguishes downstream UI ("Merged" status + "Show Containing Mod")
-	// from a fresh install. Serialized only when true to keep older
-	// metadata.yaml files round-trippable.
-	Merged bool
+	InstalledAt string
+	Merged      bool
 }
 
 // ModMetadata is the flat form of a mod's metadata.yaml.
@@ -386,8 +330,7 @@ type ModMetadata struct {
 	Files          []string
 }
 
-// LoadModMetadata reads {modDir}/metadata.yaml. Missing file → zero-value
-// metadata + nil error.
+// LoadModMetadata reads {modDir}/metadata.yaml; missing file returns zero value.
 func LoadModMetadata(modDir string) (*ModMetadata, error) {
 	path := filepath.Join(modDir, "metadata.yaml")
 	f, err := os.Open(path)
@@ -500,7 +443,6 @@ func LoadModMetadata(modDir string) (*ModMetadata, error) {
 	return m, scanner.Err()
 }
 
-// SaveModMetadata writes {modDir}/metadata.yaml.
 func SaveModMetadata(modDir string, m *ModMetadata) error {
 	var b strings.Builder
 	b.WriteString("# Gorganizer mod metadata — auto-generated\n")
@@ -540,9 +482,7 @@ func SaveModMetadata(modDir string, m *ModMetadata) error {
 	return os.WriteFile(filepath.Join(modDir, "metadata.yaml"), []byte(b.String()), 0644)
 }
 
-// AppendSourceArchive adds one archive reference to a mod's source_archives
-// list and merges `newFiles` into the files list (deduplicated). Creates
-// the metadata.yaml if absent.
+// AppendSourceArchive adds an archive ref and merges newFiles into the files list.
 func AppendSourceArchive(modDir, modName string, ref SourceArchiveRef, displayName, category, version, modPage string, newFiles []string) error {
 	m, err := LoadModMetadata(modDir)
 	if err != nil {
@@ -599,8 +539,6 @@ func AppendSourceArchive(modDir, modName string, ref SourceArchiveRef, displayNa
 
 	return SaveModMetadata(modDir, m)
 }
-
-// --- Extractor implementations ---
 
 // ZipExtractor uses the Go stdlib archive/zip.
 type ZipExtractor struct{}

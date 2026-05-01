@@ -9,25 +9,18 @@ import (
 	"os"
 )
 
-// Header is the TES4 record header decoded from the start of an .esp/.esm/.esl
-// file: the master list (MAST subrecords) and whether the ESL light-master
-// flag is set. The engine uses these to resolve cross-plugin references at
-// load time; the analyzer uses them to spot missing dependencies before the
-// game ever launches.
+// Header is the decoded TES4 record header (master list + light-master flag).
 type Header struct {
 	Masters []string
 	IsLight bool
 	Flags   uint16
 }
 
-// Limits — TES4 records are tiny in practice (a hundred bytes plus a few
-// dozen masters at most). Anything exceeding these caps means the file is
-// corrupt or hostile; we refuse to allocate.
 const (
-	maxFileSize    = int64(2) << 30 // 2 GiB — Bethesda's plugin size ceiling
-	maxHeaderWalk  = 64 * 1024      // bytes scanned for subrecords
-	maxMasterCount = 256            // engine cap is 254 + 2 implicit
-	maxMasterLen   = 1024           // a single MAST string
+	maxFileSize    = int64(2) << 30
+	maxHeaderWalk  = 64 * 1024
+	maxMasterCount = 256
+	maxMasterLen   = 1024
 )
 
 var (
@@ -36,11 +29,7 @@ var (
 	dataTag   = [4]byte{'D', 'A', 'T', 'A'}
 )
 
-// ParseHeader opens path and decodes the TES4 record header. The returned
-// Header is safe to retain — no slice aliases the file buffer.
-//
-// ctx is honoured between subrecords so a long-running batch of parses can be
-// cancelled cleanly.
+// ParseHeader decodes the TES4 record header at path.
 func ParseHeader(ctx context.Context, path string) (*Header, error) {
 	st, err := os.Stat(path)
 	if err != nil {
@@ -59,15 +48,6 @@ func ParseHeader(ctx context.Context, path string) (*Header, error) {
 	}
 	defer f.Close()
 
-	// Read the 24-byte TES4 record header. Layout (Skyrim/FO3/FNV/FO4 — same
-	// shape across all post-Morrowind engines):
-	//   [0..4)   "TES4"
-	//   [4..8)   dataSize (uint32 LE)  — bytes of subrecords following
-	//   [8..12)  flags (uint32 LE)     — low 16 bits are what we care about
-	//   [12..16) formID                — always 0 for TES4
-	//   [16..20) versionControlInfo
-	//   [20..22) internalVersion
-	//   [22..24) unknown
 	var hdr [24]byte
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
 		return nil, err
@@ -92,10 +72,6 @@ func ParseHeader(ctx context.Context, path string) (*Header, error) {
 	r := io.LimitReader(f, walk)
 	br := &boundedReader{r: r}
 
-	// Walk subrecords. Each subrecord is [4-byte tag][2-byte size][payload].
-	// The TES4 record contains HEDR (header), CNAM (author), SNAM (desc),
-	// MAST (master file) + DATA (8-byte filesize, ignored), INTV/INCC/ONAM
-	// (post-Skyrim). We only care about MAST.
 	for {
 		select {
 		case <-ctx.Done():
@@ -122,7 +98,6 @@ func ParseHeader(ctx context.Context, path string) (*Header, error) {
 		switch [4]byte{sub[0], sub[1], sub[2], sub[3]} {
 		case mastTag:
 			if len(out.Masters) >= maxMasterCount {
-				// Skip rather than error — accept the plugin but stop adding.
 				if _, err := io.CopyN(io.Discard, br, int64(size)); err != nil {
 					return nil, err
 				}
@@ -146,9 +121,6 @@ func ParseHeader(ctx context.Context, path string) (*Header, error) {
 	return out, nil
 }
 
-// boundedReader wraps an io.Reader to surface ErrUnexpectedEOF as a clean EOF
-// at the boundary, so the subrecord loop terminates without bubbling an error
-// up when the limit reader is simply exhausted at a record boundary.
 type boundedReader struct{ r io.Reader }
 
 func (b *boundedReader) Read(p []byte) (int, error) { return b.r.Read(p) }

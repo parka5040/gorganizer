@@ -17,23 +17,17 @@ import (
 	"github.com/parka/gorganizer/internal/mod"
 )
 
-// previewEntry is one daemon-side cached archive extraction keyed by
-// preview_id. The lifecycle is (PreviewInstall → optional StartInstall →
-// DiscardPreview or TTL eviction). Values are small: an extract path plus
-// a couple of strings; the heavy on-disk cost is the extracted tree,
-// cleaned up on eviction.
 type previewEntry struct {
 	GameID         string
 	ArchiveRelPath string
 	ExtractRoot    string
 	CreatedAt      time.Time
 	HasFomod       bool
-	ModuleRoot     string // fomod/ParentDir when HasFomod, else ""
+	ModuleRoot     string
 }
 
 // previewCache is the daemon-scoped cache for FOMOD-aware install previews.
 // TTL eviction runs on a background goroutine; the bound keeps disk use
-// capped even if the user abandons a dialog without calling DiscardPreview.
 type previewCache struct {
 	mu      sync.Mutex
 	entries map[string]*previewEntry
@@ -52,7 +46,6 @@ func newPreviewCache(ttl time.Duration, maxLen int) *previewCache {
 func (c *previewCache) put(entry *previewEntry) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// Evict oldest if over the cap.
 	for len(c.entries) >= c.maxLen {
 		var oldestID string
 		var oldestT time.Time
@@ -81,8 +74,6 @@ func (c *previewCache) get(id string) *previewEntry {
 	if !ok {
 		return nil
 	}
-	// Refresh the TTL on read — a user walking a FOMOD wizard shouldn't
-	// have their extraction GC'd mid-flow.
 	e.CreatedAt = time.Now()
 	return e
 }
@@ -131,17 +122,10 @@ func (d *Daemon) runPreviewSweeper() {
 	}
 }
 
-// --- ipc.ArchiveController ---
-
 // StartDownload enqueues a new download from an NXM URI. Wraps the download
 // manager so daemon-level policy (require initialized manager, surface
-// structured errors) lives here.
 func (d *Daemon) StartDownload(nxmURI string) (string, int, error) {
 	if d.downloadMgr == nil {
-		// Also surface to the global status stream so the running MainWindow
-		// shows a banner when an NXM forwarded by `gorganizerd --handle-nxm`
-		// lands here. Without this the failure goes only to the forwarder's
-		// stderr (a detached child of the browser) and the user sees nothing.
 		const msg = "NXM ignored: no Nexus API key set — open Settings to add one"
 		select {
 		case d.statusCh <- ipc.StatusEventResult{Error: msg}:
@@ -149,7 +133,49 @@ func (d *Daemon) StartDownload(nxmURI string) (string, int, error) {
 		}
 		return "", 0, fmt.Errorf("download manager not initialized (set nexus_api_key in config)")
 	}
-	return d.downloadMgr.StartDownload(nxmURI)
+	override := d.resolveActiveGameOverride(nxmURI)
+	return d.downloadMgr.StartDownloadForGame(nxmURI, override)
+}
+
+// resolveActiveGameOverride decides whether an inbound NXM should be
+// routed to the frontend's currently-active game instead of the canonical
+func (d *Daemon) resolveActiveGameOverride(nxmURI string) string {
+	d.activeGameIDMu.RLock()
+	active := d.activeGameID
+	d.activeGameIDMu.RUnlock()
+	if active == "" {
+		return ""
+	}
+	link, err := download.ParseNXM(nxmURI)
+	if err != nil {
+		return ""
+	}
+	defaultGameID, err := link.GameID()
+	if err != nil {
+		return ""
+	}
+	if active == defaultGameID {
+		return ""
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	gc, ok := d.config.Games[active]
+	if !ok {
+		return ""
+	}
+	if gc.LinkedFromGameID != defaultGameID {
+		return ""
+	}
+	return active
+}
+
+// SetActiveGame records the frontend's currently-displayed game. Empty
+// string clears the hint. See activeGameID field comment for usage.
+func (d *Daemon) SetActiveGame(gameID string) error {
+	d.activeGameIDMu.Lock()
+	d.activeGameID = gameID
+	d.activeGameIDMu.Unlock()
+	return nil
 }
 
 func (d *Daemon) CancelDownload(id string) error {
@@ -168,7 +194,6 @@ func (d *Daemon) RetryDownload(id string) (int, error) {
 
 // ListArchives returns the per-game Downloads view — every archive in the
 // index, enriched from its sidecar, with status derived from installed
-// mods' source_archives + the live download manager's queue.
 func (d *Daemon) ListArchives(gameID string) ([]ipc.ArchiveRowResult, error) {
 	if _, ok := d.config.Games[gameID]; !ok {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
@@ -230,18 +255,6 @@ func (d *Daemon) ListArchives(gameID string) ([]ipc.ArchiveRowResult, error) {
 		rows = append(rows, row)
 	}
 
-	// Append phantom rows for ledger-tracked downloads that haven't landed
-	// on disk yet (queued, in-flight, resumed-after-restart). Frontend
-	// promotes these in place once the real archive appears.
-	//
-	// Two filters keep us from duplicating real archives:
-	//   1. Skip terminal entries (Downloaded / Cancelled / Failed) — the
-	//      downloader removes these on success but stale entries can
-	//      survive a hard kill (which my smoke test just demonstrated).
-	//   2. Skip entries whose ArchiveRelPath also appears in the index —
-	//      the index entry already represents this archive with full
-	//      sidecar metadata; the ledger row would be a stripped-down
-	//      duplicate showing only "Downloaded" + size.
 	indexed := make(map[string]struct{}, len(idx.Archives))
 	for _, e := range idx.Archives {
 		indexed[e.Path] = struct{}{}
@@ -254,8 +267,6 @@ func (d *Daemon) ListArchives(gameID string) ([]ipc.ArchiveRowResult, error) {
 				continue
 			}
 			if _, dup := indexed[le.ArchiveRelPath]; dup {
-				// Index entry already covers this archive — the ledger row
-				// is leftover bookkeeping. Evict so future calls are clean.
 				toEvict = append(toEvict, le.ID)
 				continue
 			}
@@ -303,7 +314,6 @@ func (d *Daemon) RemoveArchive(gameID, archiveRelPath string) error {
 	absArchive := filepath.Join(downloadsDir, archiveRelPath)
 	_ = os.Remove(absArchive)
 	_ = os.Remove(download.SidecarPath(absArchive))
-	// Also remove any lingering .part file.
 	_ = os.Remove(download.PartPath(absArchive))
 	if err := download.RemoveEntry(gameID, archiveRelPath); err != nil {
 		return err
@@ -361,9 +371,6 @@ func (d *Daemon) SetArchivesHiddenBulk(gameID string, hidden bool, scope ipc.Bul
 	return count, nil
 }
 
-// RefreshArchiveMetadata re-fetches the archive's sidecar from Nexus and
-// rewrites it. Useful when the mod version bumps or category changes on
-// Nexus and the user wants the local metadata to reflect the newer state.
 func (d *Daemon) RefreshArchiveMetadata(gameID, archiveRelPath string) (*ipc.ArchiveRowResult, error) {
 	gc, ok := d.config.Games[gameID]
 	if !ok {
@@ -391,7 +398,6 @@ func (d *Daemon) RefreshArchiveMetadata(gameID, archiveRelPath string) (*ipc.Arc
 	if err != nil {
 		return nil, fmt.Errorf("fetching file details: %w", err)
 	}
-	// Preserve what the old sidecar knew; update what Nexus tells us.
 	updated := *sc
 	if info != nil {
 		updated.ModName = info.Name
@@ -499,12 +505,8 @@ func (d *Daemon) StreamInstallEvents(ctx context.Context, gameID string) (<-chan
 	return ch, nil
 }
 
-// --- ipc.InstallController ---
-
 // PreviewInstall extracts an archive into a daemon-cached tmpdir and
 // returns either a FOMOD plan for the UI wizard or a flat file listing.
-// The caller either follows up with StartInstall (which reuses the cache)
-// or DiscardPreview (which drops it).
 func (d *Daemon) PreviewInstall(gameID, archiveRelPath string) (*ipc.PreviewResult, error) {
 	if _, ok := d.config.Games[gameID]; !ok {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
@@ -526,9 +528,6 @@ func (d *Daemon) PreviewInstall(gameID, archiveRelPath string) (*ipc.PreviewResu
 		os.RemoveAll(tmp)
 		return nil, fmt.Errorf("extracting: %w", err)
 	}
-	// Legacy NMM-style installers nest a *.fomod (itself an archive) inside
-	// the outer download. Without this expansion FindFomodRoot would never
-	// see a fomod/ tree for those archives.
 	download.ExpandNestedFomods(tmp)
 	entry := &previewEntry{
 		GameID: gameID, ArchiveRelPath: archiveRelPath, ExtractRoot: tmp,
@@ -540,8 +539,6 @@ func (d *Daemon) PreviewInstall(gameID, archiveRelPath string) (*ipc.PreviewResu
 		out.HasFomod = true
 		switch kind {
 		case download.FomodKindModuleConfig:
-			// Modern XML wizard. The frontend parses ModuleConfig.xml itself
-			// from ModulePath; we just pass the root through.
 			out.Plan = &ipc.FomodPlanResult{
 				ModuleName: filepath.Base(archiveRelPath),
 				ModulePath: root,
@@ -559,7 +556,6 @@ func (d *Daemon) PreviewInstall(gameID, archiveRelPath string) (*ipc.PreviewResu
 			}
 		}
 	} else {
-		// Flat list, relative paths under the content root.
 		contentRoot := download.FindContentRoot(tmp)
 		_ = filepath.WalkDir(contentRoot, func(path string, de os.DirEntry, err error) error {
 			if err != nil || de.IsDir() {
@@ -584,10 +580,6 @@ func (d *Daemon) DiscardPreview(previewID string) error {
 	return nil
 }
 
-// StartInstall is the unified install entry point. archive_rel_path and
-// external_archive_path are mutually exclusive — StartInstall fails if
-// both or neither is set. Every successful install writes source_archives
-// (no more "drag-drop can't reinstall" blind spot).
 func (d *Daemon) StartInstall(req ipc.StartInstallRequest) (string, int, error) {
 	if _, ok := d.config.Games[req.GameID]; !ok {
 		return "", 0, fmt.Errorf("%w: %s", config.ErrInvalidGameID, req.GameID)
@@ -596,7 +588,6 @@ func (d *Daemon) StartInstall(req ipc.StartInstallRequest) (string, int, error) 
 		return "", 0, fmt.Errorf("exactly one of archive_rel_path or external_archive_path must be set")
 	}
 
-	// Resolve on-disk archive.
 	var absArchive string
 	var sidecar *download.ArchiveSidecar
 	var indexRef download.SourceArchiveRef
@@ -613,9 +604,6 @@ func (d *Daemon) StartInstall(req ipc.StartInstallRequest) (string, int, error) 
 		if _, err := os.Stat(absArchive); err != nil {
 			return "", 0, fmt.Errorf("external archive not found: %w", err)
 		}
-		// Use the archive's on-disk path as the source_archive entry. If
-		// the user wants it tracked in the Downloads index, they can import
-		// separately.
 		indexRef.Path = absArchive
 	}
 	if sidecar != nil {
@@ -623,7 +611,6 @@ func (d *Daemon) StartInstall(req ipc.StartInstallRequest) (string, int, error) 
 		indexRef.FileID = sidecar.FileID
 	}
 
-	// Resolve target mod folder.
 	target := req.TargetMod
 	if req.Mode == ipc.InstallAsNewMod {
 		if target == "" && sidecar != nil {
@@ -639,7 +626,6 @@ func (d *Daemon) StartInstall(req ipc.StartInstallRequest) (string, int, error) 
 		return "", 0, fmt.Errorf("could not determine target mod folder")
 	}
 
-	// Resolve any preview cache hit.
 	var extractedRoot string
 	if req.PreviewID != "" {
 		pe := d.previews.get(req.PreviewID)
@@ -649,7 +635,6 @@ func (d *Daemon) StartInstall(req ipc.StartInstallRequest) (string, int, error) 
 		extractedRoot = pe.ExtractRoot
 	}
 
-	// Emit progress via the per-game install bus.
 	sink := func(p download.InstallProgress) {
 		d.installBus.Publish(req.GameID, ipc.InstallEventResult{
 			GameID: req.GameID,
@@ -668,7 +653,6 @@ func (d *Daemon) StartInstall(req ipc.StartInstallRequest) (string, int, error) 
 		})
 	}
 
-	// Marshal FOMOD selections from IPC → download types.
 	var fomodFiles []download.FomodFile
 	for _, f := range req.FomodSelectedFiles {
 		fomodFiles = append(fomodFiles, download.FomodFile{
@@ -699,8 +683,6 @@ func (d *Daemon) StartInstall(req ipc.StartInstallRequest) (string, int, error) 
 
 	result, err := download.Install(installReq)
 	if err != nil {
-		// Translate install markers into IPC error types so the daemon
-		// surfaces actionable failures instead of generic strings.
 		if path, ok := download.IsFomodMarker(err); ok {
 			return "", 0, &ipc.FomodRequiredError{
 				GameID: req.GameID, Path: path, PreviewID: req.PreviewID,
@@ -712,20 +694,15 @@ func (d *Daemon) StartInstall(req ipc.StartInstallRequest) (string, int, error) 
 		return "", 0, err
 	}
 
-	// Preview's job is done; drop it from the cache.
 	if req.PreviewID != "" {
 		d.previews.discard(req.PreviewID)
 	}
 
-	// Bookkeeping that the daemon owns (download package deliberately
-	// doesn't touch these).
 	d.invalidateInstalledArchiveCache(req.GameID)
 	if req.Mode == ipc.InstallAsNewMod {
 		d.ensureInModList(req.GameID, result.ModFolder)
 	}
 
-	// Emit a RowChanged event so the Downloads tab flips to INSTALLED
-	// without a full ListArchives reload.
 	if req.ArchiveRelPath != "" {
 		if row, err := d.buildArchiveRow(req.GameID, req.ArchiveRelPath); err == nil {
 			d.archiveBus.Publish(req.GameID, ipc.ArchiveEventResult{
@@ -738,8 +715,6 @@ func (d *Daemon) StartInstall(req ipc.StartInstallRequest) (string, int, error) 
 		"game", req.GameID, "mod", result.ModFolder, "files", result.FileCount)
 	return result.ModFolder, result.FileCount, nil
 }
-
-// --- ipc.ModController — v2 additions ---
 
 // ListMods enumerates installed mods for a game.
 func (d *Daemon) ListMods(gameID string) ([]ipc.ModInfoResult, error) {
@@ -826,8 +801,6 @@ func (d *Daemon) RenameMod(gameID, oldName, newName string) error {
 		return fmt.Errorf("renaming mod folder: %w", err)
 	}
 
-	// Update folder field in metadata.yaml. Best-effort: if this fails we
-	// roll the directory rename back so state stays consistent.
 	meta, _ := download.LoadModMetadata(dst)
 	if meta != nil {
 		meta.Folder = newName
@@ -837,7 +810,6 @@ func (d *Daemon) RenameMod(gameID, oldName, newName string) error {
 		_ = download.SaveModMetadata(dst, meta)
 	}
 
-	// Rewrite every profile's modlist.txt.
 	profiles, _ := d.profileMgr.List(gameID)
 	for _, p := range profiles {
 		_, entries, err := d.profileMgr.Load(gameID, p.Name)
@@ -857,8 +829,6 @@ func (d *Daemon) RenameMod(gameID, oldName, newName string) error {
 	}
 
 	d.invalidateInstalledArchiveCache(gameID)
-	// Rebuild VFS if the game is mounted — mod folder name is in the
-	// layer list.
 	d.mu.RLock()
 	mm, mmOk := d.mountMgrs[gameID]
 	ms, msOk := d.mountStates[gameID]
@@ -873,31 +843,50 @@ func (d *Daemon) RenameMod(gameID, oldName, newName string) error {
 	return nil
 }
 
-// UninstallMod removes a mod's install dir, strips it from every profile's
-// modlist, and flips the sticky Uninstalled bit on archives owned solely by
-// this mod. Returns the list of archive paths flagged so the frontend can
-// refresh those rows without a full reload.
-//
-// When `force=false` and the mod is enabled in any profile, returns a
-// ModInUseError listing the profiles. The frontend presents a confirm
-// dialog and re-issues with force=true.
-func (d *Daemon) UninstallMod(gameID, modName string, force bool) ([]string, error) {
+// UninstallModAsync is the async wrapper used for huge mod folders (TTW
+func (d *Daemon) UninstallModAsync(gameID, modName string, force bool) ([]string, error) {
+	flagged, modDir, err := d.uninstallModSync(gameID, modName, force)
+	if err != nil || modDir == "" {
+		return flagged, err
+	}
+	go func() {
+		var removeErr error
+		for attempt := 0; attempt < 2; attempt++ {
+			if rerr := os.RemoveAll(modDir); rerr == nil {
+				removeErr = nil
+				break
+			} else {
+				removeErr = rerr
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+		if removeErr != nil {
+			slog.Warn("UninstallModAsync: removeall failed", "mod", modName, "err", removeErr)
+			return
+		}
+		slog.Info("UninstallModAsync: removeall complete", "mod", modName)
+		d.invalidateInstalledArchiveCache(gameID)
+	}()
+	return flagged, nil
+}
+
+// uninstallModSync is the shared bookkeeping path for UninstallMod and
+// UninstallModAsync. Returns the resolved modDir so the async variant
+func (d *Daemon) uninstallModSync(gameID, modName string, force bool) ([]string, string, error) {
 	if _, ok := d.config.Games[gameID]; !ok {
-		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
+		return nil, "", fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	modDir := filepath.Join(config.ModsDir(gameID), modName)
 	meta, err := download.LoadModMetadata(modDir)
 	if err != nil || meta == nil || (len(meta.SourceArchives) == 0 && meta.Name == "") {
-		// Mod folder absent is legitimate — nothing to do.
 		if _, statErr := os.Stat(modDir); os.IsNotExist(statErr) {
-			return nil, &ipc.ModNotFoundError{GameID: gameID, Name: modName}
+			return nil, "", &ipc.ModNotFoundError{GameID: gameID, Name: modName}
 		}
 		if err != nil {
-			return nil, fmt.Errorf("reading mod metadata: %w", err)
+			return nil, "", fmt.Errorf("reading mod metadata: %w", err)
 		}
 	}
 
-	// Check which profiles have this mod enabled.
 	profiles, _ := d.profileMgr.List(gameID)
 	var enabledIn []string
 	for _, p := range profiles {
@@ -913,10 +902,9 @@ func (d *Daemon) UninstallMod(gameID, modName string, force bool) ([]string, err
 		}
 	}
 	if len(enabledIn) > 0 && !force {
-		return nil, &ipc.ModInUseError{Name: modName, Profiles: enabledIn}
+		return nil, "", &ipc.ModInUseError{Name: modName, Profiles: enabledIn}
 	}
 
-	// Flip sticky Uninstalled on archives used SOLELY by this mod.
 	ownedSolely := map[string]bool{}
 	if meta != nil {
 		for _, sa := range meta.SourceArchives {
@@ -924,7 +912,6 @@ func (d *Daemon) UninstallMod(gameID, modName string, force bool) ([]string, err
 		}
 	}
 	if len(ownedSolely) > 0 {
-		// Scan every other mod — if any one references an archive, un-flag it.
 		modsDir := config.ModsDir(gameID)
 		entries, _ := os.ReadDir(modsDir)
 		for _, ent := range entries {
@@ -943,7 +930,6 @@ func (d *Daemon) UninstallMod(gameID, modName string, force bool) ([]string, err
 		}
 	}
 
-	// Strip from every profile's modlist.txt.
 	for _, p := range profiles {
 		_, entries, err := d.profileMgr.Load(gameID, p.Name)
 		if err != nil {
@@ -963,8 +949,105 @@ func (d *Daemon) UninstallMod(gameID, modName string, force bool) ([]string, err
 		}
 	}
 
-	// Remove mod folder. Retry once on EBUSY — FUSE may be holding a file
-	// open briefly during a concurrent read.
+	var flagged []string
+	for archivePath, solo := range ownedSolely {
+		if !solo {
+			continue
+		}
+		rel := strings.TrimPrefix(archivePath, "Downloads/")
+		if err := download.SetUninstalled(gameID, rel, true); err != nil {
+			slog.Warn("setting archive uninstalled flag failed", "path", archivePath, "err", err)
+			continue
+		}
+		flagged = append(flagged, rel)
+		if row, err := d.buildArchiveRow(gameID, rel); err == nil {
+			d.archiveBus.Publish(gameID, ipc.ArchiveEventResult{
+				GameID: gameID, RowChanged: row,
+			})
+		}
+	}
+
+	return flagged, modDir, nil
+}
+
+// UninstallMod removes a mod's install dir, strips it from every profile's
+func (d *Daemon) UninstallMod(gameID, modName string, force bool) ([]string, error) {
+	if _, ok := d.config.Games[gameID]; !ok {
+		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
+	}
+	modDir := filepath.Join(config.ModsDir(gameID), modName)
+	meta, err := download.LoadModMetadata(modDir)
+	if err != nil || meta == nil || (len(meta.SourceArchives) == 0 && meta.Name == "") {
+		if _, statErr := os.Stat(modDir); os.IsNotExist(statErr) {
+			return nil, &ipc.ModNotFoundError{GameID: gameID, Name: modName}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading mod metadata: %w", err)
+		}
+	}
+
+	profiles, _ := d.profileMgr.List(gameID)
+	var enabledIn []string
+	for _, p := range profiles {
+		_, entries, err := d.profileMgr.Load(gameID, p.Name)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.Name == modName && e.Enabled {
+				enabledIn = append(enabledIn, p.Name)
+				break
+			}
+		}
+	}
+	if len(enabledIn) > 0 && !force {
+		return nil, &ipc.ModInUseError{Name: modName, Profiles: enabledIn}
+	}
+
+	ownedSolely := map[string]bool{}
+	if meta != nil {
+		for _, sa := range meta.SourceArchives {
+			ownedSolely[sa.Path] = true
+		}
+	}
+	if len(ownedSolely) > 0 {
+		modsDir := config.ModsDir(gameID)
+		entries, _ := os.ReadDir(modsDir)
+		for _, ent := range entries {
+			if !ent.IsDir() || ent.Name() == "Downloads" || ent.Name() == modName {
+				continue
+			}
+			other, err := download.LoadModMetadata(filepath.Join(modsDir, ent.Name()))
+			if err != nil || other == nil {
+				continue
+			}
+			for _, sa := range other.SourceArchives {
+				if ownedSolely[sa.Path] {
+					ownedSolely[sa.Path] = false
+				}
+			}
+		}
+	}
+
+	for _, p := range profiles {
+		_, entries, err := d.profileMgr.Load(gameID, p.Name)
+		if err != nil {
+			continue
+		}
+		kept := entries[:0]
+		changed := false
+		for _, e := range entries {
+			if e.Name == modName {
+				changed = true
+				continue
+			}
+			kept = append(kept, e)
+		}
+		if changed {
+			_ = d.profileMgr.Save(p, kept)
+		}
+	}
+
 	var removeErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		if err := os.RemoveAll(modDir); err == nil {
@@ -979,8 +1062,6 @@ func (d *Daemon) UninstallMod(gameID, modName string, force bool) ([]string, err
 		return nil, fmt.Errorf("removing mod folder: %w", removeErr)
 	}
 
-	// Flip sticky-uninstalled. Input paths look like "Downloads/<rel>"; the
-	// index is keyed by <rel>, so strip the prefix.
 	var flagged []string
 	for archivePath, solo := range ownedSolely {
 		if !solo {
@@ -992,7 +1073,6 @@ func (d *Daemon) UninstallMod(gameID, modName string, force bool) ([]string, err
 			continue
 		}
 		flagged = append(flagged, rel)
-		// Broadcast a RowChanged so the Downloads tab flips without a reload.
 		if row, err := d.buildArchiveRow(gameID, rel); err == nil {
 			d.archiveBus.Publish(gameID, ipc.ArchiveEventResult{
 				GameID: gameID, RowChanged: row,
@@ -1002,7 +1082,6 @@ func (d *Daemon) UninstallMod(gameID, modName string, force bool) ([]string, err
 
 	d.invalidateInstalledArchiveCache(gameID)
 
-	// Rebuild VFS if mounted.
 	d.mu.RLock()
 	mm, mmOk := d.mountMgrs[gameID]
 	ms, msOk := d.mountStates[gameID]
@@ -1018,9 +1097,6 @@ func (d *Daemon) UninstallMod(gameID, modName string, force bool) ([]string, err
 	return flagged, nil
 }
 
-// ReinstallMod clears the mod's file tree and replays every archive in its
-// source_archives via the canonical Install path. Missing archives are
-// skipped; the rest still run.
 func (d *Daemon) ReinstallMod(gameID, modName string) (int, int, int, error) {
 	if _, ok := d.config.Games[gameID]; !ok {
 		return 0, 0, 0, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
@@ -1038,7 +1114,6 @@ func (d *Daemon) ReinstallMod(gameID, modName string) (int, int, int, error) {
 	if err := download.ClearModFiles(modDir); err != nil {
 		return 0, 0, 0, fmt.Errorf("clearing mod files: %w", err)
 	}
-	// Preserve identity fields; wipe accumulations so each replay re-builds.
 	preserved := *meta
 	preserved.SourceArchives = nil
 	preserved.Files = nil
@@ -1053,7 +1128,6 @@ func (d *Daemon) ReinstallMod(gameID, modName string) (int, int, int, error) {
 			skipped++
 			continue
 		}
-		// Use MergeInto so each replay overlays onto the same folder.
 		sink := func(p download.InstallProgress) {
 			d.installBus.Publish(gameID, ipc.InstallEventResult{
 				GameID: gameID,

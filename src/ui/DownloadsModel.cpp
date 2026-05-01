@@ -91,9 +91,6 @@ QVariant DownloadsModel::data(const QModelIndex& idx, int role) const
         case ColCategory:
             return categoryDisplay(r.category);
         case ColStatus:
-            // Merged installs show "Merged" instead of "Installed" so the user
-            // can tell at a glance which archives stand alone vs. were folded
-            // into another mod.
             if (r.merged && r.phase == DownloadPhase::Installed)
                 return QStringLiteral("Merged");
             return phaseLabel(r.phase);
@@ -156,8 +153,6 @@ void DownloadsModel::setShowHidden(bool show)
     if (m_showHidden == show)
         return;
     m_showHidden = show;
-    // The proxy filter re-invalidates on its own when the view asks it to;
-    // we just flip the flag. Views should call invalidate on their proxy.
 }
 
 bool DownloadsModel::rowMatchesFilter(int sourceRow) const
@@ -169,11 +164,7 @@ bool DownloadsModel::rowMatchesFilter(int sourceRow) const
     return !m_rows[sourceRow].hidden;
 }
 
-// Status mapping: proto DownloadStatus is the SINGLE source of truth shared by
-// streaming progress and snapshot list rows. Values match the unified proto
-// numerically (0=unknown, 1=queued, 2=downloading, 3=downloaded, 4=installing,
-// 5=installed, 6=uninstalled, 7=cancelled, 8=failed). This is the only place
-// that maps the wire int to a phase.
+// Maps the wire proto DownloadStatus int to a UI phase.
 DownloadPhase DownloadsModel::phaseFromDownloadStatus(int status)
 {
     switch (status) {
@@ -223,10 +214,6 @@ QString DownloadsModel::formatSize(qint64 bytes)
 
 void DownloadsModel::replaceFromDaemon(const std::vector<GrpcDownloadRow>& rows)
 {
-    // Bucket existing transient rows (keyed by dl:<id>) by their downloadId.
-    // The daemon echoes download_id on archive rows that correspond to an
-    // in-flight download, so we can promote the transient row into the
-    // archive row in place — no duplicate "Waiting + Completed" pair.
     QHash<QString, DownloadRowData> transientById;
     for (const auto& r : m_rows) {
         if (!r.downloadId.isEmpty() && r.archiveRelPath.isEmpty())
@@ -248,7 +235,7 @@ void DownloadsModel::replaceFromDaemon(const std::vector<GrpcDownloadRow>& rows)
         r.version = src.version;
         r.category = src.category;
         r.sizeBytes = src.sizeBytes;
-        r.bytesDownloaded = src.sizeBytes; // on-disk already
+        r.bytesDownloaded = src.sizeBytes;
         r.uploadedAt = src.uploadedAt;
         r.downloadedAt = src.downloadedAt;
         r.gameDomain = src.gameDomain;
@@ -260,9 +247,6 @@ void DownloadsModel::replaceFromDaemon(const std::vector<GrpcDownloadRow>& rows)
         r.pct = -1;
         r.phase = phaseFromDownloadStatus(src.status);
 
-        // Promotion: if the daemon attached a downloadId, consume the matching
-        // transient (keep its live bytes/pct/error) and drop it from the
-        // carry-forward map so it doesn't get re-added below.
         if (!src.downloadId.isEmpty()) {
             auto it = transientById.find(src.downloadId);
             if (it != transientById.end()) {
@@ -276,8 +260,6 @@ void DownloadsModel::replaceFromDaemon(const std::vector<GrpcDownloadRow>& rows)
         }
         m_rows.push_back(std::move(r));
     }
-    // Carry forward any transients whose downloadId did NOT appear in the
-    // daemon's snapshot — the archive hasn't landed yet (first few ticks).
     for (auto it = transientById.begin(); it != transientById.end(); ++it)
         m_rows.push_back(*it);
     rebuildIndex();
@@ -286,9 +268,6 @@ void DownloadsModel::replaceFromDaemon(const std::vector<GrpcDownloadRow>& rows)
 
 void DownloadsModel::applyDownloadProgress(const GrpcDownloadProgress& p)
 {
-    // Find the matching row by downloadId. Create a transient if none exists
-    // yet (happens during the first few progress ticks before ListDownloads
-    // has the archive entry).
     int row = rowForDownloadId(p.downloadId);
     if (row < 0) {
         DownloadRowData r;
@@ -315,9 +294,6 @@ void DownloadsModel::applyDownloadProgress(const GrpcDownloadProgress& p)
     if (p.bytesTotal > 0)
         r.sizeBytes = p.bytesTotal;
     r.phase = phaseFromDownloadStatus(p.status);
-    // Unified proto DownloadStatus: DOWNLOADED=3 and INSTALLED=5 are terminal
-    // for the bytes channel; pin pct=100 so the row's progress bar reads full
-    // instead of indeterminate when bytes_total wasn't advertised.
     bool terminal = (p.status == 3 || p.status == 5);
     r.pct = (p.bytesTotal > 0)
         ? static_cast<int>(p.bytesDownloaded * 100 / p.bytesTotal)
@@ -332,7 +308,7 @@ void DownloadsModel::applyInstallProgress(const GrpcInstallProgress& p)
         return;
     int row = rowForKey(keyForArchive(p.archiveRelPath));
     if (row < 0)
-        return;  // row will appear on the next ListDownloads; install events before then are dropped
+        return;
     auto& r = m_rows[row];
     switch (p.step) {
         case GrpcInstallStepExtracting:
@@ -387,9 +363,6 @@ void DownloadsModel::removeTransientByDownloadId(const QString& downloadId)
     for (int i = 0; i < static_cast<int>(m_rows.size()); ++i) {
         if (m_rows[i].downloadId != downloadId)
             continue;
-        // Only remove rows that are still in transient form (no archive
-        // path yet) — a fully promoted row that happens to share a
-        // download_id should not be wiped.
         if (!m_rows[i].archiveRelPath.isEmpty())
             return;
         beginRemoveRows({}, i, i);

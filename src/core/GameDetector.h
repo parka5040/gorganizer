@@ -14,10 +14,7 @@ public:
     static std::vector<GameInfo> detectGames(const std::vector<std::filesystem::path>& libraryFolders);
     static std::vector<GameInfo> detectAll();
 
-    // Build a GameInfo from a user-selected executable. Used for Lutris/GOG/
-    // manually-moved installs where Steam detection doesn't find the game.
-    // Matches the filename against the known Bethesda main executables; returns
-    // nullopt if the executable is unrecognized.
+    // Build a GameInfo from a user-selected executable for Lutris/GOG/manual installs.
     static std::optional<GameInfo> fromExecutable(const std::filesystem::path& exePath);
 
 private:

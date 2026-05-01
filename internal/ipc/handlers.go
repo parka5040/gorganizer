@@ -20,7 +20,6 @@ type gorganizerServer struct {
 
 // grpcError maps errors to gRPC status codes. Typed errors from errors.go
 // go through MapError first; everything else falls back to the sentinel
-// table below.
 func grpcError(err error) error {
 	if mapped, ok := MapError(err); ok {
 		return mapped
@@ -44,8 +43,6 @@ func grpcError(err error) error {
 		return status.Error(codes.Internal, err.Error())
 	}
 }
-
-// --- Game handlers ---
 
 func (s *gorganizerServer) ListGames(_ context.Context, _ *pb.ListGamesRequest) (*pb.ListGamesResponse, error) {
 	games, err := s.ctrl.ListConfiguredGames()
@@ -73,8 +70,6 @@ func (s *gorganizerServer) ConfigureGame(_ context.Context, req *pb.ConfigureGam
 	}
 	return &pb.ConfigureGameResponse{}, nil
 }
-
-// --- Mod handlers ---
 
 func (s *gorganizerServer) ListMods(_ context.Context, req *pb.ListModsRequest) (*pb.ListModsResponse, error) {
 	mods, err := s.ctrl.ListMods(req.GetGameId())
@@ -160,8 +155,6 @@ func (s *gorganizerServer) ExtractOverwriteToMod(_ context.Context, req *pb.Extr
 	return &pb.ExtractOverwriteToModResponse{FileCount: int32(count)}, nil
 }
 
-// --- Profile handlers ---
-
 func (s *gorganizerServer) ListProfiles(_ context.Context, req *pb.ListProfilesRequest) (*pb.ListProfilesResponse, error) {
 	profiles, err := s.ctrl.ListProfiles(req.GetGameId())
 	if err != nil {
@@ -225,10 +218,16 @@ func (s *gorganizerServer) SetSeparators(_ context.Context, req *pb.SetSeparator
 	return &pb.SetSeparatorsResponse{}, nil
 }
 
-// --- VFS handlers ---
-
 func (s *gorganizerServer) MountVFS(_ context.Context, req *pb.MountVFSRequest) (*pb.MountVFSResponse, error) {
-	st, err := s.ctrl.MountVFS(req.GetGameId(), req.GetProfileName())
+	var (
+		st  *VFSStatusResult
+		err error
+	)
+	if req.GetAutoSwap() {
+		st, err = s.ctrl.MountVFSWithSwap(req.GetGameId(), req.GetProfileName())
+	} else {
+		st, err = s.ctrl.MountVFS(req.GetGameId(), req.GetProfileName())
+	}
 	if err != nil {
 		return nil, grpcError(err)
 	}
@@ -264,8 +263,6 @@ func (s *gorganizerServer) RestoreFromBackup(_ context.Context, req *pb.RestoreF
 	return &pb.RestoreFromBackupResponse{}, nil
 }
 
-// --- Conflict handler ---
-
 func (s *gorganizerServer) GetConflicts(_ context.Context, req *pb.GetConflictsRequest) (*pb.ConflictsResponse, error) {
 	conflicts, err := s.ctrl.GetConflicts(req.GetGameId(), req.GetProfileName())
 	if err != nil {
@@ -281,8 +278,6 @@ func (s *gorganizerServer) GetConflicts(_ context.Context, req *pb.GetConflictsR
 	}
 	return &pb.ConflictsResponse{Conflicts: pbConflicts}, nil
 }
-
-// --- Archive handlers (the Downloads tab lifecycle) ---
 
 func (s *gorganizerServer) StartDownload(_ context.Context, req *pb.StartDownloadRequest) (*pb.StartDownloadResponse, error) {
 	id, ahead, err := s.ctrl.StartDownload(req.GetNxmUri())
@@ -378,8 +373,6 @@ func (s *gorganizerServer) StreamArchiveEvents(req *pb.StreamArchiveEventsReques
 	return nil
 }
 
-// --- Install handlers ---
-
 func (s *gorganizerServer) PreviewInstall(_ context.Context, req *pb.PreviewInstallRequest) (*pb.PreviewInstallResponse, error) {
 	res, err := s.ctrl.PreviewInstall(req.GetGameId(), req.GetArchiveRelPath())
 	if err != nil {
@@ -447,8 +440,6 @@ func (s *gorganizerServer) StreamInstallEvents(req *pb.StreamInstallEventsReques
 	return nil
 }
 
-// --- Game settings ---
-
 func (s *gorganizerServer) GetGameSettings(_ context.Context, req *pb.GetGameSettingsRequest) (*pb.GameSettings, error) {
 	gs, err := s.ctrl.GetGameSettings(req.GetGameId())
 	if err != nil {
@@ -464,8 +455,6 @@ func (s *gorganizerServer) SetGameSettings(_ context.Context, req *pb.SetGameSet
 	}
 	return gameSettingsToProto(gs), nil
 }
-
-// --- INI handlers ---
 
 func (s *gorganizerServer) ListProfileIniFiles(_ context.Context, req *pb.ListProfileIniFilesRequest) (*pb.ListProfileIniFilesResponse, error) {
 	res, err := s.ctrl.ListProfileIniFiles(req.GetGameId(), req.GetProfileName())
@@ -544,8 +533,6 @@ func iniTweakToProto(t IniTweakStateResult) *pb.IniTweakState {
 	}
 }
 
-// --- Launch handlers ---
-
 func (s *gorganizerServer) LaunchGame(_ context.Context, req *pb.LaunchGameRequest) (*pb.LaunchGameResponse, error) {
 	pid, err := s.ctrl.LaunchGame(req.GetGameId(), req.GetUseTool(), req.GetProfileName())
 	if err != nil {
@@ -616,8 +603,6 @@ func (s *gorganizerServer) SetPreferredProton(_ context.Context, req *pb.SetPref
 	return &pb.SetPreferredProtonResponse{}, nil
 }
 
-// --- Settings handlers ---
-
 func (s *gorganizerServer) SetNexusAPIKey(ctx context.Context, req *pb.SetNexusAPIKeyRequest) (*pb.SetNexusAPIKeyResponse, error) {
 	result, err := s.ctrl.SetNexusAPIKey(ctx, req.GetApiKey())
 	if err != nil {
@@ -629,7 +614,12 @@ func (s *gorganizerServer) SetNexusAPIKey(ctx context.Context, req *pb.SetNexusA
 	}, nil
 }
 
-// --- Lifecycle handlers ---
+func (s *gorganizerServer) SetActiveGame(_ context.Context, req *pb.SetActiveGameRequest) (*pb.SetActiveGameResponse, error) {
+	if err := s.ctrl.SetActiveGame(req.GetGameId()); err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.SetActiveGameResponse{}, nil
+}
 
 func (s *gorganizerServer) Shutdown(_ context.Context, _ *pb.ShutdownRequest) (*pb.ShutdownResponse, error) {
 	s.ctrl.Shutdown()
@@ -736,14 +726,14 @@ func pluginStatusToProto(p *PluginStatusItemResult) *pb.PluginStatusItem {
 	}
 }
 
-// --- Conversion helpers ---
-
 func gamesToProto(games []GameInfo) []*pb.Game {
 	result := make([]*pb.Game, len(games))
 	for i, g := range games {
 		result[i] = &pb.Game{
 			GameId: g.GameID, Name: g.Name, SteamAppId: g.SteamAppID,
 			InstallPath: g.InstallPath, DataPath: g.DataPath,
+			Synthetic: g.Synthetic, LinkedFromGameId: g.LinkedFromGameID,
+			VfsActive: g.VFSActive,
 		}
 	}
 	return result
@@ -753,7 +743,7 @@ func modToProto(m *ModInfoResult) *pb.ModInfo {
 	return &pb.ModInfo{
 		Name: m.Name, GameId: m.GameID,
 		BasePath:  m.BasePath,
-		DataPath:  m.BasePath, // mod folder IS the data content
+		DataPath:  m.BasePath,
 		FileCount: int32(m.FileCount), TotalSize: m.TotalSize,
 		Files: m.Files,
 	}
@@ -765,6 +755,168 @@ func modsToProto(mods []ModInfoResult) []*pb.ModInfo {
 		result[i] = modToProto(&mods[i])
 	}
 	return result
+}
+
+func (s *gorganizerServer) CheckTTWPrereqs(_ context.Context, req *pb.CheckTTWPrereqsRequest) (*pb.CheckTTWPrereqsResponse, error) {
+	res, err := s.ctrl.CheckTTWPrereqs(int(req.GetBackend()))
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.CheckTTWPrereqsResponse{
+		Backend:               pb.TTWBackend(res.Backend),
+		GstreamerInstalled:    res.GstreamerInstalled,
+		GstreamerCodecsHint:   res.GstreamerCodecsHint,
+		XdeltaInstalled:       res.XdeltaInstalled,
+		DiskSpaceAvailable:    res.DiskSpaceAvailable,
+		DiskSpaceRequired:     res.DiskSpaceRequired,
+		FnvVanilla:            res.FNVVanilla,
+		MpiInstallerPath:      res.MpiInstallerPath,
+		MpiInstallerVersion:   res.MpiInstallerVersion,
+		PrefixExists:          res.PrefixExists,
+		HasDotnet48:           res.HasDotnet48,
+		Dotnet48ReleaseRev:    res.DotNet48ReleaseRev,
+		HasMsxml6:             res.HasMsxml6,
+		HasVcrun2022:          res.HasVcrun2022,
+		HasCorefonts:          res.HasCorefonts,
+		MonoNeedsRemoval:      res.MonoNeedsRemoval,
+		SteamRunning:          res.SteamRunning,
+		ProtontricksAvailable: res.ProtontricksAvailable,
+		WinetricksAvailable:   res.WinetricksAvailable,
+		Missing:               res.Missing,
+	}, nil
+}
+
+func (s *gorganizerServer) CheckTTWDiskSpace(_ context.Context, _ *pb.CheckTTWDiskSpaceRequest) (*pb.CheckTTWDiskSpaceResponse, error) {
+	avail, req, err := s.ctrl.CheckTTWDiskSpace()
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.CheckTTWDiskSpaceResponse{Available: avail, Required: req}, nil
+}
+
+func (s *gorganizerServer) CheckFNVNotMounted(_ context.Context, _ *pb.CheckFNVNotMountedRequest) (*pb.CheckFNVNotMountedResponse, error) {
+	if err := s.ctrl.CheckFNVNotMounted(); err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.CheckFNVNotMountedResponse{}, nil
+}
+
+func (s *gorganizerServer) PrepareTTWInstaller(_ context.Context, req *pb.PrepareTTWInstallerRequest) (*pb.PrepareTTWInstallerResponse, error) {
+	info, err := s.ctrl.PrepareTTWInstaller(req.GetUserPath(), int(req.GetBackend()))
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.PrepareTTWInstallerResponse{
+		Backend:       pb.TTWBackend(info.Backend),
+		MpiFile:       info.MpiFile,
+		InstallerExe:  info.InstallerExe,
+		Version:       info.Version,
+		AlternateMpis: info.AlternateMpis,
+	}, nil
+}
+
+func (s *gorganizerServer) CreateBlankTTWMod(_ context.Context, req *pb.CreateBlankTTWModRequest) (*pb.CreateBlankTTWModResponse, error) {
+	dir, err := s.ctrl.CreateBlankTTWMod(req.GetModName())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.CreateBlankTTWModResponse{ModDir: dir}, nil
+}
+
+func (s *gorganizerServer) EnsureNativeMpiInstaller(_ context.Context, _ *pb.EnsureNativeMpiInstallerRequest) (*pb.EnsureNativeMpiInstallerResponse, error) {
+	path, version, err := s.ctrl.EnsureNativeMpiInstaller()
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.EnsureNativeMpiInstallerResponse{Path: path, Version: version}, nil
+}
+
+func (s *gorganizerServer) BootstrapFNVPrefix(_ context.Context, _ *pb.BootstrapFNVPrefixRequest) (*pb.BootstrapFNVPrefixResponse, error) {
+	if err := s.ctrl.BootstrapFNVPrefix(); err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.BootstrapFNVPrefixResponse{}, nil
+}
+
+func (s *gorganizerServer) InstallTTWPrereqs(_ context.Context, _ *pb.InstallTTWPrereqsRequest) (*pb.InstallTTWPrereqsResponse, error) {
+	id, err := s.ctrl.InstallTTWPrereqs()
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.InstallTTWPrereqsResponse{InstallId: id}, nil
+}
+
+func (s *gorganizerServer) LaunchTTWInstaller(_ context.Context, req *pb.LaunchTTWInstallerRequest) (*pb.LaunchTTWInstallerResponse, error) {
+	info := req.GetInfo()
+	if info == nil {
+		return nil, status.Error(codes.InvalidArgument, "info is required")
+	}
+	id, err := s.ctrl.LaunchTTWInstaller(TTWInstallerInfoResult{
+		Backend:       int(info.GetBackend()),
+		MpiFile:       info.GetMpiFile(),
+		InstallerExe:  info.GetInstallerExe(),
+		Version:       info.GetVersion(),
+		AlternateMpis: info.GetAlternateMpis(),
+	}, req.GetDataModName())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.LaunchTTWInstallerResponse{InstallId: id}, nil
+}
+
+func (s *gorganizerServer) CancelTTWInstaller(_ context.Context, req *pb.CancelTTWInstallerRequest) (*pb.CancelTTWInstallerResponse, error) {
+	if err := s.ctrl.CancelTTWInstaller(req.GetInstallId()); err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.CancelTTWInstallerResponse{}, nil
+}
+
+func (s *gorganizerServer) GetTTWInstallResult(_ context.Context, req *pb.GetTTWInstallResultRequest) (*pb.GetTTWInstallResultResponse, error) {
+	res, err := s.ctrl.GetTTWInstallResult(req.GetInstallId(), req.GetBlock())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	out := &pb.GetTTWInstallResultResponse{
+		InstallerExitCode: int32(res.InstallerExitCode),
+		LayoutFixed:       res.LayoutFixed,
+		DataModFileCount:  int32(res.DataModFileCount),
+		DataModBytes:      res.DataModBytes,
+	}
+	for _, d := range res.ChangedExesInRoot {
+		out.ChangedExesInRoot = append(out.ChangedExesInRoot, &pb.TTWExeDelta{
+			RelPath: d.RelPath, Kind: d.Kind,
+			Size: d.Size, Mtime: d.MTime, Sha256: d.SHA256,
+		})
+	}
+	for _, d := range res.DataModExes {
+		out.DataModExes = append(out.DataModExes, &pb.TTWExeDelta{
+			RelPath: d.RelPath, Kind: d.Kind,
+			Size: d.Size, Mtime: d.MTime, Sha256: d.SHA256,
+		})
+	}
+	return out, nil
+}
+
+func (s *gorganizerServer) SetTTWLauncherExe(_ context.Context, req *pb.SetTTWLauncherExeRequest) (*pb.SetTTWLauncherExeResponse, error) {
+	if err := s.ctrl.SetTTWLauncherExe(req.GetRelPath()); err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.SetTTWLauncherExeResponse{}, nil
+}
+
+func (s *gorganizerServer) VerifyTTWIntegrity(_ context.Context, _ *pb.VerifyTTWIntegrityRequest) (*pb.VerifyTTWIntegrityResponse, error) {
+	if err := s.ctrl.VerifyTTWIntegrity(); err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.VerifyTTWIntegrityResponse{}, nil
+}
+
+func (s *gorganizerServer) TranslateWinePath(_ context.Context, req *pb.TranslateWinePathRequest) (*pb.TranslateWinePathResponse, error) {
+	out, err := s.ctrl.TranslateWinePath(req.GetGameId(), req.GetUnixPath())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.TranslateWinePathResponse{WinePath: out}, nil
 }
 
 func profileToProto(p *ProfileResult) *pb.Profile {

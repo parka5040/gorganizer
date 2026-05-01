@@ -15,7 +15,7 @@ DownloadsRowDelegate::DownloadsRowDelegate(QObject* parent)
 static QColor phaseColor(DownloadPhase phase, bool merged, const QPalette& palette)
 {
     if (merged && phase == DownloadPhase::Installed)
-        return QColor(120, 140, 200); // muted blue distinguishes merged from a fresh install
+        return QColor(120, 140, 200);
     switch (phase) {
         case DownloadPhase::Downloading: return QColor(70, 140, 220);
         case DownloadPhase::Downloaded:  return QColor(120, 170, 220);
@@ -55,7 +55,6 @@ void DownloadsRowDelegate::paint(QPainter* painter, const QStyleOptionViewItem& 
     int pct = index.data(DownloadsModel::ProgressRole).toInt();
     bool merged = index.data(DownloadsModel::MergedRole).toBool();
 
-    // Draw selection / alternating-row background first.
     QStyleOptionViewItem opt = option;
     initStyleOption(&opt, index);
     opt.text.clear();
@@ -64,7 +63,6 @@ void DownloadsRowDelegate::paint(QPainter* painter, const QStyleOptionViewItem& 
     const QRect r = option.rect.adjusted(4, 4, -4, -4);
     const QString label = phaseText(phase, merged);
 
-    // Terminal states: just draw a tinted chip with the label, no progress bar.
     const bool terminal = (phase == DownloadPhase::Installed
                         || phase == DownloadPhase::Downloaded
                         || phase == DownloadPhase::Uninstalled
@@ -85,25 +83,15 @@ void DownloadsRowDelegate::paint(QPainter* painter, const QStyleOptionViewItem& 
         painter->setPen(option.palette.color(QPalette::Text));
         painter->drawText(chip, Qt::AlignCenter, label);
     } else {
-        // Hand-painted progress bar: guarantees a left-to-right fill that
-        // doesn't depend on QStyle's interpretation of cell geometry or
-        // theme QSS chunk rules. Earlier versions deferred to
-        // QStyle::CE_ProgressBar, which under Fusion + tight cell heights
-        // could appear to fill bottom-to-top.
         const QColor chunkColor = phaseColor(phase, merged, option.palette);
         QColor trackColor = option.palette.color(QPalette::Base);
         if (trackColor.alpha() == 0)
             trackColor = option.palette.color(QPalette::Window);
 
-        // Track.
         painter->setPen(QPen(option.palette.color(QPalette::Mid), 1));
         painter->setBrush(trackColor);
         painter->drawRoundedRect(r, 3, 3);
 
-        // Chunk (determinate). Indeterminate (pct < 0) leaves the track
-        // empty and just shows the label — we don't drive a timer from a
-        // delegate, so a true pulsing animation belongs in the activity
-        // log; the chip color still telegraphs the phase.
         if (pct > 0) {
             QRect chunkRect(r.x(), r.y(),
                             qMax(0, r.width() * qMin(pct, 100) / 100),
@@ -115,7 +103,6 @@ void DownloadsRowDelegate::paint(QPainter* painter, const QStyleOptionViewItem& 
             painter->setClipping(false);
         }
 
-        // Label, centered over the bar.
         const QString text = (pct < 0)
             ? label
             : QString("%1  %2%").arg(label).arg(pct);

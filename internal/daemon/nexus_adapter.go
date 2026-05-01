@@ -9,9 +9,6 @@ import (
 )
 
 // nexusV3Adapter narrows *download.NexusClient to the plugins.V3Adapter
-// surface. Lives in the daemon package because it's the wiring layer that
-// already imports both download and plugins; keeping it here lets plugins
-// stay free of an internal/download import.
 type nexusV3Adapter struct {
 	client *download.NexusClient
 }
@@ -50,7 +47,6 @@ func (a *nexusV3Adapter) RateLimitRemaining() (int, int) {
 
 // readSubdirs returns the names of immediate subdirectories under root.
 // Used to walk every mod folder under ModsDir(gameID). Hidden entries
-// (e.g. ".gorganizer-game.yaml") and Downloads/ are skipped.
 func readSubdirs(root string) ([]string, error) {
 	d, err := os.Open(root)
 	if err != nil {

@@ -1,7 +1,4 @@
-// runtime-probe is a one-shot diagnostic that prints which Steam Linux
-// Runtime entry point gorganizer would invoke for each installed Proton
-// version under the user's Steam root. Used as a smoke check after the
-// Sniper-wrapper change. Not built by default; invoke with `go run`.
+// runtime-probe is a diagnostic that prints which Steam Linux Runtime entry point would be invoked for each Proton version.
 package main
 
 import (
@@ -48,8 +45,6 @@ func main() {
 			fmt.Printf("%-40s  -> direct (no runtime found)\n", name)
 		} else {
 			fmt.Printf("%-40s  -> %s/_v2-entry-point\n", name, runtimeName)
-			// One real-world sanity check: confirm the entry point is
-			// executable. If not, our launch will EACCES.
 			if _, err := exec.LookPath(entry); err != nil {
 				if info, statErr := os.Stat(entry); statErr == nil && info.Mode()&0111 == 0 {
 					fmt.Printf("    WARNING: %s is not executable\n", entry)

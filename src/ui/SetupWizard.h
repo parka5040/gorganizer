@@ -18,11 +18,7 @@ public:
     explicit SetupWizard(AppConfig& config, QWidget* parent = nullptr);
 
     std::vector<GameInfo> selectedGames() const { return m_selectedGames; }
-    // Returns the validated API key the user pasted in the wizard, or an
-    // empty string if they skipped that page. Caller should hand this to
-    // GrpcClient::setNexusAPIKey() once the daemon is reachable so the
-    // running daemon picks up the key without a restart — saving to disk
-    // alone leaves the daemon's in-memory copy stale (and downloadMgr nil).
+    // Returns the validated API key, or empty if the user skipped that page.
     QString validatedApiKey() const { return m_apiKeyValid ? m_validatedApiKey : QString(); }
 
 private:

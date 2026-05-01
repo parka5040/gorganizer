@@ -11,38 +11,30 @@ import (
 
 func fakeFutureTime() time.Time { return time.Now().Add(2 * time.Second) }
 
-// buildTES4 builds a synthetic TES4 record header for tests. flags is the
-// 16-bit field at byte 8 (low 16 bits of the 32-bit on-disk word). Each
-// master in masters is emitted as MAST + DATA pair, matching what xEdit and
-// the Bethesda engines produce.
+// buildTES4 builds a synthetic TES4 record header for tests.
 func buildTES4(flags uint16, masters []string) []byte {
 	var sub []byte
-	// HEDR (12 bytes payload) — version float, numRecords int, nextObjectID int
 	hedr := make([]byte, 12)
 	sub = append(sub, 'H', 'E', 'D', 'R')
 	sub = append(sub, byte(len(hedr)), byte(len(hedr)>>8))
 	sub = append(sub, hedr...)
 
-	// CNAM (author)
 	auth := []byte("test\x00")
 	sub = append(sub, 'C', 'N', 'A', 'M')
 	sub = append(sub, byte(len(auth)), byte(len(auth)>>8))
 	sub = append(sub, auth...)
 
-	// MAST + DATA pairs.
 	for _, m := range masters {
 		mb := append([]byte(m), 0)
 		sub = append(sub, 'M', 'A', 'S', 'T')
 		sub = append(sub, byte(len(mb)), byte(len(mb)>>8))
 		sub = append(sub, mb...)
 
-		// DATA — 8 bytes filesize, ignored.
 		sub = append(sub, 'D', 'A', 'T', 'A')
 		sub = append(sub, 8, 0)
 		sub = append(sub, 0, 0, 0, 0, 0, 0, 0, 0)
 	}
 
-	// 24-byte TES4 record header, then sub.
 	out := make([]byte, 24)
 	copy(out[:4], "TES4")
 	binary.LittleEndian.PutUint32(out[4:8], uint32(len(sub)))
@@ -115,11 +107,9 @@ func TestParseHeader_TooSmall(t *testing.T) {
 }
 
 func TestParseHeader_OversizeSubrecord(t *testing.T) {
-	// Construct a malicious MAST claiming a 60000-byte payload — exceeds
-	// maxMasterLen (1024) and must be rejected.
 	var sub []byte
 	sub = append(sub, 'M', 'A', 'S', 'T')
-	sub = append(sub, 0x60, 0xEA) // 60000 LE
+	sub = append(sub, 0x60, 0xEA)
 	out := make([]byte, 24)
 	copy(out[:4], "TES4")
 	binary.LittleEndian.PutUint32(out[4:8], uint32(len(sub)+1024))
@@ -159,11 +149,9 @@ func TestHeaderCache_InvalidatesOnMtime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Rewrite with different masters and bumped mtime.
 	if err := os.WriteFile(path, buildTES4(0, []string{"Update.esm"}), 0644); err != nil {
 		t.Fatal(err)
 	}
-	// Bump mtime explicitly: some filesystems coalesce sub-second writes.
 	if err := os.Chtimes(path, fakeFutureTime(), fakeFutureTime()); err != nil {
 		t.Fatal(err)
 	}

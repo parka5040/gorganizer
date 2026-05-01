@@ -37,6 +37,7 @@ private slots:
     void onOpenIniEditor();
     void onAddNewGame();
     void onPatchFalloutTo4GB();
+    void onInstallTTW();
 
 private:
     void setupUi();
@@ -59,9 +60,10 @@ private:
     std::vector<GameInfo> m_managedGames;
     GameInfo m_activeGame;
     QString m_currentProfile = "Default";
-    QActionGroup* m_themeActions = nullptr;     // legacy: dark variant choice
-    QActionGroup* m_appearanceActions = nullptr; // System / Light / Dark
-    QAction* m_patch4GBAction = nullptr;         // Tools → Patch Fallout to 4GB
+    QActionGroup* m_themeActions = nullptr;
+    QActionGroup* m_appearanceActions = nullptr;
+    QAction* m_patch4GBAction = nullptr;
+    QAction* m_installTtwAction = nullptr;
 };
 
 } // namespace gorganizer

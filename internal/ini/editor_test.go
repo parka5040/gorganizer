@@ -21,7 +21,6 @@ func TestSet_InExistingSection(t *testing.T) {
 	if !strings.Contains(out, "SInvalidationFile=") {
 		t.Fatalf("SInvalidationFile missing after Set:\n%s", out)
 	}
-	// Should insert inside the Archive section, not at EOF.
 	archiveIdx := strings.Index(out, "[Archive]")
 	generalIdx := strings.Index(out, "[General]")
 	sInvIdx := strings.Index(out, "SInvalidationFile=")

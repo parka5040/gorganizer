@@ -4,10 +4,7 @@
 
 namespace gorganizer {
 
-// Delegate for the DownloadsModel's Status column. Renders a
-// color-coded progress bar plus phase label in-place, so a row can
-// transition from Downloading → Installing → Installed without any
-// widget swaps or full-row redraws.
+// Renders a color-coded progress bar with phase label for the Status column.
 class DownloadsRowDelegate : public QStyledItemDelegate {
     Q_OBJECT
 public:

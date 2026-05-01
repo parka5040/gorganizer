@@ -13,11 +13,6 @@ import (
 	"github.com/parka/gorganizer/internal/vfs"
 )
 
-// gorganizerctl is the offline maintenance CLI for gorganizer. It deliberately
-// talks to the same on-disk state as the daemon but never to the daemon
-// itself — the most common reason to reach for this tool is "the daemon won't
-// start because of a stale FUSE mount", and an IPC client would deadlock on
-// the same socket.
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -42,10 +37,7 @@ func main() {
 	}
 }
 
-// runRecoverConfirm performs the destructive Data → Data.orig restore the
-// user explicitly confirmed via the prompt printed by `recover`. Kept
-// separate so a misclick in the terminal can't escalate a diagnostic
-// `recover` into data loss.
+// runRecoverConfirm performs the destructive Data → Data.orig restore after explicit user confirmation.
 func runRecoverConfirm(args []string) int {
 	fs := flag.NewFlagSet("recover-confirm", flag.ExitOnError)
 	dataPath := fs.String("data-path", "", "absolute path to the Data dir to restore")
@@ -118,10 +110,6 @@ func runRecover(args []string) int {
 		Level: slog.LevelInfo,
 	})))
 
-	// Refuse to run while the daemon is live — the daemon owns the mount
-	// state and a concurrent fusermount would race against an active
-	// activate/deactivate. Probe the socket rather than just check for
-	// existence; a stale leftover socket file shouldn't block recovery.
 	sock := *socketPath
 	if sock == "" {
 		sock = config.SocketPath()
@@ -147,10 +135,6 @@ func runRecover(args []string) int {
 		return 1
 	}
 	if outcome.Pending != nil {
-		// CLI path: the user IS the human consenting. Print the reason
-		// and the explicit follow-up command rather than auto-restoring,
-		// so destructive action stays gated on a deliberate second
-		// invocation. (Future: add a `--restore-from-backup` flag.)
 		fmt.Fprintf(os.Stderr,
 			"\nrecovery is pending and requires manual confirmation:\n  %s\n\n"+
 				"Inspect %q before deciding. To proceed with the\n"+
@@ -164,12 +148,7 @@ func runRecover(args []string) int {
 	return 0
 }
 
-// resolveDataPath turns the recover subcommand's flags into an absolute Data
-// dir. Direct --data-path wins. Otherwise --game is resolved against the
-// daemon config; if config is missing or doesn't know the game, fall back to
-// scanning Steam libraries for an installed Bethesda title with the matching
-// internal id. The Steam scan is what makes recovery work on a fresh install
-// where the user never started the daemon.
+// resolveDataPath resolves the recover flags to an absolute Data dir, falling back to a Steam scan.
 func resolveDataPath(gameID, dataPathFlag string) (string, error) {
 	if dataPathFlag != "" {
 		return dataPathFlag, nil
@@ -194,9 +173,7 @@ func resolveDataPath(gameID, dataPathFlag string) (string, error) {
 	return "", fmt.Errorf("could not resolve %q: not in config and no Steam-detected install matches; pass --data-path explicitly", gameID)
 }
 
-// isSocketLive returns true when something is actively accepting on the
-// daemon socket. A stale socket file (left over from a kill -9) isn't a
-// blocker — the connect will fail with ECONNREFUSED and we proceed.
+// isSocketLive returns true when something is actively accepting on the daemon socket.
 func isSocketLive(sockPath string) bool {
 	if _, err := os.Stat(sockPath); err != nil {
 		return false

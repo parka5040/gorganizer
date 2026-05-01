@@ -36,7 +36,6 @@ bool initialChecked(FomodGroupType type, FomodPluginState state, int indexInGrou
         case FomodGroupType::SelectAll:
             return true;
         case FomodGroupType::SelectExactlyOne: {
-            // First Recommended; else first non-NotUsable.
             if (state == FomodPluginState::Recommended) return true;
             if (!firstEligibleTaken && indexInGroup == 0) return true;
             return false;
@@ -94,10 +93,6 @@ FomodInstallerDialog::FomodInstallerDialog(const FomodPlan& plan, QWidget* paren
 
 void FomodInstallerDialog::buildPages()
 {
-    // Legacy NMM-style FOMOD: just a fomod/info.xml, no install steps. Show
-    // a single info page (description + screenshot) and treat Accept as a
-    // confirmation that we may flat-copy everything outside fomod/. The
-    // companion C# script.cs is intentionally not executed.
     if (m_plan.legacyInfoOnly) {
         auto* page = new QWidget;
         auto* layout = new QVBoxLayout(page);
@@ -142,8 +137,6 @@ void FomodInstallerDialog::buildPages()
     for (int i = 0; i < m_plan.steps.size(); ++i)
         buildStepPage(m_plan.steps[i], i);
 
-    // If the FOMOD had no install steps (only requiredInstallFiles), add a
-    // confirmation page so the user still gets to review the mod name.
     if (m_plan.steps.isEmpty()) {
         auto* page = new QWidget;
         auto* layout = new QVBoxLayout(page);

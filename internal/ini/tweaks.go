@@ -7,11 +7,7 @@ type TweakEntry struct {
 	Value   string
 }
 
-// Tweak is a named preset — a human-readable bundle of INI edits that map
-// to a well-known modding configuration (archive invalidation, papyrus
-// logging, face-gen loading, etc.). All tweaks target the game's
-// {Game}Custom.ini so the primary INI stays untouched; for engines that
-// don't read Custom.ini natively the daemon merges it on push.
+// Tweak is a named preset of INI edits targeting the game's Custom.ini.
 type Tweak struct {
 	ID          string
 	Name        string
@@ -19,8 +15,6 @@ type Tweak struct {
 	Entries     []TweakEntry
 }
 
-// Canonical archive-invalidation blocks per engine family. These mirror
-// what MO2's "Toggle Archive Invalidation" writes.
 var tweakArchiveInvalidationOblivion = Tweak{
 	ID:   "archive_invalidation",
 	Name: "Archive Invalidation",
@@ -104,26 +98,19 @@ var tweakAllowConsole = Tweak{
 	},
 }
 
-// gameTweaks maps gameID → curated preset list. Each game only offers
-// tweaks that apply to its engine generation.
 var gameTweaks = map[string][]Tweak{
 	"oblivion":  {tweakArchiveInvalidationOblivion},
 	"fallout3":  {tweakArchiveInvalidationFallout, tweakFaceGenLoad, tweakDisableIntroFallout, tweakAllowConsole},
 	"falloutnv": {tweakArchiveInvalidationFallout, tweakFaceGenLoad, tweakDisableIntroFallout, tweakAllowConsole},
 	"skyrim":    {tweakArchiveInvalidationSkyrimLE, tweakDisableIntroSkyrim, tweakPapyrusLog},
 	"skyrimse":  {tweakDisableIntroSkyrim, tweakPapyrusLog},
-	// Fallout 4 and Starfield handle archive invalidation in-engine; no
-	// tweak presets offered here (by request). Morrowind omitted — its INI
-	// layout predates the archive concept entirely.
 }
 
-// AvailableTweaks returns the preset list for a game, or nil when none are
-// defined. Never returns nil entries, so a `range` on the result is safe.
+// AvailableTweaks returns the preset list for a game, or nil when none defined.
 func AvailableTweaks(gameID string) []Tweak {
 	return gameTweaks[gameID]
 }
 
-// FindTweak looks up a tweak by ID for a game.
 func FindTweak(gameID, tweakID string) (Tweak, bool) {
 	for _, t := range gameTweaks[gameID] {
 		if t.ID == tweakID {
@@ -133,9 +120,7 @@ func FindTweak(gameID, tweakID string) (Tweak, bool) {
 	return Tweak{}, false
 }
 
-// IsApplied returns true when every entry of the tweak is present in the
-// target INI document with its exact value. A single missing or mismatched
-// entry marks the tweak as not applied.
+// IsApplied returns true when every entry is present with its exact value.
 func (t Tweak) IsApplied(doc *Document) bool {
 	if doc == nil {
 		return false
@@ -149,14 +134,12 @@ func (t Tweak) IsApplied(doc *Document) bool {
 	return true
 }
 
-// Apply writes every tweak entry into the document.
 func (t Tweak) Apply(doc *Document) {
 	for _, e := range t.Entries {
 		doc.Set(e.Section, e.Key, e.Value)
 	}
 }
 
-// Unapply removes every tweak entry from the document.
 func (t Tweak) Unapply(doc *Document) {
 	for _, e := range t.Entries {
 		doc.Remove(e.Section, e.Key)

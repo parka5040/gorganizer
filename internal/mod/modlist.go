@@ -13,10 +13,7 @@ type ModListEntry struct {
 	Enabled bool
 }
 
-// ParseModList reads a modlist.txt from an io.Reader.
-// Lines starting with + are enabled, - are disabled.
-// Lines starting with # or empty lines are skipped.
-// Returns entries in file order (first = lowest priority).
+// ParseModList reads a modlist.txt; +Name = enabled, -Name = disabled.
 func ParseModList(r io.Reader) ([]ModListEntry, error) {
 	var entries []ModListEntry
 	scanner := bufio.NewScanner(r)
@@ -53,7 +50,6 @@ func ParseModList(r io.Reader) ([]ModListEntry, error) {
 	return entries, nil
 }
 
-// WriteModList writes entries to an io.Writer in modlist.txt format.
 func WriteModList(w io.Writer, entries []ModListEntry) error {
 	bw := bufio.NewWriter(w)
 	if _, err := bw.WriteString("# Gorganizer modlist — do not edit while daemon is running\n"); err != nil {

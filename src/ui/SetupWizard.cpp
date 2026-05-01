@@ -26,14 +26,7 @@
 
 namespace {
 
-// Script extender install lives in the main-window Run combo now — the
-// wizard no longer offers it (would just duplicate a click for no reason).
-// The daemon's InstallScriptExtender RPC is the single source of truth for
-// the Nexus-backed download flow.
-
-// Persist the API key to the daemon's config.json directly (the wizard runs
-// before the daemon is spawned). Matches internal/config/config.go JSON shape
-// so the daemon reads it on startup.
+// Persists the API key to the daemon's config.json directly (wizard runs before daemon spawn).
 bool saveNexusApiKeyToConfig(const QString& apiKey)
 {
     QString configDir = QString::fromUtf8(qgetenv("XDG_CONFIG_HOME"));
@@ -88,21 +81,19 @@ void SetupWizard::accept()
 {
     m_config.markSetupComplete();
 
-    std::vector<uint32_t> ids;
+    std::vector<QString> shortNames;
     for (const auto& g : m_selectedGames)
-        ids.push_back(g.appId);
-    m_config.setManagedGames(ids);
+        shortNames.push_back(g.shortName);
+    m_config.setManagedGames(shortNames);
 
     if (!m_selectedGames.empty())
-        m_config.setActiveGameAppId(m_selectedGames.front().appId);
+        m_config.setActiveGameShortName(m_selectedGames.front().shortName);
 
     if (m_apiKeyValid && !m_validatedApiKey.isEmpty())
         saveNexusApiKeyToConfig(m_validatedApiKey);
 
     QWizard::accept();
 }
-
-// --- Page 1: Welcome ---
 
 QWizardPage* SetupWizard::createWelcomePage()
 {
@@ -124,8 +115,6 @@ QWizardPage* SetupWizard::createWelcomePage()
     layout->addStretch();
     return page;
 }
-
-// --- Page 2: Steam Detection ---
 
 QWizardPage* SetupWizard::createSteamDetectionPage()
 {
@@ -184,7 +173,6 @@ QWizardPage* SetupWizard::createSteamDetectionPage()
                 .arg(QString::fromStdString(detected->installDir.string())));
     });
 
-    // Run detection when page is shown
     connect(this, &QWizard::currentIdChanged, this, [this](int id) {
         if (id != 1) return;
 
@@ -214,8 +202,6 @@ QWizardPage* SetupWizard::createSteamDetectionPage()
 
     return page;
 }
-
-// --- Page 3: Game Selection ---
 
 class GameSelectionPage : public QWizardPage {
 public:
@@ -263,11 +249,35 @@ QWizardPage* SetupWizard::createGameSelectionPage()
         if (id != 2) return;
 
         m_selectionList->clear();
+        bool hasFO3 = false, hasFNV = false;
+        bool sawTTW = false;
         for (const auto& game : m_detectedGames) {
-            auto* item = new QListWidgetItem(game.name, m_selectionList);
+            QString label = game.name;
+            if (game.shortName == "ttw") {
+                sawTTW = true;
+                label += " (install required after setup)";
+            }
+            auto* item = new QListWidgetItem(label, m_selectionList);
             item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
             item->setCheckState(Qt::Checked);
-            item->setData(Qt::UserRole, game.appId);
+            item->setData(Qt::UserRole, game.shortName);
+            if (game.shortName == "fallout3") hasFO3 = true;
+            if (game.shortName == "falloutnv") hasFNV = true;
+        }
+        if (hasFO3 && hasFNV && !sawTTW) {
+            auto* item = new QListWidgetItem(
+                "Tale of Two Wastelands (install required after setup)",
+                m_selectionList);
+            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+            item->setCheckState(Qt::Unchecked);
+            item->setData(Qt::UserRole, QString("ttw"));
+        } else if (!sawTTW) {
+            auto* item = new QListWidgetItem(
+                "Tale of Two Wastelands — requires Fallout 3 and Fallout: New Vegas",
+                m_selectionList);
+            item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
+            item->setData(Qt::UserRole, QString("ttw-disabled"));
+            item->setToolTip("Install both Fallout 3 and Fallout: New Vegas via Steam to enable.");
         }
         emit page->completeChanged();
     });
@@ -278,8 +288,6 @@ QWizardPage* SetupWizard::createGameSelectionPage()
 
     return page;
 }
-
-// --- Page 4: Nexus API Key ---
 
 QWizardPage* SetupWizard::createApiKeyPage()
 {
@@ -335,8 +343,6 @@ QWizardPage* SetupWizard::createApiKeyPage()
 
 void SetupWizard::validateApiKey(const QString& key)
 {
-    // Probe call to v3 mirrors NexusClient.ValidateAPIKey in Go. 200 = valid,
-    // 401/403 = invalid key, anything else = transient failure.
     m_apiKeyStatus->setText("<span style='color:#888;'>Validating...</span>");
     m_apiKeyValidateBtn->setEnabled(false);
 
@@ -379,8 +385,6 @@ void SetupWizard::validateApiKey(const QString& key)
     }
 }
 
-// --- Page 5: Directory Setup ---
-
 QWizardPage* SetupWizard::createDirectorySetupPage()
 {
     auto* page = new QWizardPage;
@@ -396,17 +400,22 @@ QWizardPage* SetupWizard::createDirectorySetupPage()
     connect(this, &QWizard::currentIdChanged, this, [this](int id) {
         if (id != 4) return;
 
-        // Collect the currently-selected games (re-syncs if the user back-
-        // navigated to change the checklist).
         m_selectedGames.clear();
         for (int i = 0; i < m_selectionList->count(); ++i) {
             auto* item = m_selectionList->item(i);
             if (item->checkState() != Qt::Checked)
                 continue;
-            uint32_t appId = item->data(Qt::UserRole).toUInt();
-            auto game = GameInfo::findIn(m_detectedGames, appId);
-            if (game)
-                m_selectedGames.push_back(*game);
+            QString shortName = item->data(Qt::UserRole).toString();
+            if (shortName == "ttw-disabled")
+                continue;
+            auto it = std::find_if(m_detectedGames.begin(), m_detectedGames.end(),
+                [&shortName](const GameInfo& g) { return g.shortName == shortName; });
+            if (it != m_detectedGames.end()) {
+                m_selectedGames.push_back(*it);
+                continue;
+            }
+            if (auto known = GameInfo::findByShortName(shortName))
+                m_selectedGames.push_back(*known);
         }
 
         auto configDir = m_config.configDir();
@@ -439,8 +448,6 @@ QWizardPage* SetupWizard::createDirectorySetupPage()
 
     return page;
 }
-
-// --- Page 6: Finish ---
 
 QWizardPage* SetupWizard::createFinishPage()
 {
