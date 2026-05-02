@@ -365,9 +365,11 @@ public:
     void setModList(const QString& gameId, const QString& profileName,
                     const std::vector<GrpcModListEntry>& entries);
     bool listSeparators(const QString& gameId, const QString& profileName,
-                        std::vector<GrpcSeparator>& out, QString& errorOut);
+                        std::vector<GrpcSeparator>& out, bool& viewEnabledOut,
+                        QString& errorOut);
     bool setSeparators(const QString& gameId, const QString& profileName,
-                       const std::vector<GrpcSeparator>& seps, QString& errorOut);
+                       const std::vector<GrpcSeparator>& seps, bool viewEnabled,
+                       QString& errorOut);
 
     void mountVfs(const QString& gameId, const QString& profileName);
     // Auto-swap unmounts the conflicting game in the same mutex group (FNV/TTW).

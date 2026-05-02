@@ -9,6 +9,7 @@
 
 class QDropEvent;
 class QCheckBox;
+class QPushButton;
 
 namespace gorganizer {
 
@@ -93,7 +94,10 @@ private:
     void renameSeparator(int row);
     void removeSeparator(int row);
     void toggleCollapseAt(int row);
+    void moveSeparatorTo(int row, bool toTop);
     void persistSeparators();
+    void onAddSeparatorClicked();
+    void groupByCategory();
     // Sets/unsets a single top-level key in metadata.yaml without disturbing other lines.
     static void patchMetadataField(const QString& yamlPath, const QString& key,
                                     const QString& value);
@@ -103,6 +107,7 @@ private:
     QStandardItemModel* m_model;
     QWidget* m_placeholder;
     QCheckBox* m_visualCheck = nullptr;
+    QPushButton* m_addSeparatorBtn = nullptr;
 
     std::vector<GrpcFileConflict> m_conflicts;
     void repaintConflictHighlights();

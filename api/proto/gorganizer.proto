@@ -390,11 +390,13 @@ message ListSeparatorsRequest {
 }
 message ListSeparatorsResponse {
   repeated Separator separators = 1;
+  bool view_enabled = 2;
 }
 message SetSeparatorsRequest {
   string game_id = 1;
   string profile_name = 2;
   repeated Separator separators = 3;
+  bool view_enabled = 4;
 }
 message SetSeparatorsResponse {}
 

@@ -153,8 +153,8 @@ type ProfileController interface {
 	DeleteProfile(gameID, name string) error
 	GetModList(gameID, profileName string) ([]ModListEntryResult, error)
 	SetModList(gameID, profileName string, entries []ModListEntryResult) error
-	ListSeparators(gameID, profileName string) ([]SeparatorResult, error)
-	SetSeparators(gameID, profileName string, seps []SeparatorResult) error
+	ListSeparators(gameID, profileName string) ([]SeparatorResult, bool, error)
+	SetSeparators(gameID, profileName string, seps []SeparatorResult, viewEnabled bool) error
 }
 
 // SeparatorResult is one MO2-style visual separator row in the mod list.

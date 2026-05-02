@@ -41,26 +41,27 @@ func (d *Daemon) writeTrueIndexes(gameID string, entries []mod.ModListEntry) {
 	}
 }
 
-// ListSeparators returns the profile's stored separator layout. An empty
-// slice is a valid response (first-run / user deleted them all).
-func (d *Daemon) ListSeparators(gameID, profileName string) ([]ipc.SeparatorResult, error) {
+// ListSeparators returns the profile's stored separator layout plus the
+// persistent "Separator View" checkbox state. Both default to empty/false
+// on first run.
+func (d *Daemon) ListSeparators(gameID, profileName string) ([]ipc.SeparatorResult, bool, error) {
 	dir := d.profileMgr.ProfileDir(gameID, profileName)
-	list, err := separators.Load(dir)
+	layout, err := separators.LoadLayout(dir)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	out := make([]ipc.SeparatorResult, len(list))
-	for i, s := range list {
+	out := make([]ipc.SeparatorResult, len(layout.Separators))
+	for i, s := range layout.Separators {
 		out[i] = ipc.SeparatorResult{
 			Name:        s.Name,
 			VisualIndex: s.VisualIndex,
 			Collapsed:   s.Collapsed,
 		}
 	}
-	return out, nil
+	return out, layout.ViewEnabled, nil
 }
 
-func (d *Daemon) SetSeparators(gameID, profileName string, seps []ipc.SeparatorResult) error {
+func (d *Daemon) SetSeparators(gameID, profileName string, seps []ipc.SeparatorResult, viewEnabled bool) error {
 	dir := d.profileMgr.ProfileDir(gameID, profileName)
 	out := make([]separators.Separator, len(seps))
 	for i, s := range seps {
@@ -70,5 +71,8 @@ func (d *Daemon) SetSeparators(gameID, profileName string, seps []ipc.SeparatorR
 			Collapsed:   s.Collapsed,
 		}
 	}
-	return separators.Save(dir, out)
+	return separators.SaveLayout(dir, separators.Layout{
+		ViewEnabled: viewEnabled,
+		Separators:  out,
+	})
 }

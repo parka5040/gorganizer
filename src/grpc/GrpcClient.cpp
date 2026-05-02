@@ -724,7 +724,8 @@ bool GrpcClient::extractOverwriteToMod(const QString& gameId, const QString& mod
 }
 
 bool GrpcClient::listSeparators(const QString& gameId, const QString& profileName,
-                                 std::vector<GrpcSeparator>& out, QString& errorOut)
+                                 std::vector<GrpcSeparator>& out, bool& viewEnabledOut,
+                                 QString& errorOut)
 {
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
@@ -744,11 +745,13 @@ bool GrpcClient::listSeparators(const QString& gameId, const QString& profileNam
             sp.collapsed(),
         });
     }
+    viewEnabledOut = resp.view_enabled();
     return true;
 }
 
 bool GrpcClient::setSeparators(const QString& gameId, const QString& profileName,
-                                const std::vector<GrpcSeparator>& seps, QString& errorOut)
+                                const std::vector<GrpcSeparator>& seps, bool viewEnabled,
+                                QString& errorOut)
 {
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
@@ -762,6 +765,7 @@ bool GrpcClient::setSeparators(const QString& gameId, const QString& profileName
         sp->set_visual_index(g.visualIndex.toStdString());
         sp->set_collapsed(g.collapsed);
     }
+    req.set_view_enabled(viewEnabled);
     gorganizer::v1::SetSeparatorsResponse resp;
     auto s = stub->SetSeparators(&ctx, req, &resp);
     if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }

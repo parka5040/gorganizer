@@ -195,7 +195,7 @@ func (s *gorganizerServer) SetModList(_ context.Context, req *pb.SetModListReque
 }
 
 func (s *gorganizerServer) ListSeparators(_ context.Context, req *pb.ListSeparatorsRequest) (*pb.ListSeparatorsResponse, error) {
-	seps, err := s.ctrl.ListSeparators(req.GetGameId(), req.GetProfileName())
+	seps, viewEnabled, err := s.ctrl.ListSeparators(req.GetGameId(), req.GetProfileName())
 	if err != nil {
 		return nil, grpcError(err)
 	}
@@ -203,7 +203,7 @@ func (s *gorganizerServer) ListSeparators(_ context.Context, req *pb.ListSeparat
 	for i, s := range seps {
 		out[i] = &pb.Separator{Name: s.Name, VisualIndex: s.VisualIndex, Collapsed: s.Collapsed}
 	}
-	return &pb.ListSeparatorsResponse{Separators: out}, nil
+	return &pb.ListSeparatorsResponse{Separators: out, ViewEnabled: viewEnabled}, nil
 }
 
 func (s *gorganizerServer) SetSeparators(_ context.Context, req *pb.SetSeparatorsRequest) (*pb.SetSeparatorsResponse, error) {
@@ -212,7 +212,7 @@ func (s *gorganizerServer) SetSeparators(_ context.Context, req *pb.SetSeparator
 	for i, sp := range in {
 		seps[i] = SeparatorResult{Name: sp.GetName(), VisualIndex: sp.GetVisualIndex(), Collapsed: sp.GetCollapsed()}
 	}
-	if err := s.ctrl.SetSeparators(req.GetGameId(), req.GetProfileName(), seps); err != nil {
+	if err := s.ctrl.SetSeparators(req.GetGameId(), req.GetProfileName(), seps, req.GetViewEnabled()); err != nil {
 		return nil, grpcError(err)
 	}
 	return &pb.SetSeparatorsResponse{}, nil

@@ -17,25 +17,34 @@ type Separator struct {
 	Collapsed   bool
 }
 
+// Layout bundles the per-profile separator order with the persistent
+// "Separator View" checkbox state. Both live in separators.yaml so the
+// view follows the profile.
+type Layout struct {
+	ViewEnabled bool
+	Separators  []Separator
+}
+
 // Index returns the separator's visual index as a uint64; 0 on parse failure.
 func (s Separator) Index() uint64 {
 	v, _ := strconv.ParseUint(strings.TrimSpace(s.VisualIndex), 16, 64)
 	return v
 }
 
-// Load reads separators.yaml from the given profile directory.
-func Load(profileDir string) ([]Separator, error) {
+// LoadLayout reads separators.yaml from the given profile directory.
+// Missing file → empty layout with ViewEnabled=false.
+func LoadLayout(profileDir string) (Layout, error) {
 	path := filepath.Join(profileDir, "separators.yaml")
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return Layout{}, nil
 		}
-		return nil, fmt.Errorf("opening %s: %w", path, err)
+		return Layout{}, fmt.Errorf("opening %s: %w", path, err)
 	}
 	defer f.Close()
 
-	var out []Separator
+	var out Layout
 	var cur *Separator
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -46,13 +55,10 @@ func Load(profileDir string) ([]Separator, error) {
 		}
 		if strings.HasPrefix(line, "- ") {
 			if cur != nil {
-				out = append(out, *cur)
+				out.Separators = append(out.Separators, *cur)
 			}
 			cur = &Separator{}
 			line = strings.TrimPrefix(line, "- ")
-		}
-		if cur == nil {
-			continue
 		}
 		k, v, ok := strings.Cut(line, ":")
 		if !ok {
@@ -60,6 +66,13 @@ func Load(profileDir string) ([]Separator, error) {
 		}
 		k = strings.TrimSpace(k)
 		v = strings.TrimSpace(strings.Trim(strings.TrimSpace(v), `"`))
+		// Top-level keys (no leading "- ", no current separator block).
+		if cur == nil {
+			if k == "view_enabled" {
+				out.ViewEnabled = (v == "true")
+			}
+			continue
+		}
 		switch k {
 		case "name":
 			cur.Name = v
@@ -70,13 +83,13 @@ func Load(profileDir string) ([]Separator, error) {
 		}
 	}
 	if cur != nil {
-		out = append(out, *cur)
+		out.Separators = append(out.Separators, *cur)
 	}
 	return out, scanner.Err()
 }
 
-// Save writes separators.yaml atomically.
-func Save(profileDir string, sep []Separator) error {
+// SaveLayout writes separators.yaml atomically.
+func SaveLayout(profileDir string, l Layout) error {
 	if err := os.MkdirAll(profileDir, 0755); err != nil {
 		return fmt.Errorf("creating %s: %w", profileDir, err)
 	}
@@ -84,8 +97,9 @@ func Save(profileDir string, sep []Separator) error {
 
 	var b strings.Builder
 	b.WriteString("# Gorganizer separators — visual grouping only. Safe to delete.\n")
+	fmt.Fprintf(&b, "view_enabled: %t\n", l.ViewEnabled)
 	b.WriteString("separators:\n")
-	for _, s := range sep {
+	for _, s := range l.Separators {
 		fmt.Fprintf(&b, "  - name: %q\n", s.Name)
 		fmt.Fprintf(&b, "    visual_index: %q\n", s.VisualIndex)
 		fmt.Fprintf(&b, "    collapsed: %t\n", s.Collapsed)
@@ -95,6 +109,23 @@ func Save(profileDir string, sep []Separator) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// Load is the legacy separator-only reader; kept for callers that don't
+// care about the view-enabled flag.
+func Load(profileDir string) ([]Separator, error) {
+	l, err := LoadLayout(profileDir)
+	if err != nil {
+		return nil, err
+	}
+	return l.Separators, nil
+}
+
+// Save is the legacy separator-only writer; preserves the existing
+// view_enabled value on disk so it isn't accidentally clobbered.
+func Save(profileDir string, sep []Separator) error {
+	prev, _ := LoadLayout(profileDir)
+	return SaveLayout(profileDir, Layout{ViewEnabled: prev.ViewEnabled, Separators: sep})
 }
 
 // FormatIndex converts a uint64 to the 16-hex-char form used in the yaml.

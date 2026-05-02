@@ -1,5 +1,6 @@
 #include "ModListWidget.h"
 
+#include <QApplication>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -57,6 +58,15 @@ int ModListTreeView::dropTargetRow(QDropEvent* event) const
     if (!idx.isValid())
         return model()->rowCount();
 
+    // Dropping anywhere on a separator row = "drop into this separator":
+    // place the dragged mod immediately below the separator so the
+    // walking-cursor in persistRowOrder records it as a member.
+    if (auto* m = static_cast<const QStandardItemModel*>(model())) {
+        auto* it = m->item(idx.row(), ModColName);
+        if (it && it->data(Qt::UserRole + 50).toInt() == RowKindSeparator)
+            return idx.row() + 1;
+    }
+
     auto rect = visualRect(idx);
     bool aboveHalf = (pos.y() < rect.center().y());
     return aboveHalf ? idx.row() : idx.row() + 1;
@@ -72,54 +82,75 @@ void ModListTreeView::dropEvent(QDropEvent* event)
         return;
     }
 
-    auto selected = selectionModel()->selectedRows(ModColName);
-    if (selected.isEmpty()) {
-        event->ignore();
-        return;
-    }
-
-    int sourceRow = selected.first().row();
-    int destRow = dropTargetRow(event);
-    int count = model()->rowCount();
-
-    if (sourceRow < 0 || sourceRow >= count)
-        return;
-    if (destRow < 0 || destRow > count)
-        return;
-    if (sourceRow == destRow || sourceRow + 1 == destRow)
-        return;
-
     auto* m = static_cast<QStandardItemModel*>(model());
+    int count = m->rowCount();
 
-    auto srcKindItem = m->item(sourceRow, ModColName);
-    if (srcKindItem && srcKindItem->data(Qt::UserRole + 50).toInt() == RowKindOverwrite) {
+    // Multi-select drag: collect every selected row that is draggable
+    // (mods and separators). The Overwrite pseudo-row is silently
+    // dropped from the set rather than rejecting the whole gesture.
+    QList<int> srcRows;
+    {
+        QSet<int> seen;
+        for (const auto& idx : selectionModel()->selectedRows(ModColName)) {
+            int r = idx.row();
+            if (r < 0 || r >= count || seen.contains(r))
+                continue;
+            auto* it = m->item(r, ModColName);
+            if (!it)
+                continue;
+            if (it->data(Qt::UserRole + 50).toInt() == RowKindOverwrite)
+                continue;
+            seen.insert(r);
+            srcRows.append(r);
+        }
+        std::sort(srcRows.begin(), srcRows.end());
+    }
+    if (srcRows.isEmpty()) {
         event->ignore();
         return;
     }
+
+    int destRow = dropTargetRow(event);
+    if (destRow < 0 || destRow > count) {
+        event->ignore();
+        return;
+    }
+    // Drops past the bottom map onto the Overwrite row, which is illegal.
     if (destRow >= count) {
         event->ignore();
         return;
     }
-    if (auto* destKindItem = m->item(destRow, ModColName);
-        destKindItem && destKindItem->data(Qt::UserRole + 50).toInt() == RowKindOverwrite) {
+    if (auto* destItem = m->item(destRow, ModColName);
+        destItem && destItem->data(Qt::UserRole + 50).toInt() == RowKindOverwrite) {
         event->ignore();
         return;
     }
 
-    auto* srcItem = m->item(sourceRow, ModColName);
-    if (!srcItem) { event->ignore(); return; }
+    // Where the block lands once the source rows are pulled out.
+    int landingRow = destRow;
+    for (int r : srcRows)
+        if (r < destRow) landingRow--;
 
-    auto items = m->takeRow(sourceRow);
-    int insertAt = destRow;
-    if (sourceRow < destRow)
-        insertAt--;
-    m->insertRow(insertAt, items);
+    QVector<QList<QStandardItem*>> taken(srcRows.size());
+    for (int i = srcRows.size() - 1; i >= 0; --i)
+        taken[i] = m->takeRow(srcRows[i]);
+
+    for (int i = 0; i < taken.size(); ++i)
+        m->insertRow(landingRow + i, taken[i]);
 
     m_owner->recalculatePriorities();
     m_owner->persistRowOrder();
 
-    selectionModel()->select(m->index(insertAt, 0),
-                             QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+    auto* sel = selectionModel();
+    sel->clearSelection();
+    QItemSelection range;
+    int lastCol = m->columnCount() - 1;
+    for (int i = 0; i < taken.size(); ++i) {
+        QModelIndex top = m->index(landingRow + i, 0);
+        QModelIndex bot = m->index(landingRow + i, lastCol);
+        range.select(top, bot);
+    }
+    sel->select(range, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
 
     event->setDropAction(Qt::CopyAction);
     event->accept();
@@ -221,11 +252,12 @@ ModListWidget::ModListWidget(GrpcClient* grpc, QWidget* parent)
     headerRow->addWidget(titleLabel);
     headerRow->addStretch();
 
-    m_visualCheck = new QCheckBox("Visual");
+    m_visualCheck = new QCheckBox("Separator View");
     m_visualCheck->setToolTip(
-        "Visual mode: separators are shown and dragging rearranges the\n"
+        "Separator View: separators are shown and dragging rearranges the\n"
         "mod list for display only. Turn off to edit the real load order\n"
-        "(lower = overrides higher) — separators disappear while off.");
+        "(lower = overrides higher) — separators disappear while off.\n"
+        "State is remembered per profile.");
     headerRow->addWidget(m_visualCheck);
     layout->addLayout(headerRow);
 
@@ -266,6 +298,18 @@ ModListWidget::ModListWidget(GrpcClient* grpc, QWidget* parent)
             this, &ModListWidget::onSelectionChanged);
 
     layout->addWidget(m_view);
+
+    auto* footerRow = new QHBoxLayout;
+    footerRow->addStretch();
+    m_addSeparatorBtn = new QPushButton("+ Separator");
+    m_addSeparatorBtn->setFlat(true);
+    m_addSeparatorBtn->setToolTip(
+        "Add a new separator above the Overwrite row.\n"
+        "Hold Shift to add at the top of the list instead.\n"
+        "(Existing separators can be repositioned via right-click → Move to Top/Bottom.)");
+    footerRow->addWidget(m_addSeparatorBtn);
+    layout->addLayout(footerRow);
+    connect(m_addSeparatorBtn, &QPushButton::clicked, this, &ModListWidget::onAddSeparatorClicked);
 
     m_placeholder = new QWidget;
     auto* placeholderLayout = new QVBoxLayout(m_placeholder);
@@ -361,8 +405,9 @@ void ModListWidget::scanModsFolder()
 
     if (!m_gameId.isEmpty() && !m_profileName.isEmpty()) {
         std::vector<GrpcSeparator> seps;
+        bool viewEnabled = false;
         QString err;
-        if (m_grpc->listSeparators(m_gameId, m_profileName, seps, err)) {
+        if (m_grpc->listSeparators(m_gameId, m_profileName, seps, viewEnabled, err)) {
             for (const auto& s : seps) {
                 SeparatorDef d;
                 d.name = s.name;
@@ -370,6 +415,9 @@ void ModListWidget::scanModsFolder()
                 d.collapsed = s.collapsed;
                 m_separators.push_back(d);
             }
+            m_visualMode = viewEnabled;
+            QSignalBlocker block(m_visualCheck);
+            m_visualCheck->setChecked(viewEnabled);
         }
     }
 
@@ -672,6 +720,10 @@ void ModListWidget::onContextMenu(const QPoint& pos)
         if (kind == RowKindSeparator) {
             menu.addAction("Toggle Collapse", [this, row] { toggleCollapseAt(row); });
             menu.addAction("Rename Separator...", [this, row] { renameSeparator(row); });
+            menu.addSeparator();
+            menu.addAction("Move to Top", [this, row] { moveSeparatorTo(row, true); });
+            menu.addAction("Move to Bottom", [this, row] { moveSeparatorTo(row, false); });
+            menu.addSeparator();
             menu.addAction("Remove Separator", [this, row] { removeSeparator(row); });
             menu.exec(m_view->viewport()->mapToGlobal(pos));
             return;
@@ -687,6 +739,7 @@ void ModListWidget::onContextMenu(const QPoint& pos)
         menu.addAction("Add Separator Here...", [this, insertAt] {
             createSeparatorAt(insertAt);
         });
+        menu.addAction("Group by Category", [this] { groupByCategory(); });
         menu.addSeparator();
     }
 
@@ -1110,6 +1163,7 @@ void ModListWidget::onVisualToggled(bool on)
 {
     m_visualMode = on;
     rebuildView();
+    persistSeparators();
 }
 
 void ModListWidget::rebuildView()
@@ -1417,7 +1471,7 @@ void ModListWidget::persistSeparators()
         out.push_back(std::move(g));
     }
     QString err;
-    m_grpc->setSeparators(m_gameId, m_profileName, out, err);
+    m_grpc->setSeparators(m_gameId, m_profileName, out, m_visualMode, err);
 }
 
 void ModListWidget::createSeparatorAt(int visualRow)
@@ -1511,6 +1565,40 @@ void ModListWidget::toggleCollapseAt(int row)
     }
     persistSeparators();
     rebuildView();
+}
+
+void ModListWidget::moveSeparatorTo(int row, bool toTop)
+{
+    auto* item = m_model->item(row, ModColName);
+    if (!item || item->data(Qt::UserRole + 50).toInt() != RowKindSeparator)
+        return;
+    QString name = item->data(Qt::UserRole + 102).toString();
+    if (name.isEmpty() || m_separators.empty())
+        return;
+
+    // Bracket the new index just outside the current min/max so rebuildView
+    // sorts this separator to the desired end. persistRowOrder then
+    // renumbers the whole list sequentially so we don't accumulate gaps.
+    quint64 lowest = parseHexIndex(m_separators.front().visualIndex);
+    quint64 highest = lowest;
+    for (const auto& s : m_separators) {
+        quint64 v = parseHexIndex(s.visualIndex);
+        if (v < lowest) lowest = v;
+        if (v > highest) highest = v;
+    }
+    quint64 newIdx = toTop
+        ? (lowest > 0x10 ? lowest - 0x10 : 0x1)
+        : (highest + 0x10);
+
+    for (auto& s : m_separators) {
+        if (s.name == name) {
+            s.visualIndex = formatHexIndex(newIdx);
+            break;
+        }
+    }
+
+    rebuildView();
+    persistRowOrder();
 }
 
 void ModListWidget::setCategoryForRow(int modIdx, const QString& category)
@@ -1688,6 +1776,87 @@ void ModListWidget::extractOverwriteSelected()
     QMessageBox::information(this, "Extract Complete",
         QString("Moved %1 file(s) into mod \"%2\".").arg(count).arg(name));
     scanModsFolder();
+}
+
+void ModListWidget::onAddSeparatorClicked()
+{
+    if (m_view->isHidden())
+        return;
+    if (!m_visualMode) {
+        // Toggling the checkbox flows through onVisualToggled →
+        // rebuildView + persistSeparators, leaving the model in a
+        // consistent visual-mode state before we insert.
+        m_visualCheck->setChecked(true);
+    }
+    bool atTop = QApplication::keyboardModifiers().testFlag(Qt::ShiftModifier);
+    int targetRow = atTop ? 0 : (m_model->rowCount() - 1);
+    if (targetRow < 0)
+        targetRow = 0;
+    createSeparatorAt(targetRow);
+}
+
+void ModListWidget::groupByCategory()
+{
+    QStringList cats;
+    QSet<QString> seen;
+    for (const auto& m : m_mods) {
+        QString c = m.category.trimmed();
+        if (c.isEmpty() || seen.contains(c))
+            continue;
+        seen.insert(c);
+        cats.append(c);
+    }
+    if (cats.isEmpty()) {
+        QMessageBox::information(this, "Group by Category",
+            "No mods have a category set. Assign categories first "
+            "(right-click a mod → Set Category).");
+        return;
+    }
+
+    auto reply = QMessageBox::question(this, "Group by Category",
+        QString("Create separators for %1 distinct categor%2 and assign every "
+                "categorized mod to its matching separator?\n\n"
+                "Mods currently in a different separator will be reassigned. "
+                "Mods with no category are left untouched.")
+            .arg(cats.size()).arg(cats.size() == 1 ? "y" : "ies"),
+        QMessageBox::Yes | QMessageBox::No);
+    if (reply != QMessageBox::Yes)
+        return;
+
+    QSet<QString> existing;
+    quint64 nextIdx = 0x10;
+    for (const auto& s : m_separators) {
+        existing.insert(s.name);
+        quint64 v = parseHexIndex(s.visualIndex);
+        if (v >= nextIdx) nextIdx = v + 0x10;
+    }
+    for (const auto& c : cats) {
+        if (existing.contains(c))
+            continue;
+        SeparatorDef d;
+        d.name = c;
+        d.collapsed = false;
+        d.visualIndex = formatHexIndex(nextIdx);
+        nextIdx += 0x10;
+        m_separators.push_back(d);
+    }
+
+    for (auto& meta : m_mods) {
+        QString c = meta.category.trimmed();
+        if (c.isEmpty() || meta.separator == c)
+            continue;
+        meta.separator = c;
+        QString yamlPath = m_modsDir + "/" + meta.folder + "/metadata.yaml";
+        patchMetadataField(yamlPath, "separator", c);
+    }
+
+    if (!m_visualMode) {
+        m_visualMode = true;
+        QSignalBlocker block(m_visualCheck);
+        m_visualCheck->setChecked(true);
+    }
+    rebuildView();
+    persistRowOrder();
 }
 
 } // namespace gorganizer
