@@ -100,32 +100,62 @@ void ModInstallDialog::startExtraction()
 
     auto* proc = new QProcess(this);
     m_extractProc = proc;
-    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+    // Merge stderr into stdout so we capture both with one read on finish; the
+    // old dialog discarded 7z's output entirely, which made "exit code N"
+    // failures impossible to diagnose.
+    proc->setProcessChannelMode(QProcess::MergedChannels);
+    connect(proc, &QProcess::finished,
             this, &ModInstallDialog::onExtractFinished);
 
-    QString sevenz = "7z";
-    QStringList args = {"x", "-o" + m_extractDir, "-y", m_archivePath};
-
+    QStringList sevenZArgs = {"x", "-o" + m_extractDir, "-y", m_archivePath};
+    m_extractToolUsed = "7z";
+    m_extractArgsUsed = sevenZArgs;
     m_statusLabel->setText("Extracting: " + QFileInfo(m_archivePath).fileName());
 
-    proc->start(sevenz, args);
-    if (!proc->waitForStarted(2000)) {
-        proc->start("bsdtar", {"xf", m_archivePath, "-C", m_extractDir});
-        if (!proc->waitForStarted(2000)) {
-            proc->start("unzip", {"-o", m_archivePath, "-d", m_extractDir});
-            if (!proc->waitForStarted(2000)) {
-                m_statusLabel->setText("Error: No extraction tool found (7z, bsdtar, or unzip).");
-                m_progressBar->hide();
-                return;
-            }
-        }
-    }
+    proc->start("7z", sevenZArgs);
+    if (proc->waitForStarted(2000)) return;
+
+    QStringList bsdtarArgs = {"xf", m_archivePath, "-C", m_extractDir};
+    m_extractToolUsed = "bsdtar";
+    m_extractArgsUsed = bsdtarArgs;
+    proc->start("bsdtar", bsdtarArgs);
+    if (proc->waitForStarted(2000)) return;
+
+    QStringList unzipArgs = {"-o", m_archivePath, "-d", m_extractDir};
+    m_extractToolUsed = "unzip";
+    m_extractArgsUsed = unzipArgs;
+    proc->start("unzip", unzipArgs);
+    if (proc->waitForStarted(2000)) return;
+
+    m_statusLabel->setText("Error: No extraction tool found (7z, bsdtar, or unzip).");
+    m_progressBar->hide();
 }
 
-void ModInstallDialog::onExtractFinished(int exitCode)
+void ModInstallDialog::onExtractFinished(int exitCode, QProcess::ExitStatus status)
 {
-    if (exitCode != 0) {
-        m_statusLabel->setText("Extraction failed (exit code " + QString::number(exitCode) + ").");
+    QString output;
+    if (m_extractProc)
+        output = QString::fromLocal8Bit(m_extractProc->readAllStandardOutput()).trimmed();
+
+    if (status == QProcess::CrashExit || exitCode != 0) {
+        QString reason = (status == QProcess::CrashExit)
+            ? QString("crashed (signal %1)").arg(exitCode)
+            : QString("exit code %1").arg(exitCode);
+
+        // Log the full failure so it's recoverable from a terminal-launched
+        // GUI. Status label is space-constrained, so it gets a short summary
+        // plus the last line of tool output.
+        QString cmdline = m_extractToolUsed + " " + m_extractArgsUsed.join(" ");
+        qWarning().noquote() << "Extraction failed:" << cmdline;
+        qWarning().noquote() << "  reason:" << reason;
+        if (!output.isEmpty())
+            qWarning().noquote() << "  output:" << output;
+
+        QString tail = output.section('\n', -1).trimmed();
+        QString shown = QString("Extraction failed (%1, %2).").arg(m_extractToolUsed, reason);
+        if (!tail.isEmpty())
+            shown += "\n" + tail;
+        m_statusLabel->setText(shown);
         m_progressBar->hide();
         return;
     }

@@ -155,16 +155,16 @@ void readInstallStep(QXmlStreamReader& xml, FomodStep& step)
 
 } // namespace
 
-// Best-effort parse of a legacy fomod/info.xml (handles UTF-16 BOMs).
+// Read an XML file as a QString, sniffing UTF-16 LE/BE BOMs. FOMOD authoring
+// tools (notably FOMOD Creation Tool on Windows) often emit UTF-16 without an
+// <?xml encoding="..."?> declaration; QXmlStreamReader fed a QIODevice in that
+// case assumes UTF-8 and fails. Decoding up front sidesteps that.
 namespace {
-void readLegacyInfo(const QString& fomodDir, FomodPlan& plan)
+QString readXmlAsString(const QString& path)
 {
-    QString infoPath = findChildCI(fomodDir, "info.xml");
-    if (infoPath.isEmpty())
-        return;
-    QFile f(infoPath);
+    QFile f(path);
     if (!f.open(QIODevice::ReadOnly))
-        return;
+        return {};
     QByteArray raw = f.readAll();
     f.close();
 
@@ -175,7 +175,17 @@ void readLegacyInfo(const QString& fomodDir, FomodPlan& plan)
         dec = QStringDecoder(QStringDecoder::Utf16BE);
     else
         dec = QStringDecoder(QStringDecoder::Utf8);
-    QString text = dec.decode(raw);
+    return dec.decode(raw);
+}
+
+void readLegacyInfo(const QString& fomodDir, FomodPlan& plan)
+{
+    QString infoPath = findChildCI(fomodDir, "info.xml");
+    if (infoPath.isEmpty())
+        return;
+    QString text = readXmlAsString(infoPath);
+    if (text.isEmpty())
+        return;
 
     QXmlStreamReader xml(text);
     while (!xml.atEnd() && !xml.hasError()) {
@@ -286,10 +296,10 @@ std::optional<FomodPlan> FomodParser::parse(const QString& extractRoot)
         return plan;
     }
 
-    QFile f(configPath);
-    if (!f.open(QIODevice::ReadOnly)) return std::nullopt;
+    QString text = readXmlAsString(configPath);
+    if (text.isEmpty()) return std::nullopt;
 
-    QXmlStreamReader xml(&f);
+    QXmlStreamReader xml(text);
     while (!xml.atEnd() && !xml.hasError()) {
         xml.readNext();
         if (!xml.isStartElement()) continue;

@@ -12,8 +12,9 @@
 #include <QThread>
 #include "FomodPlan.h"
 
+#include <QProcess>
+
 class QCloseEvent;
-class QProcess;
 
 namespace gorganizer {
 
@@ -45,7 +46,7 @@ signals:
     void fomodWizardClosed(const QString& archivePath);
 
 private slots:
-    void onExtractFinished(int exitCode);
+    void onExtractFinished(int exitCode, QProcess::ExitStatus status);
     void onInstallClicked();
     void onCancelClicked();
     void onWorkerFinished(bool ok, bool cancelled, int fileCount, const QString& err);
@@ -84,6 +85,8 @@ private:
     QString m_installDestDir;
 
     QPointer<QProcess> m_extractProc;
+    QString m_extractToolUsed;
+    QStringList m_extractArgsUsed;
 
     enum Phase { Extracting, Choosing, Installing, Cancelling, Done };
     Phase m_phase = Extracting;

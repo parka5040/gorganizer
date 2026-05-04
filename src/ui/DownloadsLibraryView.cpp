@@ -369,6 +369,7 @@ static QString modsDirectoryForGame(const QString& gameShortName)
         {"skyrim", "Skyrim_Mods"}, {"skyrimse", "SkyrimSE_Mods"},
         {"fallout3", "Fallout3_Mods"}, {"falloutnv", "FalloutNV_Mods"},
         {"fallout4", "Fallout4_Mods"}, {"starfield", "Starfield_Mods"},
+        {"ttw", "TTW_Mods"},
     };
     QByteArray root = qgetenv("GORGANIZER_ROOT");
     if (!root.isEmpty()) {
