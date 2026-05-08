@@ -257,6 +257,7 @@ void MainWindow::setupUi()
     auto* splitter = new QSplitter(Qt::Horizontal);
 
     m_modList = new ModListWidget(m_grpc);
+    m_modList->applyCollapsedSeparatorView(m_config.collapsedSeparatorView());
     splitter->addWidget(m_modList);
 
     m_rightTabs = new QTabWidget;
@@ -640,6 +641,10 @@ void MainWindow::onInstallTTW()
 void MainWindow::onOpenSettings()
 {
     SettingsDialog dlg(m_grpc, &m_config, this);
+    connect(&dlg, &SettingsDialog::collapsedSeparatorViewChanged,
+            this, [this](bool on) {
+                if (m_modList) m_modList->applyCollapsedSeparatorView(on);
+            });
     dlg.exec();
     if (m_themeActions) {
         QString current = m_config.preferredStyle();

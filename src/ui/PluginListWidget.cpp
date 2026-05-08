@@ -136,6 +136,8 @@ void LoadOrderTreeView::dropEvent(QDropEvent* event)
     }
 
     m_owner->recalculateIndices();
+    m_owner->revalidateOrderingIssues();
+    m_owner->persistOrderToDaemon();
 
     selectionModel()->select(m->index(insertAt, 0),
                              QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
@@ -476,6 +478,7 @@ void PluginListWidget::applyStatusToRow(int row, const GrpcPluginStatus& s)
 
 void PluginListWidget::onPluginStatusSnapshot(const std::vector<GrpcPluginStatus>& plugins)
 {
+    m_lastStatus.clear();
     QHash<QString, int> rowByName;
     rowByName.reserve(m_model->rowCount());
     for (int r = 0; r < m_model->rowCount(); ++r) {
@@ -483,6 +486,7 @@ void PluginListWidget::onPluginStatusSnapshot(const std::vector<GrpcPluginStatus
             rowByName.insert(it->text().toLower(), r);
     }
     for (const auto& s : plugins) {
+        m_lastStatus.insert(s.filename.toLower(), s);
         auto it = rowByName.constFind(s.filename.toLower());
         if (it == rowByName.constEnd()) continue;
         applyStatusToRow(it.value(), s);
@@ -491,6 +495,7 @@ void PluginListWidget::onPluginStatusSnapshot(const std::vector<GrpcPluginStatus
 
 void PluginListWidget::onPluginStatusUpdate(const GrpcPluginStatus& plugin)
 {
+    m_lastStatus.insert(plugin.filename.toLower(), plugin);
     for (int r = 0; r < m_model->rowCount(); ++r) {
         auto* it = m_model->item(r, ColPlugin);
         if (!it) continue;
@@ -498,6 +503,65 @@ void PluginListWidget::onPluginStatusUpdate(const GrpcPluginStatus& plugin)
             applyStatusToRow(r, plugin);
             return;
         }
+    }
+}
+
+void PluginListWidget::persistOrderToDaemon()
+{
+    if (!m_grpc || !m_game.detected || m_activeProfile.isEmpty())
+        return;
+    QStringList filenames;
+    filenames.reserve(m_model->rowCount());
+    for (int r = 0; r < m_model->rowCount(); ++r) {
+        if (auto* it = m_model->item(r, ColPlugin)) {
+            QString name = it->text();
+            if (!name.isEmpty())
+                filenames << name;
+        }
+    }
+    QString err;
+    if (!m_grpc->setPluginOrder(m_game.shortName, m_activeProfile, filenames, err)) {
+        qWarning().noquote() << "setPluginOrder failed:" << err;
+        return;
+    }
+    // Re-snapshot dependency analysis from the daemon's authoritative side
+    // so any newly-introduced violations (or resolutions we couldn't see
+    // client-side) appear immediately.
+    resubscribeStream();
+}
+
+void PluginListWidget::revalidateOrderingIssues()
+{
+    if (m_lastStatus.isEmpty()) return;
+
+    QHash<QString, int> rowByName;
+    rowByName.reserve(m_model->rowCount());
+    for (int r = 0; r < m_model->rowCount(); ++r) {
+        if (auto* it = m_model->item(r, ColPlugin))
+            rowByName.insert(it->text().toLower(), r);
+    }
+
+    for (int r = 0; r < m_model->rowCount(); ++r) {
+        auto* nameItem = m_model->item(r, ColPlugin);
+        if (!nameItem) continue;
+        QString key = nameItem->text().toLower();
+        auto cachedIt = m_lastStatus.constFind(key);
+        if (cachedIt == m_lastStatus.constEnd()) continue;
+
+        // Rebuild the issue list, dropping MasterOutOfOrder entries whose
+        // master is now ABOVE the dependent in the current model order
+        // (master row < dependent row → master loads first → no longer an issue).
+        GrpcPluginStatus revised = *cachedIt;
+        revised.issues.clear();
+        for (const auto& iss : cachedIt->issues) {
+            if (iss.kind == GrpcDepMasterOutOfOrder) {
+                auto mIt = rowByName.constFind(iss.master.toLower());
+                if (mIt != rowByName.constEnd() && mIt.value() < r)
+                    continue;
+            }
+            revised.issues.push_back(iss);
+        }
+        applyStatusToRow(r, revised);
     }
 }
 

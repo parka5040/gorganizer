@@ -151,6 +151,71 @@ func (p Plugin) TypeOrder() int {
 	}
 }
 
+// ApplyUserOrder reorders the slice in place so that plugins listed in
+// `userOrder` (case-insensitive filenames) appear in that order, while
+// plugins absent from `userOrder` keep their relative natural order at
+// the end. Canonical DLC ESMs in spec.CanonicalDLCOrder are pinned to
+// their canonical positions even if the user order omits them or places
+// them elsewhere — the engine refuses to load otherwise. Empty userOrder
+// is a no-op.
+func ApplyUserOrder(plugins []Plugin, spec Spec, userOrder []string) {
+	if len(userOrder) == 0 || len(plugins) == 0 {
+		return
+	}
+	canonical := make(map[string]struct{}, len(spec.CanonicalDLCOrder))
+	for _, name := range spec.CanonicalDLCOrder {
+		canonical[strings.ToLower(name)] = struct{}{}
+	}
+	rank := make(map[string]int, len(userOrder))
+	for i, name := range userOrder {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" {
+			continue
+		}
+		if _, isCanonical := canonical[key]; isCanonical {
+			continue
+		}
+		if _, dup := rank[key]; dup {
+			continue
+		}
+		rank[key] = i
+	}
+	if len(rank) == 0 {
+		return
+	}
+
+	type indexed struct {
+		p     Plugin
+		stamp int
+	}
+	indexed_ := make([]indexed, len(plugins))
+	for i, p := range plugins {
+		indexed_[i] = indexed{p: p, stamp: i}
+	}
+	notRanked := len(userOrder) + 1
+	sort.SliceStable(indexed_, func(i, j int) bool {
+		ai, aOk := rank[strings.ToLower(indexed_[i].p.Filename)]
+		bi, bOk := rank[strings.ToLower(indexed_[j].p.Filename)]
+		if !aOk && !bOk {
+			return indexed_[i].stamp < indexed_[j].stamp
+		}
+		if !aOk {
+			ai = notRanked
+		}
+		if !bOk {
+			bi = notRanked
+		}
+		return ai < bi
+	})
+	// Reapply canonical DLC pinning AFTER user order so canonical ESMs
+	// are guaranteed to be at the top of the ESM band regardless of what
+	// the user dragged around.
+	for i := range indexed_ {
+		plugins[i] = indexed_[i].p
+	}
+	ApplyCanonicalOrder(plugins, spec)
+}
+
 // ApplyCanonicalOrder sorts ESMs in spec.CanonicalDLCOrder first, then other ESMs.
 func ApplyCanonicalOrder(plugins []Plugin, spec Spec) {
 	if len(spec.CanonicalDLCOrder) == 0 {

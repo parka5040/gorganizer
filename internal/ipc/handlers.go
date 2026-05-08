@@ -674,6 +674,13 @@ func (s *gorganizerServer) WatchStatus(_ *pb.WatchStatusRequest, stream pb.Gorga
 	return nil
 }
 
+func (s *gorganizerServer) SetPluginOrder(_ context.Context, req *pb.SetPluginOrderRequest) (*pb.SetPluginOrderResponse, error) {
+	if err := s.ctrl.SetPluginOrder(req.GetGameId(), req.GetProfileName(), req.GetFilenames()); err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.SetPluginOrderResponse{}, nil
+}
+
 func (s *gorganizerServer) StreamPluginStatus(req *pb.StreamPluginStatusRequest, stream pb.Gorganizer_StreamPluginStatusServer) error {
 	ch, err := s.ctrl.StreamPluginStatus(stream.Context(), req.GetGameId(), req.GetProfileName())
 	if err != nil {

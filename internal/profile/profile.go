@@ -1,10 +1,12 @@
 package profile
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/parka/gorganizer/internal/mod"
@@ -174,6 +176,72 @@ func (pm *Manager) Delete(gameID, profileName string) error {
 	dir := pm.ProfileDir(gameID, profileName)
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("deleting profile %s: %w", dir, err)
+	}
+	return nil
+}
+
+// pluginOrderFile is the per-profile filename storing the user's plugin
+// load order (one filename per line, highest-priority first). Distinct
+// from plugins.txt because that gets regenerated from mod priority on
+// every game launch and the engine reads it; this file is the user's
+// authoritative override that the daemon reapplies during discovery.
+const pluginOrderFile = "plugin_order.txt"
+
+// LoadPluginOrder reads the saved per-profile plugin order. Returns nil
+// (no override) when the file is missing.
+func (pm *Manager) LoadPluginOrder(gameID, profileName string) ([]string, error) {
+	path := filepath.Join(pm.ProfileDir(gameID, profileName), pluginOrderFile)
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading plugin order %s: %w", path, err)
+	}
+	defer f.Close()
+
+	var out []string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		out = append(out, line)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("scanning plugin order %s: %w", path, err)
+	}
+	return out, nil
+}
+
+// SavePluginOrder writes the user's plugin order. Empty/nil clears the
+// override (the file is removed so DiscoverPlugins falls back to
+// natural-order discovery).
+func (pm *Manager) SavePluginOrder(gameID, profileName string, filenames []string) error {
+	dir := pm.ProfileDir(gameID, profileName)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("creating profile dir %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, pluginOrderFile)
+	if len(filenames) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing plugin order %s: %w", path, err)
+		}
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString("# gorganizer plugin order — highest-priority first.\n")
+	for _, name := range filenames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		b.WriteString(name)
+		b.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0644); err != nil {
+		return fmt.Errorf("writing plugin order %s: %w", path, err)
 	}
 	return nil
 }

@@ -1541,6 +1541,12 @@ func (d *Daemon) writePluginsTxt(gameID string, gc config.GameConfig, profileNam
 	if err != nil {
 		return fmt.Errorf("discovering plugins: %w", err)
 	}
+	plugins.ApplyCanonicalOrder(list, spec)
+	if userOrder, oerr := d.profileMgr.LoadPluginOrder(gameID, profileName); oerr == nil && len(userOrder) > 0 {
+		plugins.ApplyUserOrder(list, spec, userOrder)
+	} else if oerr != nil {
+		slog.Warn("loading plugin order failed", "game", gameID, "profile", profileName, "err", oerr)
+	}
 
 	destDir, err := inipkg.AppDataLocalPath(gc.SteamAppID, spec.AppDataSubdir)
 	if err != nil {

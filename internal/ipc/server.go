@@ -178,9 +178,11 @@ type ConflictController interface {
 	GetConflicts(gameID, profileName string) ([]FileConflictResult, error)
 }
 
-// PluginStatusController streams plugin dependency-analysis results.
+// PluginStatusController streams plugin dependency-analysis results and
+// accepts user-set plugin load order overrides.
 type PluginStatusController interface {
 	StreamPluginStatus(ctx context.Context, gameID, profileName string) (<-chan PluginStatusEventResult, error)
+	SetPluginOrder(gameID, profileName string, filenames []string) error
 }
 
 // ArchiveController — the Downloads tab lifecycle. Every archive-scope verb

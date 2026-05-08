@@ -35,6 +35,13 @@ public:
     void setAppearanceMode(const QString& mode);
     QString appearanceMode() const;
 
+    // Fuses Separator View and True View into one ordering. When on, the
+    // Separator View checkbox in the mod list is forced on and disabled,
+    // and any reorder writes the same index into both visual_index and
+    // true_index. Toggling off leaves any cross-stamping in place.
+    void setCollapsedSeparatorView(bool on);
+    bool collapsedSeparatorView() const;
+
     void setLastProfileFor(const QString& gameShortName, const QString& profileName);
     QString lastProfileFor(const QString& gameShortName) const;
 

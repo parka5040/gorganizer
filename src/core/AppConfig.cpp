@@ -147,6 +147,17 @@ QString AppConfig::appearanceMode() const
     return m;
 }
 
+void AppConfig::setCollapsedSeparatorView(bool on)
+{
+    m_settings.setValue("ui/collapsedSeparatorView", on);
+    m_settings.sync();
+}
+
+bool AppConfig::collapsedSeparatorView() const
+{
+    return m_settings.value("ui/collapsedSeparatorView", false).toBool();
+}
+
 void AppConfig::setLastProfileFor(const QString& gameShortName, const QString& profileName)
 {
     if (gameShortName.isEmpty() || profileName.isEmpty())

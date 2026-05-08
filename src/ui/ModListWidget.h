@@ -64,6 +64,12 @@ public:
 
     bool visualModeEnabled() const;
 
+public slots:
+    // Toggle the global "fuse separator+true views" setting. While on, the
+    // Separator View checkbox is forced on/disabled; reorders also stamp
+    // true_index to match visual_index. Off leaves any stamped indices alone.
+    void applyCollapsedSeparatorView(bool on);
+
 signals:
     void modToggled();
 
@@ -130,6 +136,7 @@ private:
     };
     std::vector<SeparatorDef> m_separators;
     bool m_visualMode = false;
+    bool m_collapsedSeparatorView = false;
     bool m_updatingModel = false;
 
     int m_sortColumn = ModColPriority;

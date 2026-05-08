@@ -181,6 +181,13 @@ service Gorganizer {
   // background workers. The frontend renders a Status column + row tint
   // and emits matching DependencyWarning entries to the Activity Log.
   rpc StreamPluginStatus(StreamPluginStatusRequest) returns (stream PluginStatusEvent);
+
+  // Persist a user-set plugin load order for a profile. The order is a
+  // list of plugin filenames (case-insensitive), highest-priority first.
+  // Plugins not in the list are appended after the override in their
+  // natural-discovery order. Canonical DLC ESM positions are preserved
+  // regardless of override (engine requires them in fixed order).
+  rpc SetPluginOrder(SetPluginOrderRequest) returns (SetPluginOrderResponse);
 }
 
 // --- Game messages ---
@@ -1141,6 +1148,17 @@ message PluginStatusEvent {
     PluginStatusUpdate update = 2;
   }
 }
+
+// SetPluginOrderRequest carries the user's drag-and-drop result from the
+// Plugins tab. Filenames are matched case-insensitively against discovered
+// plugins. Empty filenames vector clears the override.
+message SetPluginOrderRequest {
+  string game_id = 1;
+  string profile_name = 2;
+  repeated string filenames = 3;
+}
+
+message SetPluginOrderResponse {}
 
 // DependencyWarning is one entry routed to the Activity Log. Severity is
 // implied by kind (absent / out-of-order → error; disabled / soft → warning).

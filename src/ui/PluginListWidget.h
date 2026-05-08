@@ -3,15 +3,16 @@
 #include <QWidget>
 #include <QTreeView>
 #include <QStandardItemModel>
+#include <QHash>
 #include <vector>
 #include "GameInfo.h"
+#include "GrpcClient.h"
 
 class QDropEvent;
 
 namespace gorganizer {
 
 struct PluginEntry;
-struct GrpcPluginStatus;
 class GrpcClient;
 
 enum PluginRole {
@@ -70,6 +71,14 @@ private:
     void recalculateIndices();
     void applySort(int column, Qt::SortOrder order);
     void restoreLoadOrder();
+    // Re-evaluate cached MasterOutOfOrder issues against the current row
+    // positions and re-render. Called after a drag-drop reorder so warnings
+    // resolve in real time when the user manually fixes the order.
+    void revalidateOrderingIssues();
+    // Push the current model order to the daemon as the user-set plugin
+    // order. Called after a drop so plugins.txt + dep analysis pick up
+    // the change.
+    void persistOrderToDaemon();
 
     LoadOrderTreeView* m_view;
     QStandardItemModel* m_model;
@@ -81,6 +90,11 @@ private:
 
     int m_sortColumn = ColIndex;
     Qt::SortOrder m_sortOrder = Qt::AscendingOrder;
+
+    // Latest known dep-status per plugin (lowercased filename → status).
+    // Used by revalidateOrderingIssues so a drag-drop can clear stale
+    // MasterOutOfOrder warnings without round-tripping the daemon.
+    QHash<QString, GrpcPluginStatus> m_lastStatus;
 };
 
 } // namespace gorganizer

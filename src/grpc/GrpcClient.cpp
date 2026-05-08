@@ -772,6 +772,23 @@ bool GrpcClient::setSeparators(const QString& gameId, const QString& profileName
     return true;
 }
 
+bool GrpcClient::setPluginOrder(const QString& gameId, const QString& profileName,
+                                 const QStringList& filenames, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    gorganizer::v1::SetPluginOrderRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_profile_name(profileName.toStdString());
+    for (const auto& f : filenames)
+        req.add_filenames(f.toStdString());
+    gorganizer::v1::SetPluginOrderResponse resp;
+    auto s = stub->SetPluginOrder(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    return true;
+}
+
 bool GrpcClient::detectProtonVersions(std::vector<GrpcProtonVersion>& out, QString& errorOut)
 {
     if (!m_channel) { errorOut = "not connected"; return false; }

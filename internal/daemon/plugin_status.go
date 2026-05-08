@@ -13,6 +13,15 @@ import (
 	"github.com/parka/gorganizer/internal/plugins"
 )
 
+// SetPluginOrder persists a user-set plugin load order for a profile.
+// An empty filenames slice clears any saved override.
+func (d *Daemon) SetPluginOrder(gameID, profileName string, filenames []string) error {
+	if _, ok := d.config.Games[gameID]; !ok {
+		return fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
+	}
+	return d.profileMgr.SavePluginOrder(gameID, profileName, filenames)
+}
+
 // StreamPluginStatus is the daemon-side implementation of the IPC streaming
 func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName string) (<-chan ipc.PluginStatusEventResult, error) {
 	gc, ok := d.config.Games[gameID]
@@ -48,6 +57,11 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 		return nil, fmt.Errorf("discovering plugins: %w", err)
 	}
 	plugins.ApplyCanonicalOrder(discovered, spec)
+	if userOrder, err := d.profileMgr.LoadPluginOrder(gameID, profileName); err == nil && len(userOrder) > 0 {
+		plugins.ApplyUserOrder(discovered, spec, userOrder)
+	} else if err != nil {
+		slog.Warn("loading plugin order failed", "game", gameID, "profile", profileName, "err", err)
+	}
 
 	cache := d.pluginHeaderCacheLazy()
 	statuses := plugins.AnalyzeHardDeps(ctx, cache, discovered, allFolders, spec, nil)

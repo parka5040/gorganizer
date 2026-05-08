@@ -470,6 +470,11 @@ public:
     void subscribePluginStatus(const QString& gameId, const QString& profileName);
     void unsubscribePluginStatus();
 
+    // Persist a user-set plugin load order. Synchronous; returns false on
+    // RPC failure with a message in errorOut.
+    bool setPluginOrder(const QString& gameId, const QString& profileName,
+                        const QStringList& filenames, QString& errorOut);
+
     void setNexusAPIKey(const QString& apiKey);
 
     void shutdownDaemon();

@@ -28,6 +28,7 @@
 #include <QLineEdit>
 #include <QDialogButtonBox>
 #include <algorithm>
+#include <limits>
 
 namespace gorganizer {
 
@@ -50,26 +51,57 @@ ModListTreeView::ModListTreeView(ModListWidget* owner, QWidget* parent)
 {
 }
 
+// Locate the pinned Overwrite row by its kind tag rather than by row position
+// — defensive against future pinned-bottom rows being added.
+static int findOverwriteRow(const QStandardItemModel* m)
+{
+    if (!m) return -1;
+    for (int r = m->rowCount() - 1; r >= 0; --r) {
+        auto* it = m->item(r, ModColName);
+        if (it && it->data(Qt::UserRole + 50).toInt() == RowKindOverwrite)
+            return r;
+    }
+    return -1;
+}
+
 int ModListTreeView::dropTargetRow(QDropEvent* event) const
 {
+    auto* m = static_cast<const QStandardItemModel*>(model());
     auto pos = event->position().toPoint();
     auto idx = indexAt(pos);
 
+    int overwriteRow = findOverwriteRow(m);
+    int floor = (overwriteRow >= 0) ? overwriteRow : m->rowCount();
+
+    // Off the end of the list = "drop at the very bottom" = just above Overwrite.
     if (!idx.isValid())
-        return model()->rowCount();
+        return floor;
 
     // Dropping anywhere on a separator row = "drop into this separator":
-    // place the dragged mod immediately below the separator so the
-    // walking-cursor in persistRowOrder records it as a member.
-    if (auto* m = static_cast<const QStandardItemModel*>(model())) {
-        auto* it = m->item(idx.row(), ModColName);
-        if (it && it->data(Qt::UserRole + 50).toInt() == RowKindSeparator)
-            return idx.row() + 1;
+    // walk forward until the next separator or Overwrite, and land there
+    // — that puts the dropped mod at the BOTTOM of the highlighted group.
+    if (auto* it = m->item(idx.row(), ModColName);
+        it && it->data(Qt::UserRole + 50).toInt() == RowKindSeparator) {
+        for (int r = idx.row() + 1; r < m->rowCount(); ++r) {
+            auto* nx = m->item(r, ModColName);
+            if (!nx) continue;
+            int kind = nx->data(Qt::UserRole + 50).toInt();
+            if (kind == RowKindSeparator || kind == RowKindOverwrite)
+                return r;
+        }
+        return floor;
     }
+
+    // Dropping ON Overwrite = land just above it.
+    if (auto* it = m->item(idx.row(), ModColName);
+        it && it->data(Qt::UserRole + 50).toInt() == RowKindOverwrite)
+        return idx.row();
 
     auto rect = visualRect(idx);
     bool aboveHalf = (pos.y() < rect.center().y());
-    return aboveHalf ? idx.row() : idx.row() + 1;
+    int target = aboveHalf ? idx.row() : idx.row() + 1;
+    if (target > floor) target = floor;
+    return target;
 }
 
 void ModListTreeView::dropEvent(QDropEvent* event)
@@ -85,9 +117,23 @@ void ModListTreeView::dropEvent(QDropEvent* event)
     auto* m = static_cast<QStandardItemModel*>(model());
     int count = m->rowCount();
 
+    // The drop target may resolve to a separator if the user is dropping
+    // INTO that separator's group; we still want to compute the destination
+    // before we know which separator was the cursor target, so capture it.
+    auto pos = event->position().toPoint();
+    auto cursorIdx = indexAt(pos);
+    int targetSeparatorRow = -1;
+    if (cursorIdx.isValid()) {
+        if (auto* it = m->item(cursorIdx.row(), ModColName);
+            it && it->data(Qt::UserRole + 50).toInt() == RowKindSeparator)
+            targetSeparatorRow = cursorIdx.row();
+    }
+
     // Multi-select drag: collect every selected row that is draggable
     // (mods and separators). The Overwrite pseudo-row is silently
     // dropped from the set rather than rejecting the whole gesture.
+    // Also skip the cursor's target separator if the user is dropping
+    // a separator onto itself — keeps takeRow/insertRow math sane.
     QList<int> srcRows;
     {
         QSet<int> seen;
@@ -100,6 +146,8 @@ void ModListTreeView::dropEvent(QDropEvent* event)
                 continue;
             if (it->data(Qt::UserRole + 50).toInt() == RowKindOverwrite)
                 continue;
+            if (r == targetSeparatorRow)
+                continue;
             seen.insert(r);
             srcRows.append(r);
         }
@@ -111,20 +159,18 @@ void ModListTreeView::dropEvent(QDropEvent* event)
     }
 
     int destRow = dropTargetRow(event);
-    if (destRow < 0 || destRow > count) {
-        event->ignore();
-        return;
-    }
-    // Drops past the bottom map onto the Overwrite row, which is illegal.
-    if (destRow >= count) {
-        event->ignore();
-        return;
-    }
+    int overwriteRow = findOverwriteRow(m);
+    int floor = (overwriteRow >= 0) ? overwriteRow : count;
+
+    // Normalize: drops past the bottom or onto Overwrite land just above
+    // Overwrite (the very bottom of the modlist).
+    if (destRow < 0)
+        destRow = 0;
+    if (destRow >= count)
+        destRow = floor;
     if (auto* destItem = m->item(destRow, ModColName);
-        destItem && destItem->data(Qt::UserRole + 50).toInt() == RowKindOverwrite) {
-        event->ignore();
-        return;
-    }
+        destItem && destItem->data(Qt::UserRole + 50).toInt() == RowKindOverwrite)
+        destRow = floor;
 
     // Where the block lands once the source rows are pulled out.
     int landingRow = destRow;
@@ -415,9 +461,11 @@ void ModListWidget::scanModsFolder()
                 d.collapsed = s.collapsed;
                 m_separators.push_back(d);
             }
-            m_visualMode = viewEnabled;
+            // Global "fuse views" overrides the per-profile saved value.
+            m_visualMode = m_collapsedSeparatorView ? true : viewEnabled;
             QSignalBlocker block(m_visualCheck);
-            m_visualCheck->setChecked(viewEnabled);
+            m_visualCheck->setChecked(m_visualMode);
+            m_visualCheck->setEnabled(!m_collapsedSeparatorView);
         }
     }
 
@@ -1166,6 +1214,32 @@ void ModListWidget::onVisualToggled(bool on)
     persistSeparators();
 }
 
+void ModListWidget::applyCollapsedSeparatorView(bool on)
+{
+    if (m_collapsedSeparatorView == on && (!on || (m_visualMode && !m_visualCheck->isEnabled())))
+        return;
+
+    m_collapsedSeparatorView = on;
+    if (!m_visualCheck) return;
+
+    if (on) {
+        // Force visual mode without round-tripping through onVisualToggled
+        // (which would call persistSeparators again, harmless but noisy).
+        QSignalBlocker block(m_visualCheck);
+        m_visualCheck->setChecked(true);
+        m_visualCheck->setEnabled(false);
+        bool wasVisual = m_visualMode;
+        m_visualMode = true;
+        rebuildView();
+        if (!wasVisual)
+            persistSeparators();
+    } else {
+        m_visualCheck->setEnabled(true);
+        // Leave m_visualMode and the check's state as-is — any cross-stamping
+        // done while collapsed remains in the persisted indices.
+    }
+}
+
 void ModListWidget::rebuildView()
 {
     m_updatingModel = true;
@@ -1278,9 +1352,14 @@ void ModListWidget::rebuildView()
         }
         for (int i = 0; i < int(m_mods.size()); ++i) {
             const auto& m = m_mods[i];
-            quint64 sepIdx = 0;
+            // Mods with no separator (or pointing at one that no longer exists)
+            // sink past every real separator group so freshly installed mods
+            // land just above the Overwrite floor instead of at the top.
+            quint64 sepIdx;
             if (!m.separator.isEmpty() && sepRank.contains(m.separator))
                 sepIdx = sepRank[m.separator];
+            else
+                sepIdx = std::numeric_limits<quint64>::max();
             quint64 own = parseHexIndex(m.visualIndex);
             if (own == 0) own = parseHexIndex(m.trueIndex);
 
@@ -1418,6 +1497,7 @@ void ModListWidget::persistRowOrder()
     QString currentSeparator;
     quint64 runningIdx = 0x10;
     std::vector<SeparatorDef> updatedSeparators;
+    std::vector<GrpcModListEntry> collapsedEntries;
 
     for (int r = 0; r < m_model->rowCount(); ++r) {
         auto* priorityItem = m_model->item(r, ModColPriority);
@@ -1443,18 +1523,40 @@ void ModListWidget::persistRowOrder()
         QString newVisualIndex = formatHexIndex(runningIdx);
         QString newSeparator = currentSeparator;
         bool dirty = (meta.visualIndex != newVisualIndex) || (meta.separator != newSeparator);
+        // In collapsed-views mode, both indices share the same cursor so the
+        // true view's ordering matches the visual one.
+        if (m_collapsedSeparatorView && meta.trueIndex != newVisualIndex)
+            dirty = true;
         meta.visualIndex = newVisualIndex;
         meta.separator = newSeparator;
+        if (m_collapsedSeparatorView)
+            meta.trueIndex = newVisualIndex;
         if (dirty) {
             QString yamlPath = m_modsDir + "/" + meta.folder + "/metadata.yaml";
             patchMetadataField(yamlPath, "visual_index", newVisualIndex);
             patchMetadataField(yamlPath, "separator", newSeparator);
+            if (m_collapsedSeparatorView)
+                patchMetadataField(yamlPath, "true_index", newVisualIndex);
+        }
+        if (m_collapsedSeparatorView) {
+            GrpcModListEntry e;
+            e.modName = meta.folder;
+            e.enabled = meta.enabled;
+            e.priority = int(collapsedEntries.size());
+            collapsedEntries.push_back(std::move(e));
         }
         runningIdx += 0x10;
     }
 
     m_separators = updatedSeparators;
     persistSeparators();
+
+    // Keep the daemon's modlist.txt order aligned with the visual cursor in
+    // collapsed mode. Without this, any later flow that triggers writeTrueIndexes
+    // (e.g. enable/disable via checkbox, profile reload) would re-stamp
+    // true_index from a stale flat order and break the invariant.
+    if (m_collapsedSeparatorView && !m_gameId.isEmpty() && !m_profileName.isEmpty())
+        m_grpc->setModList(m_gameId, m_profileName, collapsedEntries);
 }
 
 void ModListWidget::persistSeparators()

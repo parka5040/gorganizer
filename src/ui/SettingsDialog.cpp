@@ -11,6 +11,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QComboBox>
+#include <QCheckBox>
 #include <QProcess>
 #include <QFileInfo>
 #include <QFile>
@@ -36,6 +37,17 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
     populateThemeCombo();
     connect(m_themeCombo, &QComboBox::currentTextChanged, this, &SettingsDialog::onThemeChanged);
     form->addRow("Theme:", m_themeCombo);
+
+    m_collapseViewsCheck = new QCheckBox("Show one ordering for both views");
+    m_collapseViewsCheck->setToolTip(
+        "When on, the Separator View checkbox in the mod list is forced on and "
+        "disabled, and any reorder writes the same index into both visual_index "
+        "and true_index. Toggling off later leaves any cross-stamping in place.");
+    if (m_config)
+        m_collapseViewsCheck->setChecked(m_config->collapsedSeparatorView());
+    connect(m_collapseViewsCheck, &QCheckBox::toggled,
+            this, &SettingsDialog::onCollapsedSeparatorViewToggled);
+    form->addRow("Mod list:", m_collapseViewsCheck);
 
     m_apiKeyEdit = new QLineEdit;
     m_apiKeyEdit->setPlaceholderText("Paste your Nexus Mods API key here");
@@ -335,6 +347,13 @@ void SettingsDialog::onSaveProton()
         return;
     }
     m_protonStatus->setText("<b style='color:#080;'>Saved.</b>");
+}
+
+void SettingsDialog::onCollapsedSeparatorViewToggled(bool on)
+{
+    if (m_config)
+        m_config->setCollapsedSeparatorView(on);
+    emit collapsedSeparatorViewChanged(on);
 }
 
 } // namespace gorganizer
