@@ -33,9 +33,9 @@ func main() {
 	}
 	fmt.Fprintf(os.Stderr, "pre-activate fingerprint: %s\n", pre)
 
-	mm := vfs.NewMountManager(dataPath, "")
+	mm := vfs.NewMountManager(dataPath, "", "testgame")
 	layers := []vfs.Layer{{Name: "__base__", RootPath: dataPath, Enabled: true}}
-	if err := mm.Activate(layers); err != nil {
+	if err := mm.Activate(layers, ""); err != nil {
 		fmt.Fprintf(os.Stderr, "Activate failed: %v\n", err)
 		os.Exit(1)
 	}
@@ -49,6 +49,31 @@ func main() {
 	fmt.Fprintf(os.Stderr, "mid-activate fingerprint (excluding sentinel): %s\n", mid)
 	if mid != pre {
 		fmt.Fprintf(os.Stderr, "MISMATCH: materialized view diverges from source\n")
+		_ = mm.Deactivate()
+		os.Exit(1)
+	}
+
+	// Phase 3: rebuild-while-mounted via ReMaterialize (atomic RENAME_EXCHANGE
+	// swap). The materialized view must be unchanged and leave no transient dirs.
+	if err := mm.MarkDirty(layers); err != nil {
+		fmt.Fprintf(os.Stderr, "MarkDirty failed: %v\n", err)
+		_ = mm.Deactivate()
+		os.Exit(1)
+	}
+	if err := mm.ReMaterialize(); err != nil {
+		fmt.Fprintf(os.Stderr, "ReMaterialize failed: %v\n", err)
+		_ = mm.Deactivate()
+		os.Exit(1)
+	}
+	remat, err := hashTree(dataPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hash post-rematerialize: %v\n", err)
+		_ = mm.Deactivate()
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "post-rematerialize fingerprint (excluding sentinel): %s\n", remat)
+	if remat != pre {
+		fmt.Fprintf(os.Stderr, "MISMATCH: re-materialized view diverges from source\n")
 		_ = mm.Deactivate()
 		os.Exit(1)
 	}
@@ -69,7 +94,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Fprintln(os.Stderr, "smoke OK: pre == mid == post")
+	fmt.Fprintln(os.Stderr, "smoke OK: pre == mid == rematerialize == post")
 }
 
 // hashTree returns a deterministic fingerprint of dataPath built from each file's path, size, and content hash.

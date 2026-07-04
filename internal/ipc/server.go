@@ -332,6 +332,12 @@ type VFSStatusResult struct {
 	MountPoint      string
 	EnabledModCount int
 	TotalFileCount  int
+	// Dirty is true when the on-disk farm is stale relative to pending in-memory
+	// edits (applied on next launch / explicit Apply). TotalFileCount is the
+	// desired count while Dirty.
+	Dirty      bool
+	DesiredGen uint64
+	AppliedGen uint64
 }
 
 type FileConflictResult struct {

@@ -134,11 +134,79 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 		outcome.FuseUnmounted = true
 	}
 
+	// Reap transient build siblings a crash may have left behind, before any
+	// sentinel/pending decision (Guard R9). RENAME_EXCHANGE keeps Data itself
+	// valid across an interrupted Apply, so these are always safe to discard.
+	_ = os.RemoveAll(stagingDirPath(resolved))
+	_ = os.RemoveAll(oldFarmPath(resolved))
+	_ = RemoveIntent(applyingIntentPath(resolved))
+
+	// An activation intent means Activate was interrupted between recording its
+	// intent and committing (removing it). Roll the activation back to a pristine
+	// Data deterministically — this is the case that used to degrade to a manual
+	// recovery prompt (H-3).
+	activatingPath := activatingIntentPath(resolved)
+	if _, iErr := ReadIntent(activatingPath); iErr == nil {
+		backupExists := false
+		if _, err := os.Stat(backupPath); err == nil {
+			backupExists = true
+		}
+		_, dataStatErr := os.Stat(resolved)
+		dataExists := dataStatErr == nil
+
+		defer func() { _ = RemoveIntent(activatingPath) }()
+
+		if !backupExists {
+			// The rename never happened (or the backup is gone): Data, if present,
+			// is the untouched original — nothing to roll back.
+			slog.Info("interrupted activation with no backup — leaving Data as-is",
+				"path", resolved)
+			return outcome, nil
+		}
+		// Backup exists: wipe whatever partial/complete farm sits at Data and
+		// restore the original from the backup.
+		if dataExists {
+			if err := os.RemoveAll(resolved); err != nil {
+				return outcome, fmt.Errorf("removing interrupted activation at %s: %w", resolved, err)
+			}
+		}
+		if err := os.Rename(backupPath, resolved); err != nil {
+			return outcome, fmt.Errorf("rolling back interrupted activation of %s from %s: %w",
+				resolved, backupPath, err)
+		}
+		slog.Info("rolled back interrupted activation", "path", resolved)
+		outcome.Restored = true
+		return outcome, nil
+	} else if !errors.Is(iErr, ErrIntentMissing) {
+		slog.Warn("could not read activation intent during recovery", "path", resolved, "err", iErr)
+	}
+
 	if s, sErr := ReadSentinel(resolved); sErr == nil {
 		if vErr := ValidateSentinel(s); vErr == nil {
 			slog.Info("found valid overlay sentinel from prior run — restoring",
 				"path", resolved, "backup_path", s.BackupPath,
 				"prior_pid", s.ActivationPID, "started_at", s.ActivationStartedAt)
+			// Capture new writes (saves, tool output) into the Overwrite mod
+			// before destroying the farm. v1 sentinels carry no OverwriteRoot,
+			// so they skip capture and recover exactly as before. If capture
+			// fails we must NOT RemoveAll — surface as pending instead (H-1).
+			if s.SchemaVersion >= 2 && s.OverwriteRoot != "" {
+				if moved, capErr := CaptureNewFiles(resolved, s.OverwriteRoot); capErr != nil {
+					slog.Warn("recovery capture failed — refusing to destroy Data",
+						"path", resolved, "err", capErr)
+					outcome.Pending = &RecoveryPending{
+						DataPath:   resolved,
+						BackupPath: backupPath,
+						Reason: fmt.Sprintf("could not capture new writes into the overwrite mod during "+
+							"recovery (%v). Confirm restore only if you accept discarding any un-captured "+
+							"files written during the previous session.", capErr),
+					}
+					return outcome, nil
+				} else if moved > 0 {
+					slog.Info("recovery captured new writes into overwrite mod",
+						"path", resolved, "count", moved, "overwrite_root", s.OverwriteRoot)
+				}
+			}
 			if err := os.RemoveAll(resolved); err != nil {
 				return outcome, fmt.Errorf("removing crashed overlay at %s: %w", resolved, err)
 			}

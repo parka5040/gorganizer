@@ -84,6 +84,7 @@ func TestCleanupStale_SentinelCrashRecovery(t *testing.T) {
 		BackupPath:          backupPath,
 		MaterializerVersion: CurrentMaterializerVersion,
 	}
+	s.Hash = ComputeLayerHash(s.Layers)
 	if err := WriteSentinel(dataPath, s); err != nil {
 		t.Fatal(err)
 	}

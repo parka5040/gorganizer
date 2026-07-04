@@ -11,7 +11,7 @@ func TestRecoverIfNeeded_NoBackup(t *testing.T) {
 	dataPath := filepath.Join(dir, "Data")
 	os.MkdirAll(dataPath, 0755)
 
-	mm := NewMountManager(dataPath, "")
+	mm := NewMountManager(dataPath, "", "testgame")
 	if _, err := mm.RecoverIfNeeded(); err != nil {
 		t.Fatalf("RecoverIfNeeded: %v", err)
 	}
@@ -30,7 +30,7 @@ func TestRecoverIfNeeded_StaleBackup(t *testing.T) {
 	os.WriteFile(filepath.Join(backupPath, "test.esp"), []byte("data"), 0644)
 	os.MkdirAll(dataPath, 0755)
 
-	mm := NewMountManager(dataPath, "")
+	mm := NewMountManager(dataPath, "", "testgame")
 	if _, err := mm.RecoverIfNeeded(); err != nil {
 		t.Fatalf("RecoverIfNeeded: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestMountManagerNotMounted(t *testing.T) {
 	dataPath := filepath.Join(dir, "Data")
 	os.MkdirAll(dataPath, 0755)
 
-	mm := NewMountManager(dataPath, "")
+	mm := NewMountManager(dataPath, "", "testgame")
 	if mm.IsMounted() {
 		t.Error("should not be mounted initially")
 	}
@@ -67,9 +67,9 @@ func TestMountManagerActivateBackupExists(t *testing.T) {
 	os.MkdirAll(dataPath, 0755)
 	os.MkdirAll(backupPath, 0755)
 
-	mm := NewMountManager(dataPath, "")
+	mm := NewMountManager(dataPath, "", "testgame")
 	layers := []Layer{{Name: "__base__", RootPath: dataPath, Enabled: true}}
-	err := mm.Activate(layers)
+	err := mm.Activate(layers, "")
 	if err == nil {
 		t.Error("Activate should fail when backup already exists")
 	}
@@ -79,9 +79,9 @@ func TestMountManagerActivateDataMissing(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
 
-	mm := NewMountManager(dataPath, "")
+	mm := NewMountManager(dataPath, "", "testgame")
 	layers := []Layer{{Name: "__base__", RootPath: dataPath, Enabled: true}}
-	err := mm.Activate(layers)
+	err := mm.Activate(layers, "")
 	if err == nil {
 		t.Error("Activate should fail when Data/ does not exist")
 	}
@@ -105,9 +105,9 @@ func TestActivateDeactivate_RoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mm := NewMountManager(dataPath, "")
+	mm := NewMountManager(dataPath, "", "testgame")
 	layers := []Layer{{Name: "__base__", RootPath: dataPath, Enabled: true}}
-	if err := mm.Activate(layers); err != nil {
+	if err := mm.Activate(layers, ""); err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
 	if !mm.IsMounted() {
@@ -152,9 +152,9 @@ func TestDeactivate_RefusesWithoutSentinel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mm := NewMountManager(dataPath, "")
+	mm := NewMountManager(dataPath, "", "testgame")
 	layers := []Layer{{Name: "__base__", RootPath: dataPath, Enabled: true}}
-	if err := mm.Activate(layers); err != nil {
+	if err := mm.Activate(layers, ""); err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
 

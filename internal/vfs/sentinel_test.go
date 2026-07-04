@@ -26,6 +26,10 @@ func TestSentinel_RoundTripWriteReadValidate(t *testing.T) {
 	backup := writeBackupDir(t, base)
 
 	now := time.Now().UTC().Truncate(time.Second)
+	layers := []SentinelLayer{
+		{Name: "__base__", Root: backup, Enabled: true},
+		{Name: "YUP", Root: filepath.Join(base, "mods", "YUP"), Enabled: true},
+	}
 	want := &Sentinel{
 		SchemaVersion:       CurrentSentinelSchema,
 		Magic:               SentinelMagic,
@@ -33,13 +37,11 @@ func TestSentinel_RoundTripWriteReadValidate(t *testing.T) {
 		ProfileName:         "Default",
 		ActivationPID:       12345,
 		ActivationStartedAt: now,
-		Hash:                "sha256:deadbeef",
+		Hash:                ComputeLayerHash(layers),
 		BackupPath:          backup,
 		OverwriteMod:        "Overwrite",
-		Layers: []SentinelLayer{
-			{Name: "__base__", Root: backup, Enabled: true},
-			{Name: "YUP", Root: filepath.Join(base, "mods", "YUP"), Enabled: true},
-		},
+		OverwriteRoot:       filepath.Join(base, "mods", "Overwrite"),
+		Layers:              layers,
 		MaterializerVersion: CurrentMaterializerVersion,
 	}
 

@@ -217,7 +217,7 @@ func TestRecovery_SyntheticVFSMutexSurfacesError(t *testing.T) {
 // mockMountedManager returns a vfs.MountManager whose IsMounted reports
 // true without performing real filesystem work. Used by the mutex tests
 func mockMountedManager(dataPath string) *vfs.MountManager {
-	mm := vfs.NewMountManager(dataPath, "")
+	mm := vfs.NewMountManager(dataPath, "", "testgame")
 	mm.SetMountedForTesting(true)
 	return mm
 }

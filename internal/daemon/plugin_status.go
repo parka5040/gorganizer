@@ -40,6 +40,17 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 		subpath = "Data"
 	}
 	baseData := filepath.Join(gc.InstallPath, subpath)
+	// Guard R1-plugin: while the VFS is mounted, the game's Data path IS the
+	// materialized farm — which contains mod plugins as base files and can be
+	// stale under defer+coalesce. Read the true vanilla base plugins from the
+	// untouched backup so discovery tracks the current enabled-mod set, not the
+	// last-materialized farm.
+	d.mu.RLock()
+	mm, mmOk := d.mountMgrs[gameID]
+	d.mu.RUnlock()
+	if mmOk && mm.IsMounted() {
+		baseData = mm.BackupPath()
+	}
 
 	enabled := make([]plugins.ModEntry, 0, len(entries))
 	allFolders := make([]plugins.ModEntry, 0, len(entries))

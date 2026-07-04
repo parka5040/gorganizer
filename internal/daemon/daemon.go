@@ -99,7 +99,11 @@ type Daemon struct {
 	ipcServer   *ipc.Server
 
 	launched   map[int]*launchedGame
-	launchedMu sync.Mutex
+	// steamLaunched marks games launched via Steam (xdg-open), whose process the
+	// daemon cannot track. It gates shutdown teardown so we never pull the farm
+	// out from under a running game (H-1b). Guarded by launchedMu.
+	steamLaunched map[string]bool
+	launchedMu    sync.Mutex
 
 	pendingRecoveries   map[string]*ipc.RecoveryPendingResult
 	gamesAtPath         map[string][]string
@@ -169,6 +173,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 		shutdownCh:            make(chan struct{}),
 		installedArchiveCache: make(map[string]map[string]archiveInstall),
 		launched:              make(map[int]*launchedGame),
+		steamLaunched:         make(map[string]bool),
 		pendingRecoveries:     make(map[string]*ipc.RecoveryPendingResult),
 		gamesAtPath:           make(map[string][]string),
 	}
@@ -220,6 +225,7 @@ func (d *Daemon) ensureMountManager(gameID string, gc config.GameConfig) *vfs.Mo
 	mm := vfs.NewMountManager(
 		filepath.Join(installPath, subpath),
 		filepath.Join(config.ModsDir(gameID), "Overwrite"),
+		gameID,
 	)
 	d.mountMgrs[gameID] = mm
 	return mm
@@ -380,11 +386,20 @@ func (d *Daemon) shutdownAll(ctx context.Context) {
 	defer d.mu.Unlock()
 
 	for gameID, mm := range d.mountMgrs {
-		if mm.IsMounted() {
-			slog.Info("deactivating VFS on shutdown", "game", gameID)
-			if err := mm.Deactivate(); err != nil {
-				slog.Error("deactivation failed on shutdown", "game", gameID, "err", err)
-			}
+		if !mm.IsMounted() {
+			continue
+		}
+		// H-1b: never tear the farm out from under a game/tool that may still be
+		// running. Leaving it mounted is safe — next-boot recovery finds the valid
+		// sentinel, captures any new writes, and restores the original Data/.
+		if d.mountBusy(gameID) {
+			slog.Warn("leaving VFS mounted on shutdown; a launch may still be using it — recovery will restore on next start",
+				"game", gameID)
+			continue
+		}
+		slog.Info("deactivating VFS on shutdown", "game", gameID)
+		if err := mm.Deactivate(); err != nil {
+			slog.Error("deactivation failed on shutdown", "game", gameID, "err", err)
 		}
 	}
 
@@ -395,6 +410,34 @@ func (d *Daemon) shutdownAll(ctx context.Context) {
 	close(d.statusCh)
 	<-d.ingesterDone
 	<-d.coalescerDone
+}
+
+// setSteamLaunched records/clears that a game is running via an untracked Steam
+// launch, gating shutdown teardown of its farm (H-1b).
+func (d *Daemon) setSteamLaunched(gameID string, active bool) {
+	d.launchedMu.Lock()
+	defer d.launchedMu.Unlock()
+	if active {
+		d.steamLaunched[gameID] = true
+	} else {
+		delete(d.steamLaunched, gameID)
+	}
+}
+
+// mountBusy reports whether a game's farm may still have a live reader — a
+// tracked Proton launch or an untracked Steam launch — so teardown must wait.
+func (d *Daemon) mountBusy(gameID string) bool {
+	d.launchedMu.Lock()
+	defer d.launchedMu.Unlock()
+	if d.steamLaunched[gameID] {
+		return true
+	}
+	for _, lg := range d.launched {
+		if lg.gameID == gameID {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Daemon) trackLaunched(gameID string, h *tools.LaunchHandle) {
@@ -663,34 +706,51 @@ func (d *Daemon) SetModList(gameID, profileName string, entries []ipc.ModListEnt
 	d.mu.RUnlock()
 	if mmOk && msOk && gcOk && ms.profileName == profileName && mm.IsMounted() {
 		layers := d.buildLayers(gameID, gc, modEntries)
-		if err := mm.Tree().Rebuild(layers); err != nil {
-			slog.Warn("VFS rebuild after modlist change failed", "game", gameID, "err", err)
+		// H-6: mark the mount dirty (in-memory only) rather than fabricating an
+		// "applied" status — the on-disk farm the game reads is NOT changed here.
+		// It is rebuilt just-in-time before launch, or on an explicit Apply.
+		if err := mm.MarkDirty(layers); err != nil {
+			slog.Warn("VFS mark-dirty after modlist change failed", "game", gameID, "err", err)
 		} else {
-			enabled := 0
-			for _, e := range modEntries {
-				if e.Enabled {
-					enabled++
-				}
-			}
-			fileCount, _ := mm.Tree().Stats()
-			subpath := gc.DataSubpath
-			if subpath == "" {
-				subpath = "Data"
-			}
 			select {
-			case d.statusCh <- ipc.StatusEventResult{VFSStatus: &ipc.VFSStatusResult{
-				Mounted:         true,
-				GameID:          gameID,
-				ProfileName:     profileName,
-				MountPoint:      filepath.Join(gc.InstallPath, subpath),
-				EnabledModCount: enabled,
-				TotalFileCount:  fileCount,
-			}}:
+			case d.statusCh <- ipc.StatusEventResult{VFSStatus: d.vfsStatus(gameID, gc, profileName, mm, modEntries)}:
 			default:
 			}
 		}
 	}
 	return nil
+}
+
+// vfsStatus builds a VFSStatusResult from the mount's live generation counters.
+// TotalFileCount reflects the DESIRED (in-memory) layout; Dirty distinguishes
+// it from what the on-disk farm currently holds.
+func (d *Daemon) vfsStatus(gameID string, gc config.GameConfig, profileName string, mm *vfs.MountManager, entries []mod.ModListEntry) *ipc.VFSStatusResult {
+	enabled := 0
+	for _, e := range entries {
+		if e.Enabled {
+			enabled++
+		}
+	}
+	subpath := gc.DataSubpath
+	if subpath == "" {
+		subpath = "Data"
+	}
+	fileCount := 0
+	if t := mm.Tree(); t != nil {
+		fileCount, _ = t.Stats()
+	}
+	applied, desired := mm.Generations()
+	return &ipc.VFSStatusResult{
+		Mounted:         mm.IsMounted(),
+		GameID:          gameID,
+		ProfileName:     profileName,
+		MountPoint:      filepath.Join(gc.InstallPath, subpath),
+		EnabledModCount: enabled,
+		TotalFileCount:  fileCount,
+		Dirty:           mm.IsDirty(),
+		AppliedGen:      applied,
+		DesiredGen:      desired,
+	}
 }
 
 func (d *Daemon) MountVFS(gameID, profileName string) (*ipc.VFSStatusResult, error) {
@@ -724,6 +784,7 @@ func (d *Daemon) mountVFSWithSwap(gameID, profileName string, autoSwap bool) (*i
 				return nil, fmt.Errorf("auto-swap deactivate of %s failed: %w", conflict, err)
 			}
 			delete(d.mountStates, conflict)
+			d.setSteamLaunched(conflict, false)
 			select {
 			case d.statusCh <- ipc.StatusEventResult{VFSStatus: &ipc.VFSStatusResult{GameID: conflict}}:
 			default:
@@ -754,32 +815,14 @@ func (d *Daemon) mountVFSWithSwap(gameID, profileName string, autoSwap bool) (*i
 
 	layers := d.buildLayers(gameID, gc, entries)
 
-	if err := mm.Activate(layers); err != nil {
+	if err := mm.Activate(layers, profileName); err != nil {
 		return nil, err
 	}
 
 	d.mountStates[gameID] = mountState{profileName: profileName}
 
-	enabledCount := 0
-	for _, e := range entries {
-		if e.Enabled {
-			enabledCount++
-		}
-	}
-
-	fileCount, _ := mm.Tree().Stats()
-	subpath := gc.DataSubpath
-	if subpath == "" {
-		subpath = "Data"
-	}
-	st := &ipc.VFSStatusResult{
-		Mounted:         true,
-		GameID:          gameID,
-		ProfileName:     profileName,
-		MountPoint:      filepath.Join(gc.InstallPath, subpath),
-		EnabledModCount: enabledCount,
-		TotalFileCount:  fileCount,
-	}
+	// Freshly activated: appliedGen == desiredGen, so Dirty is false.
+	st := d.vfsStatus(gameID, gc, profileName, mm, entries)
 
 	select {
 	case d.statusCh <- ipc.StatusEventResult{VFSStatus: st}:
@@ -800,6 +843,7 @@ func (d *Daemon) UnmountVFS(gameID string) error {
 		return err
 	}
 	delete(d.mountStates, gameID)
+	d.setSteamLaunched(gameID, false)
 
 	select {
 	case d.statusCh <- ipc.StatusEventResult{VFSStatus: &ipc.VFSStatusResult{GameID: gameID}}:
@@ -895,6 +939,11 @@ func (d *Daemon) RebuildVFS(gameID string) error {
 		return fmt.Errorf("%w for %s", vfs.ErrNotMounted, gameID)
 	}
 
+	// Guard R5: never swap the farm out from under a live reader.
+	if d.mountBusy(gameID) {
+		return fmt.Errorf("cannot apply changes while %s is running — stop it first", gameID)
+	}
+
 	gc := d.config.Games[gameID]
 	ms := d.mountStates[gameID]
 
@@ -903,8 +952,20 @@ func (d *Daemon) RebuildVFS(gameID string) error {
 		return err
 	}
 
+	// "Apply now": refresh the in-memory tree to the latest layout, then
+	// materialize it to disk.
 	layers := d.buildLayers(gameID, gc, entries)
-	return mm.Tree().Rebuild(layers)
+	if err := mm.MarkDirty(layers); err != nil {
+		return err
+	}
+	if err := mm.ReMaterialize(); err != nil {
+		return err
+	}
+	select {
+	case d.statusCh <- ipc.StatusEventResult{VFSStatus: d.vfsStatus(gameID, gc, ms.profileName, mm, entries)}:
+	default:
+	}
+	return nil
 }
 
 func (d *Daemon) buildLayers(gameID string, gc config.GameConfig, entries []mod.ModListEntry) []vfs.Layer {
@@ -1420,6 +1481,16 @@ func (d *Daemon) LaunchGame(gameID string, useTool bool, profileName string) (in
 		}
 	}
 
+	// §3.8: bring the on-disk farm in sync with pending mod-list edits
+	// (defer+coalesce) just-in-time before launch, for both the Steam and
+	// script-extender paths — but never while a reader is already live (R5).
+	if mm.IsMounted() && mm.IsDirty() && !d.mountBusy(gameID) {
+		slog.Info("applying pending mod changes before launch", "game", gameID)
+		if err := mm.ReMaterialize(); err != nil {
+			return 0, fmt.Errorf("applying pending mod changes before launch: %w", err)
+		}
+	}
+
 	if profileName == "" {
 		slog.Warn("no profile selected — skipping INI push (tweaks like disable-intro will NOT apply)",
 			"game", gameID)
@@ -1500,6 +1571,10 @@ func (d *Daemon) LaunchGame(gameID string, useTool bool, profileName string) (in
 		return 0, fmt.Errorf("launching via Steam: %w", err)
 	}
 	go cmd.Wait()
+	// Steam owns the game process; we get no exit signal for it. Mark the mount
+	// busy so shutdown won't tear the farm out from under a running game. Cleared
+	// on explicit unmount / game-switch (H-1b).
+	d.setSteamLaunched(gameID, true)
 	return cmd.Process.Pid, nil
 }
 

@@ -837,7 +837,14 @@ func (d *Daemon) RenameMod(gameID, oldName, newName string) error {
 	if mmOk && msOk && gcOk && mm.IsMounted() {
 		if _, entries, err := d.profileMgr.Load(gameID, ms.profileName); err == nil {
 			layers := d.buildLayers(gameID, gc, entries)
-			_ = mm.Tree().Rebuild(layers)
+			// H-6: mark dirty (in-memory only); the on-disk farm is rebuilt
+			// before the next launch or on an explicit Apply.
+			if err := mm.MarkDirty(layers); err == nil {
+				select {
+				case d.statusCh <- ipc.StatusEventResult{VFSStatus: d.vfsStatus(gameID, gc, ms.profileName, mm, entries)}:
+				default:
+				}
+			}
 		}
 	}
 	return nil
@@ -1090,7 +1097,14 @@ func (d *Daemon) UninstallMod(gameID, modName string, force bool) ([]string, err
 	if mmOk && msOk && gcOk && mm.IsMounted() {
 		if _, entries, err := d.profileMgr.Load(gameID, ms.profileName); err == nil {
 			layers := d.buildLayers(gameID, gc, entries)
-			_ = mm.Tree().Rebuild(layers)
+			// H-6: mark dirty (in-memory only); the on-disk farm is rebuilt
+			// before the next launch or on an explicit Apply.
+			if err := mm.MarkDirty(layers); err == nil {
+				select {
+				case d.statusCh <- ipc.StatusEventResult{VFSStatus: d.vfsStatus(gameID, gc, ms.profileName, mm, entries)}:
+				default:
+				}
+			}
 		}
 	}
 	slog.Info("mod uninstalled", "game", gameID, "mod", modName, "archives_flagged", flagged)

@@ -416,6 +416,14 @@ message VFSStatus {
   string mount_point = 4;
   int32 enabled_mod_count = 5;
   int32 total_file_count = 6;
+  // dirty is true when the in-memory mod layout has pending edits not yet
+  // reflected in the on-disk hardlink farm the game reads. The farm is rebuilt
+  // just-in-time before launch or on an explicit Apply. total_file_count
+  // reflects the DESIRED layout while dirty; the generation counters expose the
+  // coalescing state.
+  bool dirty = 7;
+  uint64 desired_gen = 8;
+  uint64 applied_gen = 9;
 }
 
 message MountVFSRequest {

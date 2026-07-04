@@ -966,6 +966,9 @@ func vfsStatusToProto(st *VFSStatusResult) *pb.VFSStatus {
 		MountPoint:      st.MountPoint,
 		EnabledModCount: int32(st.EnabledModCount),
 		TotalFileCount:  int32(st.TotalFileCount),
+		Dirty:           st.Dirty,
+		DesiredGen:      st.DesiredGen,
+		AppliedGen:      st.AppliedGen,
 	}
 }
 
