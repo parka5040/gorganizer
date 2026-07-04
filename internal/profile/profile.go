@@ -2,6 +2,7 @@ package profile
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/mod"
 )
 
@@ -100,7 +102,7 @@ func (pm *Manager) Save(p *Profile, entries []mod.ModListEntry) error {
 		return fmt.Errorf("marshaling profile: %w", err)
 	}
 	profilePath := filepath.Join(dir, "profile.json")
-	if err := os.WriteFile(profilePath, profileData, 0644); err != nil {
+	if err := atomicfile.WriteFile(profilePath, profileData, 0644); err != nil {
 		return fmt.Errorf("writing profile %s: %w", profilePath, err)
 	}
 
@@ -113,14 +115,14 @@ func (pm *Manager) Save(p *Profile, entries []mod.ModListEntry) error {
 	}
 	entries = clean
 
-	modlistPath := filepath.Join(dir, "modlist.txt")
-	modlistFile, err := os.Create(modlistPath)
-	if err != nil {
-		return fmt.Errorf("creating modlist %s: %w", modlistPath, err)
+	// Buffer the modlist, then write atomically so a crash can't leave a
+	// truncated modlist.txt (which would silently drop the user's load order).
+	var modlistBuf bytes.Buffer
+	if err := mod.WriteModList(&modlistBuf, entries); err != nil {
+		return fmt.Errorf("rendering modlist: %w", err)
 	}
-	defer modlistFile.Close()
-
-	if err := mod.WriteModList(modlistFile, entries); err != nil {
+	modlistPath := filepath.Join(dir, "modlist.txt")
+	if err := atomicfile.WriteFile(modlistPath, modlistBuf.Bytes(), 0644); err != nil {
 		return fmt.Errorf("writing modlist %s: %w", modlistPath, err)
 	}
 	return nil
@@ -240,7 +242,7 @@ func (pm *Manager) SavePluginOrder(gameID, profileName string, filenames []strin
 		b.WriteString(name)
 		b.WriteByte('\n')
 	}
-	if err := os.WriteFile(path, []byte(b.String()), 0644); err != nil {
+	if err := atomicfile.WriteFile(path, []byte(b.String()), 0644); err != nil {
 		return fmt.Errorf("writing plugin order %s: %w", path, err)
 	}
 	return nil

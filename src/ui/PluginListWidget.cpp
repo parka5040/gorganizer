@@ -11,6 +11,7 @@
 #include <QSet>
 #include <QPainter>
 #include <QPixmap>
+#include <QMessageBox>
 #include <algorithm>
 
 namespace gorganizer {
@@ -34,24 +35,36 @@ int LoadOrderTreeView::dropTargetRow(QDropEvent* event) const
     return aboveHalf ? idx.row() : idx.row() + 1;
 }
 
-bool LoadOrderTreeView::isMoveAllowed(int sourceRow, int destRow) const
+bool LoadOrderTreeView::isMoveAllowed(int sourceRow, int destRow, QString* reason) const
 {
+    auto setReason = [&](const QString& r) { if (reason) *reason = r; };
     auto* m = static_cast<QStandardItemModel*>(model());
     int count = m->rowCount();
 
-    if (sourceRow < 0 || sourceRow >= count)
+    if (sourceRow < 0 || sourceRow >= count) {
+        setReason("Nothing to move.");
         return false;
-    if (destRow < 0 || destRow > count)
+    }
+    if (destRow < 0 || destRow > count) {
+        setReason("Invalid drop position.");
         return false;
-    if (sourceRow == destRow || sourceRow + 1 == destRow)
+    }
+    if (sourceRow == destRow || sourceRow + 1 == destRow) {
+        setReason(QString());  // a no-op drop back onto itself — silent, not an error
         return false;
+    }
 
     auto* srcPlugin = m->item(sourceRow, ColPlugin);
-    if (!srcPlugin)
+    if (!srcPlugin) {
+        setReason("Invalid plugin.");
         return false;
+    }
 
-    if (srcPlugin->data(PinnedRole).toBool())
+    if (srcPlugin->data(PinnedRole).toBool()) {
+        setReason(QString("\"%1\" is pinned and its load order is fixed by the engine.")
+                      .arg(srcPlugin->text()));
         return false;
+    }
 
     int srcType = srcPlugin->data(PluginTypeRole).toInt();
 
@@ -79,19 +92,27 @@ bool LoadOrderTreeView::isMoveAllowed(int sourceRow, int destRow) const
         return pi ? pi->data(PinnedRole).toBool() : false;
     };
 
-    if (insertAt < count - 1 && pinnedAtEffective(insertAt))
+    if (insertAt < count - 1 && pinnedAtEffective(insertAt)) {
+        setReason("That position is fixed by a pinned plugin above it.");
         return false;
+    }
 
     if (insertAt > 0) {
         int aboveType = typeAtEffective(insertAt - 1);
-        if (aboveType > srcType)
+        if (aboveType > srcType) {
+            setReason("Masters (.esm) must load before regular plugins — "
+                      "can't move this plugin above a master.");
             return false;
+        }
     }
 
     if (insertAt < count - 1) {
         int belowType = typeAtEffective(insertAt);
-        if (belowType >= 0 && belowType < srcType)
+        if (belowType >= 0 && belowType < srcType) {
+            setReason("Masters (.esm) must load before regular plugins — "
+                      "can't move this master below a regular plugin.");
             return false;
+        }
     }
 
     return true;
@@ -104,6 +125,10 @@ void LoadOrderTreeView::dropEvent(QDropEvent* event)
 
     if (!(m_owner->m_sortColumn == ColIndex && m_owner->m_sortOrder == Qt::AscendingOrder)) {
         event->ignore();
+        // U-7: silent ignore left users guessing why drags did nothing.
+        QMessageBox::information(this, "Can't reorder",
+            "Plugins can only be reordered while sorted by Index (load order). "
+            "Click the Index column header to sort ascending, then drag.");
         return;
     }
 
@@ -116,8 +141,13 @@ void LoadOrderTreeView::dropEvent(QDropEvent* event)
     int sourceRow = selected.first().row();
     int destRow = dropTargetRow(event);
 
-    if (!isMoveAllowed(sourceRow, destRow)) {
+    QString reason;
+    if (!isMoveAllowed(sourceRow, destRow, &reason)) {
         event->ignore();
+        // U-7: explain the rejection (master/plugin ordering, pinned, …) instead
+        // of only a stderr qWarning. An empty reason = benign no-op drop, stay quiet.
+        if (!reason.isEmpty())
+            QMessageBox::information(this, "Can't move plugin", reason);
         return;
     }
 
@@ -522,6 +552,10 @@ void PluginListWidget::persistOrderToDaemon()
     QString err;
     if (!m_grpc->setPluginOrder(m_game.shortName, m_activeProfile, filenames, err)) {
         qWarning().noquote() << "setPluginOrder failed:" << err;
+        // U-7: the drop looked like it worked in the view, but the daemon
+        // rejected the new order — tell the user instead of only logging.
+        QMessageBox::warning(this, "Load order not saved",
+            QString("The new plugin order could not be saved:\n\n%1").arg(err));
         return;
     }
     // Re-snapshot dependency analysis from the daemon's authoritative side

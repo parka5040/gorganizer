@@ -463,6 +463,7 @@ bool GrpcClient::listArchives(const QString& gameId, std::vector<GrpcArchiveRow>
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::ListArchivesRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::ListArchivesResponse resp;
@@ -478,6 +479,7 @@ bool GrpcClient::setArchiveHidden(const QString& gameId, const QString& archiveR
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::SetArchiveHiddenRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_archive_rel_path(archiveRelPath.toStdString());
@@ -494,6 +496,7 @@ bool GrpcClient::setArchivesHiddenBulk(const QString& gameId, bool hidden, GrpcB
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::SetArchivesHiddenBulkRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_hidden(hidden);
@@ -510,6 +513,7 @@ bool GrpcClient::removeArchive(const QString& gameId, const QString& archiveRelP
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::RemoveArchiveRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_archive_rel_path(archiveRelPath.toStdString());
@@ -595,6 +599,7 @@ bool GrpcClient::discardPreview(const QString& previewId, QString& errorOut)
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::DiscardPreviewRequest req;
     req.set_preview_id(previewId.toStdString());
     gorganizer::v1::DiscardPreviewResponse resp;
@@ -609,6 +614,7 @@ bool GrpcClient::renameMod(const QString& gameId, const QString& oldName,
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::RenameModRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_old_name(oldName.toStdString());
@@ -730,6 +736,7 @@ bool GrpcClient::listSeparators(const QString& gameId, const QString& profileNam
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::ListSeparatorsRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
@@ -756,6 +763,7 @@ bool GrpcClient::setSeparators(const QString& gameId, const QString& profileName
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::SetSeparatorsRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
@@ -778,6 +786,7 @@ bool GrpcClient::setPluginOrder(const QString& gameId, const QString& profileNam
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::SetPluginOrderRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
@@ -794,6 +803,7 @@ bool GrpcClient::detectProtonVersions(std::vector<GrpcProtonVersion>& out, QStri
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::DetectProtonRequest req;
     gorganizer::v1::DetectProtonResponse resp;
     auto s = stub->DetectProton(&ctx, req, &resp);
@@ -814,6 +824,7 @@ bool GrpcClient::getPreferredProton(QString& pathOut, QString& errorOut)
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::GetPreferredProtonRequest req;
     gorganizer::v1::GetPreferredProtonResponse resp;
     auto s = stub->GetPreferredProton(&ctx, req, &resp);
@@ -827,6 +838,7 @@ bool GrpcClient::setPreferredProton(const QString& path, QString& errorOut)
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::SetPreferredProtonRequest req;
     req.set_path(path.toStdString());
     gorganizer::v1::SetPreferredProtonResponse resp;
@@ -840,6 +852,7 @@ void GrpcClient::setActiveGame(const QString& gameId)
     if (!m_channel) return;
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::SetActiveGameRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::SetActiveGameResponse resp;
@@ -1181,6 +1194,7 @@ bool GrpcClient::getGameSettings(const QString& gameId, GrpcGameSettings& settin
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::GetGameSettingsRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::GameSettings resp;
@@ -1196,6 +1210,7 @@ bool GrpcClient::setGameSettings(const QString& gameId, bool autoInstall, GrpcGa
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::SetGameSettingsRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_auto_install(autoInstall);
@@ -1225,6 +1240,7 @@ bool GrpcClient::listProfileIniFiles(const QString& gameId, const QString& profi
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::ListProfileIniFilesRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
@@ -1253,6 +1269,7 @@ bool GrpcClient::saveProfileIniFile(const QString& gameId, const QString& profil
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::SaveProfileIniFileRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
@@ -1270,6 +1287,7 @@ bool GrpcClient::setProfileIniEnabled(const QString& gameId, const QString& prof
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::SetProfileIniEnabledRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
@@ -1287,6 +1305,7 @@ bool GrpcClient::getProfileIniStatus(const QString& gameId, const QString& profi
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::GetProfileIniStatusRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
@@ -1314,6 +1333,7 @@ bool GrpcClient::listIniTweaks(const QString& gameId, const QString& profileName
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::ListIniTweaksRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
@@ -1353,6 +1373,7 @@ bool GrpcClient::setIniTweak(const QString& gameId, const QString& profileName,
     if (!m_channel) { errorOut = "not connected"; return false; }
     auto stub = makeStub(m_channel);
     grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));  // U-1: bound the wait so a stalled daemon can never hang the UI thread
     gorganizer::v1::SetIniTweakRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());

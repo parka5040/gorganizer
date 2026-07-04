@@ -145,8 +145,10 @@ func (m *MountManager) Deactivate() error {
 	if m.overwriteRoot != "" {
 		moved, capErr := CaptureNewFiles(dataPath, m.overwriteRoot)
 		if capErr != nil {
-			slog.Warn("write capture failed — proceeding with teardown",
-				"path", dataPath, "err", capErr)
+			// Do NOT proceed to RemoveAll — that would destroy the uncaptured
+			// writes we just failed to save (saves, tool output). Leave the farm
+			// mounted and intact; the user can retry, fix the cause, or force (H-1).
+			return fmt.Errorf("%w: %v", ErrCaptureFailed, capErr)
 		} else if moved > 0 {
 			slog.Info("captured tool/game writes into overwrite mod",
 				"count", moved, "overwrite_root", m.overwriteRoot)

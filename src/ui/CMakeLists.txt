@@ -1,5 +1,4 @@
 add_library(gorganizer_ui STATIC
-    PanelWidget.cpp
     MainWindow.cpp
     SetupWizard.cpp
     GameSelectorWidget.cpp
@@ -11,7 +10,6 @@ add_library(gorganizer_ui STATIC
     DownloadsLibraryView.cpp
     DownloadsModel.cpp
     DownloadsRowDelegate.cpp
-    InstallStatusBanner.cpp
     SettingsDialog.cpp
     SplashScreen.cpp
     ActivityLogPanel.cpp

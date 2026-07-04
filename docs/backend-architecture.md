@@ -1,5 +1,7 @@
 # Gorganizer Backend Architecture
 
+> ⚠️ **PARTLY HISTORICAL — verify against code before relying on this.** The VFS is now a **hardlink farm**, not FUSE/OverlayFS (there is no `go-fuse` dependency; residual FUSE code only detects/unmounts a legacy mount during recovery). The `KnownGames` list here omits `skyrimse`/`ttw`, the RPC list is a small subset of the real ~83, and the `dist/` packaging tree does not exist. The living, ground-truth reference is `docs/local/ARCHITECTURE.md` (gitignored). Treat the code as authoritative.
+
 ## Overview
 
 The Gorganizer backend is a Go daemon (`gorganizerd`) that provides a FUSE3-based virtual file system for Bethesda game modding on Linux. It presents a merged, read-only view of the game's original Data directory overlaid with user-installed mods, respecting a configurable priority order. At runtime, mod files are indistinguishable from files physically present in the game's Data directory.

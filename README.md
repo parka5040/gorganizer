@@ -90,8 +90,10 @@ just:
 
 The script manages the daemon's lifetime — it spawns `gorganizerd`, waits
 for the gRPC socket to bind, then runs the GUI in the foreground. When you
-exit the GUI, the daemon shuts down cleanly (it waits on any in-flight Proton
-launches before unmounting the overlay).
+exit the GUI, the daemon shuts down cleanly (it waits on any in-flight
+directly-launched Proton processes — the script extender and external tools —
+before tearing down the mod hardlink farm; the game itself launches through
+Steam, which the daemon does not track).
 
 ### Runtime requirements
 

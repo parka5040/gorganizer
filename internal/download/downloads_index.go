@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/config"
 )
 
@@ -137,11 +138,7 @@ func SaveIndex(gameID string, idx *DownloadsIndex) error {
 		fmt.Fprintf(&b, "    uninstalled: %t\n", e.Uninstalled)
 	}
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(b.String()), 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicfile.WriteFile(path, []byte(b.String()), 0644)
 }
 
 // UpsertEntry adds or replaces an entry by path.
@@ -269,7 +266,7 @@ func SaveSidecar(archivePath string, s ArchiveSidecar, at time.Time) error {
 	fmt.Fprintf(&b, "downloaded_at: %q\n", s.DownloadedAt)
 	fmt.Fprintf(&b, "size_bytes: %d\n", s.SizeBytes)
 
-	return os.WriteFile(SidecarPath(archivePath), []byte(b.String()), 0644)
+	return atomicfile.WriteFile(SidecarPath(archivePath), []byte(b.String()), 0644)
 }
 
 // LoadSidecar reads the per-archive .meta.yaml.

@@ -37,7 +37,7 @@ protected:
 
 private:
     int dropTargetRow(QDropEvent* event) const;
-    bool isMoveAllowed(int sourceRow, int destRow) const;
+    bool isMoveAllowed(int sourceRow, int destRow, QString* reason = nullptr) const;
     PluginListWidget* m_owner;
 };
 

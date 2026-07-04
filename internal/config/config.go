@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/parka/gorganizer/internal/atomicfile"
 )
 
 // GameConfig holds per-game configuration.
@@ -65,8 +67,10 @@ func (c *Config) Save() error {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
 
+	// 0600 because the config holds the Nexus API key. Atomic write so a crash
+	// mid-save can never truncate config.json (H-13).
 	path := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	if err := atomicfile.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("writing config %s: %w", path, err)
 	}
 	return nil

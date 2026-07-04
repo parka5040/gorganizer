@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/config"
 )
 
@@ -174,11 +175,7 @@ func SaveLedger(gameID string, entries []LedgerEntry) error {
 		}
 	}
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(b.String()), 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicfile.WriteFile(path, []byte(b.String()), 0644)
 }
 
 // UpsertLedgerEntry inserts or overwrites a single entry, keyed by ID.

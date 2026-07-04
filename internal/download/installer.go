@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/bodgit/sevenzip"
+
+	"github.com/parka/gorganizer/internal/atomicfile"
 )
 
 // Extractor abstracts archive extraction per format.
@@ -479,7 +481,7 @@ func SaveModMetadata(modDir string, m *ModMetadata) error {
 	for _, f := range m.Files {
 		fmt.Fprintf(&b, "  - %q\n", f)
 	}
-	return os.WriteFile(filepath.Join(modDir, "metadata.yaml"), []byte(b.String()), 0644)
+	return atomicfile.WriteFile(filepath.Join(modDir, "metadata.yaml"), []byte(b.String()), 0644)
 }
 
 // AppendSourceArchive adds an archive ref and merges newFiles into the files list.

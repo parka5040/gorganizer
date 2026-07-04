@@ -43,6 +43,9 @@ gorganizer-v*-linux-*.tar.gz.sha256
 # Per-game mod folders (created by gorganizer.sh)
 *_Mods/
 
+# Local-only architecture docs (never committed)
+docs/local/
+
 # OS
 .DS_Store
 Thumbs.db

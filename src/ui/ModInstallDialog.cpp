@@ -445,9 +445,21 @@ void ModInstallDialog::onWorkerFinished(bool ok, bool cancelled, int fileCount,
                 archiveRel = archAbs.mid(modsDirNorm.length() + 1);
             QString rpcErr;
             if (!m_grpc->registerManualInstall(m_gameId, m_modName, archiveRel, rpcErr)) {
+                // U-5: the files are on disk, but the daemon never learned about
+                // this mod — do NOT accept() (which reads as full success). Make
+                // the failure loud and leave the dialog open with a clear exit so
+                // the user knows to rescan/restart rather than assume it worked.
                 m_statusLabel->setText(
-                    QString("Installed %1 files. (Daemon notify failed: %2)")
+                    QString("Copied %1 files, but notifying the daemon failed: %2")
                         .arg(fileCount).arg(rpcErr));
+                QMessageBox::warning(this, "Install incomplete",
+                    QString("The mod files were copied to disk, but the daemon "
+                            "could not be notified:\n\n%1\n\nThe mod may not appear "
+                            "or be enabled until you rescan mods or restart Gorganizer.")
+                        .arg(rpcErr));
+                m_cancelBtn->setEnabled(true);
+                m_cancelBtn->setText("Close");
+                return;
             }
         }
         accept();

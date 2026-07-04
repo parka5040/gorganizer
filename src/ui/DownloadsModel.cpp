@@ -260,8 +260,20 @@ void DownloadsModel::replaceFromDaemon(const std::vector<GrpcDownloadRow>& rows)
         }
         m_rows.push_back(std::move(r));
     }
-    for (auto it = transientById.begin(); it != transientById.end(); ++it)
-        m_rows.push_back(*it);
+    for (auto it = transientById.begin(); it != transientById.end(); ++it) {
+        // U-6: an unmatched transient in a post-download phase (Downloaded /
+        // Installing / Installed / Uninstalled / Unknown) implies the daemon
+        // already has a real row for it and the reconciling RowChanged event was
+        // dropped — keeping it would leave a permanent ghost. Only carry over
+        // rows that are still in progress or that failed without a daemon row.
+        const DownloadPhase ph = it->phase;
+        const bool keep = ph == DownloadPhase::Queued
+                       || ph == DownloadPhase::Downloading
+                       || ph == DownloadPhase::Failed
+                       || ph == DownloadPhase::Cancelled;
+        if (keep)
+            m_rows.push_back(*it);
+    }
     rebuildIndex();
     endResetModel();
 }

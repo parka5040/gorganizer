@@ -213,7 +213,7 @@ void RunButtonWidget::syncRunLabel()
     switch (t.type) {
         case TargetGame:
             m_runBtn->setText(m_game.detected ? QString("Run %1").arg(m_game.name) : "Run");
-            m_runBtn->setToolTip("Launch through Steam; FUSE overlay + plugins.txt are deployed first.");
+            m_runBtn->setToolTip("Launch through Steam; the mod hardlink farm + plugins.txt are deployed first.");
             break;
         case TargetTool:
             m_runBtn->setText(t.label);
