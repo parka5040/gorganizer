@@ -155,3 +155,28 @@ func TestReMaterialize_NoopWhenClean(t *testing.T) {
 			applied0, desired0, applied1, desired1)
 	}
 }
+
+// CaptureNewFilesInto with relink must move the loose file into the target AND
+// leave it readable at the original farm path (the tool-exit capture path).
+func TestCaptureNewFilesInto_Relink(t *testing.T) {
+	dir := t.TempDir()
+	farm := filepath.Join(dir, "Data")
+	target := filepath.Join(dir, "mods", "DynDOLOD Output")
+	mustDir(t, target)
+	mustFile(t, filepath.Join(farm, "meshes", "lod.nif"), "LODDATA")
+
+	n, err := CaptureNewFilesInto(farm, target, true, false)
+	if err != nil {
+		t.Fatalf("CaptureNewFilesInto: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("moved %d, want 1", n)
+	}
+	if got := mustRead(t, filepath.Join(target, "meshes", "lod.nif")); got != "LODDATA" {
+		t.Errorf("target copy = %q", got)
+	}
+	// Still visible in the farm (re-linked), so a running session keeps seeing it.
+	if got := mustRead(t, filepath.Join(farm, "meshes", "lod.nif")); got != "LODDATA" {
+		t.Errorf("farm re-link = %q", got)
+	}
+}

@@ -875,6 +875,142 @@ bool GrpcClient::installScriptExtender(const QString& gameId, QString& nameOut, 
     return true;
 }
 
+// ---- External executables ----
+
+static GrpcExecutable execFromProto(const gorganizer::v1::Executable& e)
+{
+    GrpcExecutable g;
+    g.id = QString::fromStdString(e.id());
+    g.title = QString::fromStdString(e.title());
+    g.exePath = QString::fromStdString(e.exe_path());
+    for (const auto& a : e.args()) g.args << QString::fromStdString(a);
+    g.workingDir = QString::fromStdString(e.working_dir());
+    g.needsVfsMounted = e.needs_vfs_mounted();
+    g.captureOutputToMod = QString::fromStdString(e.capture_output_to_mod());
+    g.sanitizeEnv = e.sanitize_env();
+    for (const auto& p : e.extra_rw_paths()) g.extraRwPaths << QString::fromStdString(p);
+    g.autoDetected = e.auto_detected();
+    return g;
+}
+
+static void execToProto(const GrpcExecutable& g, gorganizer::v1::Executable* e)
+{
+    e->set_id(g.id.toStdString());
+    e->set_title(g.title.toStdString());
+    e->set_exe_path(g.exePath.toStdString());
+    for (const auto& a : g.args) e->add_args(a.toStdString());
+    e->set_working_dir(g.workingDir.toStdString());
+    e->set_needs_vfs_mounted(g.needsVfsMounted);
+    e->set_capture_output_to_mod(g.captureOutputToMod.toStdString());
+    e->set_sanitize_env(g.sanitizeEnv);
+    for (const auto& p : g.extraRwPaths) e->add_extra_rw_paths(p.toStdString());
+    e->set_auto_detected(g.autoDetected);
+}
+
+bool GrpcClient::listExecutables(const QString& gameId, QList<GrpcExecutable>& out, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
+    gorganizer::v1::ListExecutablesRequest req;
+    req.set_game_id(gameId.toStdString());
+    gorganizer::v1::ListExecutablesResponse resp;
+    auto s = stub->ListExecutables(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    out.clear();
+    for (const auto& e : resp.executables()) out << execFromProto(e);
+    return true;
+}
+
+bool GrpcClient::upsertExecutable(const QString& gameId, const GrpcExecutable& exe,
+                                  GrpcExecutable& savedOut, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
+    gorganizer::v1::UpsertExecutableRequest req;
+    req.set_game_id(gameId.toStdString());
+    execToProto(exe, req.mutable_executable());
+    gorganizer::v1::Executable resp;
+    auto s = stub->UpsertExecutable(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    savedOut = execFromProto(resp);
+    return true;
+}
+
+bool GrpcClient::removeExecutable(const QString& gameId, const QString& id, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
+    gorganizer::v1::RemoveExecutableRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_id(id.toStdString());
+    gorganizer::v1::RemoveExecutableResponse resp;
+    auto s = stub->RemoveExecutable(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    return true;
+}
+
+bool GrpcClient::detectExecutables(const QString& gameId, QList<GrpcDetectedExecutable>& out, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(60));
+    gorganizer::v1::DetectExecutablesRequest req;
+    req.set_game_id(gameId.toStdString());
+    gorganizer::v1::DetectExecutablesResponse resp;
+    auto s = stub->DetectExecutables(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    out.clear();
+    for (const auto& d : resp.detected()) {
+        GrpcDetectedExecutable g;
+        g.title = QString::fromStdString(d.title());
+        g.exePath = QString::fromStdString(d.exe_path());
+        g.needsVfsMounted = d.needs_vfs_mounted();
+        g.captureOutputToMod = QString::fromStdString(d.capture_output_to_mod());
+        out << g;
+    }
+    return true;
+}
+
+bool GrpcClient::launchExecutable(const QString& gameId, const QString& execId, const QString& profileName,
+                                  int& pidOut, QString& runIdOut, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::minutes(2));
+    gorganizer::v1::LaunchExecutableRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_exec_id(execId.toStdString());
+    req.set_profile_name(profileName.toStdString());
+    gorganizer::v1::LaunchExecutableResponse resp;
+    auto s = stub->LaunchExecutable(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    pidOut = resp.pid();
+    runIdOut = QString::fromStdString(resp.run_id());
+    return true;
+}
+
+bool GrpcClient::cancelExecutable(const QString& runId, QString& errorOut)
+{
+    if (!m_channel) { errorOut = "not connected"; return false; }
+    auto stub = makeStub(m_channel);
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
+    gorganizer::v1::CancelExecutableRequest req;
+    req.set_run_id(runId.toStdString());
+    gorganizer::v1::CancelExecutableResponse resp;
+    auto s = stub->CancelExecutable(&ctx, req, &resp);
+    if (!s.ok()) { errorOut = QString::fromStdString(s.error_message()); return false; }
+    return true;
+}
+
 bool GrpcClient::install4GBPatcher(const QString& gameId, QString& patcherExePathOut,
                                     QString& versionOut, QString& errorOut)
 {

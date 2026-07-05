@@ -189,8 +189,19 @@ func devID(path string) (uint64, error) {
 func devIDOf(path string) (uint64, error) { return devID(path) }
 
 // CaptureNewFiles moves files we didn't place (st_nlink == 1) into overwriteRoot.
+// It is the teardown/rebuild form: no re-link (the farm is about to be removed).
 func CaptureNewFiles(dataDir, overwriteRoot string) (int, error) {
-	if overwriteRoot == "" {
+	return CaptureNewFilesInto(dataDir, overwriteRoot, false, false)
+}
+
+// CaptureNewFilesInto moves loose files we didn't place (st_nlink == 1) from
+// dataDir into targetRoot. When relink is true, each moved file is linked back
+// into dataDir (symlink fallback across filesystems; chmod 0444 unless
+// isOverwrite) so it stays visible in the live farm WITHOUT a full
+// re-materialize. This is how external-tool output (DynDOLOD/Nemesis/BodySlide)
+// is captured into a mod on tool exit while a session continues (plan §5.4).
+func CaptureNewFilesInto(dataDir, targetRoot string, relink, isOverwrite bool) (int, error) {
+	if targetRoot == "" {
 		return 0, nil
 	}
 
@@ -220,19 +231,47 @@ func CaptureNewFiles(dataDir, overwriteRoot string) (int, error) {
 		if relErr != nil {
 			return relErr
 		}
-		dst := filepath.Join(overwriteRoot, rel)
+		dst := filepath.Join(targetRoot, rel)
 		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 			return fmt.Errorf("mkdir %q: %w", filepath.Dir(dst), err)
 		}
 		if err := moveFile(path, dst); err != nil {
 			return fmt.Errorf("moving captured file %q -> %q: %w", path, dst, err)
 		}
-		slog.Info("captured new file into overwrite mod",
-			"src", path, "dst", dst)
+		slog.Info("captured new file", "src", path, "dst", dst, "relink", relink)
 		moved++
+
+		if relink {
+			if err := relinkCaptured(dst, path, isOverwrite); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	return moved, walkErr
+}
+
+// relinkCaptured hardlinks src (now in the target mod) back to farmPath, falling
+// back to an absolute symlink across filesystems, mirroring BuildInto.
+func relinkCaptured(src, farmPath string, isOverwrite bool) error {
+	outDevID, _ := devIDOf(filepath.Dir(farmPath))
+	linked, srcDevID, linkErr := tryHardlink(src, farmPath, outDevID)
+	switch {
+	case linked:
+		if !isOverwrite {
+			_ = os.Chmod(farmPath, 0444)
+		}
+		return nil
+	case errors.Is(linkErr, syscall.EXDEV) || (srcDevID != 0 && srcDevID != outDevID):
+		abs, _ := filepath.Abs(src)
+		if err := os.Symlink(abs, farmPath); err != nil {
+			return fmt.Errorf("re-link symlink %q -> %q: %w", farmPath, abs, err)
+		}
+		return nil
+	case linkErr != nil:
+		return fmt.Errorf("re-link %q -> %q: %w", farmPath, src, linkErr)
+	}
+	return nil
 }
 
 // moveFile renames src to dst, falling back to copy-and-delete on EXDEV.

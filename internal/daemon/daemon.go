@@ -105,9 +105,21 @@ type Daemon struct {
 	steamLaunched map[string]bool
 	launchedMu    sync.Mutex
 
+	// execRuns tracks in-flight external-tool launches (Executables) so the mount
+	// is treated as busy while a tool holds it, and so runs can be cancelled and
+	// waited on at shutdown. Keyed by run id.
+	execRuns   map[string]*execRun
+	execRunsMu sync.Mutex
+
 	pendingRecoveries   map[string]*ipc.RecoveryPendingResult
 	gamesAtPath         map[string][]string
 	pendingRecoveriesMu sync.Mutex
+
+	// installLocks serialize install/merge/reinstall/uninstall/rename per
+	// destination mod folder so concurrent operations can't interleave a
+	// mergeTree with a metadata.yaml rewrite (H-9/H-11). Keyed by mod path.
+	installLocks   map[string]*sync.Mutex
+	installLocksMu sync.Mutex
 
 	activeGameID   string
 	activeGameIDMu sync.RWMutex
@@ -132,6 +144,12 @@ type Daemon struct {
 
 	readiness   ipc.ReadinessResult
 	readinessMu sync.RWMutex
+
+	// recoveryReady is closed once crash recovery has run and pendingRecoveries
+	// is authoritative. Mount/launch RPCs wait on it so they never act on a farm
+	// recovery would have flagged (H-8).
+	recoveryReady     chan struct{}
+	recoveryReadyOnce sync.Once
 
 	pluginHeaderCache     *plugins.HeaderCache
 	pluginHeaderCacheOnce sync.Once
@@ -174,6 +192,9 @@ func New(cfg *config.Config) (*Daemon, error) {
 		installedArchiveCache: make(map[string]map[string]archiveInstall),
 		launched:              make(map[int]*launchedGame),
 		steamLaunched:         make(map[string]bool),
+		execRuns:              make(map[string]*execRun),
+		installLocks:          make(map[string]*sync.Mutex),
+		recoveryReady:         make(chan struct{}),
 		pendingRecoveries:     make(map[string]*ipc.RecoveryPendingResult),
 		gamesAtPath:           make(map[string][]string),
 	}
@@ -231,9 +252,36 @@ func (d *Daemon) ensureMountManager(gameID string, gc config.GameConfig) *vfs.Mo
 	return mm
 }
 
+const recoveryWaitTimeout = 60 * time.Second
+
+// signalRecoveryReady unblocks awaitRecovery; safe to call more than once.
+func (d *Daemon) signalRecoveryReady() {
+	d.recoveryReadyOnce.Do(func() { close(d.recoveryReady) })
+}
+
+// awaitRecovery blocks until crash recovery has completed (so pendingRecoveries
+// is authoritative), the daemon is shutting down, or a timeout elapses (H-8).
+func (d *Daemon) awaitRecovery() error {
+	select {
+	case <-d.recoveryReady:
+		return nil
+	default:
+	}
+	select {
+	case <-d.recoveryReady:
+		return nil
+	case <-d.shutdownCh:
+		return fmt.Errorf("daemon is shutting down")
+	case <-time.After(recoveryWaitTimeout):
+		return fmt.Errorf("still completing crash recovery — please try again in a moment")
+	}
+}
+
 func (d *Daemon) RecoverAll() {
 	d.setReadinessStep("checking crash recovery", nil)
 	defer d.setReadinessStep("recovery complete", func(r *ipc.ReadinessResult) { r.RecoveryDone = true })
+	// Unblock any mount/launch RPCs waiting for recovery to be authoritative (H-8).
+	defer d.signalRecoveryReady()
 
 	pathToGames := map[string][]string{}
 	pathOrder := []string{}
@@ -412,6 +460,46 @@ func (d *Daemon) shutdownAll(ctx context.Context) {
 	<-d.coalescerDone
 }
 
+// installLock returns the per-mod-folder mutex serializing writes to that mod.
+func (d *Daemon) installLock(gameID, modName string) *sync.Mutex {
+	key := filepath.Clean(filepath.Join(config.ModsDir(gameID), modName))
+	d.installLocksMu.Lock()
+	defer d.installLocksMu.Unlock()
+	m, ok := d.installLocks[key]
+	if !ok {
+		m = &sync.Mutex{}
+		d.installLocks[key] = m
+	}
+	return m
+}
+
+// lockMods locks the install mutexes for one or more mod folders in a fixed
+// (sorted, de-duplicated) order to prevent deadlock, and returns a function that
+// unlocks them in reverse. Empty names are ignored.
+func (d *Daemon) lockMods(gameID string, names ...string) func() {
+	seen := make(map[string]bool, len(names))
+	uniq := make([]string, 0, len(names))
+	for _, n := range names {
+		if n == "" || seen[n] {
+			continue
+		}
+		seen[n] = true
+		uniq = append(uniq, n)
+	}
+	sort.Strings(uniq)
+	locks := make([]*sync.Mutex, 0, len(uniq))
+	for _, n := range uniq {
+		l := d.installLock(gameID, n)
+		l.Lock()
+		locks = append(locks, l)
+	}
+	return func() {
+		for i := len(locks) - 1; i >= 0; i-- {
+			locks[i].Unlock()
+		}
+	}
+}
+
 // setSteamLaunched records/clears that a game is running via an untracked Steam
 // launch, gating shutdown teardown of its farm (H-1b).
 func (d *Daemon) setSteamLaunched(gameID string, active bool) {
@@ -425,15 +513,26 @@ func (d *Daemon) setSteamLaunched(gameID string, active bool) {
 }
 
 // mountBusy reports whether a game's farm may still have a live reader — a
-// tracked Proton launch or an untracked Steam launch — so teardown must wait.
+// tracked Proton launch, an untracked Steam launch, or a running external tool —
+// so teardown/re-materialize must wait.
 func (d *Daemon) mountBusy(gameID string) bool {
 	d.launchedMu.Lock()
-	defer d.launchedMu.Unlock()
 	if d.steamLaunched[gameID] {
+		d.launchedMu.Unlock()
 		return true
 	}
 	for _, lg := range d.launched {
 		if lg.gameID == gameID {
+			d.launchedMu.Unlock()
+			return true
+		}
+	}
+	d.launchedMu.Unlock()
+
+	d.execRunsMu.Lock()
+	defer d.execRunsMu.Unlock()
+	for _, r := range d.execRuns {
+		if r.gameID == gameID {
 			return true
 		}
 	}
@@ -763,6 +862,10 @@ func (d *Daemon) MountVFSWithSwap(gameID, profileName string) (*ipc.VFSStatusRes
 }
 
 func (d *Daemon) mountVFSWithSwap(gameID, profileName string, autoSwap bool) (*ipc.VFSStatusResult, error) {
+	// Wait until crash recovery is authoritative before acting on any farm (H-8).
+	if err := d.awaitRecovery(); err != nil {
+		return nil, err
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -1429,6 +1532,9 @@ func (d *Daemon) SetGameSettings(gameID string, autoInstall bool) (*ipc.GameSett
 }
 
 func (d *Daemon) LaunchGame(gameID string, useTool bool, profileName string) (int, error) {
+	if err := d.awaitRecovery(); err != nil {
+		return 0, err
+	}
 	if pending := d.recoveryPendingFor(gameID); pending != nil {
 		return 0, fmt.Errorf("recovery pending for %s: %s — confirm via the GUI prompt or `gorganizerctl recover-confirm` first",
 			gameID, pending.Reason)

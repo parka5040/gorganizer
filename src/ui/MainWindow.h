@@ -8,6 +8,8 @@
 #include "GameInfo.h"
 #include <vector>
 
+class QToolButton;
+
 namespace gorganizer {
 
 class GrpcClient;
@@ -28,6 +30,7 @@ public:
 private slots:
     void onGameChanged(uint32_t appId);
     void onRunGame();
+    void onApplyChanges();
     void onProfileChanged(const QString& profileName);
     void onGameLaunched(int pid);
     void onGameLaunchFailed(const QString& error);
@@ -35,6 +38,8 @@ private slots:
     void onInstallMod();
     void onOpenSettings();
     void onOpenIniEditor();
+    void onOpenExecutables();
+    void onUnmountMods();
     void onAddNewGame();
     void onPatchFalloutTo4GB();
     void onInstallTTW();
@@ -43,6 +48,7 @@ private:
     void setupUi();
     void loadManagedGames();
     void updateStatusBarInfo();
+    void setVfsDirty(bool dirty);
 
     AppConfig& m_config;
     GrpcClient* m_grpc;
@@ -56,6 +62,9 @@ private:
     ProfileSelectorWidget* m_profileSelector = nullptr;
     ConnectionIndicator* m_connectionIndicator = nullptr;
     QLabel* m_statusInfo = nullptr;
+    QToolButton* m_applyButton = nullptr; // "Apply Changes" — visible while dirty
+    bool m_vfsDirty = false;
+    bool m_vfsMounted = false;
 
     std::vector<GameInfo> m_managedGames;
     GameInfo m_activeGame;

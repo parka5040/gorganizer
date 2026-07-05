@@ -11,6 +11,7 @@
 #include "SettingsDialog.h"
 #include "ModInstallDialog.h"
 #include "IniEditorDialog.h"
+#include "ExecutablesDialog.h"
 #include "GameDetector.h"
 #include "TTWInstallDialog.h"
 #include "ThemeManager.h"
@@ -208,6 +209,8 @@ void MainWindow::setupUi()
 
     auto* toolsMenu = menuBar()->addMenu("&Tools");
     toolsMenu->addAction("INI &Editor...", this, &MainWindow::onOpenIniEditor);
+    toolsMenu->addAction("E&xternal Tools...", this, &MainWindow::onOpenExecutables);
+    toolsMenu->addAction("&Unmount Mods (restore vanilla Data)", this, &MainWindow::onUnmountMods);
     m_patch4GBAction = toolsMenu->addAction("Patch Fallout to &4GB",
                                             this, &MainWindow::onPatchFalloutTo4GB);
     m_patch4GBAction->setVisible(false);
@@ -239,6 +242,19 @@ void MainWindow::setupUi()
     installBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
     connect(installBtn, &QToolButton::clicked, this, &MainWindow::onInstallMod);
     toolbar->addWidget(installBtn);
+
+    // "Apply Changes" — under defer+coalesce, mod-list edits mark the VFS dirty
+    // instead of remounting on every click. This button (shown only while dirty)
+    // rebuilds the on-disk farm; launching also applies automatically.
+    m_applyButton = new QToolButton;
+    m_applyButton->setText("Apply Changes");
+    m_applyButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_applyButton->setToolTip("Rebuild the game's mod view to match your pending changes.\n"
+                              "Launching the game applies them automatically.");
+    m_applyButton->setStyleSheet("QToolButton { font-weight: bold; }");
+    m_applyButton->setVisible(false);
+    connect(m_applyButton, &QToolButton::clicked, this, &MainWindow::onApplyChanges);
+    toolbar->addWidget(m_applyButton);
 
     auto* spacer = new QWidget;
     spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
@@ -311,15 +327,17 @@ void MainWindow::setupUi()
 
     connect(m_modList, &ModListWidget::modToggled,
             m_pluginList, &PluginListWidget::refresh);
-    connect(m_modList, &ModListWidget::modToggled, this, [this] {
-        if (m_activeGame.detected && !m_currentProfile.isEmpty() && m_grpc->isConnected())
-            m_grpc->mountVfsWithSwap(m_activeGame.shortName, m_currentProfile);
-    });
+    // Defer+coalesce (U-2): a mod toggle/reorder persists via setModList, which
+    // marks the VFS dirty on the daemon. We no longer remount on every click;
+    // the daemon emits VFSStatus{dirty} and we surface an Apply affordance. The
+    // farm is rebuilt on Apply or automatically just before launch.
 
     connect(m_grpc, &GrpcClient::vfsStatusChanged, this,
             [this](const GrpcVFSStatus& status) {
         if (!m_activeGame.detected) return;
         if (status.gameId != m_activeGame.shortName) return;
+        m_vfsMounted = status.mounted;
+        setVfsDirty(status.dirty);
         m_pluginList->refresh();
     });
 
@@ -419,6 +437,31 @@ void MainWindow::onGameChanged(uint32_t appId)
     updateStatusBarInfo();
 }
 
+void MainWindow::setVfsDirty(bool dirty)
+{
+    m_vfsDirty = dirty;
+    if (m_applyButton) {
+        m_applyButton->setVisible(dirty);
+        m_applyButton->setEnabled(dirty);
+    }
+    if (dirty)
+        statusBar()->showMessage("Mod changes pending — click \"Apply Changes\" or just launch.", 4000);
+}
+
+void MainWindow::onApplyChanges()
+{
+    if (!m_activeGame.detected || m_currentProfile.isEmpty() || !m_grpc->isConnected())
+        return;
+    m_applyButton->setEnabled(false);
+    statusBar()->showMessage("Applying mod changes…");
+    // When mounted, RebuildVFS re-materializes the on-disk farm in place; if not
+    // yet mounted (rare — game-switch mounts), fall back to a mount/swap.
+    if (m_vfsMounted)
+        m_grpc->rebuildVfs(m_activeGame.shortName);
+    else
+        m_grpc->mountVfsWithSwap(m_activeGame.shortName, m_currentProfile);
+}
+
 void MainWindow::onProfileChanged(const QString& profileName)
 {
     m_currentProfile = profileName;
@@ -468,6 +511,9 @@ void MainWindow::onRunGame()
         statusBar()->showMessage(
             useTool ? QString("Preparing mods and launching %1...").arg(target.label)
                     : QString("Preparing mods and launching %1...").arg(m_activeGame.name));
+        // U-3: prevent a double-click from firing two launches; re-enabled when
+        // the launch resolves (onGameLaunched / onGameLaunchFailed).
+        m_runButton->setEnabled(false);
         m_grpc->launchGame(m_activeGame.shortName, useTool, m_currentProfile);
     } else {
         QString steamUrl = QString("steam://rungameid/%1").arg(m_activeGame.appId);
@@ -722,13 +768,45 @@ void MainWindow::onOpenIniEditor()
     dlg.exec();
 }
 
+void MainWindow::onUnmountMods()
+{
+    if (!m_activeGame.detected || !m_grpc->isConnected())
+        return;
+    // C4/C5: explicit "stop playing" — deactivate the farm (capturing writes,
+    // restoring vanilla Data/) and clear the steam-launched busy flag so a later
+    // Apply/rebuild is allowed.
+    if (QMessageBox::question(this, "Unmount mods",
+            "Restore the game's vanilla Data folder?\n\nAny new writes (saves, tool output) "
+            "are captured into Overwrite first. Do this when you've finished playing.")
+        != QMessageBox::Yes)
+        return;
+    m_grpc->unmountVfs(m_activeGame.shortName);
+    statusBar()->showMessage("Unmounting mods…", 4000);
+}
+
+void MainWindow::onOpenExecutables()
+{
+    if (!m_activeGame.detected) {
+        QMessageBox::information(this, "External Tools", "Select a game first.");
+        return;
+    }
+    if (!m_grpc->isConnected()) {
+        QMessageBox::warning(this, "External Tools", "The daemon must be running.");
+        return;
+    }
+    ExecutablesDialog dlg(m_grpc, m_activeGame.shortName, m_currentProfile, this);
+    dlg.exec();
+}
+
 void MainWindow::onGameLaunched(int pid)
 {
+    m_runButton->setEnabled(true); // U-3
     statusBar()->showMessage(QString("Game launched (PID %1)").arg(pid), 5000);
 }
 
 void MainWindow::onGameLaunchFailed(const QString& error)
 {
+    m_runButton->setEnabled(true); // U-3
     if (error.contains("loader_missing:")) {
         const int idx = error.indexOf("loader_missing:");
         const QStringList parts = error.mid(idx + QString("loader_missing:").length())
@@ -812,6 +890,16 @@ void MainWindow::onGameLaunchFailed(const QString& error)
 
 void MainWindow::onRpcError(const QString& method, const QString& error)
 {
+    // U-4: a mod-list mutation is applied optimistically in the view. If the
+    // daemon rejects it, revert to the daemon's authoritative state and surface
+    // the failure loudly rather than leaving the UI silently out of sync.
+    if (method == "SetModList") {
+        if (m_activeGame.detected)
+            m_modList->loadForGame(m_activeGame, m_currentProfile);
+        QMessageBox::warning(this, "Change not saved",
+            QString("A mod-list change could not be saved and was reverted:\n\n%1").arg(error));
+        return;
+    }
     statusBar()->showMessage(QString("Error (%1): %2").arg(method, error), 5000);
 }
 

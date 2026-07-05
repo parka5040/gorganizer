@@ -1071,3 +1071,97 @@ func fomodPlanToProto(p *FomodPlanResult) *pb.FomodPlan {
 	}
 	return out
 }
+
+// ---- External executables ----
+
+func execSpecToProto(s ExecutableSpec) *pb.Executable {
+	return &pb.Executable{
+		Id:                 s.ID,
+		Title:              s.Title,
+		ExePath:            s.ExePath,
+		Args:               s.Args,
+		WorkingDir:         s.WorkingDir,
+		NeedsVfsMounted:    s.NeedsVFSMounted,
+		CaptureOutputToMod: s.CaptureOutputToMod,
+		SanitizeEnv:        s.SanitizeEnv,
+		ExtraRwPaths:       s.ExtraRWPaths,
+		AutoDetected:       s.AutoDetected,
+	}
+}
+
+func protoToExecSpec(e *pb.Executable) ExecutableSpec {
+	if e == nil {
+		return ExecutableSpec{}
+	}
+	return ExecutableSpec{
+		ID:                 e.GetId(),
+		Title:              e.GetTitle(),
+		ExePath:            e.GetExePath(),
+		Args:               e.GetArgs(),
+		WorkingDir:         e.GetWorkingDir(),
+		NeedsVFSMounted:    e.GetNeedsVfsMounted(),
+		CaptureOutputToMod: e.GetCaptureOutputToMod(),
+		SanitizeEnv:        e.GetSanitizeEnv(),
+		ExtraRWPaths:       e.GetExtraRwPaths(),
+		AutoDetected:       e.GetAutoDetected(),
+	}
+}
+
+func (s *gorganizerServer) ListExecutables(_ context.Context, req *pb.ListExecutablesRequest) (*pb.ListExecutablesResponse, error) {
+	list, err := s.ctrl.ListExecutables(req.GetGameId())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	resp := &pb.ListExecutablesResponse{}
+	for _, e := range list {
+		resp.Executables = append(resp.Executables, execSpecToProto(e))
+	}
+	return resp, nil
+}
+
+func (s *gorganizerServer) UpsertExecutable(_ context.Context, req *pb.UpsertExecutableRequest) (*pb.Executable, error) {
+	saved, err := s.ctrl.UpsertExecutable(req.GetGameId(), protoToExecSpec(req.GetExecutable()))
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return execSpecToProto(saved), nil
+}
+
+func (s *gorganizerServer) RemoveExecutable(_ context.Context, req *pb.RemoveExecutableRequest) (*pb.RemoveExecutableResponse, error) {
+	if err := s.ctrl.RemoveExecutable(req.GetGameId(), req.GetId()); err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.RemoveExecutableResponse{}, nil
+}
+
+func (s *gorganizerServer) DetectExecutables(_ context.Context, req *pb.DetectExecutablesRequest) (*pb.DetectExecutablesResponse, error) {
+	found, err := s.ctrl.DetectExecutables(req.GetGameId())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	resp := &pb.DetectExecutablesResponse{}
+	for _, f := range found {
+		resp.Detected = append(resp.Detected, &pb.DetectedExecutable{
+			Title:              f.Title,
+			ExePath:            f.ExePath,
+			NeedsVfsMounted:    f.NeedsVFSMounted,
+			CaptureOutputToMod: f.CaptureOutputToMod,
+		})
+	}
+	return resp, nil
+}
+
+func (s *gorganizerServer) LaunchExecutable(_ context.Context, req *pb.LaunchExecutableRequest) (*pb.LaunchExecutableResponse, error) {
+	pid, runID, err := s.ctrl.LaunchExecutable(req.GetGameId(), req.GetExecId(), req.GetProfileName())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.LaunchExecutableResponse{Pid: int32(pid), RunId: runID}, nil
+}
+
+func (s *gorganizerServer) CancelExecutable(_ context.Context, req *pb.CancelExecutableRequest) (*pb.CancelExecutableResponse, error) {
+	if err := s.ctrl.CancelExecutable(req.GetRunId()); err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.CancelExecutableResponse{}, nil
+}

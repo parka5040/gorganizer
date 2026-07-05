@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/parka/gorganizer/internal/game"
 )
 
 // NXMLink holds the parsed components of an nxm:// URI.
@@ -16,28 +18,10 @@ type NXMLink struct {
 	Expires  int64
 }
 
-var slugToGameID = map[string]string{
-	"skyrimspecialedition": "skyrimse",
-	"skyrim":               "skyrim",
-	"newvegas":             "falloutnv",
-	"fallout3":             "fallout3",
-	"fallout4":             "fallout4",
-	"oblivion":             "oblivion",
-	"morrowind":            "morrowind",
-	"starfield":            "starfield",
-}
-
 // GameSlug returns the canonical Nexus slug for an internal gameID, or "".
+// The slug data lives on the central game registry (game.GameDefinition.NxmSlug).
 func GameSlug(gameID string) string {
-	if gameID == "ttw" {
-		return "newvegas"
-	}
-	for slug, id := range slugToGameID {
-		if id == gameID {
-			return slug
-		}
-	}
-	return ""
+	return game.NxmSlugForID(gameID)
 }
 
 // ParseNXM parses an nxm:// URI into its components.
@@ -81,7 +65,7 @@ func ParseNXM(uri string) (*NXMLink, error) {
 }
 
 func (n *NXMLink) GameID() (string, error) {
-	id, ok := slugToGameID[n.GameSlug]
+	id, ok := game.GameIDForNxmSlug(n.GameSlug)
 	if !ok {
 		return "", fmt.Errorf("%w: %s", ErrUnknownSlug, n.GameSlug)
 	}

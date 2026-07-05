@@ -24,6 +24,12 @@ type previewEntry struct {
 	CreatedAt      time.Time
 	HasFomod       bool
 	ModuleRoot     string
+
+	// leases counts in-flight readers of ExtractRoot (an install using this
+	// preview). While leased, eviction is deferred by setting pendingEvict; the
+	// last release performs the RemoveAll (Guard R3, H-12).
+	leases       int
+	pendingEvict bool
 }
 
 // previewCache is the daemon-scoped cache for FOMOD-aware install previews.
@@ -46,25 +52,38 @@ func newPreviewCache(ttl time.Duration, maxLen int) *previewCache {
 func (c *previewCache) put(entry *previewEntry) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for len(c.entries) >= c.maxLen {
-		var oldestID string
-		var oldestT time.Time
-		for id, e := range c.entries {
-			if oldestID == "" || e.CreatedAt.Before(oldestT) {
-				oldestID, oldestT = id, e.CreatedAt
-			}
-		}
-		if oldestID == "" {
-			break
-		}
-		old := c.entries[oldestID]
-		delete(c.entries, oldestID)
-		os.RemoveAll(old.ExtractRoot)
+	// Evict oldest UNLEASED entries toward the bound. A leased entry is skipped
+	// (it is reclaimed on release), so the cache may briefly exceed maxLen rather
+	// than spin or rm an extract dir an install is still reading (Guard R3).
+	for len(c.entries) >= c.maxLen && c.evictOldestUnleasedLocked() {
 	}
 	id := "prev-" + uuid.NewString()
 	entry.CreatedAt = time.Now()
 	c.entries[id] = entry
 	return id
+}
+
+// evictOldestUnleasedLocked removes the oldest entry that has no active lease
+// and is not already pending eviction, returning true if one was evicted.
+// Caller holds c.mu.
+func (c *previewCache) evictOldestUnleasedLocked() bool {
+	var oldestID string
+	var oldestT time.Time
+	for id, e := range c.entries {
+		if e.leases > 0 || e.pendingEvict {
+			continue
+		}
+		if oldestID == "" || e.CreatedAt.Before(oldestT) {
+			oldestID, oldestT = id, e.CreatedAt
+		}
+	}
+	if oldestID == "" {
+		return false
+	}
+	old := c.entries[oldestID]
+	delete(c.entries, oldestID)
+	os.RemoveAll(old.ExtractRoot)
+	return true
 }
 
 func (c *previewCache) get(id string) *previewEntry {
@@ -78,34 +97,81 @@ func (c *previewCache) get(id string) *previewEntry {
 	return e
 }
 
-func (c *previewCache) discard(id string) bool {
+// acquire takes a lease on the entry so its ExtractRoot cannot be removed while
+// an install reads it. Returns nil if the entry is gone. Pair with release.
+func (c *previewCache) acquire(id string) *previewEntry {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	e, ok := c.entries[id]
-	if ok {
-		delete(c.entries, id)
+	if !ok {
+		return nil
+	}
+	e.leases++
+	e.CreatedAt = time.Now()
+	return e
+}
+
+// release drops a lease; if the entry was marked for eviction while leased, the
+// final release deletes it and removes its ExtractRoot exactly once.
+func (c *previewCache) release(id string) {
+	c.mu.Lock()
+	var toRemove string
+	if e, ok := c.entries[id]; ok {
+		if e.leases > 0 {
+			e.leases--
+		}
+		if e.leases == 0 && e.pendingEvict {
+			delete(c.entries, id)
+			toRemove = e.ExtractRoot
+		}
 	}
 	c.mu.Unlock()
-	if ok && e != nil {
-		os.RemoveAll(e.ExtractRoot)
+	if toRemove != "" {
+		os.RemoveAll(toRemove)
+	}
+}
+
+func (c *previewCache) discard(id string) bool {
+	c.mu.Lock()
+	var toRemove string
+	e, ok := c.entries[id]
+	if ok {
+		if e.leases > 0 {
+			// An install is still reading it — defer removal to the last release.
+			e.pendingEvict = true
+			ok = false
+		} else {
+			delete(c.entries, id)
+			toRemove = e.ExtractRoot
+		}
+	}
+	c.mu.Unlock()
+	if toRemove != "" {
+		os.RemoveAll(toRemove)
 		return true
 	}
-	return false
+	return ok
 }
 
 // sweep evicts expired entries. Called periodically by runPreviewSweeper.
 func (c *previewCache) sweep() {
 	c.mu.Lock()
 	now := time.Now()
-	var expired []*previewEntry
+	var expired []string
 	for id, e := range c.entries {
-		if now.Sub(e.CreatedAt) > c.ttl {
-			expired = append(expired, e)
-			delete(c.entries, id)
+		if now.Sub(e.CreatedAt) <= c.ttl {
+			continue
 		}
+		if e.leases > 0 {
+			e.pendingEvict = true // reclaimed on release
+			continue
+		}
+		expired = append(expired, e.ExtractRoot)
+		delete(c.entries, id)
 	}
 	c.mu.Unlock()
-	for _, e := range expired {
-		os.RemoveAll(e.ExtractRoot)
+	for _, root := range expired {
+		os.RemoveAll(root)
 	}
 }
 
@@ -626,12 +692,20 @@ func (d *Daemon) StartInstall(req ipc.StartInstallRequest) (string, int, error) 
 		return "", 0, fmt.Errorf("could not determine target mod folder")
 	}
 
+	// Serialize all writes to this destination mod folder (H-9/H-11) so a
+	// concurrent install/reinstall can't interleave a mergeTree with a
+	// metadata.yaml rewrite. Acquired before the preview lease (Guard C6).
+	defer d.lockMods(req.GameID, target)()
+
 	var extractedRoot string
 	if req.PreviewID != "" {
-		pe := d.previews.get(req.PreviewID)
+		// Lease the preview so a concurrent sweep/put/discard can't RemoveAll the
+		// extract dir while download.Install reads it (H-12). Released below.
+		pe := d.previews.acquire(req.PreviewID)
 		if pe == nil {
 			return "", 0, &ipc.PreviewNotFoundError{PreviewID: req.PreviewID}
 		}
+		defer d.previews.release(req.PreviewID)
 		extractedRoot = pe.ExtractRoot
 	}
 
@@ -785,6 +859,8 @@ func (d *Daemon) RenameMod(gameID, oldName, newName string) error {
 	if oldName == newName {
 		return nil
 	}
+	// Serialize against installs/uninstalls of either folder (H-9/H-11).
+	defer d.lockMods(gameID, oldName, newName)()
 	modsDir := config.ModsDir(gameID)
 	src := filepath.Join(modsDir, oldName)
 	dst := filepath.Join(modsDir, newName)
@@ -982,6 +1058,7 @@ func (d *Daemon) UninstallMod(gameID, modName string, force bool) ([]string, err
 	if _, ok := d.config.Games[gameID]; !ok {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
+	defer d.lockMods(gameID, modName)()
 	modDir := filepath.Join(config.ModsDir(gameID), modName)
 	meta, err := download.LoadModMetadata(modDir)
 	if err != nil || meta == nil || (len(meta.SourceArchives) == 0 && meta.Name == "") {
@@ -1115,6 +1192,7 @@ func (d *Daemon) ReinstallMod(gameID, modName string) (int, int, int, error) {
 	if _, ok := d.config.Games[gameID]; !ok {
 		return 0, 0, 0, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
+	defer d.lockMods(gameID, modName)()
 	modsDir := config.ModsDir(gameID)
 	modDir := filepath.Join(modsDir, modName)
 	meta, err := download.LoadModMetadata(modDir)

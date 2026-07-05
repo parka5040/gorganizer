@@ -16,16 +16,16 @@ import (
 
 // KnownGames is the registry of supported Bethesda games; must match the C++ frontend's GameInfo::knownGames().
 var KnownGames = []GameDefinition{
-	{ID: "morrowind", Name: "The Elder Scrolls III: Morrowind", SteamAppID: 22320, DataSubpath: "Data"},
-	{ID: "oblivion", Name: "The Elder Scrolls IV: Oblivion", SteamAppID: 22330, DataSubpath: "Data"},
-	{ID: "skyrim", Name: "The Elder Scrolls V: Skyrim", SteamAppID: 72850, DataSubpath: "Data"},
-	{ID: "skyrimse", Name: "The Elder Scrolls V: Skyrim Special Edition", SteamAppID: 489830, DataSubpath: "Data"},
-	{ID: "fallout3", Name: "Fallout 3", SteamAppID: 22370, DataSubpath: "Data"},
-	{ID: "falloutnv", Name: "Fallout: New Vegas", SteamAppID: 22380, DataSubpath: "Data"},
-	{ID: "fallout4", Name: "Fallout 4", SteamAppID: 377160, DataSubpath: "Data"},
-	{ID: "starfield", Name: "Starfield", SteamAppID: 1716740, DataSubpath: "Data"},
+	{ID: "morrowind", Name: "The Elder Scrolls III: Morrowind", SteamAppID: 22320, DataSubpath: "Data", NxmSlug: "morrowind"},
+	{ID: "oblivion", Name: "The Elder Scrolls IV: Oblivion", SteamAppID: 22330, DataSubpath: "Data", NxmSlug: "oblivion"},
+	{ID: "skyrim", Name: "The Elder Scrolls V: Skyrim", SteamAppID: 72850, DataSubpath: "Data", NxmSlug: "skyrim"},
+	{ID: "skyrimse", Name: "The Elder Scrolls V: Skyrim Special Edition", SteamAppID: 489830, DataSubpath: "Data", NxmSlug: "skyrimspecialedition"},
+	{ID: "fallout3", Name: "Fallout 3", SteamAppID: 22370, DataSubpath: "Data", NxmSlug: "fallout3"},
+	{ID: "falloutnv", Name: "Fallout: New Vegas", SteamAppID: 22380, DataSubpath: "Data", NxmSlug: "newvegas"},
+	{ID: "fallout4", Name: "Fallout 4", SteamAppID: 377160, DataSubpath: "Data", NxmSlug: "fallout4"},
+	{ID: "starfield", Name: "Starfield", SteamAppID: 1716740, DataSubpath: "Data", NxmSlug: "starfield"},
 	{ID: "ttw", Name: "Tale of Two Wastelands", SteamAppID: 0, DataSubpath: "Data",
-		Synthetic: true, ParentGameID: "falloutnv",
+		Synthetic: true, ParentGameID: "falloutnv", NxmSlug: "newvegas",
 		Requires: []string{"fallout3", "falloutnv"}},
 }
 

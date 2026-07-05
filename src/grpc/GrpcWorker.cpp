@@ -87,6 +87,7 @@ GrpcVFSStatus GrpcWorker::vfsStatusFromProto(const gorganizer::v1::VFSStatus& s)
         .mountPoint = QString::fromStdString(s.mount_point()),
         .enabledModCount = s.enabled_mod_count(),
         .totalFileCount = s.total_file_count(),
+        .dirty = s.dirty(),
     };
 }
 

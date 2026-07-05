@@ -38,6 +38,14 @@ var specs = map[string]Spec{
 		PluginsFileName:   "plugins.txt",
 		LoadOrderFileName: "loadorder.txt",
 		StarPrefix:        true,
+		// The five classic masters are always present. Anniversary Edition
+		// (1.6.x) auto-loads additional Creation Club masters (_ResourcePack.esl
+		// plus ccBGSSSE*/ccQDRSSE*/ccBGSSSE* .esm/.esl). Do NOT hardcode those
+		// here: they are absent on SE 1.5.x installs and listing them would
+		// misorder those users' load orders. Skyrim enablement (a later pass)
+		// should DETECT which CC masters actually exist under the game's Data/
+		// (they carry the ESM master flag and load before regular plugins) and
+		// treat the found set as implicit — verified against a real 1.6.x install.
 		ImplicitMasters: []string{
 			"Skyrim.esm", "Update.esm", "Dawnguard.esm",
 			"HearthFires.esm", "Dragonborn.esm",

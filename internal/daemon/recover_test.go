@@ -197,6 +197,10 @@ func TestRecovery_SyntheticVFSMutexSurfacesError(t *testing.T) {
 	d.mountStates["falloutnv"] = mountState{profileName: "Default"}
 	d.mu.Unlock()
 
+	// The recovery gate (H-8) blocks mount RPCs until recovery has run; this
+	// test never calls Run(), so signal it directly to exercise the mutex path.
+	d.RecoverAll()
+
 	if d.findMutexConflict("ttw") != "falloutnv" {
 		t.Fatalf("findMutexConflict(ttw) = %q; want falloutnv",
 			d.findMutexConflict("ttw"))

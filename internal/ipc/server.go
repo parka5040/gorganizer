@@ -46,6 +46,18 @@ type DaemonController interface {
 	IniController
 	LifecycleController
 	TTWController
+	ExecutableController
+}
+
+// ExecutableController manages and launches user-registered external tools
+// (xEdit, LOOT, DynDOLOD, Nemesis/Pandora, BodySlide, …) through Proton.
+type ExecutableController interface {
+	ListExecutables(gameID string) ([]ExecutableSpec, error)
+	UpsertExecutable(gameID string, spec ExecutableSpec) (ExecutableSpec, error)
+	RemoveExecutable(gameID, id string) error
+	DetectExecutables(gameID string) ([]DetectedExecutable, error)
+	LaunchExecutable(gameID, execID, profileName string) (int, string, error)
+	CancelExecutable(runID string) error
 }
 
 // TTWController exposes the synthetic-game install + lifecycle for Tale
@@ -344,6 +356,28 @@ type FileConflictResult struct {
 	VirtualPath string
 	WinningMod  string
 	LosingMods  []string
+}
+
+// ExecutableSpec is the wire form of a registered external tool (config.Executable).
+type ExecutableSpec struct {
+	ID                 string
+	Title              string
+	ExePath            string
+	Args               []string
+	WorkingDir         string
+	NeedsVFSMounted    bool
+	CaptureOutputToMod string
+	SanitizeEnv        bool
+	ExtraRWPaths       []string
+	AutoDetected       bool
+}
+
+// DetectedExecutable is an autodetected tool candidate.
+type DetectedExecutable struct {
+	Title              string
+	ExePath            string
+	NeedsVFSMounted    bool
+	CaptureOutputToMod string
 }
 
 // OverwriteEntryResult mirrors proto OverwriteEntry. One row per file (and

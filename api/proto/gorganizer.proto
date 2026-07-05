@@ -165,6 +165,15 @@ service Gorganizer {
   rpc TranslateWinePath(TranslateWinePathRequest) returns (TranslateWinePathResponse);
 
   // Lifecycle
+  // External executables (MO2-style tools: xEdit, LOOT, DynDOLOD, Nemesis,
+  // BodySlide, …) launched through Proton against the mounted VFS.
+  rpc ListExecutables(ListExecutablesRequest) returns (ListExecutablesResponse);
+  rpc UpsertExecutable(UpsertExecutableRequest) returns (Executable);
+  rpc RemoveExecutable(RemoveExecutableRequest) returns (RemoveExecutableResponse);
+  rpc DetectExecutables(DetectExecutablesRequest) returns (DetectExecutablesResponse);
+  rpc LaunchExecutable(LaunchExecutableRequest) returns (LaunchExecutableResponse);
+  rpc CancelExecutable(CancelExecutableRequest) returns (CancelExecutableResponse);
+
   rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
   // Lightweight, non-streaming readiness probe used by the splash screen.
   // Polled at ~150 ms during cold start; the frontend unlocks the main
@@ -1175,3 +1184,54 @@ message DependencyWarning {
   string detail = 2;
   DepKind kind = 3;
 }
+
+// ---- External executables (MO2-style tools) ----
+
+message Executable {
+  string id = 1;
+  string title = 2;
+  string exe_path = 3;
+  repeated string args = 4;
+  string working_dir = 5;
+  bool needs_vfs_mounted = 6;
+  string capture_output_to_mod = 7;   // "" => Overwrite
+  bool sanitize_env = 8;
+  repeated string extra_rw_paths = 9;
+  bool auto_detected = 10;
+}
+
+message ListExecutablesRequest { string game_id = 1; }
+message ListExecutablesResponse { repeated Executable executables = 1; }
+
+message UpsertExecutableRequest {
+  string game_id = 1;
+  Executable executable = 2;
+}
+
+message RemoveExecutableRequest {
+  string game_id = 1;
+  string id = 2;
+}
+message RemoveExecutableResponse {}
+
+message DetectExecutablesRequest { string game_id = 1; }
+message DetectedExecutable {
+  string title = 1;
+  string exe_path = 2;
+  bool needs_vfs_mounted = 3;
+  string capture_output_to_mod = 4;
+}
+message DetectExecutablesResponse { repeated DetectedExecutable detected = 1; }
+
+message LaunchExecutableRequest {
+  string game_id = 1;
+  string exec_id = 2;
+  string profile_name = 3;
+}
+message LaunchExecutableResponse {
+  int32 pid = 1;
+  string run_id = 2;
+}
+
+message CancelExecutableRequest { string run_id = 1; }
+message CancelExecutableResponse {}

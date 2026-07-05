@@ -118,6 +118,7 @@ struct GrpcVFSStatus {
     QString mountPoint;
     int enabledModCount = 0;
     int totalFileCount = 0;
+    bool dirty = false; // pending mod edits not yet applied to the on-disk farm
 };
 
 struct GrpcFileConflict {
@@ -233,6 +234,26 @@ using GrpcDownloadRow = GrpcArchiveRow;
 struct GrpcGameSettings {
     QString gameId;
     bool autoInstall = false;
+};
+
+struct GrpcExecutable {
+    QString id;
+    QString title;
+    QString exePath;
+    QStringList args;
+    QString workingDir;
+    bool needsVfsMounted = true;
+    QString captureOutputToMod;
+    bool sanitizeEnv = true;
+    QStringList extraRwPaths;
+    bool autoDetected = false;
+};
+
+struct GrpcDetectedExecutable {
+    QString title;
+    QString exePath;
+    bool needsVfsMounted = true;
+    QString captureOutputToMod;
 };
 
 struct GrpcReinstallResult {
@@ -384,6 +405,16 @@ public:
 
     void launchGame(const QString& gameId, bool useTool, const QString& profileName);
     bool installScriptExtender(const QString& gameId, QString& nameOut, QString& errorOut);
+
+    // External executables (MO2-style tools). Synchronous, deadline-bounded.
+    bool listExecutables(const QString& gameId, QList<GrpcExecutable>& out, QString& errorOut);
+    bool upsertExecutable(const QString& gameId, const GrpcExecutable& exe,
+                          GrpcExecutable& savedOut, QString& errorOut);
+    bool removeExecutable(const QString& gameId, const QString& id, QString& errorOut);
+    bool detectExecutables(const QString& gameId, QList<GrpcDetectedExecutable>& out, QString& errorOut);
+    bool launchExecutable(const QString& gameId, const QString& execId, const QString& profileName,
+                          int& pidOut, QString& runIdOut, QString& errorOut);
+    bool cancelExecutable(const QString& runId, QString& errorOut);
 
     // FNV 4GB patcher (FNV only): two-step install + apply, plus marker-file probe.
     bool install4GBPatcher(const QString& gameId, QString& patcherExePathOut,

@@ -27,7 +27,25 @@ var dropEnvKeys = map[string]bool{
 	"WINEDLLOVERRIDES": true,
 }
 
-// LaunchExternal launches a Windows executable inside a Proton prefix for installers and helper tools.
+// ExternalLaunchOpts parameterizes LaunchExternalWithOptions. It is a superset
+// of the historical LaunchExternal arguments plus WorkingDir.
+type ExternalLaunchOpts struct {
+	PrefixGameID    string
+	GameCfg         *config.GameConfig
+	ExePath         string
+	Args            []string
+	ExtraEnv        []string
+	PreferredProton string
+	SanitizeEnv     bool
+	RWPaths         []string
+	// WorkingDir is the process CWD; empty preserves the historical behavior of
+	// filepath.Dir(ExePath).
+	WorkingDir string
+}
+
+// LaunchExternal launches a Windows executable inside a Proton prefix for
+// installers and helper tools. Preserved shim over LaunchExternalWithOptions so
+// existing callers (the TTW installer) keep byte-identical behavior.
 func (m *Manager) LaunchExternal(
 	prefixGameID string,
 	gameCfg *config.GameConfig,
@@ -38,7 +56,22 @@ func (m *Manager) LaunchExternal(
 	sanitizeEnv bool,
 	rwPaths []string,
 ) (*ExternalLaunchHandle, error) {
-	if gameCfg == nil {
+	return m.LaunchExternalWithOptions(ExternalLaunchOpts{
+		PrefixGameID:    prefixGameID,
+		GameCfg:         gameCfg,
+		ExePath:         exePath,
+		Args:            args,
+		ExtraEnv:        extraEnv,
+		PreferredProton: preferredProton,
+		SanitizeEnv:     sanitizeEnv,
+		RWPaths:         rwPaths,
+	})
+}
+
+// LaunchExternalWithOptions is the general external-tool launcher: any Windows
+// .exe run through the game's Proton prefix against the mounted VFS.
+func (m *Manager) LaunchExternalWithOptions(o ExternalLaunchOpts) (*ExternalLaunchHandle, error) {
+	if o.GameCfg == nil {
 		return nil, fmt.Errorf("LaunchExternal: gameCfg is nil")
 	}
 
@@ -47,13 +80,13 @@ func (m *Manager) LaunchExternal(
 		return nil, fmt.Errorf("finding Steam root: %w", err)
 	}
 
-	appID := strconv.Itoa(gameCfg.SteamAppID)
+	appID := strconv.Itoa(o.GameCfg.SteamAppID)
 	compatDataPath := filepath.Join(steamRoot, "steamapps", "compatdata", appID)
 	prefixPath := filepath.Join(compatDataPath, "pfx")
 
 	if _, err := os.Stat(prefixPath); err != nil {
 		return nil, &ipc.ErrPrefixMissing{
-			GameID:       prefixGameID,
+			GameID:       o.PrefixGameID,
 			ExpectedPath: prefixPath,
 		}
 	}
@@ -62,9 +95,9 @@ func (m *Manager) LaunchExternal(
 		return nil, &ipc.ErrSteamNotRunning{}
 	}
 
-	protonPath := gameCfg.ProtonPath
+	protonPath := o.GameCfg.ProtonPath
 	if protonPath == "" {
-		protonPath = preferredProton
+		protonPath = o.PreferredProton
 	}
 	if protonPath == "" {
 		versions := detectProtonVersions(steamRoot)
@@ -75,12 +108,12 @@ func (m *Manager) LaunchExternal(
 	}
 
 	env := buildExternalEnv(
-		sanitizeEnv, compatDataPath, steamRoot, appID,
-		gameCfg.InstallPath, rwPaths, extraEnv,
+		o.SanitizeEnv, compatDataPath, steamRoot, appID,
+		o.GameCfg.InstallPath, o.RWPaths, o.ExtraEnv,
 	)
 
 	bin := protonPath
-	cmdArgs := append([]string{"waitforexitandrun", exePath}, args...)
+	cmdArgs := append([]string{"waitforexitandrun", o.ExePath}, o.Args...)
 	if entryPoint, runtimeName := ResolveProtonRuntime(protonPath, steamRoot); entryPoint != "" {
 		cmdArgs = append([]string{"--verb=waitforexitandrun", "--", protonPath}, cmdArgs...)
 		bin = entryPoint
@@ -88,9 +121,14 @@ func (m *Manager) LaunchExternal(
 			"runtime", runtimeName, "entry_point", entryPoint, "proton", protonPath)
 	}
 
+	workDir := o.WorkingDir
+	if workDir == "" {
+		workDir = filepath.Dir(o.ExePath)
+	}
+
 	cmd := exec.Command(bin, cmdArgs...)
 	cmd.Env = env
-	cmd.Dir = filepath.Dir(exePath)
+	cmd.Dir = workDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdoutPipe, err := cmd.StdoutPipe()
@@ -103,14 +141,14 @@ func (m *Manager) LaunchExternal(
 	}
 
 	slog.Info("launching external exe via Proton",
-		"prefix_game", prefixGameID, "exe", exePath, "proton", protonPath)
+		"prefix_game", o.PrefixGameID, "exe", o.ExePath, "proton", protonPath)
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("starting Proton wrapper: %w", err)
 	}
 
-	go logProtonOutput(prefixGameID+":external:stdout", "stdout", stdoutPipe)
-	go logProtonOutput(prefixGameID+":external:stderr", "stderr", stderrPipe)
+	go logProtonOutput(o.PrefixGameID+":external:stdout", "stdout", stdoutPipe)
+	go logProtonOutput(o.PrefixGameID+":external:stderr", "stderr", stderrPipe)
 
 	done := make(chan struct{})
 	exitCh := make(chan int, 1)
