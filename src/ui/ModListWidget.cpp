@@ -1,4 +1,5 @@
 #include "ModListWidget.h"
+#include "ThemeManager.h"
 
 #include <QApplication>
 #include <QVBoxLayout>
@@ -292,6 +293,11 @@ ModListWidget::ModListWidget(GrpcClient* grpc, QWidget* parent)
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
 
+    // Conflict/separator/overwrite colors are baked into model items; refresh on
+    // theme change (fires post-construction, once m_model is populated).
+    connect(ThemeManager::instance(), &ThemeManager::themeChanged,
+            this, [this](const Palette&) { restyleModModel(); });
+
     auto* headerRow = new QHBoxLayout;
     auto* titleLabel = new QLabel("Mod List");
     titleLabel->setStyleSheet("font-weight: bold;");
@@ -361,7 +367,7 @@ ModListWidget::ModListWidget(GrpcClient* grpc, QWidget* parent)
     auto* placeholderLayout = new QVBoxLayout(m_placeholder);
     auto* placeholderLabel = new QLabel("No game selected.");
     placeholderLabel->setAlignment(Qt::AlignCenter);
-    placeholderLabel->setStyleSheet("color: gray;");
+    placeholderLabel->setObjectName("hintLabel");
     placeholderLayout->addWidget(placeholderLabel);
     layout->addWidget(m_placeholder);
 
@@ -500,19 +506,20 @@ void ModListWidget::onConflictsReceived(const std::vector<GrpcFileConflict>& con
         conflictItem->setToolTip("");
         conflictItem->setForeground(QBrush());
 
+        const Palette& pal = ThemeManager::currentPalette();
         if (wins > 0 && losses > 0) {
             conflictItem->setText("+-");
             conflictItem->setToolTip(QString("Overwrites %1 file(s), overwritten in %2 file(s) "
                                              "— right-click for details").arg(wins).arg(losses));
-            conflictItem->setForeground(QColor(255, 165, 0));
+            conflictItem->setForeground(pal.warningFg);
         } else if (wins > 0) {
             conflictItem->setText("+");
             conflictItem->setToolTip(QString("Overwrites %1 file(s) — right-click for details").arg(wins));
-            conflictItem->setForeground(QColor(100, 200, 100));
+            conflictItem->setForeground(pal.successFg);
         } else if (losses > 0) {
             conflictItem->setText("-");
             conflictItem->setToolTip(QString("Overwritten in %1 file(s) — right-click for details").arg(losses));
-            conflictItem->setForeground(QColor(255, 100, 100));
+            conflictItem->setForeground(pal.errorFg);
         }
     }
 
@@ -560,8 +567,9 @@ void ModListWidget::repaintConflictHighlights()
         }
     }
 
-    QBrush redBrush(QColor(220, 80, 80, 100));
-    QBrush greenBrush(QColor(80, 180, 100, 100));
+    const Palette& pal = ThemeManager::currentPalette();
+    QBrush redBrush(pal.errorBg);
+    QBrush greenBrush(pal.successBg);
 
     for (int row = 0; row < m_model->rowCount(); ++row) {
         if (row == selRow)
@@ -580,6 +588,47 @@ void ModListWidget::repaintConflictHighlights()
         for (int col = 0; col < m_model->columnCount(); ++col) {
             if (auto* it = m_model->item(row, col))
                 it->setBackground(b);
+        }
+    }
+}
+
+void ModListWidget::restyleModModel()
+{
+    if (!m_model)
+        return;
+    const Palette& pal = ThemeManager::currentPalette();
+
+    // 1) Conflict-marker foregrounds, from the current marker glyph (no recompute).
+    for (int row = 0; row < m_model->rowCount(); ++row) {
+        auto* conflictItem = m_model->item(row, ModColConflicts);
+        if (!conflictItem)
+            continue;
+        const QString mark = conflictItem->text();
+        if (mark == "+-")
+            conflictItem->setForeground(pal.warningFg);
+        else if (mark == "+")
+            conflictItem->setForeground(pal.successFg);
+        else if (mark == "-")
+            conflictItem->setForeground(pal.errorFg);
+    }
+
+    // 2) Selection-based highlights (uses the new token brushes; clears all bg).
+    repaintConflictHighlights();
+
+    // 3) Separator + overwrite colors AFTER, since step 2 clears every item's bg.
+    const QBrush sepBg(pal.surface);
+    for (int row = 0; row < m_model->rowCount(); ++row) {
+        auto* first = m_model->item(row, ModColPriority);
+        const int kind = first ? first->data(Qt::UserRole + 50).toInt() : int(RowKindMod);
+        if (kind == RowKindSeparator) {
+            for (int col = 0; col < m_model->columnCount(); ++col)
+                if (auto* it = m_model->item(row, col))
+                    it->setBackground(sepBg);
+            if (auto* nameItem = m_model->item(row, ModColName))
+                nameItem->setForeground(QBrush(pal.accent));
+        } else if (kind == RowKindOverwrite) {
+            if (first)
+                first->setForeground(QBrush(pal.textMuted));
         }
     }
 }
@@ -638,10 +687,10 @@ void ModListWidget::showConflictDetailsForMod(const QString& modName)
     };
 
     buildSection(QString("Overwrites %1 file(s):").arg(winsOver.size()),
-                 QColor(80, 180, 100), winsOver,
+                 ThemeManager::currentPalette().successFg, winsOver,
                  "This mod doesn't overwrite any files.", "Loser");
     buildSection(QString("Overwritten in %1 file(s):").arg(overwrittenBy.size()),
-                 QColor(220, 80, 80), overwrittenBy,
+                 ThemeManager::currentPalette().errorFg, overwrittenBy,
                  "This mod isn't overwritten by any other mod.", "Winner");
 
     auto* close = new QPushButton("Close");
@@ -1303,8 +1352,9 @@ void ModListWidget::rebuildView()
         f.setBold(true);
         f.setItalic(true);
         nameItem->setFont(f);
-        nameItem->setForeground(QBrush(QColor(200, 200, 120)));
-        QBrush bg(QColor(60, 60, 80));
+        const Palette& sepPal = ThemeManager::currentPalette();
+        nameItem->setForeground(QBrush(sepPal.accent));
+        QBrush bg(sepPal.surface);
         priorityItem->setBackground(bg);
         conflictItem->setBackground(bg);
         nameItem->setBackground(bg);
@@ -1409,7 +1459,7 @@ void ModListWidget::appendOverwriteRow()
     QFont f = spanItem->font();
     f.setItalic(true);
     spanItem->setFont(f);
-    spanItem->setForeground(QBrush(QColor(170, 170, 200)));
+    spanItem->setForeground(QBrush(ThemeManager::currentPalette().textMuted));
     spanItem->setToolTip(
         "Always-on write-capture layer.\n"
         "Loose .esp/.dds/.bsa files dropped here are visible in-game at the\n"

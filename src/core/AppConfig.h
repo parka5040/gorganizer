@@ -28,10 +28,13 @@ public:
     void setManagedGamesByAppId(const std::vector<uint32_t>& appIds);
     std::vector<uint32_t> managedGamesByAppId() const;
 
+    // Selected theme name (e.g. "Neutral", "Dracula"); the light/dark form is
+    // chosen by appearanceMode(). Stored under ui/style; defaults to "Neutral".
     void setPreferredStyle(const QString& style);
     QString preferredStyle() const;
 
-    // Light/Dark/System appearance mode; "system" follows OS, "dark" uses preferredStyle().
+    // Light/Dark/System appearance mode; "system" follows the OS color scheme.
+    // The theme name (preferredStyle()) applies in every mode.
     void setAppearanceMode(const QString& mode);
     QString appearanceMode() const;
 

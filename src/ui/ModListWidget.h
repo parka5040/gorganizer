@@ -117,6 +117,9 @@ private:
 
     std::vector<GrpcFileConflict> m_conflicts;
     void repaintConflictHighlights();
+    // Re-apply conflict markers/highlights, separator, and overwrite-row colors
+    // from the active theme's tokens. Called on theme change.
+    void restyleModModel();
     void showConflictDetailsForMod(const QString& modName);
 
     void appendOverwriteRow();

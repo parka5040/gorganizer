@@ -66,6 +66,9 @@ private:
     static bool isGameMaster(const QString& filename, const QString& gameShortName);
     void resubscribeStream();
     void applyStatusToRow(int row, const GrpcPluginStatus& s);
+    // Re-apply plugin-type foregrounds + dep-status icons/tints from cached
+    // status using the active theme's tokens. Called on theme change.
+    void restylePluginModel();
 
     friend class LoadOrderTreeView;
     void recalculateIndices();

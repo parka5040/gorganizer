@@ -7,6 +7,7 @@
 #include <QTimer>
 #include <QApplication>
 #include <QScreen>
+#include <QFont>
 
 namespace gorganizer {
 
@@ -47,7 +48,10 @@ SplashScreen::SplashScreen(GrpcClient* grpc, QWidget* parent)
 
     auto* hint = new QLabel("This usually takes a few seconds.");
     hint->setAlignment(Qt::AlignCenter);
-    hint->setStyleSheet("color: gray; font-size: 10pt;");
+    hint->setObjectName("hintLabel");
+    QFont hintFont = hint->font();
+    hintFont.setPointSize(10);
+    hint->setFont(hintFont);
     layout->addWidget(hint);
 
     if (auto* screen = QApplication::primaryScreen()) {

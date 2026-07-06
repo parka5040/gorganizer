@@ -190,13 +190,11 @@ void MainWindow::setupUi()
         });
     }
 
-    auto* darkMenu = viewMenu->addMenu("Dark &Variant");
+    auto* darkMenu = viewMenu->addMenu("&Theme");
     m_themeActions = new QActionGroup(this);
     m_themeActions->setExclusive(true);
-    QString currentVariant = m_config.preferredStyle();
-    if (!ThemeManager::isDarkVariant(currentVariant))
-        currentVariant = "Dracula";
-    for (const auto& name : ThemeManager::availableDarkVariants()) {
+    QString currentVariant = ThemeManager::canonicalThemeName(m_config.preferredStyle());
+    for (const auto& name : ThemeManager::availableThemes()) {
         auto* action = darkMenu->addAction(name);
         action->setCheckable(true);
         action->setChecked(name == currentVariant);
@@ -285,7 +283,7 @@ void MainWindow::setupUi()
     auto* dpLayout = new QVBoxLayout(dataPlaceholder);
     auto* dpLabel = new QLabel("Virtual data directory.\nShows the merged view of all enabled mods.\n\n(Coming soon)");
     dpLabel->setAlignment(Qt::AlignCenter);
-    dpLabel->setStyleSheet("color: gray;");
+    dpLabel->setObjectName("hintLabel");
     dpLayout->addWidget(dpLabel);
     m_rightTabs->addTab(dataPlaceholder, "Data");
 
@@ -693,9 +691,7 @@ void MainWindow::onOpenSettings()
             });
     dlg.exec();
     if (m_themeActions) {
-        QString current = m_config.preferredStyle();
-        if (!ThemeManager::isDarkVariant(current))
-            current = "Dracula";
+        QString current = ThemeManager::canonicalThemeName(m_config.preferredStyle());
         for (auto* a : m_themeActions->actions())
             a->setChecked(a->text() == current);
     }

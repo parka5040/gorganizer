@@ -1,6 +1,7 @@
 #include "SetupWizard.h"
 #include "GameDetector.h"
 #include "DirectoryManager.h"
+#include "ThemeManager.h"
 
 #include <QLabel>
 #include <QListWidget>
@@ -61,6 +62,13 @@ bool saveNexusApiKeyToConfig(const QString& apiKey)
 } // anonymous namespace
 
 namespace gorganizer {
+
+namespace {
+// Status-text hues from the active theme so they read in both light and dark.
+QString okHex() { return ThemeManager::currentPalette().successFg.name(); }
+QString errHex() { return ThemeManager::currentPalette().errorFg.name(); }
+QString mutedHex() { return ThemeManager::currentPalette().textMuted.name(); }
+} // namespace
 
 SetupWizard::SetupWizard(AppConfig& config, QWidget* parent)
     : QWizard(parent)
@@ -332,7 +340,7 @@ QWizardPage* SetupWizard::createApiKeyPage()
         QString key = m_apiKeyEdit->text().trimmed();
         if (key.isEmpty()) {
             m_apiKeyStatus->setText(
-                "<span style='color:#c00;'>Please enter a key.</span>");
+                QString("<span style='color:%1;'>Please enter a key.</span>").arg(errHex()));
             return;
         }
         validateApiKey(key);
@@ -343,7 +351,7 @@ QWizardPage* SetupWizard::createApiKeyPage()
 
 void SetupWizard::validateApiKey(const QString& key)
 {
-    m_apiKeyStatus->setText("<span style='color:#888;'>Validating...</span>");
+    m_apiKeyStatus->setText(QString("<span style='color:%1;'>Validating...</span>").arg(mutedHex()));
     m_apiKeyValidateBtn->setEnabled(false);
 
     QNetworkAccessManager manager;
@@ -370,18 +378,18 @@ void SetupWizard::validateApiKey(const QString& key)
         m_apiKeyValid = true;
         m_validatedApiKey = key;
         m_apiKeyStatus->setText(
-            "<b style='color:#080;'>Validated — the key will be saved on finish.</b>");
+            QString("<b style='color:%1;'>Validated — the key will be saved on finish.</b>").arg(okHex()));
     } else if (status == 401 || status == 403) {
         m_apiKeyValid = false;
         m_validatedApiKey.clear();
         m_apiKeyStatus->setText(
-            "<b style='color:#c00;'>Key rejected. Check that you copied it correctly.</b>");
+            QString("<b style='color:%1;'>Key rejected. Check that you copied it correctly.</b>").arg(errHex()));
     } else {
         m_apiKeyValid = false;
         m_validatedApiKey.clear();
         m_apiKeyStatus->setText(
-            QString("<b style='color:#c00;'>Validation failed (HTTP %1). Network issue?</b>")
-                .arg(status));
+            QString("<b style='color:%1;'>Validation failed (HTTP %2). Network issue?</b>")
+                .arg(errHex()).arg(status));
     }
 }
 

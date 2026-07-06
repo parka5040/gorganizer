@@ -130,7 +130,8 @@ void AppConfig::setPreferredStyle(const QString& style)
 
 QString AppConfig::preferredStyle() const
 {
-    return m_settings.value("ui/style").toString();
+    const QString s = m_settings.value("ui/style").toString();
+    return s.isEmpty() ? QStringLiteral("Neutral") : s;
 }
 
 void AppConfig::setAppearanceMode(const QString& mode)

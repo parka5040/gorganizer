@@ -1,4 +1,5 @@
 #include "IniEditorDialog.h"
+#include "ThemeManager.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -21,6 +22,12 @@
 #include <QRegularExpression>
 
 namespace gorganizer {
+
+namespace {
+// Status-text hues from the active theme so they read in both light and dark.
+QString okHex() { return ThemeManager::currentPalette().successFg.name(); }
+QString errHex() { return ThemeManager::currentPalette().errorFg.name(); }
+} // namespace
 
 IniEditorDialog::IniEditorDialog(GrpcClient* grpc,
                                  const QString& gameId,
@@ -49,7 +56,7 @@ IniEditorDialog::IniEditorDialog(GrpcClient* grpc,
     layout->addWidget(m_enabledCheck);
 
     m_pathLabel->setWordWrap(true);
-    m_pathLabel->setStyleSheet("color: #888; font-family: monospace;");
+    m_pathLabel->setObjectName("monoHintLabel");
     m_pathLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     layout->addWidget(m_pathLabel);
 
@@ -59,7 +66,7 @@ IniEditorDialog::IniEditorDialog(GrpcClient* grpc,
 
     buildFindBar(layout);
 
-    m_statusLabel->setStyleSheet("color: #888;");
+    m_statusLabel->setObjectName("hintLabel");
     layout->addWidget(m_statusLabel);
 
     auto* findSc = new QShortcut(QKeySequence::Find, this);
@@ -94,7 +101,7 @@ void IniEditorDialog::reload()
     GrpcProfileIniStatus status;
     QString err;
     if (!m_grpc->listProfileIniFiles(m_gameId, m_profileName, files, status, err)) {
-        m_statusLabel->setText(QString("<span style='color:#d66;'>Error: %1</span>").arg(err));
+        m_statusLabel->setText(QString("<span style='color:%1;'>Error: %2</span>").arg(errHex(), err));
         m_pathLabel->clear();
         return;
     }
@@ -114,7 +121,7 @@ void IniEditorDialog::reload()
             "No INI files managed for this game.\n"
             "(Either the game isn't in the supported list or no spec was found.)");
         placeholder->setAlignment(Qt::AlignCenter);
-        placeholder->setStyleSheet("color: gray;");
+        placeholder->setObjectName("hintLabel");
         m_tabs->addTab(placeholder, "—");
         m_saveBtn->setEnabled(false);
         return;
@@ -167,7 +174,7 @@ void IniEditorDialog::buildTweaksTab()
         "natively — gorganizer merges it into the primary INI when the profile's "
         "custom-INI toggle is on.");
     intro->setWordWrap(true);
-    intro->setStyleSheet("color: #888;");
+    intro->setObjectName("hintLabel");
     outer->addWidget(intro);
 
     auto* scroll = new QScrollArea;
@@ -190,12 +197,14 @@ void IniEditorDialog::buildTweaksTab()
         if (!t.description.isEmpty()) {
             auto* desc = new QLabel(t.description);
             desc->setWordWrap(true);
-            desc->setStyleSheet("color: #aaa; margin-left: 22px;");
+            desc->setObjectName("hintLabel");
+            desc->setContentsMargins(22, 0, 0, 0);
             boxLayout->addWidget(desc);
         }
         if (!t.targetFile.isEmpty()) {
             auto* target = new QLabel(QString("Writes to: %1").arg(t.targetFile));
-            target->setStyleSheet("color: #777; font-family: monospace; margin-left: 22px;");
+            target->setObjectName("monoHintLabel");
+            target->setContentsMargins(22, 0, 0, 0);
             boxLayout->addWidget(target);
         }
         QString tweakId = t.id;
@@ -221,7 +230,8 @@ void IniEditorDialog::onTweakToggled(const QString& tweakId, bool enabled)
         QMessageBox::warning(this, "Tweak Failed", err);
         return;
     }
-    m_statusLabel->setText(QString("<span style='color:#6c6;'>%1 %2 %3.</span>")
+    m_statusLabel->setText(QString("<span style='color:%1;'>%2 %3 %4.</span>")
+        .arg(okHex())
         .arg(state.name)
         .arg(state.enabled ? "enabled" : "disabled")
         .arg("(" + state.targetFile + ")"));
@@ -309,7 +319,7 @@ void IniEditorDialog::onSave()
         m_tabs->setTabText(i + prefix, h.filename);
     }
     m_saveBtn->setEnabled(false);
-    m_statusLabel->setText("<span style='color:#6c6;'>Saved.</span>");
+    m_statusLabel->setText(QString("<span style='color:%1;'>Saved.</span>").arg(okHex()));
 }
 
 void IniEditorDialog::onToggleEnabled(bool checked)
@@ -351,7 +361,7 @@ void IniEditorDialog::onApplyNow()
             const auto& h = m_handles.first();
             m_grpc->saveProfileIniFile(m_gameId, m_profileName, h.filename, h.originalContent, err);
         }
-        m_statusLabel->setText("<span style='color:#6c6;'>Applied to " + status.myGamesDir + "</span>");
+        m_statusLabel->setText(QString("<span style='color:%1;'>Applied to %2</span>").arg(okHex(), status.myGamesDir));
         return;
     }
     m_grpc->setProfileIniEnabled(m_gameId, m_profileName, true, status, err);
@@ -360,7 +370,7 @@ void IniEditorDialog::onApplyNow()
         m_grpc->saveProfileIniFile(m_gameId, m_profileName, h.filename, h.originalContent, err);
     }
     m_grpc->setProfileIniEnabled(m_gameId, m_profileName, false, status, err);
-    m_statusLabel->setText("<span style='color:#6c6;'>Pushed one-shot. Toggle \"Use profile-specific INI\" to make it persistent.</span>");
+    m_statusLabel->setText(QString("<span style='color:%1;'>Pushed one-shot. Toggle \"Use profile-specific INI\" to make it persistent.</span>").arg(okHex()));
 }
 
 namespace {
@@ -439,7 +449,7 @@ void IniEditorDialog::buildResolutionTab(const std::vector<GrpcProfileIniFile>& 
         "Sets <b>iWidth</b> and <b>iHeight</b> in <b>[Display]</b> of the "
         "chosen INI. Pick a common screen resolution or type custom values.");
     intro->setWordWrap(true);
-    intro->setStyleSheet("color:#aaa;");
+    intro->setObjectName("hintLabel");
     outer->addWidget(intro);
 
     auto* form = new QFormLayout;
@@ -511,7 +521,7 @@ void IniEditorDialog::buildResolutionTab(const std::vector<GrpcProfileIniFile>& 
 
     m_resolutionStatus = new QLabel;
     m_resolutionStatus->setWordWrap(true);
-    m_resolutionStatus->setStyleSheet("color:#888;");
+    m_resolutionStatus->setObjectName("hintLabel");
     outer->addWidget(m_resolutionStatus);
     outer->addStretch();
 
@@ -527,13 +537,13 @@ void IniEditorDialog::onApplyResolution()
     QString target = m_resolutionTarget->currentText();
     if (target.isEmpty()) {
         m_resolutionStatus->setText(
-            "<span style='color:#c00;'>No target INI file available.</span>");
+            QString("<span style='color:%1;'>No target INI file available.</span>").arg(errHex()));
         return;
     }
     applyResolutionTo(target, w, h);
     m_resolutionStatus->setText(
-        QString("<span style='color:#080;'>Staged %1×%2 into [Display] of %3. "
-                "Click Save to persist.</span>").arg(w).arg(h).arg(target));
+        QString("<span style='color:%1;'>Staged %2×%3 into [Display] of %4. "
+                "Click Save to persist.</span>").arg(okHex()).arg(w).arg(h).arg(target));
 }
 
 void IniEditorDialog::applyResolutionTo(const QString& filename, int width, int height)
@@ -579,7 +589,7 @@ void IniEditorDialog::buildFindBar(QVBoxLayout* parentLayout)
     closeBtn->setToolTip("Close (Esc)");
     row->addWidget(closeBtn);
     m_findStatus = new QLabel;
-    m_findStatus->setStyleSheet("color:#888;");
+    m_findStatus->setObjectName("hintLabel");
     row->addWidget(m_findStatus);
 
     connect(m_findInput, &QLineEdit::returnPressed, this, &IniEditorDialog::onFindNext);
@@ -619,7 +629,7 @@ void IniEditorDialog::onFindNext()
 {
     auto* editor = currentEditor();
     if (!editor) {
-        m_findStatus->setText("<span style='color:#c00;'>Open an INI tab first.</span>");
+        m_findStatus->setText(QString("<span style='color:%1;'>Open an INI tab first.</span>").arg(errHex()));
         return;
     }
     QString needle = m_findInput->text();
@@ -632,8 +642,8 @@ void IniEditorDialog::onFindNext()
         found = editor->find(needle);
     }
     m_findStatus->setText(found
-        ? "<span style='color:#080;'>match</span>"
-        : "<span style='color:#c00;'>not found</span>");
+        ? QString("<span style='color:%1;'>match</span>").arg(okHex())
+        : QString("<span style='color:%1;'>not found</span>").arg(errHex()));
 }
 
 void IniEditorDialog::onFindClose()

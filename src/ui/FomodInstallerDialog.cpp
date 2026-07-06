@@ -103,7 +103,7 @@ void FomodInstallerDialog::buildPages()
         if (!m_plan.version.isEmpty())  meta << QString("Version: %1").arg(m_plan.version);
         if (!meta.isEmpty()) {
             auto* metaLbl = new QLabel(meta.join("    "));
-            metaLbl->setStyleSheet("color: gray;");
+            metaLbl->setObjectName("hintLabel");
             layout->addWidget(metaLbl);
         }
 

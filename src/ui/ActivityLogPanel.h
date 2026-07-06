@@ -2,8 +2,10 @@
 
 #include <QWidget>
 #include <QHash>
+#include <QVector>
 
 #include "GrpcClient.h"
+#include "Palette.h"
 
 class QPlainTextEdit;
 class QToolButton;
@@ -27,7 +29,19 @@ private slots:
 
 private:
     enum class Severity { Info, Success, Warning, Error };
+    struct LogEntry {
+        Severity sev;
+        QString ts;
+        QString message;
+    };
     void log(Severity sev, const QString& message);
+    // Render one entry to HTML using the active theme's status tokens.
+    QString renderEntry(const LogEntry& e) const;
+    // Re-render the whole scrollback with fresh token colors (on theme change).
+    void rerenderLog();
+
+    static constexpr int kMaxLog = 500;
+    QVector<LogEntry> m_entries;
 
     GrpcClient* m_grpc;
     QPlainTextEdit* m_log = nullptr;

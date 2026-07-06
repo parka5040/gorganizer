@@ -2,6 +2,7 @@
 #include "DownloadsModel.h"
 #include "DownloadsRowDelegate.h"
 #include "ModInstallDialog.h"
+#include "ThemeManager.h"
 
 #include <QVBoxLayout>
 #include <QHeaderView>
@@ -91,6 +92,13 @@ DownloadsLibraryView::DownloadsLibraryView(GrpcClient* grpc, QWidget* parent)
     m_view->setContextMenuPolicy(Qt::CustomContextMenu);
     m_view->setSortingEnabled(true);
     m_view->setUniformRowHeights(true);
+
+    // The status delegate paints from the live theme palette; repaint on change.
+    connect(ThemeManager::instance(), &ThemeManager::themeChanged, this,
+            [this](const Palette&) {
+                if (m_view)
+                    m_view->viewport()->update();
+            });
 
     QHeaderView* hdr = m_view->header();
     hdr->setSectionResizeMode(DownloadsModel::ColName,        QHeaderView::Interactive);

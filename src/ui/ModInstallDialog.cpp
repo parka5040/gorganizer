@@ -2,6 +2,7 @@
 #include "FomodInstallerDialog.h"
 #include "GrpcClient.h"
 #include "InstallWorker.h"
+#include "ThemeManager.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -278,7 +279,7 @@ void ModInstallDialog::scanExtractedTree()
 
     auto* rootItem = new QTreeWidgetItem({"(Archive Root — use if files are directly here)"});
     rootItem->setData(0, Qt::UserRole, m_extractDir);
-    rootItem->setForeground(0, QBrush(QColor(100, 149, 237)));
+    rootItem->setForeground(0, QBrush(ThemeManager::currentPalette().accent));
     m_treeWidget->insertTopLevelItem(0, rootItem);
 
     connect(m_treeWidget, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem* item) {
@@ -306,7 +307,7 @@ void ModInstallDialog::populateTree(const QString& dir, QTreeWidgetItem* parent)
             }
         } else {
             item->setData(0, Qt::UserRole, QString());
-            item->setForeground(0, QBrush(QColor(180, 180, 180)));
+            item->setForeground(0, QBrush(ThemeManager::currentPalette().textMuted));
         }
 
         if (parent)

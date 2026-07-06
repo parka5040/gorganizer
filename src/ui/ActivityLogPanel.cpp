@@ -1,5 +1,6 @@
 #include "ActivityLogPanel.h"
 #include "GrpcClient.h"
+#include "ThemeManager.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -35,16 +36,6 @@ QString shortName(const QString& archiveRelPath, const QString& fallback)
     return fallback.isEmpty() ? QString("(unnamed)") : fallback;
 }
 
-QString sevColor(int sevInt)
-{
-    switch (sevInt) {
-    case 1: return "#080";
-    case 2: return "#a60";
-    case 3: return "#c00";
-    default: return QString();
-    }
-}
-
 } // namespace
 
 ActivityLogPanel::ActivityLogPanel(GrpcClient* grpc, QWidget* parent)
@@ -72,7 +63,10 @@ ActivityLogPanel::ActivityLogPanel(GrpcClient* grpc, QWidget* parent)
     header->addWidget(m_verboseCheck);
     m_clearBtn = new QToolButton;
     m_clearBtn->setText("Clear");
-    connect(m_clearBtn, &QToolButton::clicked, this, [this] { m_log->clear(); });
+    connect(m_clearBtn, &QToolButton::clicked, this, [this] {
+        m_entries.clear();
+        m_log->clear();
+    });
     header->addWidget(m_clearBtn);
     outer->addLayout(header);
 
@@ -94,6 +88,11 @@ ActivityLogPanel::ActivityLogPanel(GrpcClient* grpc, QWidget* parent)
     connect(m_grpc, &GrpcClient::daemonInfo, this, &ActivityLogPanel::onDaemonInfo);
     connect(m_grpc, &GrpcClient::daemonError, this, &ActivityLogPanel::onDaemonError);
     connect(m_grpc, &GrpcClient::dependencyWarning, this, &ActivityLogPanel::onDependencyWarning);
+
+    // Recolor the whole scrollback when the theme changes so severity/timestamp
+    // hues stay legible in both light and dark.
+    connect(ThemeManager::instance(), &ThemeManager::themeChanged,
+            this, [this](const Palette&) { rerenderLog(); });
 }
 
 void ActivityLogPanel::onDependencyWarning(const GrpcDependencyWarning& warning)
@@ -115,19 +114,39 @@ void ActivityLogPanel::onDependencyWarning(const GrpcDependencyWarning& warning)
     log(sev, line);
 }
 
+QString ActivityLogPanel::renderEntry(const LogEntry& e) const
+{
+    const Palette& p = ThemeManager::currentPalette();
+    const QString tsHex = p.textMuted.name();
+    QString color;
+    switch (e.sev) {
+    case Severity::Success: color = p.successFg.name(); break;
+    case Severity::Warning: color = p.warningFg.name(); break;
+    case Severity::Error:   color = p.errorFg.name(); break;
+    case Severity::Info:    break; // default text color
+    }
+    if (color.isEmpty()) {
+        return QString("<span style='color:%1;'>[%2]</span> %3")
+            .arg(tsHex, e.ts.toHtmlEscaped(), e.message.toHtmlEscaped());
+    }
+    return QString("<span style='color:%1;'>[%2]</span> <span style='color:%3;'>%4</span>")
+        .arg(tsHex, e.ts.toHtmlEscaped(), color, e.message.toHtmlEscaped());
+}
+
+void ActivityLogPanel::rerenderLog()
+{
+    m_log->clear();
+    for (const auto& e : m_entries)
+        m_log->appendHtml(renderEntry(e));
+}
+
 void ActivityLogPanel::log(Severity sev, const QString& message)
 {
-    QString ts = QDateTime::currentDateTime().toString("HH:mm:ss");
-    QString color = sevColor(static_cast<int>(sev));
-    QString line;
-    if (color.isEmpty()) {
-        line = QString("<span style='color:#888;'>[%1]</span> %2")
-                   .arg(ts.toHtmlEscaped(), message.toHtmlEscaped());
-    } else {
-        line = QString("<span style='color:#888;'>[%1]</span> <span style='color:%2;'>%3</span>")
-                   .arg(ts.toHtmlEscaped(), color, message.toHtmlEscaped());
-    }
-    m_log->appendHtml(line);
+    LogEntry e{sev, QDateTime::currentDateTime().toString("HH:mm:ss"), message};
+    m_entries.push_back(e);
+    if (m_entries.size() > kMaxLog)
+        m_entries.remove(0, m_entries.size() - kMaxLog);
+    m_log->appendHtml(renderEntry(e));
 }
 
 void ActivityLogPanel::onInstallProgress(const GrpcInstallProgress& p)

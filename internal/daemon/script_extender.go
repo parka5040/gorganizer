@@ -242,18 +242,40 @@ func fetchLatestFromNexus(apiKey string, def ScriptExtenderDef, destDir string) 
 	if err != nil {
 		return "", "", fmt.Errorf("listing %s files: %w", def.Name, err)
 	}
+	// gorganizer launches every game through Steam/Proton on Linux, so a
+	// script extender must target the Steam runtime. Nexus hosts separate
+	// Steam and GOG builds of the same extender (SKSE64 AE, for example) as
+	// distinct MAIN-category files, and a GOG build ships a loader/DLL that
+	// the Steam game .exe rejects at launch ("compatible with the GOG
+	// version"). Never pick a GOG build, prefer an explicitly Steam-tagged
+	// one, and otherwise fall back to the newest remaining file.
+	mentions := func(f *download.NexusFileDetails, needle string) bool {
+		return strings.Contains(strings.ToLower(f.Name), needle) ||
+			strings.Contains(strings.ToLower(f.FileName), needle) ||
+			strings.Contains(strings.ToLower(f.Description), needle)
+	}
 	var chosen *download.NexusFileDetails
+	chosenSteam := false
 	for i := range files.Files {
 		f := &files.Files[i]
 		if !strings.EqualFold(f.CategoryName, "MAIN") {
 			continue
 		}
-		if chosen == nil || f.FileID > chosen.FileID {
-			chosen = f
+		if mentions(f, "gog") {
+			continue // wrong distribution for a Steam/Proton install
+		}
+		isSteam := mentions(f, "steam")
+		switch {
+		case chosen == nil:
+			chosen, chosenSteam = f, isSteam
+		case isSteam && !chosenSteam:
+			chosen, chosenSteam = f, true // a Steam build outranks an untagged one
+		case isSteam == chosenSteam && f.FileID > chosen.FileID:
+			chosen = f // same tier: newest wins
 		}
 	}
 	if chosen == nil {
-		return "", "", fmt.Errorf("no MAIN-category file found for %s", def.Name)
+		return "", "", fmt.Errorf("no Steam-compatible MAIN-category file found for %s (only GOG builds available?)", def.Name)
 	}
 	cdnURL, err := nx.ResolveDownloadURLByID(def.GameSlug, def.ModID, chosen.FileID)
 	if err != nil {

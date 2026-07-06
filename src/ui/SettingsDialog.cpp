@@ -21,6 +21,15 @@
 
 namespace gorganizer {
 
+namespace {
+// Status-text hues sourced from the active theme so they stay legible in both
+// light and dark. Transient messages are re-set on the next action, so they pick
+// up a theme change naturally.
+QString okHex() { return ThemeManager::currentPalette().successFg.name(); }
+QString errHex() { return ThemeManager::currentPalette().errorFg.name(); }
+QString warnHex() { return ThemeManager::currentPalette().warningFg.name(); }
+} // namespace
+
 SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* parent)
     : QDialog(parent)
     , m_grpc(grpc)
@@ -112,7 +121,7 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
     connect(m_grpc, &GrpcClient::nexusAPIKeySet, this, &SettingsDialog::onKeyValidated);
     connect(m_grpc, &GrpcClient::rpcError, this, [this](const QString& method, const QString& error) {
         if (method == "SetNexusAPIKey") {
-            m_statusLabel->setText(QString("<b style='color: red;'>Error: %1</b>").arg(error));
+            m_statusLabel->setText(QString("<b style='color:%1;'>Error: %2</b>").arg(errHex(), error));
             m_saveBtn->setEnabled(true);
         }
     });
@@ -126,7 +135,7 @@ void SettingsDialog::onSaveKey()
         return;
     }
     if (!m_grpc->isConnected()) {
-        m_statusLabel->setText("<b style='color: red;'>Daemon not connected.</b>");
+        m_statusLabel->setText(QString("<b style='color:%1;'>Daemon not connected.</b>").arg(errHex()));
         return;
     }
     m_statusLabel->setText("Validating...");
@@ -138,10 +147,10 @@ void SettingsDialog::onKeyValidated(bool valid, const QString& errorMessage)
 {
     m_saveBtn->setEnabled(true);
     if (valid) {
-        m_statusLabel->setText("<b style='color: green;'>Validated!</b>");
+        m_statusLabel->setText(QString("<b style='color:%1;'>Validated!</b>").arg(okHex()));
     } else {
         m_statusLabel->setText(
-            QString("<b style='color: red;'>Invalid: %1</b>").arg(errorMessage));
+            QString("<b style='color:%1;'>Invalid: %2</b>").arg(errHex(), errorMessage));
     }
 }
 
@@ -158,7 +167,7 @@ void SettingsDialog::populateProtonCombo()
     QString err;
     if (!m_grpc->detectProtonVersions(versions, err)) {
         m_protonStatus->setText(
-            QString("<span style='color:#c00;'>Cannot detect Proton: %1</span>").arg(err));
+            QString("<span style='color:%1;'>Cannot detect Proton: %2</span>").arg(errHex(), err));
         return;
     }
     for (const auto& v : versions)
@@ -214,9 +223,9 @@ QString xdgDataHome()
 void SettingsDialog::onTestNxm()
 {
     QStringList rows;
-    auto pass = [&](const QString& label) { rows << QString("<span style='color:#080;'>&#10003;</span> %1").arg(label); };
-    auto fail = [&](const QString& label) { rows << QString("<span style='color:#c00;'>&#10007;</span> %1").arg(label); };
-    auto warn = [&](const QString& label) { rows << QString("<span style='color:#a60;'>&#9888;</span> %1").arg(label); };
+    auto pass = [&](const QString& label) { rows << QString("<span style='color:%1;'>&#10003;</span> %2").arg(okHex(), label); };
+    auto fail = [&](const QString& label) { rows << QString("<span style='color:%1;'>&#10007;</span> %2").arg(errHex(), label); };
+    auto warn = [&](const QString& label) { rows << QString("<span style='color:%1;'>&#9888;</span> %2").arg(warnHex(), label); };
 
     const QString desktopId = "gorganizer-nxm.desktop";
     const QString desktopFile = xdgDataHome() + "/applications/" + desktopId;
@@ -288,22 +297,22 @@ void SettingsDialog::onReregisterNxm()
 {
     const QString script = findGorganizerScript();
     if (script.isEmpty()) {
-        m_nxmStatus->setText("<span style='color:#c00;'>Cannot find gorganizer.sh next to the frontend binary.</span>");
+        m_nxmStatus->setText(QString("<span style='color:%1;'>Cannot find gorganizer.sh next to the frontend binary.</span>").arg(errHex()));
         return;
     }
 
     QProcess p;
     p.start(script, {"--register-nxm"});
     if (!p.waitForFinished(15000)) {
-        m_nxmStatus->setText("<span style='color:#c00;'>Re-registration timed out.</span>");
+        m_nxmStatus->setText(QString("<span style='color:%1;'>Re-registration timed out.</span>").arg(errHex()));
         return;
     }
     if (p.exitStatus() != QProcess::NormalExit || p.exitCode() != 0) {
-        m_nxmStatus->setText(QString("<span style='color:#c00;'>Re-registration failed: %1</span>")
-                                 .arg(QString::fromUtf8(p.readAllStandardError()).toHtmlEscaped()));
+        m_nxmStatus->setText(QString("<span style='color:%1;'>Re-registration failed: %2</span>")
+                                 .arg(errHex(), QString::fromUtf8(p.readAllStandardError()).toHtmlEscaped()));
         return;
     }
-    m_nxmStatus->setText("<span style='color:#080;'>&#10003; Re-registered. Run 'Test NXM Handler' to verify.</span>");
+    m_nxmStatus->setText(QString("<span style='color:%1;'>&#10003; Re-registered. Run 'Test NXM Handler' to verify.</span>").arg(okHex()));
 }
 
 void SettingsDialog::populateThemeCombo()
@@ -311,9 +320,7 @@ void SettingsDialog::populateThemeCombo()
     m_themeCombo->blockSignals(true);
     m_themeCombo->clear();
     m_themeCombo->addItems(ThemeManager::availableThemes());
-    QString current = m_config ? m_config->preferredStyle() : QString();
-    if (current.isEmpty() || current == "Default")
-        current = "Light";
+    QString current = ThemeManager::canonicalThemeName(m_config ? m_config->preferredStyle() : QString());
     int idx = m_themeCombo->findText(current);
     if (idx >= 0)
         m_themeCombo->setCurrentIndex(idx);
@@ -324,29 +331,26 @@ void SettingsDialog::onThemeChanged(const QString& name)
 {
     if (!m_config)
         return;
-    if (name == "Light") {
-        m_config->setAppearanceMode("light");
-    } else if (ThemeManager::isDarkVariant(name)) {
-        m_config->setPreferredStyle(name);
-        m_config->setAppearanceMode("dark");
-    }
-    ThemeManager::applyMode(m_config->appearanceMode(), m_config->preferredStyle());
+    // Theme is decoupled from light/dark: pick the palette here, leave the
+    // light/dark axis to appearanceMode() (System follows the OS).
+    m_config->setPreferredStyle(name);
+    ThemeManager::applyMode(m_config->appearanceMode(), name);
 }
 
 void SettingsDialog::onSaveProton()
 {
     if (!m_grpc->isConnected()) {
-        m_protonStatus->setText("<b style='color:#c00;'>Daemon not connected.</b>");
+        m_protonStatus->setText(QString("<b style='color:%1;'>Daemon not connected.</b>").arg(errHex()));
         return;
     }
     QString path = m_protonCombo->currentData().toString();
     QString err;
     if (!m_grpc->setPreferredProton(path, err)) {
         m_protonStatus->setText(
-            QString("<b style='color:#c00;'>Save failed: %1</b>").arg(err));
+            QString("<b style='color:%1;'>Save failed: %2</b>").arg(errHex(), err));
         return;
     }
-    m_protonStatus->setText("<b style='color:#080;'>Saved.</b>");
+    m_protonStatus->setText(QString("<b style='color:%1;'>Saved.</b>").arg(okHex()));
 }
 
 void SettingsDialog::onCollapsedSeparatorViewToggled(bool on)

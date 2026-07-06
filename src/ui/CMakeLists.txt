@@ -21,7 +21,6 @@ add_library(gorganizer_ui STATIC
     TTWInstallDialog.cpp
     ExecutablesDialog.cpp
     ThemeManager.cpp
-    ../../resources/themes.qrc
 )
 target_include_directories(gorganizer_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(gorganizer_ui PUBLIC

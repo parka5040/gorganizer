@@ -78,7 +78,7 @@ ExecutablesDialog::ExecutablesDialog(GrpcClient* grpc, const QString& gameId,
 
     m_formHint = new QLabel;
     m_formHint->setWordWrap(true);
-    m_formHint->setStyleSheet("color: gray;");
+    m_formHint->setObjectName("hintLabel");
     form->addRow(m_formHint);
 
     auto* rightCol = new QVBoxLayout;

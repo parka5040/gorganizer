@@ -1,4 +1,5 @@
 #include "DownloadsModel.h"
+#include "ThemeManager.h"
 
 #include <QColor>
 #include <QDateTime>
@@ -13,6 +14,12 @@ static QString keyForArchive(const QString& archiveRelPath) { return archiveRelP
 DownloadsModel::DownloadsModel(QObject* parent)
     : QAbstractTableModel(parent)
 {
+    // Foreground colors come from the theme; repaint them on theme change.
+    connect(ThemeManager::instance(), &ThemeManager::themeChanged, this, [this](const Palette&) {
+        if (!m_rows.empty())
+            emit dataChanged(index(0, 0), index(static_cast<int>(m_rows.size()) - 1, ColCount - 1),
+                             {Qt::ForegroundRole});
+    });
 }
 
 int DownloadsModel::rowCount(const QModelIndex& parent) const
@@ -59,14 +66,16 @@ QVariant DownloadsModel::data(const QModelIndex& idx, int role) const
             return r.merged;
         case RowDataRole:
             return QVariant::fromValue(r);
-        case Qt::ForegroundRole:
+        case Qt::ForegroundRole: {
+            const Palette& p = ThemeManager::currentPalette();
             if (r.hidden)
-                return QColor(140, 140, 140);
+                return p.textMuted;
             if (r.phase == DownloadPhase::Failed)
-                return QColor(200, 70, 70);
+                return p.errorFg;
             if (r.phase == DownloadPhase::Uninstalled)
-                return QColor(160, 160, 160);
+                return p.textMuted;
             return {};
+        }
         case Qt::ToolTipRole:
             if (r.phase == DownloadPhase::Failed && !r.error.isEmpty())
                 return r.error;

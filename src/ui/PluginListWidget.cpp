@@ -1,6 +1,7 @@
 #include "PluginListWidget.h"
 #include "PluginScanner.h"
 #include "GrpcClient.h"
+#include "ThemeManager.h"
 
 #include <QVBoxLayout>
 #include <QHeaderView>
@@ -214,13 +215,17 @@ PluginListWidget::PluginListWidget(QWidget* parent)
     connect(m_view->header(), &QHeaderView::sectionClicked,
             this, &PluginListWidget::onHeaderClicked);
 
+    // Plugin-type/dep colors are baked into model items; refresh on theme change.
+    connect(ThemeManager::instance(), &ThemeManager::themeChanged,
+            this, [this](const Palette&) { restylePluginModel(); });
+
     layout->addWidget(m_view);
 
     m_placeholder = new QWidget;
     auto* placeholderLayout = new QVBoxLayout(m_placeholder);
     auto* placeholderLabel = new QLabel("No game selected.");
     placeholderLabel->setAlignment(Qt::AlignCenter);
-    placeholderLabel->setStyleSheet("color: gray;");
+    placeholderLabel->setObjectName("hintLabel");
     placeholderLayout->addWidget(placeholderLabel);
     layout->addWidget(m_placeholder);
 
@@ -387,7 +392,9 @@ void PluginListWidget::resubscribeStream()
 }
 
 namespace {
-QPixmap statusIcon(QColor color)
+// Warning triangle filled with a status color; outline/tick read from the theme
+// so the glyph stays visible on both light and dark backgrounds.
+QPixmap statusIcon(const QColor& color, const Palette& pal)
 {
     QPixmap pm(16, 16);
     pm.fill(Qt::transparent);
@@ -398,37 +405,43 @@ QPixmap statusIcon(QColor color)
     QPolygon tri;
     tri << QPoint(8, 1) << QPoint(15, 14) << QPoint(1, 14);
     p.drawPolygon(tri);
-    p.setPen(QPen(QColor(0, 0, 0, 200), 1));
+    QColor outline = pal.text;
+    outline.setAlpha(200);
+    p.setPen(QPen(outline, 1));
     p.setBrush(Qt::NoBrush);
     p.drawPolygon(tri);
-    p.setPen(QPen(QColor(0, 0, 0, 220), 2));
+    QColor tick = pal.text;
+    tick.setAlpha(220);
+    p.setPen(QPen(tick, 2));
     p.drawLine(QPoint(8, 5), QPoint(8, 10));
     p.drawPoint(QPoint(8, 12));
     return pm;
 }
 
-QPixmap pendingIcon()
+QPixmap pendingIcon(const Palette& pal)
 {
     QPixmap pm(16, 16);
     pm.fill(Qt::transparent);
     QPainter p(&pm);
     p.setRenderHint(QPainter::Antialiasing, true);
-    p.setBrush(QColor(150, 150, 150, 180));
+    QColor fill = pal.textMuted;
+    fill.setAlpha(180);
+    p.setBrush(fill);
     p.setPen(Qt::NoPen);
     p.drawEllipse(2, 2, 12, 12);
     return pm;
 }
 
-QColor tintFor(int kind)
+QColor tintFor(int kind, const Palette& pal)
 {
     switch (kind) {
     case GrpcDepMasterAbsent:
     case GrpcDepMasterOutOfOrder:
-        return QColor(180, 50, 50, 60);
+        return pal.errorBg;
     case GrpcDepMasterDisabled:
-        return QColor(220, 130, 40, 50);
+        return pal.warningBg;
     case GrpcDepSoftMissing:
-        return QColor(200, 180, 30, 50);
+        return pal.infoBg;
     default:
         return QColor(0, 0, 0, 0);
     }
@@ -483,26 +496,53 @@ void PluginListWidget::applyStatusToRow(int row, const GrpcPluginStatus& s)
         if (!text.isEmpty()) details << text;
     }
 
+    const Palette& pal = ThemeManager::currentPalette();
     QPixmap icon;
     if (worst == GrpcDepMasterAbsent || worst == GrpcDepMasterOutOfOrder)
-        icon = statusIcon(QColor(220, 50, 50));
+        icon = statusIcon(pal.error, pal);
     else if (worst == GrpcDepMasterDisabled)
-        icon = statusIcon(QColor(230, 140, 40));
+        icon = statusIcon(pal.warning, pal);
     else if (worst == GrpcDepSoftMissing)
-        icon = statusIcon(QColor(220, 200, 40));
+        icon = statusIcon(pal.info, pal);
     else if (s.softPending)
-        icon = pendingIcon();
+        icon = pendingIcon(pal);
 
     statusItem->setData(icon.isNull() ? QVariant() : QVariant(icon), Qt::DecorationRole);
     statusItem->setData(details.join("\n"), Qt::ToolTipRole);
     statusItem->setData(details, DepIssuesRole);
     statusItem->setData(worst, DepWorstKindRole);
 
-    QBrush tint(tintFor(worst));
+    QBrush tint(tintFor(worst, pal));
     for (int col = 0; col < m_model->columnCount(); ++col) {
         if (auto* cell = m_model->item(row, col)) {
             cell->setData(worst == 0 ? QVariant() : QVariant(tint), Qt::BackgroundRole);
         }
+    }
+}
+
+void PluginListWidget::restylePluginModel()
+{
+    if (!m_model)
+        return;
+    const Palette& pal = ThemeManager::currentPalette();
+    for (int row = 0; row < m_model->rowCount(); ++row) {
+        auto* nameItem = m_model->item(row, ColPlugin);
+        if (!nameItem)
+            continue;
+        QColor color = pal.text;
+        switch (nameItem->data(PluginTypeRole).toInt()) {
+        case PluginEntry::ESM: color = pal.infoFg; break;
+        case PluginEntry::ESL: color = pal.successFg; break;
+        case PluginEntry::ESP: color = pal.text; break;
+        }
+        nameItem->setForeground(color);
+        if (auto* typeItem = m_model->item(row, ColType))
+            typeItem->setForeground(color);
+
+        // Re-render the dep-status icon + row tint from cached status.
+        auto it = m_lastStatus.constFind(nameItem->text().toLower());
+        if (it != m_lastStatus.constEnd())
+            applyStatusToRow(row, it.value());
     }
 }
 
@@ -782,11 +822,12 @@ void PluginListWidget::populateLoadOrder(const std::vector<PluginEntry>& plugins
         typeItem->setTextAlignment(Qt::AlignCenter);
         typeItem->setDragEnabled(!isPinned);
 
-        QColor color;
+        const Palette& pal = ThemeManager::currentPalette();
+        QColor color = pal.text;
         switch (p.type) {
-        case PluginEntry::ESM: color = QColor(100, 149, 237); break;
-        case PluginEntry::ESL: color = QColor(144, 238, 144); break;
-        case PluginEntry::ESP: color = QColor(210, 210, 210); break;
+        case PluginEntry::ESM: color = pal.infoFg; break;
+        case PluginEntry::ESL: color = pal.successFg; break;
+        case PluginEntry::ESP: color = pal.text; break;
         }
         nameItem->setForeground(color);
         typeItem->setForeground(color);

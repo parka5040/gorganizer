@@ -1,5 +1,6 @@
 #include "DownloadsRowDelegate.h"
 #include "DownloadsModel.h"
+#include "ThemeManager.h"
 
 #include <QApplication>
 #include <QPainter>
@@ -12,18 +13,20 @@ DownloadsRowDelegate::DownloadsRowDelegate(QObject* parent)
 {
 }
 
-static QColor phaseColor(DownloadPhase phase, bool merged, const QPalette& palette)
+// Phase chip/progress hues resolve to semantic status tokens so they track the
+// active theme. Uninstalled/unknown fall back to the (theme-synced) Mid role.
+static QColor phaseColor(DownloadPhase phase, bool merged, const Palette& p)
 {
     if (merged && phase == DownloadPhase::Installed)
-        return QColor(120, 140, 200);
+        return p.accent;
     switch (phase) {
-        case DownloadPhase::Downloading: return QColor(70, 140, 220);
-        case DownloadPhase::Downloaded:  return QColor(120, 170, 220);
-        case DownloadPhase::Installing:  return QColor(220, 170, 60);
-        case DownloadPhase::Installed:   return QColor(90, 170, 100);
-        case DownloadPhase::Uninstalled: return palette.color(QPalette::Mid);
-        case DownloadPhase::Failed:      return QColor(200, 70, 70);
-        default:                         return palette.color(QPalette::Mid);
+        case DownloadPhase::Downloading: return p.info;
+        case DownloadPhase::Downloaded:  return p.info;
+        case DownloadPhase::Installing:  return p.warning;
+        case DownloadPhase::Installed:   return p.success;
+        case DownloadPhase::Uninstalled: return p.mid;
+        case DownloadPhase::Failed:      return p.error;
+        default:                         return p.mid;
     }
 }
 
@@ -69,11 +72,13 @@ void DownloadsRowDelegate::paint(QPainter* painter, const QStyleOptionViewItem& 
                         || phase == DownloadPhase::Failed
                         || phase == DownloadPhase::Unknown);
 
+    const Palette& pal = ThemeManager::currentPalette();
+
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing, true);
 
     if (terminal) {
-        QColor chipColor = phaseColor(phase, merged, option.palette);
+        QColor chipColor = phaseColor(phase, merged, pal);
         chipColor.setAlpha(80);
         painter->setBrush(chipColor);
         painter->setPen(Qt::NoPen);
@@ -83,7 +88,7 @@ void DownloadsRowDelegate::paint(QPainter* painter, const QStyleOptionViewItem& 
         painter->setPen(option.palette.color(QPalette::Text));
         painter->drawText(chip, Qt::AlignCenter, label);
     } else {
-        const QColor chunkColor = phaseColor(phase, merged, option.palette);
+        const QColor chunkColor = phaseColor(phase, merged, pal);
         QColor trackColor = option.palette.color(QPalette::Base);
         if (trackColor.alpha() == 0)
             trackColor = option.palette.color(QPalette::Window);

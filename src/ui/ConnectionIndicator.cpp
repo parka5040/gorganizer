@@ -2,6 +2,7 @@
 #include "GrpcClient.h"
 
 #include <QHBoxLayout>
+#include <QStyle>
 
 namespace gorganizer {
 
@@ -13,6 +14,7 @@ ConnectionIndicator::ConnectionIndicator(GrpcClient* grpc, QWidget* parent)
     layout->setSpacing(4);
 
     m_dot = new QLabel;
+    m_dot->setObjectName("connectionDot");
     m_dot->setFixedSize(10, 10);
     m_text = new QLabel("Disconnected");
 
@@ -28,15 +30,25 @@ ConnectionIndicator::ConnectionIndicator(GrpcClient* grpc, QWidget* parent)
         onDisconnected();
 }
 
+// The dot's fill is driven by the themed QSS rule
+// QLabel#connectionDot[connected="true"/"false"], so it tracks the active theme
+// (success/error tokens) without a hardcoded color here.
+static void repolish(QLabel* dot, bool connected)
+{
+    dot->setProperty("connected", connected);
+    dot->style()->unpolish(dot);
+    dot->style()->polish(dot);
+}
+
 void ConnectionIndicator::onConnected()
 {
-    m_dot->setStyleSheet("background-color: #4CAF50; border-radius: 5px;");
+    repolish(m_dot, true);
     m_text->setText("Connected");
 }
 
 void ConnectionIndicator::onDisconnected()
 {
-    m_dot->setStyleSheet("background-color: #F44336; border-radius: 5px;");
+    repolish(m_dot, false);
     m_text->setText("Disconnected");
 }
 
