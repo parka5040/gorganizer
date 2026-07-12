@@ -1,21 +1,18 @@
 #pragma once
 
 #include <QObject>
-#include <memory>
-#include <string>
-#include <vector>
 #include <atomic>
+#include <chrono>
+#include <memory>
+#include <mutex>
+#include <vector>
 
-#include "GrpcClient.h"
+#include "GrpcDeadline.h"
+#include "GrpcTypes.h"
 #include "gorganizer.grpc.pb.h"
-
-namespace grpc {
-class ClientContext;
-}
 
 namespace gorganizer {
 
-// Runs on a dedicated QThread and performs blocking gRPC calls; results emitted as signals.
 class GrpcWorker : public QObject {
     Q_OBJECT
 public:
@@ -71,6 +68,13 @@ public slots:
     void doStreamInstallEvents(const QString& gameId);
     void doStreamPluginStatus(const QString& gameId, const QString& profileName);
 
+    void doExportInstance(const QString& gameId, const QString& outputPath,
+                          const QStringList& modFolders, const QStringList& profileNames,
+                          bool includeOverwrite, bool includeGameSettings);
+    void doImportInstance(const QString& gameId, const QString& archivePath,
+                          int policy, const QMap<QString, int>& modPolicyOverrides,
+                          const QStringList& modFolders, const QStringList& profileNames);
+
 signals:
     void gamesListed(const std::vector<GrpcGame>& games);
     void gamesDetected(const std::vector<GrpcGame>& games);
@@ -112,14 +116,37 @@ signals:
 
     void dependencyWarning(const GrpcDependencyWarning& warning);
 
+    void transferProgress(const GrpcTransferProgress& progress);
+    void transferCompleted(const GrpcTransferSummary& summary);
+    void transferFailed(const QString& error);
+
     void rpcError(const QString& method, const QString& error);
 
 private:
-    std::unique_ptr<gorganizer::v1::Gorganizer::Stub> m_stub;
+    using Stub = gorganizer::v1::Gorganizer::Stub;
+
+    std::unique_ptr<Stub> m_stub;
     std::atomic<bool> m_stopped{false};
 
     std::mutex m_streamMu;
     grpc::ClientContext* m_streamCtx = nullptr;
+    grpc::ClientContext* m_unaryCtx = nullptr;
+
+    template <typename Req, typename Resp, typename Method>
+    grpc::Status invoke(Method method, const Req& req, Resp& resp,
+                        std::chrono::milliseconds deadline = kDefaultUnaryTimeout);
+
+    template <typename Req, typename Resp, typename Method>
+    bool call(const char* rpcName, Method method, const Req& req, Resp& resp,
+              std::chrono::milliseconds deadline = kDefaultUnaryTimeout);
+
+    template <typename Req, typename Ev, typename Dispatch>
+    grpc::Status runStream(std::unique_ptr<grpc::ClientReader<Ev>> (Stub::*method)(grpc::ClientContext*, const Req&),
+                           const Req& req, Dispatch dispatch);
+
+    template <typename Req>
+    void runTransferStream(std::unique_ptr<grpc::ClientReader<gorganizer::v1::TransferEvent>> (Stub::*method)(grpc::ClientContext*, const Req&),
+                           const Req& req);
 
     static GrpcGame gameFromProto(const gorganizer::v1::Game& g);
     static GrpcModInfo modFromProto(const gorganizer::v1::ModInfo& m);
@@ -130,6 +157,8 @@ private:
     static GrpcDownloadProgress downloadProgressFromProto(const gorganizer::v1::DownloadProgress& d);
     static GrpcInstallProgress installProgressFromProto(const gorganizer::v1::InstallProgress& p);
     static GrpcArchiveRow archiveRowFromProto(const gorganizer::v1::ArchiveRow& r);
+    static GrpcTransferProgress transferProgressFromProto(const gorganizer::v1::TransferProgress& p);
+    static GrpcTransferSummary transferSummaryFromProto(const gorganizer::v1::TransferSummary& s);
 };
 
-} // namespace gorganizer
+}

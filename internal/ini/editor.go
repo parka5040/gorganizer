@@ -4,8 +4,6 @@ import (
 	"strings"
 )
 
-// Document is a line-preserving INI representation that round-trips comments,
-// blank lines, and whitespace intact.
 type Document struct {
 	lines []iniLine
 }

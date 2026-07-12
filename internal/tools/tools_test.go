@@ -48,9 +48,35 @@ func TestToolsForGame(t *testing.T) {
 	}
 }
 
+func TestDetectObse64InNestedInstallDirectory(t *testing.T) {
+	gameRoot := t.TempDir()
+	tool := KnownTools["obse64"]
+	if err := os.MkdirAll(tool.InstallDir(gameRoot), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tool.LoaderPath(gameRoot), []byte("loader"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	detected, found := DetectTool(gameRoot, "oblivionremastered")
+	if !found {
+		t.Fatal("expected to find nested OBSE64 loader")
+	}
+	if detected.ID != "obse64" {
+		t.Fatalf("tool ID = %q, want obse64", detected.ID)
+	}
+	wantRel := "OblivionRemastered/Binaries/Win64/obse64_loader.exe"
+	if got := detected.LoaderRelativePath(); got != wantRel {
+		t.Errorf("LoaderRelativePath = %q, want %q", got, wantRel)
+	}
+	if detected.LogSubpath != "OBSE/Logs" {
+		t.Errorf("LogSubpath = %q, want OBSE/Logs", detected.LogSubpath)
+	}
+}
+
 func TestKnownToolsCount(t *testing.T) {
-	if len(KnownTools) != 7 {
-		t.Errorf("expected 7 known tools, got %d", len(KnownTools))
+	if len(KnownTools) != 8 {
+		t.Errorf("expected 8 known tools, got %d", len(KnownTools))
 	}
 }
 
@@ -134,6 +160,7 @@ func TestEraAppropriateD3DX9(t *testing.T) {
 		"skse64": nil,
 		"f4se":   nil,
 		"sfse":   nil,
+		"obse64": nil,
 	}
 	for id, want := range expected {
 		tool, ok := KnownTools[id]
@@ -151,6 +178,68 @@ func TestEraAppropriateD3DX9(t *testing.T) {
 				t.Errorf("%s ExtraDlls[%d] = %q, want %q", id, i, got[i], want[i])
 			}
 		}
+	}
+}
+
+func TestScanNativeDllsUsesNestedToolDirectory(t *testing.T) {
+	gameRoot := t.TempDir()
+	tool := KnownTools["obse64"]
+	if err := os.MkdirAll(tool.InstallDir(gameRoot), 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"obse64_1_512_105.dll", "unrelated.dll"} {
+		if err := os.WriteFile(filepath.Join(tool.InstallDir(gameRoot), name), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(gameRoot, "obse64_wrong.dll"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := tool.ScanNativeDlls(gameRoot)
+	if len(got) != 1 || got[0] != "obse64_1_512_105.dll" {
+		t.Fatalf("ScanNativeDlls = %v, want nested OBSE64 DLL only", got)
+	}
+}
+
+func TestExternalToolCatalogUsesCompatibleRunners(t *testing.T) {
+	tests := []struct {
+		basename string
+		toolID   string
+		runner   RunnerKind
+	}{
+		{basename: "ReSaver.exe", toolID: "resaver", runner: RunnerProton},
+		{basename: "ReSaver.jar", toolID: "resaver-java", runner: RunnerJava},
+		{basename: "NifSkope.exe", toolID: "nifskope", runner: RunnerProton},
+		{basename: "nifskope", toolID: "nifskope-native", runner: RunnerNative},
+	}
+	root := t.TempDir()
+	for _, test := range tests {
+		path := filepath.Join(root, test.basename)
+		if err := os.WriteFile(path, []byte("tool"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "Wrye Bash Launcher.pyw"), []byte("tool"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	found := DetectExecutablesForGame("skyrimse", []string{root})
+	byBase := make(map[string]DetectedTool)
+	for _, tool := range found {
+		byBase[filepath.Base(tool.ExePath)] = tool
+	}
+	for _, test := range tests {
+		tool, ok := byBase[test.basename]
+		if !ok {
+			t.Errorf("%s was not detected", test.basename)
+			continue
+		}
+		if tool.CatalogID != test.toolID || tool.Runner != test.runner {
+			t.Errorf("%s = (%s, %s), want (%s, %s)", test.basename, tool.CatalogID, tool.Runner, test.toolID, test.runner)
+		}
+	}
+	if _, ok := byBase["Wrye Bash Launcher.pyw"]; ok {
+		t.Error("unsupported Wrye Bash .pyw launcher was detected")
 	}
 }
 

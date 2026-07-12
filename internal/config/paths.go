@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+
+	"github.com/parka/gorganizer/internal/gamedef"
 )
 
 func DataDir() string {
@@ -18,6 +20,16 @@ func ConfigDir() string {
 // CacheDir returns the dir for refetchable artifacts the daemon may discard.
 func CacheDir() string {
 	return filepath.Join(xdgCacheHome(), "gorganizer")
+}
+
+// ToolsDir returns the durable root for managed third-party tools.
+func ToolsDir() string {
+	return filepath.Join(DataDir(), "tools")
+}
+
+// ToolDataDir returns the durable root for a managed tool's mutable data.
+func ToolDataDir(toolID, gameID, profileName string) string {
+	return filepath.Join(DataDir(), "tools-data", toolID, gameID, profileName)
 }
 
 // RuntimeDir returns $XDG_RUNTIME_DIR/gorganizer, falling back to /tmp/gorganizer-<uid>.
@@ -37,24 +49,12 @@ func LockPath() string {
 	return filepath.Join(RuntimeDir(), "gorganizerd.lock")
 }
 
-var gameModsDirNames = map[string]string{
-	"morrowind":  "Morrowind_Mods",
-	"oblivion":   "Oblivion_Mods",
-	"skyrim":     "Skyrim_Mods",
-	"skyrimse":   "SkyrimSE_Mods",
-	"fallout3":   "Fallout3_Mods",
-	"falloutnv":  "FalloutNV_Mods",
-	"fallout4":   "Fallout4_Mods",
-	"starfield":  "Starfield_Mods",
-	"ttw":        "TTW_Mods",
-}
-
 // ModsDir returns the mods directory for a game, honoring GORGANIZER_ROOT when set.
 func ModsDir(gameID string) string {
 	root := os.Getenv("GORGANIZER_ROOT")
 	if root != "" {
-		if name, ok := gameModsDirNames[gameID]; ok {
-			return filepath.Join(root, name)
+		if g, ok := gamedef.ByID(gameID); ok && g.ModsDirName != "" {
+			return filepath.Join(root, g.ModsDirName)
 		}
 		return filepath.Join(root, gameID+"_Mods")
 	}
@@ -62,7 +62,11 @@ func ModsDir(gameID string) string {
 }
 
 func AllModsDirNames() map[string]string {
-	return gameModsDirNames
+	out := make(map[string]string, len(gamedef.All))
+	for _, g := range gamedef.All {
+		out[g.ID] = g.ModsDirName
+	}
+	return out
 }
 
 func ProfilesDir(gameID string) string {

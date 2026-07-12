@@ -31,7 +31,6 @@ func SteamRoot() (string, error) {
 }
 
 // DocumentsPath returns the Documents/My Games/{subdir}/ dir, probing both
-// "My Documents" and "Documents" inside the Proton pfx.
 func DocumentsPath(steamAppID int, subdir string) (string, error) {
 	if subdir == "" {
 		return "", fmt.Errorf("empty my-games subdir")
@@ -62,6 +61,24 @@ func DocumentsPath(steamAppID int, subdir string) (string, error) {
 	return filepath.Join(home, "Documents", "My Games", subdir), nil
 }
 
+// DocumentsPathAt returns Documents/My Games beneath an explicitly resolved compatdata directory.
+func DocumentsPathAt(compatDataPath, subdir string) (string, error) {
+	if compatDataPath == "" {
+		return "", fmt.Errorf("empty compatdata path")
+	}
+	prefix := filepath.Join(compatDataPath, "pfx", "drive_c", "users", "steamuser")
+	for _, docsDir := range []string{"My Documents", "Documents"} {
+		candidate := filepath.Join(prefix, docsDir, "My Games", subdir)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+		if _, err := os.Stat(filepath.Join(prefix, docsDir)); err == nil {
+			return candidate, nil
+		}
+	}
+	return filepath.Join(prefix, "My Documents", "My Games", subdir), nil
+}
+
 // AppDataLocalPath returns AppData/Local/{subdir}/ inside the Proton prefix.
 func AppDataLocalPath(steamAppID int, subdir string) (string, error) {
 	if subdir == "" {
@@ -82,4 +99,14 @@ func AppDataLocalPath(steamAppID int, subdir string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".local", "share", subdir), nil
+}
+
+// AppDataLocalPathAt returns AppData/Local beneath an explicitly resolved compatdata directory.
+func AppDataLocalPathAt(compatDataPath, subdir string) (string, error) {
+	if compatDataPath == "" || subdir == "" {
+		return "", fmt.Errorf("compatdata path and AppData subdir are required")
+	}
+	return filepath.Join(
+		compatDataPath, "pfx", "drive_c", "users", "steamuser", "AppData", "Local", subdir,
+	), nil
 }

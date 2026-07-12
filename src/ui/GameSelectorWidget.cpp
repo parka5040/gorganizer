@@ -65,4 +65,4 @@ GameInfo GameSelectorWidget::currentGame() const
     return {};
 }
 
-} // namespace gorganizer
+}

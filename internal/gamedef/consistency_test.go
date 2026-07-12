@@ -1,4 +1,4 @@
-package game
+package gamedef
 
 import (
 	"os"
@@ -7,17 +7,6 @@ import (
 	"testing"
 )
 
-// The game identity registry is duplicated across two separately-compiled
-// binaries: the Go KnownGames slice (this package) and the C++ frontend's
-// GameInfo::knownGames() (src/core/GameInfo.cpp). If they diverge — a game
-// added or an appid/name/shortname changed in one language only — the daemon
-// and the GUI silently disagree about what game the user is managing.
-//
-// This test fails the Go build/test whenever the two lists stop matching on
-// (shortName -> {appID, name}). It is the guardrail that lets the registries
-// stay hand-mirrored until the RPC-sourced consolidation (plan Phase 6) lands.
-
-// matches:  {489830, "The Elder Scrolls V: Skyrim Special Edition", "skyrimse", ...
 var cppGameLine = regexp.MustCompile(`^\s*\{\s*(\d+)\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"`)
 
 type gameIdentity struct {
@@ -44,7 +33,6 @@ func parseCppKnownGames(t *testing.T, path string) map[string]gameIdentity {
 			appID := parseUint(t, m[1])
 			out[m[3]] = gameIdentity{appID: appID, name: m[2]}
 		}
-		// The static initializer block ends at the closing "};".
 		if inBlock && regexpEndBlock.MatchString(line) {
 			break
 		}
@@ -58,22 +46,21 @@ func parseCppKnownGames(t *testing.T, path string) map[string]gameIdentity {
 var regexpEndBlock = regexp.MustCompile(`^\s*\};`)
 
 func TestGameRegistryMatchesCppFrontend(t *testing.T) {
-	// The test runs with CWD = internal/game; the C++ registry is at repo root.
 	cppPath := filepath.Join("..", "..", "src", "core", "GameInfo.cpp")
 	if _, err := os.Stat(cppPath); err != nil {
 		t.Skipf("C++ registry not found at %s (skipping cross-language check): %v", cppPath, err)
 	}
 	cpp := parseCppKnownGames(t, cppPath)
 
-	goGames := make(map[string]gameIdentity, len(KnownGames))
-	for _, g := range KnownGames {
+	goGames := make(map[string]gameIdentity, len(All))
+	for _, g := range All {
 		goGames[g.ID] = gameIdentity{appID: g.SteamAppID, name: g.Name}
 	}
 
 	for id, gi := range goGames {
 		c, ok := cpp[id]
 		if !ok {
-			t.Errorf("game %q is in Go KnownGames but missing from C++ GameInfo::knownGames()", id)
+			t.Errorf("game %q is in Go gamedef.All but missing from C++ GameInfo::knownGames()", id)
 			continue
 		}
 		if c.appID != gi.appID {
@@ -85,7 +72,7 @@ func TestGameRegistryMatchesCppFrontend(t *testing.T) {
 	}
 	for id := range cpp {
 		if _, ok := goGames[id]; !ok {
-			t.Errorf("game %q is in C++ GameInfo::knownGames() but missing from Go KnownGames", id)
+			t.Errorf("game %q is in C++ GameInfo::knownGames() but missing from Go gamedef.All", id)
 		}
 	}
 }

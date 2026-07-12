@@ -12,21 +12,18 @@ import (
 	"strings"
 )
 
-// FuseMountInfo describes a live FUSE mount discovered at a mountpoint.
 type FuseMountInfo struct {
 	Mountpoint string
 	FSType     string
 	Source     string
 }
 
-// RecoveryOutcome reports what CleanupStale did; Pending is set only when user action is needed.
 type RecoveryOutcome struct {
 	FuseUnmounted bool
 	Restored      bool
 	Pending       *RecoveryPending
 }
 
-// RecoveryPending describes an ambiguous on-disk state CleanupStale refused to act on.
 type RecoveryPending struct {
 	DataPath   string
 	BackupPath string
@@ -134,17 +131,10 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 		outcome.FuseUnmounted = true
 	}
 
-	// Reap transient build siblings a crash may have left behind, before any
-	// sentinel/pending decision (Guard R9). RENAME_EXCHANGE keeps Data itself
-	// valid across an interrupted Apply, so these are always safe to discard.
 	_ = os.RemoveAll(stagingDirPath(resolved))
 	_ = os.RemoveAll(oldFarmPath(resolved))
 	_ = RemoveIntent(applyingIntentPath(resolved))
 
-	// An activation intent means Activate was interrupted between recording its
-	// intent and committing (removing it). Roll the activation back to a pristine
-	// Data deterministically — this is the case that used to degrade to a manual
-	// recovery prompt (H-3).
 	activatingPath := activatingIntentPath(resolved)
 	if _, iErr := ReadIntent(activatingPath); iErr == nil {
 		backupExists := false
@@ -157,14 +147,10 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 		defer func() { _ = RemoveIntent(activatingPath) }()
 
 		if !backupExists {
-			// The rename never happened (or the backup is gone): Data, if present,
-			// is the untouched original — nothing to roll back.
 			slog.Info("interrupted activation with no backup — leaving Data as-is",
 				"path", resolved)
 			return outcome, nil
 		}
-		// Backup exists: wipe whatever partial/complete farm sits at Data and
-		// restore the original from the backup.
 		if dataExists {
 			if err := os.RemoveAll(resolved); err != nil {
 				return outcome, fmt.Errorf("removing interrupted activation at %s: %w", resolved, err)
@@ -186,10 +172,6 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 			slog.Info("found valid overlay sentinel from prior run — restoring",
 				"path", resolved, "backup_path", s.BackupPath,
 				"prior_pid", s.ActivationPID, "started_at", s.ActivationStartedAt)
-			// Capture new writes (saves, tool output) into the Overwrite mod
-			// before destroying the farm. v1 sentinels carry no OverwriteRoot,
-			// so they skip capture and recover exactly as before. If capture
-			// fails we must NOT RemoveAll — surface as pending instead (H-1).
 			if s.SchemaVersion >= 2 && s.OverwriteRoot != "" {
 				if moved, capErr := CaptureNewFiles(resolved, s.OverwriteRoot); capErr != nil {
 					slog.Warn("recovery capture failed — refusing to destroy Data",

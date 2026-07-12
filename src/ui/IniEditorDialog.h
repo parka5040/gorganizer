@@ -20,7 +20,6 @@ class QVBoxLayout;
 
 namespace gorganizer {
 
-// Tabbed text editor for a profile's managed INI files.
 class IniEditorDialog : public QDialog {
     Q_OBJECT
 public:
@@ -88,4 +87,4 @@ private:
     void applyResolutionTo(const QString& filename, int width, int height);
 };
 
-} // namespace gorganizer
+}

@@ -13,7 +13,6 @@ class QPushButton;
 
 namespace gorganizer {
 
-// Walks the user through a FOMOD installer one step at a time.
 class FomodInstallerDialog : public QDialog {
     Q_OBJECT
 public:
@@ -52,4 +51,4 @@ private:
     int m_currentStep = 0;
 };
 
-} // namespace gorganizer
+}

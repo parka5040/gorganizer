@@ -14,7 +14,6 @@ class QLabel;
 
 namespace gorganizer {
 
-// Persistent timestamped log of daemon activity docked at the bottom of MainWindow.
 class ActivityLogPanel : public QWidget {
     Q_OBJECT
 public:
@@ -55,4 +54,4 @@ private:
     QHash<QString, QString> m_lastArchiveName;
 };
 
-} // namespace gorganizer
+}

@@ -5,8 +5,6 @@
 #include <QLabel>
 #include <QActionGroup>
 #include "AppConfig.h"
-#include "GameInfo.h"
-#include <vector>
 
 class QToolButton;
 
@@ -21,6 +19,10 @@ class RunButtonWidget;
 class ProfileSelectorWidget;
 class ConnectionIndicator;
 class ActivityLogPanel;
+class SessionController;
+class LaunchController;
+class FalloutPatchController;
+class GameSetupController;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -28,27 +30,19 @@ public:
     explicit MainWindow(AppConfig& config, GrpcClient* grpc, QWidget* parent = nullptr);
 
 private slots:
-    void onGameChanged(uint32_t appId);
-    void onRunGame();
-    void onApplyChanges();
-    void onProfileChanged(const QString& profileName);
-    void onGameLaunched(int pid);
-    void onGameLaunchFailed(const QString& error);
-    void onRpcError(const QString& method, const QString& error);
     void onInstallMod();
     void onOpenSettings();
     void onOpenIniEditor();
     void onOpenExecutables();
-    void onUnmountMods();
-    void onAddNewGame();
-    void onPatchFalloutTo4GB();
-    void onInstallTTW();
+    void onExportMods();
+    void onImportMods();
 
 private:
     void setupUi();
-    void loadManagedGames();
-    void updateStatusBarInfo();
-    void setVfsDirty(bool dirty);
+    void createControllers();
+    void wireConnections();
+    void updateTransferActionsEnabled();
+    void refreshAfterImport();
 
     AppConfig& m_config;
     GrpcClient* m_grpc;
@@ -62,17 +56,21 @@ private:
     ProfileSelectorWidget* m_profileSelector = nullptr;
     ConnectionIndicator* m_connectionIndicator = nullptr;
     QLabel* m_statusInfo = nullptr;
-    QToolButton* m_applyButton = nullptr; // "Apply Changes" — visible while dirty
-    bool m_vfsDirty = false;
-    bool m_vfsMounted = false;
+    QToolButton* m_applyButton = nullptr;
 
-    std::vector<GameInfo> m_managedGames;
-    GameInfo m_activeGame;
-    QString m_currentProfile = "Default";
+    SessionController* m_session = nullptr;
+    LaunchController* m_launch = nullptr;
+    FalloutPatchController* m_falloutPatch = nullptr;
+    GameSetupController* m_gameSetup = nullptr;
+
     QActionGroup* m_themeActions = nullptr;
     QActionGroup* m_appearanceActions = nullptr;
+    QAction* m_addGameAction = nullptr;
+    QAction* m_exportAction = nullptr;
+    QAction* m_importAction = nullptr;
+    QAction* m_unmountAction = nullptr;
     QAction* m_patch4GBAction = nullptr;
     QAction* m_installTtwAction = nullptr;
 };
 
-} // namespace gorganizer
+}

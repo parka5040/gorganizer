@@ -1,13 +1,12 @@
 package config
 
 import (
-	"bufio"
 	"fmt"
 	"os"
-	"strings"
+
+	"github.com/parka/gorganizer/internal/kvfile"
 )
 
-// GameSettings is per-game configuration stored at {ModsDir}/.gorganizer-game.yaml.
 type GameSettings struct {
 	AutoInstall bool
 }
@@ -29,24 +28,18 @@ func LoadGameSettings(gameID string) (GameSettings, error) {
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		k, v, ok := strings.Cut(line, ":")
+	sc := kvfile.NewScanner(f)
+	for sc.Scan() {
+		k, v, ok := kvfile.CutKV(sc.Line().Text)
 		if !ok {
 			continue
 		}
-		k = strings.TrimSpace(k)
-		v = strings.TrimSpace(v)
 		switch k {
 		case "auto_install":
-			s.AutoInstall = (v == "true")
+			s.AutoInstall = (kvfile.TrimValue(v) == "true")
 		}
 	}
-	return s, scanner.Err()
+	return s, sc.Err()
 }
 
 // SaveGameSettings writes {ModsDir}/.gorganizer-game.yaml, creating the mods dir if needed.
@@ -57,9 +50,8 @@ func SaveGameSettings(gameID string, s GameSettings) error {
 	}
 	path := GameSettingsPath(gameID)
 
-	var b strings.Builder
-	b.WriteString("# Gorganizer per-game settings — auto-generated\n")
-	fmt.Fprintf(&b, "auto_install: %t\n", s.AutoInstall)
-
-	return os.WriteFile(path, []byte(b.String()), 0644)
+	var w kvfile.Writer
+	w.Comment("Gorganizer per-game settings — auto-generated")
+	w.KVBool("auto_install", s.AutoInstall)
+	return w.WriteAtomic(path, 0644)
 }

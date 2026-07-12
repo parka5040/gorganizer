@@ -25,4 +25,4 @@ bool DirectoryManager::createGameDirectories(const GameInfo& game,
     return !ec;
 }
 
-} // namespace gorganizer
+}

@@ -16,20 +16,19 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/parka/gorganizer/internal/config"
-	"github.com/parka/gorganizer/internal/ipc"
+	"github.com/parka/gorganizer/internal/dto"
 )
 
 const (
-	StatusQueued      = ipc.DownloadStatusQueued
-	StatusDownloading = ipc.DownloadStatusDownloading
-	StatusDownloaded  = ipc.DownloadStatusDownloaded
-	StatusInstalling  = ipc.DownloadStatusInstalling
-	StatusInstalled   = ipc.DownloadStatusInstalled
-	StatusCancelled   = ipc.DownloadStatusCancelled
-	StatusFailed      = ipc.DownloadStatusFailed
+	StatusQueued      = dto.DownloadStatusQueued
+	StatusDownloading = dto.DownloadStatusDownloading
+	StatusDownloaded  = dto.DownloadStatusDownloaded
+	StatusInstalling  = dto.DownloadStatusInstalling
+	StatusInstalled   = dto.DownloadStatusInstalled
+	StatusCancelled   = dto.DownloadStatusCancelled
+	StatusFailed      = dto.DownloadStatusFailed
 )
 
-// Download tracks a single download operation, owned by the Manager.
 type Download struct {
 	ID              string
 	GameID          string
@@ -39,7 +38,7 @@ type Download struct {
 	FileID          int
 	GameSlug        string
 	ArchiveRel      string
-	Status          ipc.DownloadStatus
+	Status          dto.DownloadStatus
 	BytesDownloaded int64
 	BytesTotal      int64
 	Error           string
@@ -48,10 +47,8 @@ type Download struct {
 	cancel context.CancelFunc
 }
 
-// PostInstallHook is invoked after the auto-install path completes a mod.
 type PostInstallHook func(gameID, modName string)
 
-// Manager orchestrates the download-extract-install pipeline with bounded concurrency.
 type Manager struct {
 	nexus       URLResolver
 	config      *config.Config
@@ -68,20 +65,18 @@ type Manager struct {
 	stopMu    sync.Mutex
 }
 
-// ManagerHooks are non-blocking streaming callbacks invoked as downloads progress.
 type ManagerHooks struct {
 	OnDownloadProgress func(snapshot DownloadSnapshot)
 	OnArchiveLanded    func(d DownloadSnapshot, archivePath string, sidecar ArchiveSidecar)
 }
 
-// DownloadSnapshot is a lock-free copy of a Download for progress listeners.
 type DownloadSnapshot struct {
 	ID              string
 	GameID          string
 	ModName         string
 	BytesDownloaded int64
 	BytesTotal      int64
-	Status          ipc.DownloadStatus
+	Status          dto.DownloadStatus
 	Error           string
 	QueuedAhead     int32
 }
@@ -141,7 +136,7 @@ func (m *Manager) StartDownloadForGame(uri, overrideGameID string) (id string, q
 		gameID = overrideGameID
 	}
 	if link.IsExpired(time.Now()) {
-		return "", 0, &ipc.NXMExpiredError{URI: uri}
+		return "", 0, &NXMExpiredError{URI: uri}
 	}
 
 	id = "dl-" + uuid.NewString()
@@ -208,7 +203,7 @@ func (m *Manager) RetryDownload(id string) (queuedAhead int, err error) {
 				return 0, err
 			}
 			if link.IsExpired(time.Now()) {
-				return 0, &ipc.NXMExpiredError{URI: e.NXMURI}
+				return 0, &NXMExpiredError{URI: e.NXMURI}
 			}
 			dl := &Download{
 				ID: e.ID, GameID: e.GameID, GameSlug: e.GameSlug,
@@ -235,7 +230,7 @@ func (m *Manager) RetryDownload(id string) (queuedAhead int, err error) {
 			return ahead, nil
 		}
 	}
-	return 0, &ipc.DownloadNotFoundError{ID: id}
+	return 0, &DownloadNotFoundError{ID: id}
 }
 
 // CancelDownload aborts an active download or de-queues a pending one.
@@ -279,7 +274,7 @@ func (m *Manager) CancelDownload(id string) error {
 			}
 		}
 	}
-	return &ipc.DownloadNotFoundError{ID: id}
+	return &DownloadNotFoundError{ID: id}
 }
 
 func (m *Manager) GetProgress(downloadID string) (*DownloadSnapshot, error) {
@@ -295,7 +290,7 @@ func (m *Manager) GetProgress(downloadID string) (*DownloadSnapshot, error) {
 			return &s, nil
 		}
 	}
-	return nil, &ipc.DownloadNotFoundError{ID: downloadID}
+	return nil, &DownloadNotFoundError{ID: downloadID}
 }
 
 // ActiveDownloadIDByArchive returns the live download ID matching an absolute archive path.
@@ -474,7 +469,7 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 		ID: dl.ID, GameID: dl.GameID, NXMURI: dl.NXMURI,
 		GameSlug: dl.GameSlug, ModID: dl.ModID, FileID: dl.FileID,
 		ArchiveRelPath: dl.ArchiveRel,
-		BytesDone: dl.BytesDownloaded, BytesTotal: dl.BytesTotal,
+		BytesDone:      dl.BytesDownloaded, BytesTotal: dl.BytesTotal,
 		Status: LedgerDownloading,
 	})
 
@@ -487,7 +482,7 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 				ID: dl.ID, GameID: dl.GameID, NXMURI: dl.NXMURI,
 				GameSlug: dl.GameSlug, ModID: dl.ModID, FileID: dl.FileID,
 				ArchiveRelPath: dl.ArchiveRel,
-				BytesDone: dl.BytesDownloaded, BytesTotal: dl.BytesTotal,
+				BytesDone:      dl.BytesDownloaded, BytesTotal: dl.BytesTotal,
 				Status: LedgerCancelled, Error: "cancelled",
 			})
 			os.Remove(partPath)
@@ -628,7 +623,7 @@ func (m *Manager) fail(dl *Download, err error) {
 		ID: dl.ID, GameID: dl.GameID, NXMURI: dl.NXMURI,
 		GameSlug: dl.GameSlug, ModID: dl.ModID, FileID: dl.FileID,
 		ArchiveRelPath: dl.ArchiveRel,
-		BytesDone: dl.BytesDownloaded, BytesTotal: dl.BytesTotal,
+		BytesDone:      dl.BytesDownloaded, BytesTotal: dl.BytesTotal,
 		Status: LedgerFailed, Error: err.Error(),
 	})
 }

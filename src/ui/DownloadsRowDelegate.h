@@ -4,7 +4,6 @@
 
 namespace gorganizer {
 
-// Renders a color-coded progress bar with phase label for the Status column.
 class DownloadsRowDelegate : public QStyledItemDelegate {
     Q_OBJECT
 public:
@@ -17,4 +16,4 @@ public:
                    const QModelIndex& index) const override;
 };
 
-} // namespace gorganizer
+}

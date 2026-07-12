@@ -19,7 +19,6 @@ namespace gorganizer {
 class GrpcClient;
 class GameInfo;
 
-// Modal six-page wizard for installing Tale of Two Wastelands; drives daemon-side TTW RPC flow.
 class TTWInstallDialog : public QDialog {
     Q_OBJECT
 public:
@@ -112,4 +111,4 @@ private:
     QPushButton* m_cancelBtn = nullptr;
 };
 
-} // namespace gorganizer
+}

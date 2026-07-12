@@ -10,7 +10,6 @@ namespace gorganizer {
 
 class GrpcClient;
 
-// Blocks user input during daemon cold-start; polls Health RPC and emits ready() when games_warmed.
 class SplashScreen : public QWidget {
     Q_OBJECT
 public:
@@ -38,4 +37,4 @@ private:
     bool m_done = false;
 };
 
-} // namespace gorganizer
+}

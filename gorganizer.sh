@@ -81,8 +81,8 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gorganizer"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/gorganizer"
 BOOTSTRAP_SENTINEL="$CONFIG_DIR/.bootstrapped"
 
-# Legacy *_Mods directory names. Keep in sync with `gameModsDirNames` in
-# internal/config/paths.go — the daemon and this script must agree on the
+# Legacy *_Mods directory names. Keep in sync with `ModsDirName` in
+# internal/gamedef/registry.go — the daemon and this script must agree on the
 # folder layout. Format: "<gameID>:<DirName>".
 GAME_MODS_DIRS=(
     "morrowind:Morrowind_Mods"
@@ -93,6 +93,7 @@ GAME_MODS_DIRS=(
     "falloutnv:FalloutNV_Mods"
     "fallout4:Fallout4_Mods"
     "starfield:Starfield_Mods"
+    "oblivionremastered:OblivionRemastered_Mods"
     "ttw:TTW_Mods"
 )
 
@@ -210,16 +211,16 @@ detect_distro_family() {
 deps_for_family() {
     case "$1" in
         arch)
-            echo "base-devel cmake ninja go protobuf grpc qt6-base fuse3 p7zip unzip xdelta3"
+            echo "base-devel cmake ninja go protobuf grpc qt6-base p7zip unzip xdelta3"
             ;;
         debian)
-            echo "build-essential cmake ninja-build golang-go protobuf-compiler protobuf-compiler-grpc libgrpc++-dev qt6-base-dev libfuse3-dev fuse3 p7zip-full unzip xdelta3"
+            echo "build-essential cmake ninja-build golang-go protobuf-compiler protobuf-compiler-grpc libgrpc++-dev qt6-base-dev p7zip-full unzip xdelta3"
             ;;
         fedora)
-            echo "gcc-c++ cmake ninja-build golang protobuf-compiler grpc-plugins grpc-devel qt6-qtbase-devel fuse3-devel fuse3 p7zip unzip xdelta3"
+            echo "gcc-c++ cmake ninja-build golang protobuf-compiler grpc-plugins grpc-devel qt6-qtbase-devel p7zip unzip xdelta3"
             ;;
         suse)
-            echo "gcc-c++ cmake ninja go protobuf-devel grpc-devel qt6-base-devel fuse3-devel fuse3 p7zip-full unzip xdelta"
+            echo "gcc-c++ cmake ninja go protobuf-devel grpc-devel qt6-base-devel p7zip-full unzip xdelta"
             ;;
         *)
             echo ""
@@ -282,7 +283,7 @@ install_deps_interactive() {
     if [ -z "$install_cmd" ]; then
         warn "Unknown distro family ($family). Install build deps manually:"
         warn "    Need: cmake, ninja, go (1.26+), protoc, protoc-gen-grpc,"
-        warn "          qt6-base dev, grpc dev, fuse3 dev, p7zip, unzip."
+        warn "          qt6-base dev, grpc dev, p7zip, unzip."
         return 1
     fi
     case "$(missing_deps "$family"; echo "rc=$?")" in

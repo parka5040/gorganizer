@@ -1,7 +1,6 @@
 #include "RunButtonWidget.h"
 
 #include <QHBoxLayout>
-#include <QHash>
 #include <QStandardItemModel>
 #include <QVariant>
 #include <filesystem>
@@ -17,27 +16,12 @@ struct ToolEntry {
     QString loaderExe;
 };
 
-// Mirrors internal/tools/tools.go on the Go side.
-const QList<ToolEntry>& knownTools()
-{
-    static const QList<ToolEntry> list = {
-        {"oblivion",  "obse",   "OBSE",   "obse_loader.exe"},
-        {"skyrim",    "skse",   "SKSE",   "skse_loader.exe"},
-        {"skyrimse",  "skse64", "SKSE64", "skse64_loader.exe"},
-        {"fallout3",  "fose",   "FOSE",   "fose_loader.exe"},
-        {"falloutnv", "xnvse",  "xNVSE",  "nvse_loader.exe"},
-        {"fallout4",  "f4se",   "F4SE",   "f4se_loader.exe"},
-        {"starfield", "sfse",   "SFSE",   "sfse_loader.exe"},
-    };
-    return list;
-}
-
 QList<ToolEntry> toolsFor(const QString& gameShortName)
 {
     QList<ToolEntry> out;
-    for (const auto& t : knownTools())
-        if (t.gameShortName == gameShortName)
-            out.append(t);
+    auto game = GameInfo::findByShortName(gameShortName);
+    if (game && !game->seToolId.isEmpty())
+        out.append({gameShortName, game->seToolId, game->seDisplayName, game->seLoaderExe});
     return out;
 }
 
@@ -49,7 +33,7 @@ bool toolInstalled(const std::filesystem::path& installDir, const ToolEntry& t)
     return std::filesystem::exists(installDir / t.loaderExe.toStdString(), ec);
 }
 
-} // anonymous namespace
+}
 
 RunButtonWidget::RunButtonWidget(QWidget* parent)
     : QWidget(parent)
@@ -244,4 +228,4 @@ bool RunButtonWidget::useToolEnabled() const
     return currentTarget().type == TargetTool;
 }
 
-} // namespace gorganizer
+}

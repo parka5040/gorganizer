@@ -46,4 +46,4 @@ private:
     QCheckBox* m_collapseViewsCheck = nullptr;
 };
 
-} // namespace gorganizer
+}

@@ -17,10 +17,9 @@ func newLeasedEntry(t *testing.T, dir, name string) *previewEntry {
 }
 
 // A leased entry must survive eviction pressure from put(), and only be removed
-// once the last lease is released (H-12 / Guard R3).
 func TestPreviewCache_LeasedSurvivesEvictionThenReclaimed(t *testing.T) {
 	dir := t.TempDir()
-	c := newPreviewCache(time.Hour, 1) // maxLen 1 => aggressive eviction
+	c := newPreviewCache(time.Hour, 1)
 
 	id := c.put(newLeasedEntry(t, dir, "leased"))
 	pe := c.acquire(id)
@@ -29,27 +28,22 @@ func TestPreviewCache_LeasedSurvivesEvictionThenReclaimed(t *testing.T) {
 	}
 	root := pe.ExtractRoot
 
-	// Force eviction pressure: two more puts, each exceeding maxLen.
 	c.put(newLeasedEntry(t, dir, "a"))
 	c.put(newLeasedEntry(t, dir, "b"))
 
-	// The leased extract root must still exist.
 	if _, err := os.Stat(root); err != nil {
 		t.Fatalf("leased extract root was removed under eviction pressure: %v", err)
 	}
 
-	// discard while leased just marks pending; still present.
 	c.discard(id)
 	if _, err := os.Stat(root); err != nil {
 		t.Fatalf("leased extract root removed by discard: %v", err)
 	}
 
-	// Final release performs the removal exactly once.
 	c.release(id)
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Fatalf("extract root should be removed after final release, err=%v", err)
 	}
-	// Releasing again must not panic or double-remove.
 	c.release(id)
 }
 
@@ -63,7 +57,7 @@ func TestPreviewCache_SweepDefersLeased(t *testing.T) {
 	root := pe.ExtractRoot
 
 	time.Sleep(time.Millisecond)
-	c.sweep() // expired, but leased => kept
+	c.sweep()
 
 	if _, err := os.Stat(root); err != nil {
 		t.Fatalf("leased entry removed by sweep: %v", err)

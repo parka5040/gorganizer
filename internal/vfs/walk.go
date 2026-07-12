@@ -6,14 +6,12 @@ import (
 	"path/filepath"
 )
 
-// Layer represents a filesystem layer in the VFS overlay; higher index = higher priority.
 type Layer struct {
 	Name     string
 	RootPath string
 	Enabled  bool
 }
 
-// LayerVisitor is called for each file/dir discovered during layer walking.
 type LayerVisitor func(vpath, realPath string, layerIdx int, layer Layer, isDir bool) error
 
 // WalkLayers walks enabled layers in order, invoking visitor for each entry.
@@ -30,7 +28,8 @@ func WalkLayers(layers []Layer, visitor LayerVisitor) error {
 }
 
 var modRootInternalNames = map[string]struct{}{
-	"metadata.yaml": {},
+	"metadata.yaml":    {},
+	RootContentDirName: {},
 }
 
 func walkDir(rootPath, relPath string, layerIdx int, layer Layer, visitor LayerVisitor) error {
@@ -49,7 +48,7 @@ func walkDir(rootPath, relPath string, layerIdx int, layer Layer, visitor LayerV
 
 	for _, entry := range entries {
 		if relPath == "" && layer.Name != "__base__" {
-			if _, internal := modRootInternalNames[entry.Name()]; internal {
+			if _, internal := modRootInternalNames[NormalizeName(entry.Name())]; internal {
 				continue
 			}
 		}

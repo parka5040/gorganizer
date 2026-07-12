@@ -1,9 +1,7 @@
 package game
 
 import (
-	"bufio"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -11,25 +9,33 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/parka/gorganizer/internal/fsutil"
+	"github.com/parka/gorganizer/internal/gamedef"
 	"github.com/parka/gorganizer/internal/steam"
 )
 
-// KnownGames is the registry of supported Bethesda games; must match the C++ frontend's GameInfo::knownGames().
-var KnownGames = []GameDefinition{
-	{ID: "morrowind", Name: "The Elder Scrolls III: Morrowind", SteamAppID: 22320, DataSubpath: "Data", NxmSlug: "morrowind"},
-	{ID: "oblivion", Name: "The Elder Scrolls IV: Oblivion", SteamAppID: 22330, DataSubpath: "Data", NxmSlug: "oblivion"},
-	{ID: "skyrim", Name: "The Elder Scrolls V: Skyrim", SteamAppID: 72850, DataSubpath: "Data", NxmSlug: "skyrim"},
-	{ID: "skyrimse", Name: "The Elder Scrolls V: Skyrim Special Edition", SteamAppID: 489830, DataSubpath: "Data", NxmSlug: "skyrimspecialedition"},
-	{ID: "fallout3", Name: "Fallout 3", SteamAppID: 22370, DataSubpath: "Data", NxmSlug: "fallout3"},
-	{ID: "falloutnv", Name: "Fallout: New Vegas", SteamAppID: 22380, DataSubpath: "Data", NxmSlug: "newvegas"},
-	{ID: "fallout4", Name: "Fallout 4", SteamAppID: 377160, DataSubpath: "Data", NxmSlug: "fallout4"},
-	{ID: "starfield", Name: "Starfield", SteamAppID: 1716740, DataSubpath: "Data", NxmSlug: "starfield"},
-	{ID: "ttw", Name: "Tale of Two Wastelands", SteamAppID: 0, DataSubpath: "Data",
-		Synthetic: true, ParentGameID: "falloutnv", NxmSlug: "newvegas",
-		Requires: []string{"fallout3", "falloutnv"}},
+var KnownGames = knownGamesFromRegistry()
+
+// knownGamesFromRegistry derives the identity slice from the gamedef registry.
+func knownGamesFromRegistry() []GameDefinition {
+	out := make([]GameDefinition, 0, len(gamedef.All))
+	for _, d := range gamedef.All {
+		out = append(out, GameDefinition{
+			ID:                d.ID,
+			Name:              d.Name,
+			SteamAppID:        d.SteamAppID,
+			DataSubpath:       d.DataSubpath,
+			ExecutablePaths:   append([]string(nil), d.ExecutablePaths...),
+			RequiredDataFiles: append([]string(nil), d.RequiredDataFiles...),
+			Synthetic:         d.Synthetic,
+			ParentGameID:      d.ParentGameID,
+			Requires:          append([]string(nil), d.Requires...),
+			NxmSlug:           d.NxmSlug,
+		})
+	}
+	return out
 }
 
-// TTWMarkerFilename is the sentinel file dropped in FNV's install root after a successful TTW install.
 const TTWMarkerFilename = ".gorganizer-ttw.applied"
 
 var knownByAppID map[uint32]GameDefinition
@@ -62,7 +68,7 @@ func FindByID(gameID string) (GameDefinition, bool) {
 
 // DetectInstalledGames scans all Steam library folders for known games and appends synthetic entries.
 func DetectInstalledGames() ([]DetectedGame, error) {
-	steamRoot, err := FindSteamRoot()
+	steamRoot, err := steam.FindRoot()
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +109,6 @@ func DetectInstalledGames() ([]DetectedGame, error) {
 	return detected, nil
 }
 
-// TTWPlayableProbe is an optional callback that reports whether TTW is playable from an existing install.
 type TTWPlayableProbe func() (fnvInstallPath string, ok bool)
 
 // AppendSyntheticGames returns detected with synthetic TTW entries appended when installable or playable.
@@ -161,11 +166,6 @@ func HasTTWMarker(fnvInstallPath string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-// FindSteamRoot is a back-compat shim delegating to steam.FindRoot.
-func FindSteamRoot() (string, error) {
-	return steam.FindRoot()
-}
-
 // findLibraryFolders parses libraryfolders.vdf for Steam library paths.
 func findLibraryFolders(steamRoot string) ([]string, error) {
 	vdfPath := filepath.Join(steamRoot, "steamapps", "libraryfolders.vdf")
@@ -175,7 +175,7 @@ func findLibraryFolders(steamRoot string) ([]string, error) {
 	}
 	defer f.Close()
 
-	parsed, err := ParseVDF(f)
+	parsed, err := steam.ParseVDF(f)
 	if err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", vdfPath, err)
 	}
@@ -199,7 +199,7 @@ func findLibraryFolders(steamRoot string) ([]string, error) {
 		if !ok || path == "" {
 			continue
 		}
-		if dirExists(filepath.Join(path, "steamapps")) {
+		if fsutil.DirExists(filepath.Join(path, "steamapps")) {
 			folders = append(folders, path)
 		}
 	}
@@ -214,7 +214,7 @@ func parseAppManifest(acfPath, libraryFolder string) (*DetectedGame, error) {
 	}
 	defer f.Close()
 
-	parsed, err := ParseVDF(f)
+	parsed, err := steam.ParseVDF(f)
 	if err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", acfPath, err)
 	}
@@ -245,12 +245,12 @@ func parseAppManifest(acfPath, libraryFolder string) (*DetectedGame, error) {
 	}
 
 	installPath := filepath.Join(libraryFolder, "steamapps", "common", installDir)
-	if !dirExists(installPath) {
+	if !fsutil.DirExists(installPath) {
 		return nil, nil
 	}
 
-	dataPath := filepath.Join(installPath, gameDef.DataSubpath)
-	if !dirExists(dataPath) {
+	dataPath, ok := validateInstallLayout(installPath, gameDef)
+	if !ok {
 		return nil, nil
 	}
 
@@ -258,177 +258,43 @@ func parseAppManifest(acfPath, libraryFolder string) (*DetectedGame, error) {
 	if n, ok := asMap["name"].(string); ok && n != "" {
 		name = n
 	}
+	detectedDef := gameDef
+	detectedDef.Name = name
 
 	return &DetectedGame{
-		GameDefinition: GameDefinition{
-			ID:          gameDef.ID,
-			Name:        name,
-			SteamAppID:  gameDef.SteamAppID,
-			DataSubpath: gameDef.DataSubpath,
-		},
-		InstallPath: installPath,
-		DataPath:    dataPath,
-		LibraryPath: libraryFolder,
+		GameDefinition: detectedDef,
+		InstallPath:    installPath,
+		DataPath:       dataPath,
+		LibraryPath:    libraryFolder,
 	}, nil
 }
 
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
-}
-
-// ParseVDF parses Valve's VDF text format into a map structure.
-func ParseVDF(r io.Reader) (map[string]interface{}, error) {
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return nil, err
+// validateInstallLayout rejects incomplete or incorrectly rooted installs.
+func validateInstallLayout(installPath string, def GameDefinition) (string, bool) {
+	dataPath := filepath.Join(installPath, filepath.FromSlash(def.DataSubpath))
+	if !fsutil.DirExists(dataPath) {
+		return "", false
 	}
-	p := &vdfParser{input: string(data)}
-	return p.parse()
-}
 
-type vdfTokenType int
-
-const (
-	vdfString vdfTokenType = iota
-	vdfBraceOpen
-	vdfBraceClose
-	vdfEOF
-)
-
-type vdfToken struct {
-	typ vdfTokenType
-	val string
-}
-
-type vdfParser struct {
-	input string
-	pos   int
-}
-
-func (p *vdfParser) skipWhitespaceAndComments() {
-	for p.pos < len(p.input) {
-		c := p.input[p.pos]
-		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
-			p.pos++
-			continue
-		}
-		if p.pos+1 < len(p.input) && c == '/' && p.input[p.pos+1] == '/' {
-			for p.pos < len(p.input) && p.input[p.pos] != '\n' {
-				p.pos++
+	if len(def.ExecutablePaths) > 0 {
+		found := false
+		for _, rel := range def.ExecutablePaths {
+			info, err := os.Stat(filepath.Join(installPath, filepath.FromSlash(rel)))
+			if err == nil && info.Mode().IsRegular() {
+				found = true
+				break
 			}
-			continue
 		}
-		break
-	}
-}
-
-func (p *vdfParser) next() vdfToken {
-	p.skipWhitespaceAndComments()
-
-	if p.pos >= len(p.input) {
-		return vdfToken{typ: vdfEOF}
-	}
-
-	c := p.input[p.pos]
-
-	if c == '{' {
-		p.pos++
-		return vdfToken{typ: vdfBraceOpen}
-	}
-	if c == '}' {
-		p.pos++
-		return vdfToken{typ: vdfBraceClose}
-	}
-	if c == '"' {
-		p.pos++
-		var sb strings.Builder
-		for p.pos < len(p.input) {
-			ch := p.input[p.pos]
-			if ch == '\\' && p.pos+1 < len(p.input) {
-				escaped := p.input[p.pos+1]
-				if escaped == '"' || escaped == '\\' {
-					sb.WriteByte(escaped)
-					p.pos += 2
-					continue
-				}
-			}
-			if ch == '"' {
-				p.pos++
-				return vdfToken{typ: vdfString, val: sb.String()}
-			}
-			sb.WriteByte(ch)
-			p.pos++
-		}
-		return vdfToken{typ: vdfString, val: sb.String()}
-	}
-
-	var sb strings.Builder
-	for p.pos < len(p.input) {
-		ch := p.input[p.pos]
-		if ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '{' || ch == '}' {
-			break
-		}
-		sb.WriteByte(ch)
-		p.pos++
-	}
-	return vdfToken{typ: vdfString, val: sb.String()}
-}
-
-func (p *vdfParser) parse() (map[string]interface{}, error) {
-	rootKey := p.next()
-	if rootKey.typ != vdfString {
-		return nil, fmt.Errorf("expected root key, got token type %d", rootKey.typ)
-	}
-
-	brace := p.next()
-	if brace.typ != vdfBraceOpen {
-		return nil, fmt.Errorf("expected '{' after root key %q", rootKey.val)
-	}
-
-	obj, err := p.parseObject()
-	if err != nil {
-		return nil, err
-	}
-
-	return map[string]interface{}{rootKey.val: obj}, nil
-}
-
-func (p *vdfParser) parseObject() (map[string]interface{}, error) {
-	result := make(map[string]interface{})
-	for {
-		key := p.next()
-		if key.typ == vdfBraceClose || key.typ == vdfEOF {
-			return result, nil
-		}
-		if key.typ != vdfString {
-			return nil, fmt.Errorf("expected string key, got token type %d", key.typ)
-		}
-
-		valueOrBrace := p.next()
-		switch valueOrBrace.typ {
-		case vdfBraceOpen:
-			sub, err := p.parseObject()
-			if err != nil {
-				return nil, err
-			}
-			result[key.val] = sub
-		case vdfString:
-			result[key.val] = valueOrBrace.val
-		default:
-			return nil, fmt.Errorf("expected value or '{' after key %q", key.val)
+		if !found {
+			return "", false
 		}
 	}
-}
 
-// ParseVDFFromFile opens a file and parses it as VDF.
-func ParseVDFFromFile(path string) (map[string]interface{}, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
+	for _, rel := range def.RequiredDataFiles {
+		info, err := os.Stat(filepath.Join(dataPath, filepath.FromSlash(rel)))
+		if err != nil || !info.Mode().IsRegular() {
+			return "", false
+		}
 	}
-	defer f.Close()
-
-	sc := bufio.NewReader(f)
-	return ParseVDF(sc)
+	return dataPath, true
 }

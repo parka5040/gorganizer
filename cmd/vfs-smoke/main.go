@@ -1,4 +1,3 @@
-// vfs-smoke is an integration test that activates and deactivates the overlay and asserts byte-identity round-trip.
 package main
 
 import (
@@ -53,8 +52,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Phase 3: rebuild-while-mounted via ReMaterialize (atomic RENAME_EXCHANGE
-	// swap). The materialized view must be unchanged and leave no transient dirs.
 	if err := mm.MarkDirty(layers); err != nil {
 		fmt.Fprintf(os.Stderr, "MarkDirty failed: %v\n", err)
 		_ = mm.Deactivate()

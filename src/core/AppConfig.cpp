@@ -199,4 +199,4 @@ std::filesystem::path AppConfig::dataDir() const
     return Paths::appDataDir();
 }
 
-} // namespace gorganizer
+}

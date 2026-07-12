@@ -7,7 +7,6 @@ import (
 	"strings"
 )
 
-// DepKind classifies a single dependency issue; values mirror the gRPC enum.
 type DepKind int
 
 const (
@@ -18,21 +17,18 @@ const (
 	DepSoftMissing      DepKind = 4
 )
 
-// SoftDepRef identifies a soft dependency target the user can act on.
 type SoftDepRef struct {
 	ModName string
 	ModID   int
 	URL     string
 }
 
-// DepIssue is one entry on a plugin's issues list.
 type DepIssue struct {
 	Kind    DepKind
 	Master  string
 	SoftRef *SoftDepRef
 }
 
-// PluginStatus is the analyzer's verdict for one enabled plugin.
 type PluginStatus struct {
 	Plugin      Plugin
 	IsLight     bool
@@ -62,6 +58,9 @@ func AnalyzeHardDeps(
 		active[strings.ToLower(m)] = slot{idx: -1, implicit: true}
 	}
 	for i, p := range ordered {
+		if !p.Enabled {
+			continue
+		}
 		if existing, ok := active[strings.ToLower(p.Filename)]; ok && existing.implicit {
 			continue
 		}
@@ -69,6 +68,11 @@ func AnalyzeHardDeps(
 	}
 
 	disabled := make(map[string]bool)
+	for _, p := range ordered {
+		if !p.Enabled {
+			disabled[strings.ToLower(p.Filename)] = true
+		}
+	}
 	for _, m := range allModFolders {
 		entries, err := readPluginNames(m.Path)
 		if err != nil {
@@ -86,6 +90,10 @@ func AnalyzeHardDeps(
 	out := make([]PluginStatus, 0, len(ordered))
 	for i, p := range ordered {
 		ps := PluginStatus{Plugin: p}
+		if !p.Enabled {
+			out = append(out, ps)
+			continue
+		}
 		path := filepath.Join(p.Source, p.Filename)
 		hdr, err := cache.Get(ctx, path)
 		if err != nil || hdr == nil {

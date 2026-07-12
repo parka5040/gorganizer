@@ -11,8 +11,6 @@ import (
 	"time"
 )
 
-// PushedIniReport is the per-file outcome of PushToDocuments, used to verify
-// the on-disk state matches intent before launch.
 type PushedIniReport struct {
 	Filename   string
 	SourcePath string
@@ -25,7 +23,6 @@ type PushedIniReport struct {
 	Note       string
 }
 
-// Manager handles per-profile INI storage at {profileDir}/ini/{filename}.
 type Manager struct {
 	profileDir func(gameID, profileName string) string
 }
@@ -72,13 +69,23 @@ func (m *Manager) Write(gameID, profileName, filename, content string) error {
 }
 
 // SeedFromDocuments seeds the profile's ini dir from the game's My Games dir
-// when profile copies are missing, matching filenames case-insensitively.
 func (m *Manager) SeedFromDocuments(gameID, profileName string, steamAppID int) error {
+	return m.SeedFromDocumentsAt(gameID, profileName, steamAppID, "")
+}
+
+// SeedFromDocumentsAt seeds profile INIs from an explicitly resolved compatdata directory.
+func (m *Manager) SeedFromDocumentsAt(gameID, profileName string, steamAppID int, compatDataPath string) error {
 	spec, ok := SpecFor(gameID)
 	if !ok {
 		return fmt.Errorf("no INI spec for game %q", gameID)
 	}
-	docsDir, err := DocumentsPath(steamAppID, spec.MyGamesSubdir)
+	var docsDir string
+	var err error
+	if compatDataPath != "" {
+		docsDir, err = DocumentsPathAt(compatDataPath, spec.MyGamesSubdir)
+	} else {
+		docsDir, err = DocumentsPath(steamAppID, spec.MyGamesSubdir)
+	}
 	if err != nil {
 		return err
 	}
@@ -131,13 +138,23 @@ func toLowerASCII(s string) string {
 }
 
 // PushToDocuments copies profile INIs into the game's My Games dir,
-// merging Custom.ini into the primary INI for engines without native support.
 func (m *Manager) PushToDocuments(gameID, profileName string, steamAppID int) ([]PushedIniReport, error) {
+	return m.PushToDocumentsAt(gameID, profileName, steamAppID, "")
+}
+
+// PushToDocumentsAt pushes profile INIs to an explicitly resolved compatdata directory.
+func (m *Manager) PushToDocumentsAt(gameID, profileName string, steamAppID int, compatDataPath string) ([]PushedIniReport, error) {
 	spec, ok := SpecFor(gameID)
 	if !ok {
 		return nil, fmt.Errorf("no INI spec for game %q", gameID)
 	}
-	docsDir, err := DocumentsPath(steamAppID, spec.MyGamesSubdir)
+	var docsDir string
+	var err error
+	if compatDataPath != "" {
+		docsDir, err = DocumentsPathAt(compatDataPath, spec.MyGamesSubdir)
+	} else {
+		docsDir, err = DocumentsPath(steamAppID, spec.MyGamesSubdir)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -242,6 +259,38 @@ func (m *Manager) PushToDocuments(gameID, profileName string, steamAppID int) ([
 	return reports, nil
 }
 
+// PullFromDocumentsAt atomically imports current game INIs into a profile.
+func (m *Manager) PullFromDocumentsAt(gameID, profileName string, steamAppID int, compatDataPath string) error {
+	spec, ok := SpecFor(gameID)
+	if !ok {
+		return fmt.Errorf("no INI spec for game %q", gameID)
+	}
+	var docsDir string
+	var err error
+	if compatDataPath != "" {
+		docsDir, err = DocumentsPathAt(compatDataPath, spec.MyGamesSubdir)
+	} else {
+		docsDir, err = DocumentsPath(steamAppID, spec.MyGamesSubdir)
+	}
+	if err != nil {
+		return err
+	}
+	for _, name := range spec.Files {
+		source := resolveDocsFile(docsDir, name)
+		if source == "" {
+			continue
+		}
+		data, err := os.ReadFile(source)
+		if err != nil {
+			return err
+		}
+		if err := m.Write(gameID, profileName, name, string(data)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // verifyPushed re-stats the target and compares against the intended bytes.
 func verifyPushed(name, src, dst string, wrote []byte, note string) PushedIniReport {
 	r := PushedIniReport{
@@ -307,7 +356,6 @@ func mergedKey(doc *Document, section, key string) string {
 }
 
 // writeFileOverwritable writes data to path, restoring u+w first if Wine's DOS
-// read-only attribute has stripped it.
 func writeFileOverwritable(path string, data []byte) error {
 	if info, err := os.Stat(path); err == nil {
 		if info.Mode()&0200 == 0 {
@@ -332,7 +380,6 @@ func (m *Manager) WriteDocument(gameID, profileName, filename string, doc *Docum
 	return m.Write(gameID, profileName, filename, doc.Serialize())
 }
 
-// TweakState mirrors what ListTweaks returns over IPC.
 type TweakState struct {
 	ID          string
 	Name        string

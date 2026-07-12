@@ -1,12 +1,15 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/parka/gorganizer/internal/config"
-	"github.com/parka/gorganizer/internal/ipc"
+	"github.com/parka/gorganizer/internal/dto"
+	"github.com/parka/gorganizer/internal/game"
 	"github.com/parka/gorganizer/internal/vfs"
 )
 
@@ -138,7 +141,6 @@ func TestRecovery_PathKeyedSingleGameUnaffected(t *testing.T) {
 }
 
 // TestRecovery_NoAmbiguityNoPending — if the on-disk state is clean,
-// no pendingRecoveries entry is created. Catches the inverse failure
 func TestRecovery_NoAmbiguityNoPending(t *testing.T) {
 	dir := t.TempDir()
 	install := filepath.Join(dir, "install")
@@ -169,8 +171,40 @@ func TestRecovery_NoAmbiguityNoPending(t *testing.T) {
 	}
 }
 
+func TestRootDeploymentProtectsManagerOwnedMarkers(t *testing.T) {
+	dir := t.TempDir()
+	install := filepath.Join(dir, "install")
+	if err := os.MkdirAll(filepath.Join(install, "Data"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Games["falloutnv"] = config.GameConfig{
+		Name: "FNV", InstallPath: install, DataSubpath: "Data", SteamAppID: 22380,
+	}
+	d, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := d.ensureRootDeploymentManager("falloutnv", cfg.Games["falloutnv"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{seManifestFilename, game.TTWMarkerFilename, fnv4gbMarkerFilename} {
+		modRoot := filepath.Join(dir, strings.TrimPrefix(marker, "."))
+		target := filepath.Join(modRoot, vfs.RootContentDirName, marker)
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte("spoof"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := manager.Apply([]vfs.Layer{{Name: marker, RootPath: modRoot, Enabled: true}}, "Default"); !errors.Is(err, vfs.ErrRootPathConflict) {
+			t.Fatalf("manager marker %s apply = %v, want ErrRootPathConflict", marker, err)
+		}
+	}
+}
+
 // TestRecovery_SyntheticVFSMutexSurfacesError — mounting one game in a
-// mutex group while the other is already mounted must surface
 func TestRecovery_SyntheticVFSMutexSurfacesError(t *testing.T) {
 	dir := t.TempDir()
 	install := filepath.Join(dir, "install")
@@ -197,8 +231,6 @@ func TestRecovery_SyntheticVFSMutexSurfacesError(t *testing.T) {
 	d.mountStates["falloutnv"] = mountState{profileName: "Default"}
 	d.mu.Unlock()
 
-	// The recovery gate (H-8) blocks mount RPCs until recovery has run; this
-	// test never calls Run(), so signal it directly to exercise the mutex path.
 	d.RecoverAll()
 
 	if d.findMutexConflict("ttw") != "falloutnv" {
@@ -209,9 +241,9 @@ func TestRecovery_SyntheticVFSMutexSurfacesError(t *testing.T) {
 	if err == nil {
 		t.Fatal("MountVFS(ttw) succeeded while FNV mounted; want VFSMutexError")
 	}
-	mutex, ok := err.(*ipc.VFSMutexError)
+	mutex, ok := err.(*VFSMutexError)
 	if !ok {
-		t.Fatalf("err type = %T (%v); want *ipc.VFSMutexError", err, err)
+		t.Fatalf("err type = %T (%v); want *VFSMutexError", err, err)
 	}
 	if mutex.GameID != "ttw" || mutex.Conflicting != "falloutnv" || mutex.Group != "fnv-data" {
 		t.Errorf("VFSMutexError = %+v; want game=ttw conflicting=falloutnv group=fnv-data", mutex)
@@ -219,7 +251,6 @@ func TestRecovery_SyntheticVFSMutexSurfacesError(t *testing.T) {
 }
 
 // mockMountedManager returns a vfs.MountManager whose IsMounted reports
-// true without performing real filesystem work. Used by the mutex tests
 func mockMountedManager(dataPath string) *vfs.MountManager {
 	mm := vfs.NewMountManager(dataPath, "", "testgame")
 	mm.SetMountedForTesting(true)
@@ -235,7 +266,7 @@ func contains(haystack []string, needle string) bool {
 	return false
 }
 
-func mapKeys(m map[string]*ipc.RecoveryPendingResult) []string {
+func mapKeys(m map[string]*dto.RecoveryPendingResult) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)

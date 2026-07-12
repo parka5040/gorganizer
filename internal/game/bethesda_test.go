@@ -1,153 +1,15 @@
 package game
 
 import (
-	"strings"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
-func TestParseVDF_LibraryFolders(t *testing.T) {
-	input := `"libraryfolders"
-{
-	"0"
-	{
-		"path"		"/home/user/.local/share/Steam"
-		"label"		""
-		"contentid"		"1234567890"
-		"totalsize"		"0"
-		"update_clean_bytes_tally"		"0"
-		"time_last_update_corruption"		"0"
-		"apps"
-		{
-			"489830"		"12345"
-			"22380"		"67890"
-		}
-	}
-	"1"
-	{
-		"path"		"/mnt/games/SteamLibrary"
-		"label"		""
-		"apps"
-		{
-			"377160"		"99999"
-		}
-	}
-}`
-
-	result, err := ParseVDF(strings.NewReader(input))
-	if err != nil {
-		t.Fatalf("ParseVDF: %v", err)
-	}
-
-	lf, ok := result["libraryfolders"]
-	if !ok {
-		t.Fatal("missing libraryfolders key")
-	}
-
-	lfMap, ok := lf.(map[string]interface{})
-	if !ok {
-		t.Fatal("libraryfolders is not a map")
-	}
-
-	entry0, ok := lfMap["0"].(map[string]interface{})
-	if !ok {
-		t.Fatal("entry 0 is not a map")
-	}
-	if path := entry0["path"].(string); path != "/home/user/.local/share/Steam" {
-		t.Errorf("entry 0 path = %q", path)
-	}
-
-	apps0, ok := entry0["apps"].(map[string]interface{})
-	if !ok {
-		t.Fatal("entry 0 apps is not a map")
-	}
-	if v := apps0["489830"].(string); v != "12345" {
-		t.Errorf("app 489830 = %q", v)
-	}
-
-	entry1, ok := lfMap["1"].(map[string]interface{})
-	if !ok {
-		t.Fatal("entry 1 is not a map")
-	}
-	if path := entry1["path"].(string); path != "/mnt/games/SteamLibrary" {
-		t.Errorf("entry 1 path = %q", path)
-	}
-}
-
-func TestParseVDF_AppManifest(t *testing.T) {
-	input := `"AppState"
-{
-	"appid"		"489830"
-	"Universe"		"1"
-	"name"		"The Elder Scrolls V: Skyrim Special Edition"
-	"StateFlags"		"4"
-	"installdir"		"Skyrim Special Edition"
-	"LastUpdated"		"1234567890"
-	"SizeOnDisk"		"12345678901"
-}`
-
-	result, err := ParseVDF(strings.NewReader(input))
-	if err != nil {
-		t.Fatalf("ParseVDF: %v", err)
-	}
-
-	appState, ok := result["AppState"].(map[string]interface{})
-	if !ok {
-		t.Fatal("AppState is not a map")
-	}
-	if appState["appid"] != "489830" {
-		t.Errorf("appid = %v", appState["appid"])
-	}
-	if appState["installdir"] != "Skyrim Special Edition" {
-		t.Errorf("installdir = %v", appState["installdir"])
-	}
-	if appState["name"] != "The Elder Scrolls V: Skyrim Special Edition" {
-		t.Errorf("name = %v", appState["name"])
-	}
-}
-
-func TestParseVDF_EscapedQuotes(t *testing.T) {
-	input := `"root"
-{
-	"key"		"value with \"quotes\" inside"
-	"path"		"C:\\Program Files\\Steam"
-}`
-
-	result, err := ParseVDF(strings.NewReader(input))
-	if err != nil {
-		t.Fatalf("ParseVDF: %v", err)
-	}
-
-	root := result["root"].(map[string]interface{})
-	if root["key"] != `value with "quotes" inside` {
-		t.Errorf("key = %q", root["key"])
-	}
-	if root["path"] != `C:\Program Files\Steam` {
-		t.Errorf("path = %q", root["path"])
-	}
-}
-
-func TestParseVDF_Comments(t *testing.T) {
-	input := `"root"
-{
-	// This is a comment
-	"key"		"value"
-	// Another comment
-}`
-
-	result, err := ParseVDF(strings.NewReader(input))
-	if err != nil {
-		t.Fatalf("ParseVDF: %v", err)
-	}
-
-	root := result["root"].(map[string]interface{})
-	if root["key"] != "value" {
-		t.Errorf("key = %q", root["key"])
-	}
-}
-
 func TestKnownGames(t *testing.T) {
-	if len(KnownGames) != 9 {
-		t.Errorf("expected 9 known games, got %d", len(KnownGames))
+	if len(KnownGames) != 10 {
+		t.Errorf("expected 10 known games, got %d", len(KnownGames))
 	}
 
 	expectedIDs := map[uint32]string{
@@ -159,6 +21,7 @@ func TestKnownGames(t *testing.T) {
 		22380:   "falloutnv",
 		377160:  "fallout4",
 		1716740: "starfield",
+		2623190: "oblivionremastered",
 	}
 
 	for appID, expectedID := range expectedIDs {
@@ -184,6 +47,104 @@ func TestKnownGames(t *testing.T) {
 	}
 	if _, ok := FindByAppID(0); ok {
 		t.Errorf("FindByAppID(0) must not return the synthetic TTW entry")
+	}
+}
+
+func TestParseAppManifestNestedGameLayout(t *testing.T) {
+	for _, marker := range []string{
+		"OblivionRemastered.exe",
+		"OblivionRemastered/Binaries/Win64/OblivionRemastered-Win64-Shipping.exe",
+	} {
+		t.Run(filepath.Base(marker), func(t *testing.T) {
+			library := t.TempDir()
+			installDir := filepath.Join(library, "steamapps", "common", "Oblivion Remastered")
+			dataDir := filepath.Join(installDir, "OblivionRemastered", "Content", "Dev", "ObvData", "Data")
+			writeTestFile(t, filepath.Join(dataDir, "Oblivion.esm"))
+			writeTestFile(t, filepath.Join(installDir, filepath.FromSlash(marker)))
+
+			manifest := filepath.Join(library, "steamapps", "appmanifest_2623190.acf")
+			writeTestManifest(t, manifest, 2623190, "Oblivion Remastered")
+			got, err := parseAppManifest(manifest, library)
+			if err != nil {
+				t.Fatalf("parseAppManifest: %v", err)
+			}
+			if got == nil {
+				t.Fatal("parseAppManifest returned nil for valid remaster layout")
+			}
+			if got.ID != "oblivionremastered" {
+				t.Fatalf("ID = %q, want oblivionremastered", got.ID)
+			}
+			if got.InstallPath != installDir {
+				t.Fatalf("InstallPath = %q, want %q", got.InstallPath, installDir)
+			}
+			if got.DataPath != dataDir {
+				t.Fatalf("DataPath = %q, want %q", got.DataPath, dataDir)
+			}
+		})
+	}
+}
+
+func TestParseAppManifestRejectsIncompleteRemaster(t *testing.T) {
+	library := t.TempDir()
+	installDir := filepath.Join(library, "steamapps", "common", "Oblivion Remastered")
+	writeTestFile(t, filepath.Join(installDir, "OblivionRemastered.exe"))
+	if err := os.MkdirAll(filepath.Join(installDir, "OblivionRemastered", "Content", "Dev", "ObvData", "Data"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(library, "steamapps", "appmanifest_2623190.acf")
+	writeTestManifest(t, manifest, 2623190, "Oblivion Remastered")
+
+	got, err := parseAppManifest(manifest, library)
+	if err != nil {
+		t.Fatalf("parseAppManifest: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected missing Oblivion.esm to reject install, got %+v", got)
+	}
+}
+
+func TestParseAppManifestUsesMorrowindDataFiles(t *testing.T) {
+	library := t.TempDir()
+	installDir := filepath.Join(library, "steamapps", "common", "Morrowind")
+	dataDir := filepath.Join(installDir, "Data Files")
+	writeTestFile(t, filepath.Join(installDir, "Morrowind.exe"))
+	writeTestFile(t, filepath.Join(dataDir, "Morrowind.esm"))
+	manifest := filepath.Join(library, "steamapps", "appmanifest_22320.acf")
+	writeTestManifest(t, manifest, 22320, "Morrowind")
+
+	got, err := parseAppManifest(manifest, library)
+	if err != nil {
+		t.Fatalf("parseAppManifest: %v", err)
+	}
+	if got == nil || got.DataPath != dataDir {
+		t.Fatalf("DataPath = %v, want %q", got, dataDir)
+	}
+}
+
+func writeTestManifest(t *testing.T, path string, appID uint32, installDir string) {
+	t.Helper()
+	contents := fmt.Sprintf(`"AppState"
+{
+	"appid"	"%d"
+	"name"	"Test Game"
+	"installdir"	"%s"
+}
+`, appID, installDir)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeTestFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("fixture"), 0644); err != nil {
+		t.Fatal(err)
 	}
 }
 

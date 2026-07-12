@@ -11,14 +11,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/parka/gorganizer/internal/config"
-	"github.com/parka/gorganizer/internal/ipc"
+	"github.com/parka/gorganizer/internal/dto"
 	"github.com/parka/gorganizer/internal/steam"
 )
 
-// ProtonVersion describes an installed Proton version.
 type ProtonVersion struct {
 	Name string
 	Path string
@@ -26,9 +26,9 @@ type ProtonVersion struct {
 
 const loaderExeSizeCap = 500 * 1024
 
-// Manager handles script extender detection and game launching via Proton.
 type Manager struct {
-	config *config.Config
+	config      *config.Config
+	prefixLocks sync.Map
 }
 
 func NewManager(cfg *config.Config) *Manager {
@@ -36,16 +36,16 @@ func NewManager(cfg *config.Config) *Manager {
 }
 
 // DetectProton scans steamapps/common/Proton*/proton for available versions.
-func (m *Manager) DetectProton() ([]ipc.ProtonVersionResult, error) {
+func (m *Manager) DetectProton() ([]dto.ProtonVersionResult, error) {
 	steamRoot, err := findSteamRoot()
 	if err != nil {
 		return nil, err
 	}
 
-	versions := detectProtonVersions(steamRoot)
-	var results []ipc.ProtonVersionResult
+	versions := detectProtonVersionsAllLibraries(steamRoot)
+	var results []dto.ProtonVersionResult
 	for _, v := range versions {
-		results = append(results, ipc.ProtonVersionResult{
+		results = append(results, dto.ProtonVersionResult{
 			Name: v.Name,
 			Path: v.Path,
 		})
@@ -53,7 +53,6 @@ func (m *Manager) DetectProton() ([]ipc.ProtonVersionResult, error) {
 	return results, nil
 }
 
-// LaunchHandle tracks a Proton-launched process; Done closes when the whole tree has exited.
 type LaunchHandle struct {
 	PID  int
 	Done <-chan struct{}
@@ -81,23 +80,15 @@ func (m *Manager) LaunchGame(gameID string, useTool bool, gameCfg *config.GameCo
 	} else if useTool {
 		tool, found := DetectTool(gameCfg.InstallPath, gameID)
 		if found {
-			exePath = filepath.Join(gameCfg.InstallPath, tool.LoaderExe)
+			exePath = tool.LoaderPath(gameCfg.InstallPath)
 			activeTool = tool
 		}
 	}
 
 	if useTool && activeTool == nil {
-		for _, t := range KnownTools {
-			for _, gid := range t.GameIDs {
-				if gid == gameID {
-					tt := t
-					activeTool = &tt
-					break
-				}
-			}
-			if activeTool != nil {
-				break
-			}
+		if forGame := ToolsForGame(gameID); len(forGame) > 0 {
+			tt := forGame[0]
+			activeTool = &tt
 		}
 		if activeTool != nil {
 			slog.Info("resolved script extender via gameID fallback",
@@ -107,7 +98,7 @@ func (m *Manager) LaunchGame(gameID string, useTool bool, gameCfg *config.GameCo
 	}
 
 	if exePath == "" {
-		return nil, &ipc.LoaderMissingError{
+		return nil, &LoaderMissingError{
 			GameID:      gameID,
 			InstallPath: gameCfg.InstallPath,
 			Reason:      "no-loader-configured",
@@ -118,11 +109,11 @@ func (m *Manager) LaunchGame(gameID string, useTool bool, gameCfg *config.GameCo
 		slog.Warn("configured loader exe missing, probing for alternative",
 			"exe", exePath, "err", statErr)
 		if alt, found := DetectTool(gameCfg.InstallPath, gameID); found {
-			exePath = filepath.Join(gameCfg.InstallPath, alt.LoaderExe)
+			exePath = alt.LoaderPath(gameCfg.InstallPath)
 			activeTool = alt
 			slog.Info("self-heal: found alternative loader", "exe", exePath, "tool", alt.ID)
 		} else {
-			return nil, &ipc.LoaderMissingError{
+			return nil, &LoaderMissingError{
 				GameID:        gameID,
 				ConfiguredExe: filepath.Base(gameCfg.ToolExe),
 				InstallPath:   gameCfg.InstallPath,
@@ -130,7 +121,7 @@ func (m *Manager) LaunchGame(gameID string, useTool bool, gameCfg *config.GameCo
 			}
 		}
 	} else if info.Size() > loaderExeSizeCap {
-		return nil, &ipc.LoaderMissingError{
+		return nil, &LoaderMissingError{
 			GameID:        gameID,
 			ConfiguredExe: filepath.Base(exePath),
 			InstallPath:   gameCfg.InstallPath,
@@ -143,7 +134,7 @@ func (m *Manager) LaunchGame(gameID string, useTool bool, gameCfg *config.GameCo
 		protonPath = preferredProton
 	}
 	if protonPath == "" {
-		versions := detectProtonVersions(steamRoot)
+		versions := detectProtonVersionsAllLibraries(steamRoot)
 		if len(versions) == 0 {
 			return nil, fmt.Errorf("no Proton versions found")
 		}
@@ -151,7 +142,8 @@ func (m *Manager) LaunchGame(gameID string, useTool bool, gameCfg *config.GameCo
 	}
 
 	appID := strconv.Itoa(gameCfg.SteamAppID)
-	compatDataPath := filepath.Join(steamRoot, "steamapps", "compatdata", appID)
+	libraryRoot := resolveSteamLibrary(steamRoot, gameCfg)
+	compatDataPath := findCompatDataPath(steamRoot, libraryRoot, appID)
 
 	var dllOverrides string
 	if activeTool != nil {
@@ -197,7 +189,7 @@ func (m *Manager) LaunchGame(gameID string, useTool bool, gameCfg *config.GameCo
 
 	cmd := exec.Command(bin, args...)
 	cmd.Env = env
-	cmd.Dir = gameCfg.InstallPath
+	cmd.Dir = launchWorkingDir(gameCfg.InstallPath, exePath, useTool)
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -245,11 +237,15 @@ func probeExtenderLog(gameID string, tool *ToolDefinition, gameCfg *config.GameC
 
 	prefixDocs := filepath.Join(compatDataPath, "pfx", "drive_c", "users", "steamuser")
 	candidates := []string{
-		filepath.Join(gameCfg.InstallPath, tool.LogName),
+		filepath.Join(tool.InstallDir(gameCfg.InstallPath), tool.LogName),
 	}
 	if tool.MyGamesSubdir != "" {
 		for _, docDir := range []string{"My Documents", "Documents"} {
 			base := filepath.Join(prefixDocs, docDir, "My Games", tool.MyGamesSubdir)
+			if tool.LogSubpath != "" {
+				candidates = append(candidates,
+					filepath.Join(base, filepath.FromSlash(tool.LogSubpath), tool.LogName))
+			}
 			candidates = append(candidates,
 				filepath.Join(base, tool.LogName),
 				filepath.Join(base, strings.ToUpper(tool.ID), tool.LogName),
@@ -280,6 +276,13 @@ func probeExtenderLog(gameID string, tool *ToolDefinition, gameCfg *config.GameC
 	}
 	slog.Warn("script extender log not found — extender did NOT inject (check WINEDLLOVERRIDES and loader exe)",
 		"game", gameID, "tool", tool.ID, "probed_paths", candidates)
+}
+
+func launchWorkingDir(gameInstallDir, exePath string, useTool bool) string {
+	if useTool && exePath != "" {
+		return filepath.Dir(exePath)
+	}
+	return gameInstallDir
 }
 
 func readFirstLines(path string, n int) ([]string, error) {
@@ -369,6 +372,41 @@ func detectProtonVersions(steamRoot string) []ProtonVersion {
 		}
 		return versions[i].Name < versions[j].Name
 	})
+	return versions
+}
+
+func detectProtonVersionsAllLibraries(steamRoot string) []ProtonVersion {
+	seen := make(map[string]bool)
+	versions := make([]ProtonVersion, 0)
+	for _, library := range steamLibraries(steamRoot) {
+		for _, version := range detectProtonVersions(library) {
+			if seen[version.Path] {
+				continue
+			}
+			seen[version.Path] = true
+			versions = append(versions, version)
+		}
+	}
+	for _, root := range []string{
+		filepath.Join(steamRoot, "compatibilitytools.d"),
+		filepath.Join(filepath.Dir(steamRoot), "compatibilitytools.d"),
+	} {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			path := filepath.Join(root, entry.Name(), "proton")
+			if _, err := os.Stat(path); err != nil || seen[path] {
+				continue
+			}
+			seen[path] = true
+			versions = append(versions, ProtonVersion{Name: entry.Name(), Path: path})
+		}
+	}
 	return versions
 }
 
@@ -507,17 +545,19 @@ func ResolveProtonRuntime(protonPath, steamRoot string) (entryPoint, runtimeName
 	if err != nil || requireID == "" {
 		return "", ""
 	}
-	appManifest := filepath.Join(steamRoot, "steamapps", "appmanifest_"+requireID+".acf")
-	installDir, err := readVDFKey(appManifest, "installdir")
-	if err != nil || installDir == "" {
-		return "", ""
+	for _, library := range steamLibraries(steamRoot) {
+		appManifest := filepath.Join(library, "steamapps", "appmanifest_"+requireID+".acf")
+		installDir, err := readVDFKey(appManifest, "installdir")
+		if err != nil || installDir == "" {
+			continue
+		}
+		candidate := filepath.Join(library, "steamapps", "common", installDir, "_v2-entry-point")
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() {
+			return candidate, installDir
+		}
 	}
-	candidate := filepath.Join(steamRoot, "steamapps", "common", installDir, "_v2-entry-point")
-	info, err := os.Stat(candidate)
-	if err != nil || info.IsDir() {
-		return "", ""
-	}
-	return candidate, installDir
+	return "", ""
 }
 
 // readVDFKey scans a VDF file line-by-line for the first quoted top-level key matching wantKey.
@@ -548,16 +588,20 @@ func readVDFKey(path, wantKey string) (string, error) {
 
 // detectCompatToolPaths returns the list of Steam compatibility tool roots the sandbox should expose.
 func detectCompatToolPaths(steamRoot string) []string {
-	commonDir := filepath.Join(steamRoot, "steamapps", "common")
 	var out []string
-	for _, name := range []string{
-		"SteamLinuxRuntime_sniper",
-		"SteamLinuxRuntime_soldier",
-		"SteamLinuxRuntime",
-	} {
-		p := filepath.Join(commonDir, name)
-		if info, err := os.Stat(p); err == nil && info.IsDir() {
-			out = append(out, p)
+	seen := make(map[string]bool)
+	for _, library := range steamLibraries(steamRoot) {
+		commonDir := filepath.Join(library, "steamapps", "common")
+		for _, name := range []string{
+			"SteamLinuxRuntime_sniper",
+			"SteamLinuxRuntime_soldier",
+			"SteamLinuxRuntime",
+		} {
+			p := filepath.Join(commonDir, name)
+			if info, err := os.Stat(p); err == nil && info.IsDir() && !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
 		}
 	}
 	return out

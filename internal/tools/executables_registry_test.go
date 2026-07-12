@@ -43,3 +43,15 @@ func TestDetectExecutables_FindsKnownTools(t *testing.T) {
 		t.Errorf("expected exactly 2 tools, got %d: %+v", len(got), got)
 	}
 }
+
+func TestManagedLOOTCatalogHookRequiresManagedPath(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	if _, ok := ValidateCatalogMatch("loot", "skyrimse", filepath.Join(t.TempDir(), "gorganizer", "tools", "loot", "LOOT.exe")); ok {
+		t.Fatal("unmanaged LOOT path received managed hooks")
+	}
+	managed := filepath.Join(dataHome, "gorganizer", "tools", "loot", "0.29.1", "LOOT.exe")
+	if _, ok := ValidateCatalogMatch("loot", "skyrimse", managed); !ok {
+		t.Fatal("managed LOOT path was rejected")
+	}
+}

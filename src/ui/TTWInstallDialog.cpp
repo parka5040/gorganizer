@@ -1,4 +1,5 @@
 #include "TTWInstallDialog.h"
+#include "Dialogs.h"
 
 #include <QApplication>
 #include <QButtonGroup>
@@ -48,7 +49,7 @@ QString prereqRow(bool ok, const QString& label)
                                   label);
 }
 
-} // namespace
+}
 
 TTWInstallDialog::TTWInstallDialog(GrpcClient* grpc, QString fnvShortName,
                                    QString currentProfile, QWidget* parent)
@@ -70,7 +71,7 @@ TTWInstallDialog::TTWInstallDialog(GrpcClient* grpc, QString fnvShortName,
     m_stack->addWidget(buildConfigurePage());
     m_stack->addWidget(buildRunPage());
     m_stack->addWidget(buildLauncherPage());
-    root->addWidget(m_stack, /*stretch*/1);
+    root->addWidget(m_stack, 1);
 
     auto* nav = new QHBoxLayout;
     m_backBtn = new QPushButton("Back");
@@ -132,12 +133,11 @@ TTWInstallDialog::TTWInstallDialog(GrpcClient* grpc, QString fnvShortName,
 void TTWInstallDialog::closeEvent(QCloseEvent* ev)
 {
     if (m_installRunning) {
-        auto choice = QMessageBox::warning(this, "Cancel install?",
+        if (!dialogs::confirmWarn(this, "Cancel install?",
             "The TTW installer is still running. Cancelling now will kill the "
             "Wine process tree (Backend A) or the native installer (Backend B).\n\n"
             "Cancel install?",
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (choice != QMessageBox::Yes) {
+            QMessageBox::No)) {
             ev->ignore();
             return;
         }
@@ -149,10 +149,9 @@ void TTWInstallDialog::closeEvent(QCloseEvent* ev)
 void TTWInstallDialog::reject()
 {
     if (m_installRunning) {
-        auto choice = QMessageBox::warning(this, "Cancel install?",
+        if (!dialogs::confirmWarn(this, "Cancel install?",
             "The TTW installer is still running. Cancel?",
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (choice != QMessageBox::Yes) return;
+            QMessageBox::No)) return;
         onCancelInstaller();
     }
     QDialog::reject();
@@ -267,7 +266,7 @@ void TTWInstallDialog::onRefreshPrereqs()
     GrpcTTWPrereqStatus st;
     QString err;
     if (!m_grpc->checkTTWPrereqs(currentBackend(), st, err)) {
-        QMessageBox::warning(this, "Pre-flight failed",
+        dialogs::warn(this, "Pre-flight failed",
             QString("CheckTTWPrereqs RPC failed: %1").arg(err));
         return;
     }
@@ -339,21 +338,21 @@ void TTWInstallDialog::onInstallMissing()
     if (currentBackend() == GrpcTTWBackendNative) {
         QString path, version, err;
         if (!m_grpc->ensureNativeMpiInstaller(path, version, err)) {
-            QMessageBox::warning(this, "Could not install mpi_installer", err);
+            dialogs::warn(this, "Could not install mpi_installer", err);
             return;
         }
-        QMessageBox::information(this, "Installed",
+        dialogs::info(this, "Installed",
             QString("mpi_installer is now at:\n%1\n\nVersion: %2").arg(path, version));
         onRefreshPrereqs();
         return;
     }
     QString id, err;
     if (!m_grpc->installTTWPrereqs(id, err)) {
-        QMessageBox::warning(this, "Could not install prereqs", err);
+        dialogs::warn(this, "Could not install prereqs", err);
         return;
     }
     appendLog(QString("[%1] protontricks started — watch the log tail").arg(id));
-    QMessageBox::information(this, "Install started",
+    dialogs::info(this, "Install started",
         "Protontricks is installing .NET 4.8 + vcrun2022 + msxml6 + corefonts in "
         "the FNV prefix. Watch the activity log for completion (this can take "
         "5–15 minutes), then click Refresh to re-check.");
@@ -364,17 +363,17 @@ void TTWInstallDialog::onBootstrapPrefix()
     if (!m_grpc) return;
     QString err;
     if (!m_grpc->bootstrapFNVPrefix(err)) {
-        QMessageBox::warning(this, "Bootstrap failed", err);
+        dialogs::warn(this, "Bootstrap failed", err);
         return;
     }
-    QMessageBox::information(this, "Prefix bootstrapped",
+    dialogs::info(this, "Prefix bootstrapped",
         "FNV's Proton prefix is now materialized. Refresh to continue.");
     onRefreshPrereqs();
 }
 
 void TTWInstallDialog::onUninstallMono()
 {
-    QMessageBox::information(this, "Uninstall Wine Mono",
+    dialogs::info(this, "Uninstall Wine Mono",
         "Run `protontricks 22380 wine uninstaller --remove` and uninstall any "
         "Wine Mono entry from the Add/Remove dialog, then click Refresh. "
         "Automating this step from gorganizer is unsafe because Wine's uninstall "
@@ -444,7 +443,7 @@ void TTWInstallDialog::onPickMpi()
     GrpcTTWInstallerInfo info;
     QString err;
     if (!m_grpc->prepareTTWInstaller(picked, currentBackend(), info, err)) {
-        QMessageBox::warning(this, "Could not resolve .mpi", err);
+        dialogs::warn(this, "Could not resolve .mpi", err);
         return;
     }
 
@@ -501,7 +500,7 @@ void TTWInstallDialog::onConfigure()
 {
     if (!m_grpc) return;
     if (m_modName.isEmpty()) {
-        QMessageBox::information(this, "Mod name required",
+        dialogs::info(this, "Mod name required",
             "Please enter a name for the TTW mod folder.");
         return;
     }
@@ -509,22 +508,21 @@ void TTWInstallDialog::onConfigure()
     QString modDir, err;
     if (!m_grpc->createBlankTTWMod(m_modName, modDir, err)) {
         if (err.contains("mod_collision", Qt::CaseInsensitive)) {
-            auto choice = QMessageBox::question(this, "Replace existing TTW mod?",
+            if (!dialogs::confirm(this, "Replace existing TTW mod?",
                 QString("A mod folder named %1 already exists. Replace it?").arg(m_modName),
-                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-            if (choice != QMessageBox::Yes) return;
+                QMessageBox::No)) return;
             QString uerr;
             std::vector<QString> flagged;
-            if (!m_grpc->uninstallMod("ttw", m_modName, /*force*/true, flagged, uerr)) {
-                QMessageBox::warning(this, "Could not remove existing mod", uerr);
+            if (!m_grpc->uninstallMod("ttw", m_modName, true, flagged, uerr)) {
+                dialogs::warn(this, "Could not remove existing mod", uerr);
                 return;
             }
             if (!m_grpc->createBlankTTWMod(m_modName, modDir, err)) {
-                QMessageBox::warning(this, "Could not create TTW mod folder", err);
+                dialogs::warn(this, "Could not create TTW mod folder", err);
                 return;
             }
         } else {
-            QMessageBox::warning(this, "Could not create TTW mod folder", err);
+            dialogs::warn(this, "Could not create TTW mod folder", err);
             return;
         }
     }
@@ -654,7 +652,7 @@ void TTWInstallDialog::onRunInstaller()
 
     QString id, err;
     if (!m_grpc->launchTTWInstaller(info, m_modName, id, err)) {
-        QMessageBox::warning(this, "Could not launch installer", err);
+        dialogs::warn(this, "Could not launch installer", err);
         return;
     }
     m_inFlightInstallId = id;
@@ -680,7 +678,7 @@ void TTWInstallDialog::onCancelInstaller()
     }
     QString err;
     if (!m_grpc->cancelTTWInstaller(m_inFlightInstallId, err)) {
-        QMessageBox::warning(this, "Cancel failed", err);
+        dialogs::warn(this, "Cancel failed", err);
         return;
     }
     appendLog(QString("[%1] cancel issued").arg(m_inFlightInstallId));
@@ -849,17 +847,15 @@ void TTWInstallDialog::onActivate()
 
     QString err;
     if (!m_grpc->setTTWLauncherExe(m_chosenLauncherRel, err)) {
-        QMessageBox::warning(this, "Could not set launcher", err);
+        dialogs::warn(this, "Could not set launcher", err);
         return;
     }
 
-    auto choice = QMessageBox::question(this, "Activate Tale of Two Wastelands now?",
+    if (!dialogs::confirm(this, "Activate Tale of Two Wastelands now?",
         "Switch active game to Tale of Two Wastelands and mount its VFS?\n\n"
         "If FNV's VFS is currently mounted, it will be unmounted first. "
         "Saves made in vanilla FNV cannot be loaded after switching.",
-        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
-
-    if (choice != QMessageBox::Yes) {
+        QMessageBox::Yes)) {
         m_outcome = InstalledOnly;
         accept();
         return;
@@ -904,7 +900,7 @@ void TTWInstallDialog::populateLauncherCandidates()
     QString err;
     bool fetched = false;
     if (!id.isEmpty() && m_grpc) {
-        fetched = m_grpc->getTTWInstallResult(id, /*block*/false, result, err);
+        fetched = m_grpc->getTTWInstallResult(id, false, result, err);
         if (!fetched)
             appendLog(QString("[dialog] could not fetch install result: %1").arg(err));
     }
@@ -947,7 +943,7 @@ void TTWInstallDialog::populateLauncherCandidates()
                          d.relPath,
                          QString("Lives in the Fallout: New Vegas install dir (%1).")
                              .arg(d.kind),
-                         /*dest*/false);
+                         false);
         }
 
         if (!result.dataModExes.empty()) {
@@ -962,7 +958,7 @@ void TTWInstallDialog::populateLauncherCandidates()
                              "Lives inside the TTW data mod folder. Pick this only "
                              "if your TTW manifest places the launcher there "
                              "rather than in FNV's install dir.",
-                             /*dest*/true);
+                             true);
             }
         }
     }
@@ -973,7 +969,7 @@ void TTWInstallDialog::populateLauncherCandidates()
                      "xNVSE's loader. This is the correct launcher for TTW "
                      "on Linux when the native MPI installer (Backend B) "
                      "was used — no separate TTW.exe is created on Linux.",
-                     /*dest*/false);
+                     false);
     }
 
     for (int i = 0; i < m_launcherList->count(); ++i) {
@@ -986,4 +982,4 @@ void TTWInstallDialog::populateLauncherCandidates()
     }
 }
 
-} // namespace gorganizer
+}

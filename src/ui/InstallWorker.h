@@ -15,11 +15,12 @@ public:
 
     explicit InstallWorker(QObject* parent = nullptr);
 
-    void configureRecursive(const QString& src, const QString& dst);
+    void configureRecursive(const QString& src, const QString& dst, const QString& gameId);
     void configureFomodSelections(const QString& modulePath,
                                   const QList<FomodFile>& selections,
-                                  const QString& destDir);
-    void configureLegacyFomod(const QString& modulePath, const QString& destDir);
+                                  const QString& destDir, const QString& gameId);
+    void configureLegacyFomod(const QString& modulePath, const QString& destDir,
+                              const QString& gameId);
 
     void cancel();
     bool isCancelled() const { return m_cancel.load(); }
@@ -39,8 +40,9 @@ private:
     QString m_src;
     QString m_dst;
     QString m_modulePath;
+    QString m_gameId;
     QList<FomodFile> m_selections;
     std::atomic<bool> m_cancel;
 };
 
-} // namespace gorganizer
+}

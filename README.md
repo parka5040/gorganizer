@@ -6,9 +6,23 @@ into the game's `Data/` folder via a hardlink farm. Built as a Linux-native
 alternative to Mod Organizer 2 — no Wine, no Protontricks for the manager
 itself.
 
-**Status:** early. Targets Skyrim SE, Fallout New Vegas, Fallout 3, and
-similar Data/-folder Bethesda games. Oblivion Remastered (Unreal) is out of
-scope.
+**Status:** early. Targets Bethesda games: Skyrim SE, Skyrim, Fallout New
+Vegas, Fallout 3, Fallout 4, Starfield, Oblivion, Oblivion Remastered,
+Morrowind, and Tale of Two Wastelands (TTW).
+
+Oblivion Remastered uses its nested `OblivionRemastered/Content/Dev/ObvData/Data`
+directory, with OBSE64 and PAK/Win64/root-file mods handled alongside classic
+ESP/ESM mods. Put game-root files under a mod's `.gorganizer-root/` directory;
+Gorganizer deploys them as recoverable profile-scoped symlinks.
+
+The External Tools dialog can install/update the official Windows portable
+LOOT release, open it through the selected game's Proton prefix, or run an
+isolated automatic sort. LOOT works from a disposable profile projection so it
+cannot change hardlinked source mods. TTW may open LOOT in Fallout New Vegas
+mode, but automatic sorting is intentionally disabled. Common Skyrim tools such
+as xEdit, Creation Kit, Pandora, Nemesis, FNIS, BodySlide, DynDOLOD/xLODGen,
+Synthesis, Wrye Bash, BethINI, and EasyNPC have built-in discovery and write
+policies; their proprietary downloads are not redistributed.
 
 ## Install
 
@@ -101,8 +115,11 @@ Steam, which the daemon does not track).
 
 - Qt6 (Core, Gui, Widgets) — runtime libraries
 - gRPC C++ runtime + libprotobuf
-- libfuse3 + the `fusermount3` setuid helper
+- (optional) `fusermount3` — only used to clean up stale mounts left by
+  pre-hardlink-farm versions of gorganizer
 - (optional) `7z`, `unrar`, `unzip` for archive extraction
+- `protontricks` when a managed Windows tool needs a prefix runtime such as
+  LOOT's MSVC 2022 redistributable
 
 ## Building manually
 
@@ -117,15 +134,17 @@ make clean    # wipe build artifacts and generated proto
 
 Build dependencies (in addition to runtime deps): Go 1.26+, CMake 3.21+,
 Ninja or Make, g++ with C++20, `protoc`, `pkg-config`, Qt6 dev headers,
-gRPC dev headers, FUSE3 dev headers.
+gRPC dev headers.
 
 ## Repo layout
 
 - `cmd/gorganizerd/` — daemon entry point
-- `cmd/gorganizerctl/` — offline maintenance CLI (does not talk to the
-  daemon; used to recover stale FUSE state)
-- `internal/` — Go packages (config, daemon, ipc, vfs, downloads, ...)
+- `cmd/gorganizerctl/` — maintenance CLI: offline crash recovery, plus
+  instance export/import against the running daemon
+- `internal/` — Go packages (daemon services, ipc, vfs, download, transfer, ...)
 - `api/proto/` — gRPC service definition
 - `src/` — Qt6 GUI (C++)
+- `scripts/` — dev tooling (comment-policy checker)
 - `resources/icons/` — bundled app icon
+- `docs/` — local-only architecture and agent docs (gitignored)
 - `gorganizer.sh` — single entry point: build, run, register, uninstall

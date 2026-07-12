@@ -2,9 +2,10 @@
 
 #include <QWidget>
 #include <QTreeView>
-#include <QStandardItemModel>
 #include "GameInfo.h"
 #include "GrpcClient.h"
+#include "ModCatalog.h"
+#include "ModListModel.h"
 #include <vector>
 
 class QDropEvent;
@@ -12,30 +13,6 @@ class QCheckBox;
 class QPushButton;
 
 namespace gorganizer {
-
-enum ModColumn { ModColPriority = 0, ModColConflicts = 1, ModColName = 2, ModColCategory = 3, ModColVersion = 4 };
-
-// Row kinds in the model; RowKindOverwrite is the pinned-bottom write-capture pseudo-row.
-enum ModRowKind { RowKindMod = 0, RowKindSeparator = 1, RowKindOverwrite = 2 };
-
-inline constexpr const char* kOverwriteModName = "Overwrite";
-
-// Parsed from metadata.yaml in each mod folder.
-struct ModMetadata {
-    QString name;
-    QString folder;
-    QString installed;
-    QString sourceArchive;
-    QStringList sourceArchives;
-    QString nexusUrl;
-    QString category;
-    QString version;
-    bool enabled = true;
-    int fileCount = 0;
-    QString trueIndex;
-    QString visualIndex;
-    QString separator;
-};
 
 class ModListWidget;
 
@@ -65,9 +42,7 @@ public:
     bool visualModeEnabled() const;
 
 public slots:
-    // Toggle the global "fuse separator+true views" setting. While on, the
-    // Separator View checkbox is forced on/disabled; reorders also stamp
-    // true_index to match visual_index. Off leaves any stamped indices alone.
+    // Toggles the global fused separator+true view; while on, reorders also stamp true_index to match visual_index.
     void applyCollapsedSeparatorView(bool on);
 
 signals:
@@ -85,16 +60,14 @@ private slots:
 private:
     friend class ModListTreeView;
     void scanModsFolder();
-    static ModMetadata readMetadata(const QString& yamlPath);
-    void recalculatePriorities();
-    void applySort(int column, Qt::SortOrder order);
     void restorePriorityOrder();
-    void setCategoryForRow(int row, const QString& category);
+    void setCategoryForRow(int modIdx, const QString& category);
     // Sets or clears the mod_page key in metadata.yaml; empty url removes the key.
     void updateModPageUrl(int row, const QString& url);
 
     void onVisualToggled(bool on);
     void rebuildView();
+    void applyOverwriteSpan();
     void persistRowOrder();
     void createSeparatorAt(int visualRow);
     void renameSeparator(int row);
@@ -104,28 +77,22 @@ private:
     void persistSeparators();
     void onAddSeparatorClicked();
     void groupByCategory();
-    // Sets/unsets a single top-level key in metadata.yaml without disturbing other lines.
-    static void patchMetadataField(const QString& yamlPath, const QString& key,
-                                    const QString& value);
+
+    void updateConflictTints();
+    void showConflictDetailsForMod(const QString& modName);
+
+    void onOverwriteContextMenu(const QPoint& globalPos);
+    void extractOverwriteAll();
+    void extractOverwriteSelected();
 
     GrpcClient* m_grpc;
     ModListTreeView* m_view;
-    QStandardItemModel* m_model;
+    ModListModel* m_model;
     QWidget* m_placeholder;
     QCheckBox* m_visualCheck = nullptr;
     QPushButton* m_addSeparatorBtn = nullptr;
 
     std::vector<GrpcFileConflict> m_conflicts;
-    void repaintConflictHighlights();
-    // Re-apply conflict markers/highlights, separator, and overwrite-row colors
-    // from the active theme's tokens. Called on theme change.
-    void restyleModModel();
-    void showConflictDetailsForMod(const QString& modName);
-
-    void appendOverwriteRow();
-    void onOverwriteContextMenu(const QPoint& globalPos);
-    void extractOverwriteAll();
-    void extractOverwriteSelected();
 
     QString m_gameId;
     QString m_profileName;
@@ -146,4 +113,4 @@ private:
     Qt::SortOrder m_sortOrder = Qt::AscendingOrder;
 };
 
-} // namespace gorganizer
+}

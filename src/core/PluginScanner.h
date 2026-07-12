@@ -16,4 +16,4 @@ public:
     static std::vector<PluginEntry> scan(const std::filesystem::path& dataDir);
 };
 
-} // namespace gorganizer
+}

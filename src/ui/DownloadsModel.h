@@ -9,7 +9,6 @@
 
 namespace gorganizer {
 
-// Phase of a download row. Values mirror the proto DownloadStatus enum.
 enum class DownloadPhase {
     Unknown     = 0,
     Queued      = 1,
@@ -51,7 +50,6 @@ struct DownloadRowData {
     bool merged = false;
 };
 
-// Table model keyed by archive relpath (or "dl:<downloadId>" for transient rows).
 class DownloadsModel : public QAbstractTableModel {
     Q_OBJECT
 public:
@@ -115,6 +113,6 @@ private:
     static DownloadPhase phaseFromDownloadStatus(int status);
 };
 
-} // namespace gorganizer
+}
 
 Q_DECLARE_METATYPE(gorganizer::DownloadRowData)

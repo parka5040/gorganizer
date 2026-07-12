@@ -2,7 +2,6 @@ package download
 
 import (
 	"archive/zip"
-	"bufio"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,16 +13,15 @@ import (
 
 	"github.com/bodgit/sevenzip"
 
-	"github.com/parka/gorganizer/internal/atomicfile"
+	"github.com/parka/gorganizer/internal/fsutil"
+	"github.com/parka/gorganizer/internal/kvfile"
 )
 
-// Extractor abstracts archive extraction per format.
 type Extractor interface {
 	Extract(archivePath, destDir string) error
 	CanHandle(archivePath string) bool
 }
 
-// ModStructure represents the detected layout of an extracted archive.
 type ModStructure int
 
 const (
@@ -61,7 +59,7 @@ func DetectExtractor(archivePath string) (Extractor, error) {
 }
 
 func DetectStructure(extractDir string) ModStructure {
-	if dirExists(filepath.Join(extractDir, "fomod")) {
+	if fsutil.DirExists(filepath.Join(extractDir, "fomod")) {
 		return StructureFOMOD
 	}
 	entries, err := os.ReadDir(extractDir)
@@ -116,6 +114,16 @@ func isBethesdaDataSubdir(name string) bool {
 
 // findContentRoot returns the directory holding the mod content that overlays Data/.
 func findContentRoot(extractDir string) string {
+	for _, rel := range []string{
+		filepath.Join("ObvData", "Data"),
+		filepath.Join("Content", "Dev", "ObvData", "Data"),
+		filepath.Join("OblivionRemastered", "Content", "Dev", "ObvData", "Data"),
+	} {
+		if nested := exclusiveNestedContentRoot(extractDir, rel); nested != "" {
+			return nested
+		}
+	}
+
 	entries, err := os.ReadDir(extractDir)
 	if err != nil {
 		return extractDir
@@ -124,7 +132,23 @@ func findContentRoot(extractDir string) string {
 	if len(entries) == 1 && entries[0].IsDir() {
 		wrapperName := entries[0].Name()
 		wrapperPath := filepath.Join(extractDir, wrapperName)
-		if dirExists(filepath.Join(wrapperPath, "Data")) {
+		if strings.EqualFold(wrapperName, "Engine") || strings.EqualFold(wrapperName, "OblivionRemastered") {
+			return extractDir
+		}
+		for _, rel := range []string{
+			filepath.Join("ObvData", "Data"),
+			filepath.Join("Content", "Dev", "ObvData", "Data"),
+			filepath.Join("OblivionRemastered", "Content", "Dev", "ObvData", "Data"),
+		} {
+			if nested := exclusiveNestedContentRoot(wrapperPath, rel); nested != "" {
+				return nested
+			}
+		}
+		if strings.EqualFold(wrapperName, "OblivionRemastered") &&
+			fsutil.DirExists(filepath.Join(wrapperPath, "Content", "Dev", "ObvData", "Data")) {
+			return extractDir
+		}
+		if fsutil.DirExists(filepath.Join(wrapperPath, "Data")) {
 			return filepath.Join(wrapperPath, "Data")
 		}
 		if isBethesdaDataSubdir(wrapperName) {
@@ -132,18 +156,122 @@ func findContentRoot(extractDir string) string {
 		}
 		return wrapperPath
 	}
-	if dirExists(filepath.Join(extractDir, "Data")) {
+	if fsutil.DirExists(filepath.Join(extractDir, "Data")) {
 		return filepath.Join(extractDir, "Data")
 	}
 	return extractDir
 }
 
+// exclusiveNestedContentRoot returns a populated nested root when no payload exists outside it.
+func exclusiveNestedContentRoot(base, rel string) string {
+	nested := resolveNestedDirectoryFold(base, rel)
+	if nested == "" {
+		return ""
+	}
+	found := false
+	outside := false
+	err := filepath.WalkDir(base, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		within, relErr := filepath.Rel(nested, path)
+		if relErr != nil || within == ".." || strings.HasPrefix(within, ".."+string(filepath.Separator)) {
+			outside = true
+			return filepath.SkipAll
+		}
+		found = true
+		return nil
+	})
+	if err != nil || outside || !found {
+		return ""
+	}
+	return nested
+}
+
+func resolveNestedDirectoryFold(base, relative string) string {
+	current := base
+	for _, component := range strings.Split(filepath.ToSlash(relative), "/") {
+		entries, err := os.ReadDir(current)
+		if err != nil {
+			return ""
+		}
+		match := ""
+		for _, entry := range entries {
+			if !entry.IsDir() || !strings.EqualFold(entry.Name(), component) {
+				continue
+			}
+			if match != "" {
+				return ""
+			}
+			match = entry.Name()
+		}
+		if match == "" {
+			return ""
+		}
+		current = filepath.Join(current, match)
+	}
+	return current
+}
+
 // FindContentRoot is the exported shim over findContentRoot.
 func FindContentRoot(extractDir string) string { return findContentRoot(extractDir) }
 
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
+func hasOblivionRemasteredRootMarkers(root string) bool {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		for _, marker := range []string{"Engine", "OblivionRemastered", "OblivionRemastered.exe"} {
+			if strings.EqualFold(entry.Name(), marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func routeOblivionRemasteredPath(rel string, rooted bool) string {
+	clean := filepath.Clean(rel)
+	for _, dataPrefix := range []string{
+		filepath.Join("OblivionRemastered", "Content", "Dev", "ObvData", "Data"),
+		filepath.Join("Content", "Dev", "ObvData", "Data"),
+		filepath.Join("ObvData", "Data"),
+	} {
+		if strings.EqualFold(clean, dataPrefix) {
+			return "."
+		}
+		if suffix, ok := trimPathPrefixFold(clean, dataPrefix); ok {
+			return suffix
+		}
+	}
+	first := clean
+	if separator := strings.IndexRune(clean, filepath.Separator); separator >= 0 {
+		first = clean[:separator]
+	}
+	if strings.EqualFold(first, "Engine") || strings.EqualFold(first, "OblivionRemastered") ||
+		strings.EqualFold(clean, "OblivionRemastered.exe") {
+		return filepath.Join(".gorganizer-root", clean)
+	}
+	_ = rooted
+	return clean
+}
+
+func trimPathPrefixFold(path, prefix string) (string, bool) {
+	pathParts := strings.Split(filepath.ToSlash(filepath.Clean(path)), "/")
+	prefixParts := strings.Split(filepath.ToSlash(filepath.Clean(prefix)), "/")
+	if len(pathParts) <= len(prefixParts) {
+		return "", false
+	}
+	for index := range prefixParts {
+		if !strings.EqualFold(pathParts[index], prefixParts[index]) {
+			return "", false
+		}
+	}
+	return filepath.FromSlash(strings.Join(pathParts[len(prefixParts):], "/")), true
 }
 
 func copyFile(src, dst string) error {
@@ -166,7 +294,6 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-// FomodKind distinguishes modern (ModuleConfig.xml) from legacy (info.xml only) FOMODs.
 type FomodKind int
 
 const (
@@ -306,7 +433,6 @@ func ClearModFiles(modDir string) error {
 	return nil
 }
 
-// SourceArchiveRef is one entry in the mod's source_archives list.
 type SourceArchiveRef struct {
 	Path        string
 	ModID       int
@@ -315,7 +441,6 @@ type SourceArchiveRef struct {
 	Merged      bool
 }
 
-// ModMetadata is the flat form of a mod's metadata.yaml.
 type ModMetadata struct {
 	Name           string
 	Folder         string
@@ -351,19 +476,15 @@ func LoadModMetadata(modDir string) (*ModMetadata, error) {
 		curArchive   *SourceArchiveRef
 	)
 
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		raw := scanner.Text()
-		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasSuffix(line, ":") && !strings.HasPrefix(raw, " ") {
+	sc := kvfile.NewScanner(f)
+	for sc.Scan() {
+		l := sc.Line()
+		if strings.HasSuffix(l.Text, ":") && !strings.HasPrefix(l.Raw, " ") {
 			if curArchive != nil {
 				m.SourceArchives = append(m.SourceArchives, *curArchive)
 				curArchive = nil
 			}
-			switch strings.TrimSuffix(line, ":") {
+			switch strings.TrimSuffix(l.Text, ":") {
 			case "source_archives":
 				inSourceList, inFilesList = true, false
 			case "files":
@@ -373,18 +494,17 @@ func LoadModMetadata(modDir string) (*ModMetadata, error) {
 			}
 			continue
 		}
-		if inSourceList && strings.HasPrefix(line, "- ") {
+		if inSourceList && l.IsListItem {
 			if curArchive != nil {
 				m.SourceArchives = append(m.SourceArchives, *curArchive)
 			}
 			curArchive = &SourceArchiveRef{}
-			line = strings.TrimPrefix(line, "- ")
 		}
 		if inSourceList && curArchive != nil {
-			k, v, ok := strings.Cut(line, ":")
+			k, v, ok := kvfile.CutKV(l.Item)
 			if ok {
-				v = strings.TrimSpace(strings.Trim(strings.TrimSpace(v), `"`))
-				switch strings.TrimSpace(k) {
+				v = kvfile.UnquoteValue(v)
+				switch k {
 				case "path":
 					curArchive.Path = v
 				case "mod_id":
@@ -399,17 +519,16 @@ func LoadModMetadata(modDir string) (*ModMetadata, error) {
 			}
 			continue
 		}
-		if inFilesList && strings.HasPrefix(line, "- ") {
-			m.Files = append(m.Files, strings.Trim(strings.TrimPrefix(line, "- "), `"`))
+		if inFilesList && l.IsListItem {
+			m.Files = append(m.Files, kvfile.UnquoteItem(l.Item))
 			continue
 		}
 
-		k, v, ok := strings.Cut(line, ":")
+		k, v, ok := kvfile.CutKV(l.Text)
 		if !ok {
 			continue
 		}
-		k = strings.TrimSpace(k)
-		v = strings.TrimSpace(strings.Trim(strings.TrimSpace(v), `"`))
+		v = kvfile.UnquoteValue(v)
 		switch k {
 		case "name":
 			m.Name = v
@@ -442,46 +561,46 @@ func LoadModMetadata(modDir string) (*ModMetadata, error) {
 	if curArchive != nil {
 		m.SourceArchives = append(m.SourceArchives, *curArchive)
 	}
-	return m, scanner.Err()
+	return m, sc.Err()
 }
 
 func SaveModMetadata(modDir string, m *ModMetadata) error {
-	var b strings.Builder
-	b.WriteString("# Gorganizer mod metadata — auto-generated\n")
-	fmt.Fprintf(&b, "name: %q\n", m.Name)
-	fmt.Fprintf(&b, "folder: %q\n", m.Folder)
-	fmt.Fprintf(&b, "installed: %q\n", m.Installed)
-	fmt.Fprintf(&b, "category: %q\n", m.Category)
-	fmt.Fprintf(&b, "version: %q\n", m.Version)
-	fmt.Fprintf(&b, "enabled: %t\n", m.Enabled)
-	fmt.Fprintf(&b, "file_count: %d\n", m.FileCount)
+	var w kvfile.Writer
+	w.Comment("Gorganizer mod metadata — auto-generated")
+	w.KVQuoted("name", m.Name)
+	w.KVQuoted("folder", m.Folder)
+	w.KVQuoted("installed", m.Installed)
+	w.KVQuoted("category", m.Category)
+	w.KVQuoted("version", m.Version)
+	w.KVBool("enabled", m.Enabled)
+	w.KVInt("file_count", m.FileCount)
 	if m.ModPage != "" {
-		fmt.Fprintf(&b, "mod_page: %q\n", m.ModPage)
+		w.KVQuoted("mod_page", m.ModPage)
 	}
 	if m.TrueIndex != "" {
-		fmt.Fprintf(&b, "true_index: %q\n", m.TrueIndex)
+		w.KVQuoted("true_index", m.TrueIndex)
 	}
 	if m.VisualIndex != "" {
-		fmt.Fprintf(&b, "visual_index: %q\n", m.VisualIndex)
+		w.KVQuoted("visual_index", m.VisualIndex)
 	}
 	if m.Separator != "" {
-		fmt.Fprintf(&b, "separator: %q\n", m.Separator)
+		w.KVQuoted("separator", m.Separator)
 	}
-	b.WriteString("source_archives:\n")
+	w.ListHeader("source_archives")
 	for _, s := range m.SourceArchives {
-		fmt.Fprintf(&b, "  - path: %q\n", s.Path)
-		fmt.Fprintf(&b, "    mod_id: %d\n", s.ModID)
-		fmt.Fprintf(&b, "    file_id: %d\n", s.FileID)
-		fmt.Fprintf(&b, "    installed_at: %q\n", s.InstalledAt)
+		w.ItemQuoted("path", s.Path)
+		w.ContInt("mod_id", s.ModID)
+		w.ContInt("file_id", s.FileID)
+		w.ContQuoted("installed_at", s.InstalledAt)
 		if s.Merged {
-			b.WriteString("    merged: true\n")
+			w.ContBool("merged", true)
 		}
 	}
-	b.WriteString("files:\n")
+	w.ListHeader("files")
 	for _, f := range m.Files {
-		fmt.Fprintf(&b, "  - %q\n", f)
+		w.ItemString(f)
 	}
-	return atomicfile.WriteFile(filepath.Join(modDir, "metadata.yaml"), []byte(b.String()), 0644)
+	return w.WriteAtomic(filepath.Join(modDir, "metadata.yaml"), 0644)
 }
 
 // AppendSourceArchive adds an archive ref and merges newFiles into the files list.
@@ -542,7 +661,6 @@ func AppendSourceArchive(modDir, modName string, ref SourceArchiveRef, displayNa
 	return SaveModMetadata(modDir, m)
 }
 
-// ZipExtractor uses the Go stdlib archive/zip.
 type ZipExtractor struct{}
 
 func (e *ZipExtractor) CanHandle(archivePath string) bool {
@@ -587,7 +705,6 @@ func (e *ZipExtractor) Extract(archivePath, destDir string) error {
 	return nil
 }
 
-// SevenZipExtractor uses github.com/bodgit/sevenzip.
 type SevenZipExtractor struct{}
 
 func (e *SevenZipExtractor) CanHandle(archivePath string) bool {
@@ -632,7 +749,6 @@ func (e *SevenZipExtractor) Extract(archivePath, destDir string) error {
 	return nil
 }
 
-// RarExtractor shells out to the unrar CLI.
 type RarExtractor struct{}
 
 func (e *RarExtractor) CanHandle(archivePath string) bool {

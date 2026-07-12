@@ -1,4 +1,3 @@
-// runtime-probe is a diagnostic that prints which Steam Linux Runtime entry point would be invoked for each Proton version.
 package main
 
 import (

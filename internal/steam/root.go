@@ -1,10 +1,11 @@
-// Package steam provides shared helpers for locating a user's Steam installation on Linux.
 package steam
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/parka/gorganizer/internal/fsutil"
 )
 
 // FindRoot returns the absolute path to the user's Steam installation by walking the canonical Linux locations.
@@ -20,12 +21,12 @@ func FindRoot() (string, error) {
 	}
 
 	primary := filepath.Join(dataHome, "Steam")
-	if dirExists(filepath.Join(primary, "steamapps")) {
+	if fsutil.DirExists(filepath.Join(primary, "steamapps")) {
 		return primary, nil
 	}
 
 	symlink := filepath.Join(home, ".steam", "steam")
-	if dirExists(filepath.Join(symlink, "steamapps")) {
+	if fsutil.DirExists(filepath.Join(symlink, "steamapps")) {
 		if resolved, err := filepath.EvalSymlinks(symlink); err == nil {
 			return resolved, nil
 		}
@@ -33,14 +34,9 @@ func FindRoot() (string, error) {
 	}
 
 	flatpak := filepath.Join(home, ".var", "app", "com.valvesoftware.Steam", ".local", "share", "Steam")
-	if dirExists(filepath.Join(flatpak, "steamapps")) {
+	if fsutil.DirExists(filepath.Join(flatpak, "steamapps")) {
 		return flatpak, nil
 	}
 
-	return "", fmt.Errorf("steam root not found")
-}
-
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
+	return "", ErrRootNotFound
 }

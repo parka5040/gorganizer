@@ -9,26 +9,41 @@ import (
 
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/download"
-	"github.com/parka/gorganizer/internal/ipc"
+	"github.com/parka/gorganizer/internal/dto"
 	"github.com/parka/gorganizer/internal/plugins"
+	"github.com/parka/gorganizer/internal/profile"
 )
 
 // SetPluginOrder persists a user-set plugin load order for a profile.
-// An empty filenames slice clears any saved override.
-func (d *Daemon) SetPluginOrder(gameID, profileName string, filenames []string) error {
-	if _, ok := d.config.Games[gameID]; !ok {
+func (pl *PluginStatusService) SetPluginOrder(gameID, profileName string, filenames []string) error {
+	if _, ok := pl.s.config.Games[gameID]; !ok {
 		return fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
-	return d.profileMgr.SavePluginOrder(gameID, profileName, filenames)
+	return pl.s.profileMgr.SavePluginOrder(gameID, profileName, filenames)
+}
+
+// SetPluginLoadout persists a profile's complete ordered activation state.
+func (pl *PluginStatusService) SetPluginLoadout(gameID, profileName string, entries []dto.PluginLoadoutEntryResult) error {
+	if _, ok := pl.s.config.Games[gameID]; !ok {
+		return fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
+	}
+	loadout := make([]profile.PluginLoadoutEntry, 0, len(entries))
+	for _, entry := range entries {
+		loadout = append(loadout, profile.PluginLoadoutEntry{
+			Filename: entry.Filename,
+			Enabled:  entry.Enabled,
+		})
+	}
+	return pl.s.profileMgr.SavePluginLoadout(gameID, profileName, loadout)
 }
 
 // StreamPluginStatus is the daemon-side implementation of the IPC streaming
-func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName string) (<-chan ipc.PluginStatusEventResult, error) {
-	gc, ok := d.config.Games[gameID]
+func (pl *PluginStatusService) StreamPluginStatus(ctx context.Context, gameID, profileName string) (<-chan dto.PluginStatusEventResult, error) {
+	gc, ok := pl.s.config.Games[gameID]
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
-	_, entries, err := d.profileMgr.Load(gameID, profileName)
+	_, entries, err := pl.s.profileMgr.Load(gameID, profileName)
 	if err != nil {
 		return nil, err
 	}
@@ -40,17 +55,10 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 		subpath = "Data"
 	}
 	baseData := filepath.Join(gc.InstallPath, subpath)
-	// Guard R1-plugin: while the VFS is mounted, the game's Data path IS the
-	// materialized farm — which contains mod plugins as base files and can be
-	// stale under defer+coalesce. Read the true vanilla base plugins from the
-	// untouched backup so discovery tracks the current enabled-mod set, not the
-	// last-materialized farm.
-	d.mu.RLock()
-	mm, mmOk := d.mountMgrs[gameID]
-	d.mu.RUnlock()
-	if mmOk && mm.IsMounted() {
-		baseData = mm.BackupPath()
-	}
+	pl.s.mu.RLock()
+	mm, mmOk := pl.s.mountMgrs[gameID]
+	pl.s.mu.RUnlock()
+	mounted := mmOk && mm.IsMounted()
 
 	enabled := make([]plugins.ModEntry, 0, len(entries))
 	allFolders := make([]plugins.ModEntry, 0, len(entries))
@@ -63,25 +71,31 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 		allFolders = append(allFolders, plugins.ModEntry{Name: e.Name, Path: path})
 	}
 
-	discovered, err := plugins.DiscoverPlugins(baseData, enabled)
+	discoveryMods := enabled
+	if mounted {
+		discoveryMods = nil
+	}
+	discovered, err := plugins.DiscoverPlugins(baseData, discoveryMods, spec)
 	if err != nil {
 		return nil, fmt.Errorf("discovering plugins: %w", err)
 	}
 	plugins.ApplyCanonicalOrder(discovered, spec)
-	if userOrder, err := d.profileMgr.LoadPluginOrder(gameID, profileName); err == nil && len(userOrder) > 0 {
-		plugins.ApplyUserOrder(discovered, spec, userOrder)
-	} else if err != nil {
-		slog.Warn("loading plugin order failed", "game", gameID, "profile", profileName, "err", err)
+	seedDir := baseData
+	if mounted {
+		seedDir = mm.BackupPath()
+	}
+	if err := applyProfilePluginLoadout(pl.s.profileMgr, gameID, profileName, seedDir, spec, discovered); err != nil {
+		return nil, err
 	}
 
-	cache := d.pluginHeaderCacheLazy()
+	cache := pl.pluginHeaderCacheLazy()
 	statuses := plugins.AnalyzeHardDeps(ctx, cache, discovered, allFolders, spec, nil)
 
-	out := make(chan ipc.PluginStatusEventResult, 8)
+	out := make(chan dto.PluginStatusEventResult, 8)
 
-	soft := d.softDepFetcherLazy()
-	snapshot := make([]ipc.PluginStatusItemResult, 0, len(statuses))
-	enabledModIDs := d.installedModIDs(gameID)
+	soft := pl.softDepFetcherLazy()
+	snapshot := make([]dto.PluginStatusItemResult, 0, len(statuses))
+	enabledModIDs := pl.installedModIDs(gameID)
 	gameSlug := download.GameSlug(gameID)
 
 	type pendingJob struct {
@@ -91,8 +105,8 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 	for i := range statuses {
 		ps := &statuses[i]
 		item := pluginStatusToIPC(ps)
-		modID, fileID := d.lookupNexusIDsForPlugin(gameID, ps.Plugin)
-		if soft != nil && gameSlug != "" && modID != 0 && fileID != 0 {
+		modID, fileID := pl.lookupNexusIDsForPlugin(gameID, ps.Plugin)
+		if ps.Plugin.Enabled && soft != nil && gameSlug != "" && modID != 0 && fileID != 0 {
 			item.SoftPending = true
 			jobs = append(jobs, pendingJob{req: plugins.SoftDepRequest{
 				Filename:   ps.Plugin.Filename,
@@ -105,14 +119,14 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 		snapshot = append(snapshot, item)
 	}
 
-	d.emitHardDepWarnings(statuses)
+	pl.emitHardDepWarnings(statuses)
 
 	go func() {
 		defer close(out)
 		select {
 		case <-ctx.Done():
 			return
-		case out <- ipc.PluginStatusEventResult{Snapshot: snapshot}:
+		case out <- dto.PluginStatusEventResult{Snapshot: snapshot}:
 		}
 
 		if soft == nil || len(jobs) == 0 {
@@ -130,7 +144,7 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 
 		for r := range results {
 			plugins.FilterSatisfiedSoftDeps(&r, enabledModIDs)
-			var update *ipc.PluginStatusItemResult
+			var update *dto.PluginStatusItemResult
 			for i := range snapshot {
 				if !strings.EqualFold(snapshot[i].Filename, r.Filename) {
 					continue
@@ -139,7 +153,7 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 				merged.SoftPending = false
 				kept := merged.Issues[:0]
 				for _, iss := range merged.Issues {
-					if iss.Kind != ipc.DepKindSoftMissing {
+					if iss.Kind != dto.DepKindSoftMissing {
 						kept = append(kept, iss)
 					}
 				}
@@ -149,8 +163,8 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 						if softRef == nil {
 							softRef = &plugins.SoftDepRef{}
 						}
-						kept = append(kept, ipc.DepIssueResult{
-							Kind:        ipc.DepKindSoftMissing,
+						kept = append(kept, dto.DepIssueResult{
+							Kind:        dto.DepKindSoftMissing,
 							SoftModName: softRef.ModName,
 							SoftModID:   int32(softRef.ModID),
 							SoftModURL:  softRef.URL,
@@ -169,11 +183,11 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 						name = iss.SoftRef.ModName
 					}
 					detail := fmt.Sprintf("Soft dep missing: %s", name)
-					d.publishStatus(ipc.StatusEventResult{
-						DependencyWarning: &ipc.DependencyWarningResult{
+					pl.s.publishStatus(dto.StatusEventResult{
+						DependencyWarning: &dto.DependencyWarningResult{
 							PluginFilename: r.Filename,
 							Detail:         detail,
-							Kind:           ipc.DepKindSoftMissing,
+							Kind:           dto.DepKindSoftMissing,
 						},
 					})
 				}
@@ -185,7 +199,7 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 			select {
 			case <-ctx.Done():
 				return
-			case out <- ipc.PluginStatusEventResult{Update: update}:
+			case out <- dto.PluginStatusEventResult{Update: update}:
 			}
 		}
 	}()
@@ -193,7 +207,59 @@ func (d *Daemon) StreamPluginStatus(ctx context.Context, gameID, profileName str
 	return out, nil
 }
 
-func (d *Daemon) emitHardDepWarnings(statuses []plugins.PluginStatus) {
+// applyProfilePluginLoadout overlays a profile's persisted order and activation onto discovery.
+func applyProfilePluginLoadout(pm *profile.Manager, gameID, profileName, seedDir string, spec plugins.Spec, list []plugins.Plugin) error {
+	loadout, stateExists, err := pm.LoadPluginLoadoutSnapshot(gameID, profileName)
+	if err != nil {
+		return err
+	}
+	order := make([]string, 0, len(loadout))
+	state := make(map[string]bool, len(loadout))
+	for _, entry := range loadout {
+		order = append(order, entry.Filename)
+		state[strings.ToLower(entry.Filename)] = entry.Enabled
+	}
+
+	seeded := false
+	if len(order) == 0 && !stateExists && spec.SeedFromData {
+		seed, err := plugins.ReadEngineLoadout(spec, seedDir)
+		if err != nil {
+			return err
+		}
+		if len(seed) > 0 {
+			state = make(map[string]bool, len(seed))
+			order = make([]string, 0, len(seed))
+			for _, entry := range seed {
+				order = append(order, entry.Filename)
+				state[strings.ToLower(entry.Filename)] = entry.Enabled
+			}
+			seeded = true
+		} else if len(list) > 0 {
+			plugins.ApplyDefaultOrder(list, spec)
+			seeded = true
+		}
+	}
+
+	plugins.ApplyUserOrder(list, spec, order)
+	plugins.ApplyActivationState(list, spec, state)
+	if !seeded {
+		return nil
+	}
+	seededLoadout := make([]profile.PluginLoadoutEntry, 0, len(list))
+	for _, plugin := range list {
+		seededLoadout = append(seededLoadout, profile.PluginLoadoutEntry{
+			Filename: plugin.Filename,
+			Enabled:  plugin.Enabled,
+		})
+	}
+	if err := pm.SavePluginLoadout(gameID, profileName, seededLoadout); err != nil {
+		return fmt.Errorf("persisting seeded plugin loadout: %w", err)
+	}
+	slog.Info("seeded plugin loadout from game data", "game", gameID, "profile", profileName, "source", seedDir)
+	return nil
+}
+
+func (pl *PluginStatusService) emitHardDepWarnings(statuses []plugins.PluginStatus) {
 	for _, ps := range statuses {
 		for _, iss := range ps.HardIssues {
 			detail := ""
@@ -207,52 +273,42 @@ func (d *Daemon) emitHardDepWarnings(statuses []plugins.PluginStatus) {
 			default:
 				continue
 			}
-			d.publishStatus(ipc.StatusEventResult{
-				DependencyWarning: &ipc.DependencyWarningResult{
+			pl.s.publishStatus(dto.StatusEventResult{
+				DependencyWarning: &dto.DependencyWarningResult{
 					PluginFilename: ps.Plugin.Filename,
 					Detail:         detail,
-					Kind:           ipc.DepKindResult(iss.Kind),
+					Kind:           dto.DepKindResult(iss.Kind),
 				},
 			})
 		}
 	}
 }
 
-// publishStatus is a non-blocking send to the daemon's status channel.
-func (d *Daemon) publishStatus(evt ipc.StatusEventResult) {
-	select {
-	case d.statusCh <- evt:
-	default:
-		slog.Debug("status channel full, dropping plugin-status event")
-	}
-}
-
-func (d *Daemon) pluginHeaderCacheLazy() *plugins.HeaderCache {
-	d.pluginHeaderCacheOnce.Do(func() {
-		d.pluginHeaderCache = plugins.NewHeaderCache(0)
+func (pl *PluginStatusService) pluginHeaderCacheLazy() *plugins.HeaderCache {
+	pl.s.pluginHeaderCacheOnce.Do(func() {
+		pl.s.pluginHeaderCache = plugins.NewHeaderCache(0)
 	})
-	return d.pluginHeaderCache
+	return pl.s.pluginHeaderCache
 }
 
-func (d *Daemon) softDepFetcherLazy() *plugins.SoftDepFetcher {
-	d.softDepFetcherMu.Lock()
-	defer d.softDepFetcherMu.Unlock()
-	if d.softDepFetcher != nil {
-		return d.softDepFetcher
+func (pl *PluginStatusService) softDepFetcherLazy() *plugins.SoftDepFetcher {
+	pl.s.softDepFetcherMu.Lock()
+	defer pl.s.softDepFetcherMu.Unlock()
+	if pl.s.softDepFetcher != nil {
+		return pl.s.softDepFetcher
 	}
-	if d.config.NexusAPIKey == "" {
+	if pl.s.config.NexusAPIKey == "" {
 		return nil
 	}
-	client := download.NewNexusClient(d.config.NexusAPIKey)
+	client := download.NewNexusClient(pl.s.config.NexusAPIKey)
 	adapter := &nexusV3Adapter{client: client}
 	cacheDir := filepath.Join(config.CacheDir(), "nexus")
-	d.softDepFetcher = plugins.NewSoftDepFetcher(adapter, cacheDir)
-	return d.softDepFetcher
+	pl.s.softDepFetcher = plugins.NewSoftDepFetcher(adapter, cacheDir)
+	return pl.s.softDepFetcher
 }
 
 // installedModIDs returns the set of Nexus mod-ids installed under the
-// active mod set for a game. Used to filter satisfied soft-deps.
-func (d *Daemon) installedModIDs(gameID string) map[int]bool {
+func (pl *PluginStatusService) installedModIDs(gameID string) map[int]bool {
 	out := map[int]bool{}
 	modsDir := config.ModsDir(gameID)
 	entries, err := readSubdirs(modsDir)
@@ -273,7 +329,7 @@ func (d *Daemon) installedModIDs(gameID string) map[int]bool {
 	return out
 }
 
-func (d *Daemon) lookupNexusIDsForPlugin(gameID string, p plugins.Plugin) (modID, fileID int) {
+func (pl *PluginStatusService) lookupNexusIDsForPlugin(gameID string, p plugins.Plugin) (modID, fileID int) {
 	if p.FromMod == "" {
 		return 0, 0
 	}
@@ -287,9 +343,8 @@ func (d *Daemon) lookupNexusIDsForPlugin(gameID string, p plugins.Plugin) (modID
 }
 
 // pluginStatusToIPC converts a plugins.PluginStatus into the ipc result type.
-// Soft issues are not copied — those arrive via the soft-dep channel later.
-func pluginStatusToIPC(ps *plugins.PluginStatus) ipc.PluginStatusItemResult {
-	out := ipc.PluginStatusItemResult{
+func pluginStatusToIPC(ps *plugins.PluginStatus) dto.PluginStatusItemResult {
+	out := dto.PluginStatusItemResult{
 		Filename: ps.Plugin.Filename,
 		Ext:      ps.Plugin.Ext,
 		IsLight:  ps.IsLight,
@@ -297,8 +352,8 @@ func pluginStatusToIPC(ps *plugins.PluginStatus) ipc.PluginStatusItemResult {
 		FromMod:  ps.Plugin.FromMod,
 	}
 	for _, iss := range ps.HardIssues {
-		out.Issues = append(out.Issues, ipc.DepIssueResult{
-			Kind:   ipc.DepKindResult(iss.Kind),
+		out.Issues = append(out.Issues, dto.DepIssueResult{
+			Kind:   dto.DepKindResult(iss.Kind),
 			Master: iss.Master,
 		})
 	}

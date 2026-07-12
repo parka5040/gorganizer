@@ -13,24 +13,14 @@ import (
 	"github.com/parka/gorganizer/internal/atomicfile"
 )
 
-// SentinelFilename is the marker file written inside an active overlay.
 const SentinelFilename = ".gorganizer-overlay.json"
 
-// SentinelMagic identifies a gorganizer-owned overlay; rejected on mismatch.
 const SentinelMagic = "gorganizer-overlay"
 
-// CurrentSentinelSchema is the schema version this build reads and writes.
-// v1: original (GameID/Hash declared but never populated).
-// v2: GameID/ProfileName/OverwriteRoot populated; Hash is a layer-identity
-//     fingerprint that ValidateSentinel recomputes and matches.
 const CurrentSentinelSchema = 2
 
-// CurrentMaterializerVersion bumps when the on-disk layout changes incompatibly.
 const CurrentMaterializerVersion = 1
 
-// Sibling markers (siblings of dataPath, so they survive the Data↔Data.orig
-// renames): the activation/apply intent files and the transient build dirs a
-// crash may leave behind. CleanupStale reaps these unconditionally.
 const (
 	activatingSuffix = ".gorganizer-activating"
 	applyingSuffix   = ".gorganizer-applying"
@@ -38,13 +28,10 @@ const (
 	oldFarmSuffix    = ".gorganizer-oldfarm"
 )
 
-// IntentMagic identifies a gorganizer activation/apply intent marker.
 const IntentMagic = "gorganizer-intent"
 
-// CurrentIntentSchema is the intent-marker schema version.
 const CurrentIntentSchema = 1
 
-// IntentKind distinguishes an interrupted Activate from an interrupted Apply.
 type IntentKind string
 
 const (
@@ -52,9 +39,6 @@ const (
 	IntentApplying   IntentKind = "applying"
 )
 
-// ActivationIntent is a sibling marker written *before* a destructive rename so
-// that a crash mid-operation is self-healing: CleanupStale finds it and rolls
-// the operation forward or back automatically instead of prompting the user.
 type ActivationIntent struct {
 	SchemaVersion int        `json:"schema_version"`
 	Magic         string     `json:"magic"`
@@ -114,8 +98,6 @@ func RemoveIntent(markerPath string) error {
 }
 
 // ComputeLayerHash fingerprints the layer identity set (name, root, enabled) in
-// order. It deliberately excludes MaterializerVersion so a materializer bump
-// never strands a still-recoverable mounted farm (Guard R5/R6).
 func ComputeLayerHash(layers []SentinelLayer) string {
 	h := sha256.New()
 	for _, l := range layers {
@@ -124,14 +106,12 @@ func ComputeLayerHash(layers []SentinelLayer) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// SentinelLayer is a per-layer forensic record persisted in the sentinel.
 type SentinelLayer struct {
 	Name    string `json:"name"`
 	Root    string `json:"root"`
 	Enabled bool   `json:"enabled"`
 }
 
-// Sentinel is the on-disk record of an active overlay; load-bearing fields must stay stable across schema versions.
 type Sentinel struct {
 	SchemaVersion       int             `json:"schema_version"`
 	Magic               string          `json:"magic"`
@@ -186,10 +166,6 @@ func ReadSentinel(dataPath string) (*Sentinel, error) {
 }
 
 // ValidateSentinel checks magic, schema version, backup_path existence, and —
-// for schema v2+ — the populated identity fields and a recomputed layer hash.
-// It is version-aware so that v1 sentinels (written by older builds) still
-// validate and recover exactly as before; a version newer than this build
-// understands is rejected rather than mishandled.
 func ValidateSentinel(s *Sentinel) error {
 	if s == nil {
 		return fmt.Errorf("%w: nil", ErrSentinelInvalid)

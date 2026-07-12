@@ -33,4 +33,4 @@ private:
     static std::optional<QVariantMap> parseObject(Tokenizer& tok);
 };
 
-} // namespace gorganizer
+}

@@ -7,31 +7,136 @@
 namespace gorganizer {
 
 namespace {
-// Default deadline for unary RPCs (streams are deliberately unbounded).
-constexpr auto kDefaultUnaryTimeout = std::chrono::seconds(30);
-inline void setUnaryDeadline(
-    grpc::ClientContext& ctx,
-    std::chrono::milliseconds timeout = kDefaultUnaryTimeout)
+class ScopedCtxRegistration {
+public:
+    ScopedCtxRegistration(std::mutex& mu, grpc::ClientContext*& slot, grpc::ClientContext& ctx)
+        : m_mu(mu)
+        , m_slot(slot)
+    {
+        std::lock_guard<std::mutex> lk(m_mu);
+        m_slot = &ctx;
+    }
+
+    ~ScopedCtxRegistration()
+    {
+        std::lock_guard<std::mutex> lk(m_mu);
+        m_slot = nullptr;
+    }
+
+    ScopedCtxRegistration(const ScopedCtxRegistration&) = delete;
+    ScopedCtxRegistration& operator=(const ScopedCtxRegistration&) = delete;
+
+private:
+    std::mutex& m_mu;
+    grpc::ClientContext*& m_slot;
+};
+
+GrpcPluginStatus pluginStatusFromProto(const gorganizer::v1::PluginStatusItem& p)
 {
-    ctx.set_deadline(std::chrono::system_clock::now() + timeout);
+    GrpcPluginStatus out;
+    out.filename = QString::fromStdString(p.filename());
+    out.ext = QString::fromStdString(p.ext());
+    out.isLight = p.is_light();
+    out.enabled = p.enabled();
+    out.fromMod = QString::fromStdString(p.from_mod());
+    out.softPending = p.soft_pending();
+    for (const auto& iss : p.issues()) {
+        GrpcDepIssue issue;
+        issue.kind = static_cast<int>(iss.kind());
+        issue.master = QString::fromStdString(iss.master());
+        issue.softModName = QString::fromStdString(iss.soft_mod_name());
+        issue.softModId = iss.soft_mod_id();
+        issue.softModUrl = QString::fromStdString(iss.soft_mod_url());
+        out.issues.push_back(std::move(issue));
+    }
+    return out;
 }
-} // namespace
+}
 
 GrpcWorker::GrpcWorker(std::shared_ptr<grpc::Channel> channel)
     : m_stub(gorganizer::v1::Gorganizer::NewStub(channel))
 {
 }
 
+// Cancels the active stream and any in-flight unary RPC so the thread can wind down promptly.
 void GrpcWorker::stop()
 {
     m_stopped.store(true);
-    cancelActiveStream();
+    std::lock_guard<std::mutex> lk(m_streamMu);
+    if (m_streamCtx) m_streamCtx->TryCancel();
+    if (m_unaryCtx) m_unaryCtx->TryCancel();
 }
 
 void GrpcWorker::cancelActiveStream()
 {
     std::lock_guard<std::mutex> lk(m_streamMu);
     if (m_streamCtx) m_streamCtx->TryCancel();
+}
+
+template <typename Req, typename Resp, typename Method>
+grpc::Status GrpcWorker::invoke(Method method, const Req& req, Resp& resp,
+                                std::chrono::milliseconds deadline)
+{
+    grpc::ClientContext ctx;
+    setUnaryDeadline(ctx, deadline);
+    ScopedCtxRegistration reg(m_streamMu, m_unaryCtx, ctx);
+    return ((*m_stub).*method)(&ctx, req, &resp);
+}
+
+template <typename Req, typename Resp, typename Method>
+bool GrpcWorker::call(const char* rpcName, Method method, const Req& req, Resp& resp,
+                      std::chrono::milliseconds deadline)
+{
+    auto status = invoke(method, req, resp, deadline);
+    if (!status.ok()) {
+        emit rpcError(rpcName, QString::fromStdString(status.error_message()));
+        return false;
+    }
+    return true;
+}
+
+template <typename Req, typename Ev, typename Dispatch>
+grpc::Status GrpcWorker::runStream(std::unique_ptr<grpc::ClientReader<Ev>> (Stub::*method)(grpc::ClientContext*, const Req&),
+                                   const Req& req, Dispatch dispatch)
+{
+    grpc::ClientContext ctx;
+    ScopedCtxRegistration reg(m_streamMu, m_streamCtx, ctx);
+    auto reader = ((*m_stub).*method)(&ctx, req);
+    Ev event;
+    while (!m_stopped.load() && reader->Read(&event))
+        dispatch(event);
+    if (m_stopped.load()) ctx.TryCancel();
+    return reader->Finish();
+}
+
+template <typename Req>
+void GrpcWorker::runTransferStream(std::unique_ptr<grpc::ClientReader<gorganizer::v1::TransferEvent>> (Stub::*method)(grpc::ClientContext*, const Req&),
+                                   const Req& req)
+{
+    bool haveSummary = false;
+    GrpcTransferSummary summary;
+    auto status = runStream(method, req, [this, &haveSummary, &summary](const gorganizer::v1::TransferEvent& event) {
+        switch (event.event_case()) {
+        case gorganizer::v1::TransferEvent::kProgress:
+            emit transferProgress(transferProgressFromProto(event.progress()));
+            break;
+        case gorganizer::v1::TransferEvent::kSummary:
+            haveSummary = true;
+            summary = transferSummaryFromProto(event.summary());
+            break;
+        default:
+            break;
+        }
+    });
+    if (!status.ok()) {
+        emit transferFailed(QString::fromStdString(status.error_message()));
+        return;
+    }
+    if (!haveSummary) {
+        emit transferFailed(QStringLiteral("transfer stream ended without a summary"));
+        return;
+    }
+    emit transferCompleted(summary);
 }
 
 GrpcGame GrpcWorker::gameFromProto(const gorganizer::v1::Game& g)
@@ -158,14 +263,37 @@ GrpcArchiveRow GrpcWorker::archiveRowFromProto(const gorganizer::v1::ArchiveRow&
     return row;
 }
 
+GrpcTransferProgress GrpcWorker::transferProgressFromProto(const gorganizer::v1::TransferProgress& p)
+{
+    return {
+        .step = QString::fromStdString(p.step()),
+        .currentItem = QString::fromStdString(p.current_item()),
+        .itemsDone = p.items_done(),
+        .itemsTotal = p.items_total(),
+        .bytesDone = p.bytes_done(),
+        .bytesTotal = p.bytes_total(),
+    };
+}
+
+GrpcTransferSummary GrpcWorker::transferSummaryFromProto(const gorganizer::v1::TransferSummary& s)
+{
+    GrpcTransferSummary out;
+    out.modsExported = s.mods_exported();
+    out.modsImported = s.mods_imported();
+    out.profilesTransferred = s.profiles_transferred();
+    for (const auto& sk : s.skipped())
+        out.skipped.append(QString::fromStdString(sk));
+    for (const auto& [from, to] : s.renamed())
+        out.renamed.insert(QString::fromStdString(from), QString::fromStdString(to));
+    out.outputPath = QString::fromStdString(s.output_path());
+    return out;
+}
+
 void GrpcWorker::doListGames()
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx);
     gorganizer::v1::ListGamesRequest req;
     gorganizer::v1::ListGamesResponse resp;
-    auto status = m_stub->ListGames(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("ListGames", QString::fromStdString(status.error_message())); return; }
+    if (!call("ListGames", &Stub::ListGames, req, resp)) return;
     std::vector<GrpcGame> games;
     for (const auto& g : resp.games()) games.push_back(gameFromProto(g));
     emit gamesListed(games);
@@ -173,12 +301,9 @@ void GrpcWorker::doListGames()
 
 void GrpcWorker::doDetectGames()
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx, std::chrono::seconds(60));
     gorganizer::v1::DetectGamesRequest req;
     gorganizer::v1::DetectGamesResponse resp;
-    auto status = m_stub->DetectGames(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("DetectGames", QString::fromStdString(status.error_message())); return; }
+    if (!call("DetectGames", &Stub::DetectGames, req, resp, std::chrono::seconds(60))) return;
     std::vector<GrpcGame> games;
     for (const auto& g : resp.games()) games.push_back(gameFromProto(g));
     emit gamesDetected(games);
@@ -188,8 +313,6 @@ void GrpcWorker::doConfigureGame(const QString& gameId, const QString& name,
                                   uint32_t steamAppId, const QString& installPath,
                                   const QString& dataSubpath)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx);
     gorganizer::v1::ConfigureGameRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_name(name.toStdString());
@@ -197,20 +320,16 @@ void GrpcWorker::doConfigureGame(const QString& gameId, const QString& name,
     req.set_install_path(installPath.toStdString());
     req.set_data_subpath(dataSubpath.toStdString());
     gorganizer::v1::ConfigureGameResponse resp;
-    auto status = m_stub->ConfigureGame(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("ConfigureGame", QString::fromStdString(status.error_message())); return; }
+    if (!call("ConfigureGame", &Stub::ConfigureGame, req, resp)) return;
     emit gameConfigured();
 }
 
 void GrpcWorker::doListMods(const QString& gameId)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx);
     gorganizer::v1::ListModsRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::ListModsResponse resp;
-    auto status = m_stub->ListMods(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("ListMods", QString::fromStdString(status.error_message())); return; }
+    if (!call("ListMods", &Stub::ListMods, req, resp)) return;
     std::vector<GrpcModInfo> mods;
     for (const auto& m : resp.mods()) mods.push_back(modFromProto(m));
     emit modsListed(mods);
@@ -218,39 +337,30 @@ void GrpcWorker::doListMods(const QString& gameId)
 
 void GrpcWorker::doGetMod(const QString& gameId, const QString& modName)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx);
     gorganizer::v1::GetModRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_mod_name(modName.toStdString());
     gorganizer::v1::ModInfo resp;
-    auto status = m_stub->GetMod(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("GetMod", QString::fromStdString(status.error_message())); return; }
+    if (!call("GetMod", &Stub::GetMod, req, resp)) return;
     emit modInfoReceived(modFromProto(resp));
 }
 
 void GrpcWorker::doRescanMod(const QString& gameId, const QString& modName)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx, std::chrono::minutes(5));
     gorganizer::v1::RescanModRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_mod_name(modName.toStdString());
     gorganizer::v1::ModInfo resp;
-    auto status = m_stub->RescanMod(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("RescanMod", QString::fromStdString(status.error_message())); return; }
+    if (!call("RescanMod", &Stub::RescanMod, req, resp, std::chrono::minutes(5))) return;
     emit modInfoReceived(modFromProto(resp));
 }
 
 void GrpcWorker::doListProfiles(const QString& gameId)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx);
     gorganizer::v1::ListProfilesRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::ListProfilesResponse resp;
-    auto status = m_stub->ListProfiles(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("ListProfiles", QString::fromStdString(status.error_message())); return; }
+    if (!call("ListProfiles", &Stub::ListProfiles, req, resp)) return;
     std::vector<GrpcProfile> profiles;
     for (const auto& p : resp.profiles()) profiles.push_back(profileFromProto(p));
     emit profilesListed(profiles);
@@ -258,40 +368,31 @@ void GrpcWorker::doListProfiles(const QString& gameId)
 
 void GrpcWorker::doCreateProfile(const QString& gameId, const QString& name)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx);
     gorganizer::v1::CreateProfileRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_name(name.toStdString());
     gorganizer::v1::Profile resp;
-    auto status = m_stub->CreateProfile(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("CreateProfile", QString::fromStdString(status.error_message())); return; }
+    if (!call("CreateProfile", &Stub::CreateProfile, req, resp)) return;
     emit profileCreated(profileFromProto(resp));
 }
 
 void GrpcWorker::doDeleteProfile(const QString& gameId, const QString& name)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx);
     gorganizer::v1::DeleteProfileRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_name(name.toStdString());
     gorganizer::v1::DeleteProfileResponse resp;
-    auto status = m_stub->DeleteProfile(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("DeleteProfile", QString::fromStdString(status.error_message())); return; }
+    if (!call("DeleteProfile", &Stub::DeleteProfile, req, resp)) return;
     emit profileDeleted();
 }
 
 void GrpcWorker::doGetModList(const QString& gameId, const QString& profileName)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx);
     gorganizer::v1::GetModListRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
     gorganizer::v1::ModListResponse resp;
-    auto status = m_stub->GetModList(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("GetModList", QString::fromStdString(status.error_message())); return; }
+    if (!call("GetModList", &Stub::GetModList, req, resp)) return;
     std::vector<GrpcModListEntry> entries;
     for (const auto& e : resp.entries()) entries.push_back(modListEntryFromProto(e));
     emit modListReceived(entries);
@@ -300,8 +401,6 @@ void GrpcWorker::doGetModList(const QString& gameId, const QString& profileName)
 void GrpcWorker::doSetModList(const QString& gameId, const QString& profileName,
                               const std::vector<GrpcModListEntry>& entries)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx);
     gorganizer::v1::SetModListRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
@@ -312,99 +411,74 @@ void GrpcWorker::doSetModList(const QString& gameId, const QString& profileName,
         entry->set_priority(e.priority);
     }
     gorganizer::v1::SetModListResponse resp;
-    auto status = m_stub->SetModList(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("SetModList", QString::fromStdString(status.error_message())); return; }
+    if (!call("SetModList", &Stub::SetModList, req, resp)) return;
     emit modListUpdated();
 }
 
 void GrpcWorker::doMountVfs(const QString& gameId, const QString& profileName)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx, std::chrono::minutes(5));
     gorganizer::v1::MountVFSRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
     gorganizer::v1::MountVFSResponse resp;
-    auto status = m_stub->MountVFS(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("MountVFS", QString::fromStdString(status.error_message())); return; }
+    if (!call("MountVFS", &Stub::MountVFS, req, resp, std::chrono::minutes(5))) return;
     emit vfsMounted(vfsStatusFromProto(resp.status()));
 }
 
 void GrpcWorker::doMountVfsWithSwap(const QString& gameId, const QString& profileName)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx, std::chrono::minutes(10));
     gorganizer::v1::MountVFSRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
     req.set_auto_swap(true);
     gorganizer::v1::MountVFSResponse resp;
-    auto status = m_stub->MountVFS(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("MountVFS", QString::fromStdString(status.error_message())); return; }
+    if (!call("MountVFS", &Stub::MountVFS, req, resp, std::chrono::minutes(10))) return;
     emit vfsMounted(vfsStatusFromProto(resp.status()));
 }
 
 void GrpcWorker::doUnmountVfs(const QString& gameId)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx);
     gorganizer::v1::UnmountVFSRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::UnmountVFSResponse resp;
-    auto status = m_stub->UnmountVFS(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("UnmountVFS", QString::fromStdString(status.error_message())); return; }
+    if (!call("UnmountVFS", &Stub::UnmountVFS, req, resp)) return;
     emit vfsUnmounted();
 }
 
 void GrpcWorker::doRestoreFromBackup(const QString& gameId)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx);
     gorganizer::v1::RestoreFromBackupRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::RestoreFromBackupResponse resp;
-    auto status = m_stub->RestoreFromBackup(&ctx, req, &resp);
-    if (!status.ok()) {
-        emit rpcError("RestoreFromBackup", QString::fromStdString(status.error_message()));
-        return;
-    }
+    if (!call("RestoreFromBackup", &Stub::RestoreFromBackup, req, resp)) return;
     emit daemonInfo(QString("Recovery resolved for %1.").arg(gameId));
 }
 
 void GrpcWorker::doGetVfsStatus(const QString& gameId)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx);
     gorganizer::v1::GetVFSStatusRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::VFSStatus resp;
-    auto status = m_stub->GetVFSStatus(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("GetVFSStatus", QString::fromStdString(status.error_message())); return; }
+    if (!call("GetVFSStatus", &Stub::GetVFSStatus, req, resp)) return;
     emit vfsStatusReceived(vfsStatusFromProto(resp));
 }
 
 void GrpcWorker::doRebuildVfs(const QString& gameId)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx, std::chrono::minutes(5));
     gorganizer::v1::RebuildVFSRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::RebuildVFSResponse resp;
-    auto status = m_stub->RebuildVFS(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("RebuildVFS", QString::fromStdString(status.error_message())); return; }
+    if (!call("RebuildVFS", &Stub::RebuildVFS, req, resp, std::chrono::minutes(5))) return;
     emit vfsRebuilt();
 }
 
 void GrpcWorker::doGetConflicts(const QString& gameId, const QString& profileName)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx, std::chrono::minutes(2));
     gorganizer::v1::GetConflictsRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
     gorganizer::v1::ConflictsResponse resp;
-    auto status = m_stub->GetConflicts(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("GetConflicts", QString::fromStdString(status.error_message())); return; }
+    if (!call("GetConflicts", &Stub::GetConflicts, req, resp, std::chrono::minutes(2))) return;
     std::vector<GrpcFileConflict> conflicts;
     for (const auto& c : resp.conflicts()) conflicts.push_back(conflictFromProto(c));
     emit conflictsReceived(conflicts);
@@ -412,51 +486,40 @@ void GrpcWorker::doGetConflicts(const QString& gameId, const QString& profileNam
 
 void GrpcWorker::doLaunchGame(const QString& gameId, bool useTool, const QString& profileName)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx);
     gorganizer::v1::LaunchGameRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_use_tool(useTool);
     req.set_profile_name(profileName.toStdString());
     gorganizer::v1::LaunchGameResponse resp;
-    auto status = m_stub->LaunchGame(&ctx, req, &resp);
+    auto status = invoke(&Stub::LaunchGame, req, resp);
     if (!status.ok()) { emit gameLaunchFailed(QString::fromStdString(status.error_message())); return; }
     emit gameLaunched(resp.pid());
 }
 
 void GrpcWorker::doStartDownload(const QString& nxmUri)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx);
     gorganizer::v1::StartDownloadRequest req;
     req.set_nxm_uri(nxmUri.toStdString());
     gorganizer::v1::StartDownloadResponse resp;
-    auto status = m_stub->StartDownload(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("StartDownload", QString::fromStdString(status.error_message())); return; }
+    if (!call("StartDownload", &Stub::StartDownload, req, resp)) return;
     emit downloadStarted(QString::fromStdString(resp.download_id()), resp.queued_ahead());
 }
 
 void GrpcWorker::doCancelDownload(const QString& downloadId)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx);
     gorganizer::v1::CancelDownloadRequest req;
     req.set_download_id(downloadId.toStdString());
     gorganizer::v1::CancelDownloadResponse resp;
-    auto status = m_stub->CancelDownload(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("CancelDownload", QString::fromStdString(status.error_message())); return; }
+    if (!call("CancelDownload", &Stub::CancelDownload, req, resp)) return;
     emit downloadCancelled(downloadId);
 }
 
 void GrpcWorker::doRetryDownload(const QString& downloadId)
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx);
     gorganizer::v1::RetryDownloadRequest req;
     req.set_download_id(downloadId.toStdString());
     gorganizer::v1::RetryDownloadResponse resp;
-    auto status = m_stub->RetryDownload(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("RetryDownload", QString::fromStdString(status.error_message())); return; }
+    if (!call("RetryDownload", &Stub::RetryDownload, req, resp)) return;
     emit downloadRetried(downloadId, resp.queued_ahead());
 }
 
@@ -465,8 +528,6 @@ void GrpcWorker::doStartInstall(const QString& gameId, const QString& archiveRel
                                  const QString& targetMod, const QString& previewId,
                                  const std::vector<GrpcFomodFile>& fomodSelectedFiles)
 {
-    grpc::ClientContext ctx;
-    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::minutes(10));
     gorganizer::v1::StartInstallRequest req;
     req.set_game_id(gameId.toStdString());
     if (!archiveRelPath.isEmpty()) req.set_archive_rel_path(archiveRelPath.toStdString());
@@ -482,7 +543,7 @@ void GrpcWorker::doStartInstall(const QString& gameId, const QString& archiveRel
         pb->set_priority(f.priority);
     }
     gorganizer::v1::StartInstallResponse resp;
-    auto status = m_stub->StartInstall(&ctx, req, &resp);
+    auto status = invoke(&Stub::StartInstall, req, resp, std::chrono::minutes(10));
     if (!status.ok()) {
         emit installFailed(QString::fromStdString(status.error_message()));
         return;
@@ -492,37 +553,24 @@ void GrpcWorker::doStartInstall(const QString& gameId, const QString& archiveRel
 
 void GrpcWorker::doSetNexusAPIKey(const QString& apiKey)
 {
-    grpc::ClientContext ctx;
-    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(12));
     gorganizer::v1::SetNexusAPIKeyRequest req;
     req.set_api_key(apiKey.toStdString());
     gorganizer::v1::SetNexusAPIKeyResponse resp;
-    auto status = m_stub->SetNexusAPIKey(&ctx, req, &resp);
-    if (!status.ok()) { emit rpcError("SetNexusAPIKey", QString::fromStdString(status.error_message())); return; }
+    if (!call("SetNexusAPIKey", &Stub::SetNexusAPIKey, req, resp, std::chrono::seconds(12))) return;
     emit nexusAPIKeySet(resp.valid(), QString::fromStdString(resp.error_message()));
 }
 
 void GrpcWorker::doShutdownDaemon()
 {
-    grpc::ClientContext ctx;
-    setUnaryDeadline(ctx, std::chrono::seconds(3));
     gorganizer::v1::ShutdownRequest req;
     gorganizer::v1::ShutdownResponse resp;
-    m_stub->Shutdown(&ctx, req, &resp);
+    invoke(&Stub::Shutdown, req, resp, std::chrono::seconds(3));
 }
 
 void GrpcWorker::doStartWatching()
 {
-    grpc::ClientContext ctx;
-    {
-        std::lock_guard<std::mutex> lk(m_streamMu);
-        m_streamCtx = &ctx;
-    }
     gorganizer::v1::WatchStatusRequest req;
-    auto reader = m_stub->WatchStatus(&ctx, req);
-
-    gorganizer::v1::StatusEvent event;
-    while (!m_stopped.load() && reader->Read(&event)) {
+    runStream(&Stub::WatchStatus, req, [this](const gorganizer::v1::StatusEvent& event) {
         switch (event.event_case()) {
         case gorganizer::v1::StatusEvent::kVfsStatus:
             emit vfsStatusChanged(vfsStatusFromProto(event.vfs_status()));
@@ -554,26 +602,14 @@ void GrpcWorker::doStartWatching()
         default:
             break;
         }
-    }
-    {
-        std::lock_guard<std::mutex> lk(m_streamMu);
-        m_streamCtx = nullptr;
-    }
+    });
 }
 
 void GrpcWorker::doStreamArchiveEvents(const QString& gameId)
 {
-    grpc::ClientContext ctx;
-    {
-        std::lock_guard<std::mutex> lk(m_streamMu);
-        m_streamCtx = &ctx;
-    }
     gorganizer::v1::StreamArchiveEventsRequest req;
     req.set_game_id(gameId.toStdString());
-    auto reader = m_stub->StreamArchiveEvents(&ctx, req);
-
-    gorganizer::v1::ArchiveEvent event;
-    while (!m_stopped.load() && reader->Read(&event)) {
+    runStream(&Stub::StreamArchiveEvents, req, [this](const gorganizer::v1::ArchiveEvent& event) {
         GrpcArchiveEvent out;
         switch (event.event_case()) {
         case gorganizer::v1::ArchiveEvent::kDownloadProgress:
@@ -589,29 +625,17 @@ void GrpcWorker::doStreamArchiveEvents(const QString& gameId)
             out.archiveRemoved = QString::fromStdString(event.archive_removed());
             break;
         default:
-            continue;
+            return;
         }
         emit archiveEventReceived(out);
-    }
-    {
-        std::lock_guard<std::mutex> lk(m_streamMu);
-        m_streamCtx = nullptr;
-    }
+    });
 }
 
 void GrpcWorker::doStreamInstallEvents(const QString& gameId)
 {
-    grpc::ClientContext ctx;
-    {
-        std::lock_guard<std::mutex> lk(m_streamMu);
-        m_streamCtx = &ctx;
-    }
     gorganizer::v1::StreamInstallEventsRequest req;
     req.set_game_id(gameId.toStdString());
-    auto reader = m_stub->StreamInstallEvents(&ctx, req);
-
-    gorganizer::v1::InstallEvent event;
-    while (!m_stopped.load() && reader->Read(&event)) {
+    runStream(&Stub::StreamInstallEvents, req, [this](const gorganizer::v1::InstallEvent& event) {
         switch (event.event_case()) {
         case gorganizer::v1::InstallEvent::kInstallProgress:
             emit installProgressEvent(installProgressFromProto(event.install_progress()));
@@ -619,49 +643,49 @@ void GrpcWorker::doStreamInstallEvents(const QString& gameId)
         default:
             break;
         }
-    }
-    {
-        std::lock_guard<std::mutex> lk(m_streamMu);
-        m_streamCtx = nullptr;
-    }
+    });
 }
 
-namespace {
-GrpcPluginStatus pluginStatusFromProto(const gorganizer::v1::PluginStatusItem& p) {
-    GrpcPluginStatus out;
-    out.filename = QString::fromStdString(p.filename());
-    out.ext = QString::fromStdString(p.ext());
-    out.isLight = p.is_light();
-    out.enabled = p.enabled();
-    out.fromMod = QString::fromStdString(p.from_mod());
-    out.softPending = p.soft_pending();
-    for (const auto& iss : p.issues()) {
-        GrpcDepIssue issue;
-        issue.kind = static_cast<int>(iss.kind());
-        issue.master = QString::fromStdString(iss.master());
-        issue.softModName = QString::fromStdString(iss.soft_mod_name());
-        issue.softModId = iss.soft_mod_id();
-        issue.softModUrl = QString::fromStdString(iss.soft_mod_url());
-        out.issues.push_back(std::move(issue));
-    }
-    return out;
+void GrpcWorker::doExportInstance(const QString& gameId, const QString& outputPath,
+                                  const QStringList& modFolders, const QStringList& profileNames,
+                                  bool includeOverwrite, bool includeGameSettings)
+{
+    gorganizer::v1::ExportInstanceRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_output_path(outputPath.toStdString());
+    for (const auto& f : modFolders)
+        req.add_mod_folders(f.toStdString());
+    for (const auto& p : profileNames)
+        req.add_profile_names(p.toStdString());
+    req.set_include_overwrite(includeOverwrite);
+    req.set_include_game_settings(includeGameSettings);
+    runTransferStream(&Stub::ExportInstance, req);
 }
-} // namespace
+
+void GrpcWorker::doImportInstance(const QString& gameId, const QString& archivePath,
+                                  int policy, const QMap<QString, int>& modPolicyOverrides,
+                                  const QStringList& modFolders, const QStringList& profileNames)
+{
+    gorganizer::v1::ImportInstanceRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_archive_path(archivePath.toStdString());
+    req.set_policy(static_cast<gorganizer::v1::TransferCollisionPolicy>(policy));
+    for (auto it = modPolicyOverrides.constBegin(); it != modPolicyOverrides.constEnd(); ++it)
+        (*req.mutable_mod_policy_overrides())[it.key().toStdString()] =
+            static_cast<gorganizer::v1::TransferCollisionPolicy>(it.value());
+    for (const auto& f : modFolders)
+        req.add_mod_folders(f.toStdString());
+    for (const auto& p : profileNames)
+        req.add_profile_names(p.toStdString());
+    runTransferStream(&Stub::ImportInstance, req);
+}
 
 void GrpcWorker::doStreamPluginStatus(const QString& gameId, const QString& profileName)
 {
-    grpc::ClientContext ctx;
-    {
-        std::lock_guard<std::mutex> lk(m_streamMu);
-        m_streamCtx = &ctx;
-    }
     gorganizer::v1::StreamPluginStatusRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
-    auto reader = m_stub->StreamPluginStatus(&ctx, req);
-
-    gorganizer::v1::PluginStatusEvent event;
-    while (!m_stopped.load() && reader->Read(&event)) {
+    runStream(&Stub::StreamPluginStatus, req, [this](const gorganizer::v1::PluginStatusEvent& event) {
         switch (event.event_case()) {
         case gorganizer::v1::PluginStatusEvent::kSnapshot: {
             std::vector<GrpcPluginStatus> items;
@@ -678,11 +702,7 @@ void GrpcWorker::doStreamPluginStatus(const QString& gameId, const QString& prof
         default:
             break;
         }
-    }
-    {
-        std::lock_guard<std::mutex> lk(m_streamMu);
-        m_streamCtx = nullptr;
-    }
+    });
 }
 
-} // namespace gorganizer
+}

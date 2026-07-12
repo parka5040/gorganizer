@@ -2,6 +2,67 @@
 #include "VdfParser.h"
 #include "Paths.h"
 
+#include <algorithm>
+
+namespace {
+
+std::filesystem::path relativePath(const QString& path)
+{
+    return std::filesystem::path(path.toStdString());
+}
+
+bool validInstallLayout(const std::filesystem::path& installDir,
+                        const gorganizer::GameInfo& game,
+                        std::filesystem::path* dataDirOut)
+{
+    std::error_code ec;
+    const auto dataDir = installDir / relativePath(game.dataSubpath);
+    if (!std::filesystem::is_directory(dataDir, ec))
+        return false;
+
+    if (!game.executablePaths.isEmpty()) {
+        const bool foundMarker = std::any_of(
+            game.executablePaths.begin(), game.executablePaths.end(),
+            [&installDir](const QString& rel) {
+                std::error_code markerEc;
+                return std::filesystem::is_regular_file(
+                    installDir / relativePath(rel), markerEc);
+            });
+        if (!foundMarker)
+            return false;
+    }
+
+    for (const auto& rel : game.requiredDataFiles) {
+        std::error_code requiredEc;
+        if (!std::filesystem::is_regular_file(dataDir / relativePath(rel), requiredEc))
+            return false;
+    }
+
+    if (dataDirOut)
+        *dataDirOut = dataDir;
+    return true;
+}
+
+std::optional<std::filesystem::path> installRootForExecutable(
+    const gorganizer::GameInfo& game, const std::filesystem::path& exePath)
+{
+    const QString selectedStem = QString::fromStdString(exePath.stem().string());
+    for (const auto& configured : game.executablePaths) {
+        const auto rel = relativePath(configured);
+        const QString configuredStem = QString::fromStdString(rel.stem().string());
+        if (configuredStem.compare(selectedStem, Qt::CaseInsensitive) != 0)
+            continue;
+
+        auto root = exePath;
+        for (auto it = rel.begin(); it != rel.end(); ++it)
+            root = root.parent_path();
+        return root;
+    }
+    return std::nullopt;
+}
+
+}
+
 namespace gorganizer {
 
 std::optional<std::filesystem::path> GameDetector::findSteamRoot()
@@ -64,12 +125,14 @@ std::optional<GameInfo> GameDetector::parseAppManifest(
     if (!std::filesystem::exists(installDir))
         return std::nullopt;
 
-    auto dataDir = installDir / "Data";
-    if (!std::filesystem::exists(dataDir))
+    std::filesystem::path dataDir;
+    if (!validInstallLayout(installDir, *it, &dataDir))
         return std::nullopt;
 
     GameInfo game = *it;
-    game.name = appState.value("name").toString();
+    const QString manifestName = appState.value("name").toString();
+    if (!manifestName.isEmpty())
+        game.name = manifestName;
     game.installDir = installDir;
     game.dataDir = dataDir;
     game.detected = true;
@@ -126,45 +189,27 @@ std::vector<GameInfo> GameDetector::detectAll()
 
 std::optional<GameInfo> GameDetector::fromExecutable(const std::filesystem::path& exePath)
 {
-    if (!std::filesystem::exists(exePath))
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(exePath, ec))
         return std::nullopt;
-
-    static const std::vector<std::pair<QString, QString>> exeMap = {
-        {"morrowind", "morrowind"},
-        {"oblivion",  "oblivion"},
-        {"tesv",      "skyrim"},
-        {"skyrimse",  "skyrimse"},
-        {"fallout3",  "fallout3"},
-        {"falloutnv", "falloutnv"},
-        {"fallout4",  "fallout4"},
-        {"starfield", "starfield"},
-    };
 
     QString stem = QString::fromStdString(exePath.stem().string()).toLower();
-    QString shortName;
-    for (const auto& [needle, id] : exeMap) {
-        if (stem == needle) {
-            shortName = id;
-            break;
-        }
-    }
-    if (shortName.isEmpty())
+    auto game = GameInfo::findByExeStem(stem);
+    if (!game)
         return std::nullopt;
 
-    const auto& known = GameInfo::knownGames();
-    auto it = std::find_if(known.begin(), known.end(),
-        [&](const GameInfo& g) { return g.shortName == shortName; });
-    if (it == known.end())
+    auto installDir = installRootForExecutable(*game, exePath);
+    if (!installDir)
         return std::nullopt;
 
-    auto installDir = exePath.parent_path();
-    auto dataDir = installDir / "Data";
+    std::filesystem::path dataDir;
+    if (!validInstallLayout(*installDir, *game, &dataDir))
+        return std::nullopt;
 
-    GameInfo game = *it;
-    game.installDir = installDir;
-    game.dataDir = dataDir;
-    game.detected = true;
+    game->installDir = *installDir;
+    game->dataDir = dataDir;
+    game->detected = true;
     return game;
 }
 
-} // namespace gorganizer
+}

@@ -6,6 +6,24 @@ import (
 	"testing"
 )
 
+func TestReservePrefixPathRejectsConcurrentPreparation(t *testing.T) {
+	m := &Manager{}
+	release, err := m.reservePrefixPath("/tmp/gorganizer-prefix-test")
+	if err != nil {
+		t.Fatalf("first reservation: %v", err)
+	}
+	if _, err := m.reservePrefixPath("/tmp/gorganizer-prefix-test"); err == nil {
+		t.Fatal("second reservation unexpectedly succeeded")
+	}
+	release()
+	release()
+	releaseAgain, err := m.reservePrefixPath("/tmp/gorganizer-prefix-test")
+	if err != nil {
+		t.Fatalf("reservation after release: %v", err)
+	}
+	releaseAgain()
+}
+
 // fakeSteamRoot lays out a minimal Steam directory tree for ResolveProtonRuntime tests.
 func fakeSteamRoot(t *testing.T, opts struct {
 	manifestRequiresAppID string
@@ -146,6 +164,18 @@ func TestReadVDFKey(t *testing.T) {
   "version" "2"
   "require_tool_appid" "1628350"
   "use_sessions" "1"
+}
+
+func TestLaunchWorkingDirUsesLoaderDirectory(t *testing.T) {
+	gameRoot := filepath.Join(string(filepath.Separator), "games", "Oblivion Remastered")
+	loader := filepath.Join(gameRoot, "OblivionRemastered", "Binaries", "Win64", "obse64_loader.exe")
+	want := filepath.Dir(loader)
+	if got := launchWorkingDir(gameRoot, loader, true); got != want {
+		t.Errorf("launchWorkingDir = %q, want %q", got, want)
+	}
+	if got := launchWorkingDir(gameRoot, loader, false); got != gameRoot {
+		t.Errorf("non-tool launch working dir = %q, want game root %q", got, gameRoot)
+	}
 }
 `
 	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {

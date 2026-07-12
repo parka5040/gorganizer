@@ -4,14 +4,12 @@ import (
 	"github.com/parka/gorganizer/internal/vfs"
 )
 
-// FileConflict describes a virtual path where multiple mods provide the same file.
 type FileConflict struct {
 	VirtualPath string
 	Winner      string
 	Losers      []string
 }
 
-// ConflictMap holds all file conflicts across the enabled mod layers.
 type ConflictMap struct {
 	Conflicts map[string]FileConflict
 }

@@ -14,4 +14,4 @@ public:
                                       const std::filesystem::path& dataRoot);
 };
 
-} // namespace gorganizer
+}

@@ -2,18 +2,20 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/parka/gorganizer/internal/config"
-	"github.com/parka/gorganizer/internal/ipc"
 )
 
 var dropEnvKeys = map[string]bool{
@@ -27,8 +29,6 @@ var dropEnvKeys = map[string]bool{
 	"WINEDLLOVERRIDES": true,
 }
 
-// ExternalLaunchOpts parameterizes LaunchExternalWithOptions. It is a superset
-// of the historical LaunchExternal arguments plus WorkingDir.
 type ExternalLaunchOpts struct {
 	PrefixGameID    string
 	GameCfg         *config.GameConfig
@@ -38,14 +38,13 @@ type ExternalLaunchOpts struct {
 	PreferredProton string
 	SanitizeEnv     bool
 	RWPaths         []string
-	// WorkingDir is the process CWD; empty preserves the historical behavior of
-	// filepath.Dir(ExePath).
-	WorkingDir string
+	WorkingDir      string
+	PrefixAppID     int
+	ROPaths         []string
+	PrefixReserved  bool
 }
 
 // LaunchExternal launches a Windows executable inside a Proton prefix for
-// installers and helper tools. Preserved shim over LaunchExternalWithOptions so
-// existing callers (the TTW installer) keep byte-identical behavior.
 func (m *Manager) LaunchExternal(
 	prefixGameID string,
 	gameCfg *config.GameConfig,
@@ -69,7 +68,6 @@ func (m *Manager) LaunchExternal(
 }
 
 // LaunchExternalWithOptions is the general external-tool launcher: any Windows
-// .exe run through the game's Proton prefix against the mounted VFS.
 func (m *Manager) LaunchExternalWithOptions(o ExternalLaunchOpts) (*ExternalLaunchHandle, error) {
 	if o.GameCfg == nil {
 		return nil, fmt.Errorf("LaunchExternal: gameCfg is nil")
@@ -80,36 +78,57 @@ func (m *Manager) LaunchExternalWithOptions(o ExternalLaunchOpts) (*ExternalLaun
 		return nil, fmt.Errorf("finding Steam root: %w", err)
 	}
 
-	appID := strconv.Itoa(o.GameCfg.SteamAppID)
-	compatDataPath := filepath.Join(steamRoot, "steamapps", "compatdata", appID)
+	prefixAppID := o.GameCfg.SteamAppID
+	if o.PrefixAppID > 0 {
+		prefixAppID = o.PrefixAppID
+	}
+	appID := strconv.Itoa(prefixAppID)
+	libraryRoot := resolveSteamLibrary(steamRoot, o.GameCfg)
+	compatDataPath := findCompatDataPath(steamRoot, libraryRoot, appID)
 	prefixPath := filepath.Join(compatDataPath, "pfx")
 
 	if _, err := os.Stat(prefixPath); err != nil {
-		return nil, &ipc.ErrPrefixMissing{
+		return nil, &ErrPrefixMissing{
 			GameID:       o.PrefixGameID,
 			ExpectedPath: prefixPath,
 		}
 	}
 
 	if !steamIsRunning() {
-		return nil, &ipc.ErrSteamNotRunning{}
+		return nil, &ErrSteamNotRunning{}
 	}
+
+	var prefixLock *sync.Mutex
+	locked := false
+	if !o.PrefixReserved {
+		lockValue, _ := m.prefixLocks.LoadOrStore(prefixPath, &sync.Mutex{})
+		prefixLock = lockValue.(*sync.Mutex)
+		prefixLock.Lock()
+		locked = true
+	}
+	defer func() {
+		if locked {
+			prefixLock.Unlock()
+		}
+	}()
 
 	protonPath := o.GameCfg.ProtonPath
 	if protonPath == "" {
 		protonPath = o.PreferredProton
 	}
 	if protonPath == "" {
-		versions := detectProtonVersions(steamRoot)
+		versions := detectProtonVersionsAllLibraries(steamRoot)
 		if len(versions) == 0 {
 			return nil, fmt.Errorf("no Proton versions found")
 		}
 		protonPath = versions[0].Path
 	}
 
+	roPaths := append([]string(nil), o.ROPaths...)
+	roPaths = append(roPaths, symlinkTargets(o.RWPaths)...)
 	env := buildExternalEnv(
 		o.SanitizeEnv, compatDataPath, steamRoot, appID,
-		o.GameCfg.InstallPath, o.RWPaths, o.ExtraEnv,
+		o.GameCfg.InstallPath, normalizedPaths(o.RWPaths), normalizedPaths(roPaths), o.ExtraEnv,
 	)
 
 	bin := protonPath
@@ -146,6 +165,8 @@ func (m *Manager) LaunchExternalWithOptions(o ExternalLaunchOpts) (*ExternalLaun
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("starting Proton wrapper: %w", err)
 	}
+	releaseOnWait := locked
+	locked = false
 
 	go logProtonOutput(o.PrefixGameID+":external:stdout", "stdout", stdoutPipe)
 	go logProtonOutput(o.PrefixGameID+":external:stderr", "stderr", stderrPipe)
@@ -153,6 +174,9 @@ func (m *Manager) LaunchExternalWithOptions(o ExternalLaunchOpts) (*ExternalLaun
 	done := make(chan struct{})
 	exitCh := make(chan int, 1)
 	go func() {
+		if releaseOnWait {
+			defer prefixLock.Unlock()
+		}
 		err := cmd.Wait()
 		code := 0
 		if err != nil {
@@ -175,7 +199,30 @@ func (m *Manager) LaunchExternalWithOptions(o ExternalLaunchOpts) (*ExternalLaun
 	}, nil
 }
 
-// ExternalLaunchHandle is LaunchExternal's counterpart to LaunchHandle, with Cancel and ExitCode.
+func (m *Manager) ReservePrefix(gameCfg *config.GameConfig, prefixAppID int) (func(), error) {
+	compatDataPath, err := ResolveCompatDataPath(gameCfg, prefixAppID)
+	if err != nil {
+		return nil, err
+	}
+	prefixPath := filepath.Join(compatDataPath, "pfx")
+	if info, statErr := os.Stat(prefixPath); statErr != nil || !info.IsDir() {
+		return nil, fmt.Errorf("Proton prefix is missing: %s", prefixPath)
+	}
+	return m.reservePrefixPath(prefixPath)
+}
+
+func (m *Manager) reservePrefixPath(prefixPath string) (func(), error) {
+	lockValue, _ := m.prefixLocks.LoadOrStore(prefixPath, &sync.Mutex{})
+	prefixLock := lockValue.(*sync.Mutex)
+	if !prefixLock.TryLock() {
+		return nil, fmt.Errorf("Proton prefix is already in use by another managed tool: %s", prefixPath)
+	}
+	var once sync.Once
+	return func() {
+		once.Do(prefixLock.Unlock)
+	}, nil
+}
+
 type ExternalLaunchHandle struct {
 	PID      int
 	Done     <-chan struct{}
@@ -183,6 +230,82 @@ type ExternalLaunchHandle struct {
 
 	cmd        *exec.Cmd
 	prefixPath string
+}
+
+type NativeLaunchOpts struct {
+	ToolID      string
+	ExePath     string
+	Args        []string
+	ExtraEnv    []string
+	WorkingDir  string
+	JavaArchive bool
+	SanitizeEnv bool
+}
+
+// LaunchNative starts a waitable host-native tool using the same lifecycle handle as Proton tools.
+func (m *Manager) LaunchNative(options NativeLaunchOpts) (*ExternalLaunchHandle, error) {
+	binary := options.ExePath
+	args := append([]string(nil), options.Args...)
+	if options.JavaArchive {
+		java, err := exec.LookPath("java")
+		if err != nil {
+			return nil, errors.New("Java runtime is required for this tool")
+		}
+		binary = java
+		args = append([]string{"-jar", options.ExePath}, args...)
+	}
+	workingDir := options.WorkingDir
+	if workingDir == "" {
+		workingDir = filepath.Dir(options.ExePath)
+	}
+	cmd := exec.Command(binary, args...)
+	cmd.Dir = workingDir
+	baseEnv := os.Environ()
+	if options.SanitizeEnv {
+		baseEnv = sanitizedHostEnv(baseEnv)
+	}
+	cmd.Env = append(baseEnv, options.ExtraEnv...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("starting native tool: %w", err)
+	}
+	go logProtonOutput(options.ToolID+":native:stdout", "stdout", stdoutPipe)
+	go logProtonOutput(options.ToolID+":native:stderr", "stderr", stderrPipe)
+	done := make(chan struct{})
+	exitCh := make(chan int, 1)
+	go func() {
+		code := 0
+		if err := cmd.Wait(); err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				code = exitErr.ExitCode()
+			} else {
+				code = -1
+			}
+		}
+		exitCh <- code
+		close(done)
+	}()
+	return &ExternalLaunchHandle{PID: cmd.Process.Pid, Done: done, ExitCode: exitCh, cmd: cmd}, nil
+}
+
+func sanitizedHostEnv(environment []string) []string {
+	out := make([]string, 0, len(environment))
+	for _, value := range environment {
+		separator := strings.IndexByte(value, '=')
+		if separator < 0 || dropEnvKeys[value[:separator]] {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
 }
 
 // Cancel runs the three-step Wine-aware shutdown: SIGTERM, wineserver -k, SIGKILL.
@@ -202,14 +325,16 @@ func (h *ExternalLaunchHandle) Cancel(ctx context.Context) {
 		return
 	}
 
-	slog.Warn("Cancel: SIGTERM did not take, running wineserver -k", "prefix", h.prefixPath)
-	if wineserver, err := exec.LookPath("wineserver"); err == nil {
+	if h.prefixPath != "" {
+		slog.Warn("Cancel: SIGTERM did not take, running wineserver -k", "prefix", h.prefixPath)
+	}
+	if wineserver, err := exec.LookPath("wineserver"); h.prefixPath != "" && err == nil {
 		ks := exec.Command(wineserver, "-k")
 		ks.Env = append(os.Environ(), "WINEPREFIX="+h.prefixPath)
 		if err := ks.Run(); err != nil {
 			slog.Warn("wineserver -k failed", "err", err)
 		}
-	} else {
+	} else if h.prefixPath != "" {
 		slog.Warn("wineserver not on PATH — skipping step 2", "err", err)
 	}
 	if waitWithTimeout(h.Done, 5*time.Second, ctx) {
@@ -236,7 +361,7 @@ func waitWithTimeout(done <-chan struct{}, d time.Duration, ctx context.Context)
 func buildExternalEnv(
 	sanitizeEnv bool,
 	compatDataPath, steamRoot, appID, installPath string,
-	rwPaths []string,
+	rwPaths, roPaths []string,
 	extraEnv []string,
 ) []string {
 	var env []string
@@ -270,9 +395,132 @@ func buildExternalEnv(
 	if len(rwPaths) > 0 {
 		env = append(env, "PRESSURE_VESSEL_FILESYSTEMS_RW="+strings.Join(rwPaths, ":"))
 	}
+	if len(roPaths) > 0 {
+		env = append(env, "PRESSURE_VESSEL_FILESYSTEMS_RO="+strings.Join(roPaths, ":"))
+	}
 
 	env = append(env, extraEnv...)
 	return env
+}
+
+func resolveSteamLibrary(steamRoot string, gameCfg *config.GameConfig) string {
+	if gameCfg != nil && gameCfg.SteamLibraryPath != "" {
+		if info, err := os.Stat(filepath.Join(gameCfg.SteamLibraryPath, "steamapps")); err == nil && info.IsDir() {
+			return gameCfg.SteamLibraryPath
+		}
+	}
+	if gameCfg != nil {
+		install, _ := filepath.Abs(gameCfg.InstallPath)
+		for _, library := range steamLibraries(steamRoot) {
+			common, _ := filepath.Abs(filepath.Join(library, "steamapps", "common"))
+			if install == common || strings.HasPrefix(install, common+string(filepath.Separator)) {
+				return library
+			}
+		}
+	}
+	return steamRoot
+}
+
+// ResolveSteamLibrary returns the Steam library that owns a configured game installation.
+func ResolveSteamLibrary(gameCfg *config.GameConfig) (string, error) {
+	steamRoot, err := findSteamRoot()
+	if err != nil {
+		return "", err
+	}
+	return resolveSteamLibrary(steamRoot, gameCfg), nil
+}
+
+// ResolveCompatDataPath returns the compatdata directory for a game or tool-specific Steam app ID.
+func ResolveCompatDataPath(gameCfg *config.GameConfig, prefixAppID int) (string, error) {
+	steamRoot, err := findSteamRoot()
+	if err != nil {
+		return "", err
+	}
+	if gameCfg == nil {
+		return "", errors.New("game config is required")
+	}
+	appID := gameCfg.SteamAppID
+	if prefixAppID > 0 {
+		appID = prefixAppID
+	}
+	library := resolveSteamLibrary(steamRoot, gameCfg)
+	return findCompatDataPath(steamRoot, library, strconv.Itoa(appID)), nil
+}
+
+func steamLibraries(steamRoot string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0)
+	for _, library := range append([]string{steamRoot}, parseLibraryFolders(steamRoot)...) {
+		clean := filepath.Clean(library)
+		if clean == "." || seen[clean] {
+			continue
+		}
+		seen[clean] = true
+		out = append(out, clean)
+	}
+	return out
+}
+
+func findCompatDataPath(steamRoot, preferredLibrary, appID string) string {
+	libraries := append([]string{preferredLibrary}, steamLibraries(steamRoot)...)
+	seen := map[string]bool{}
+	for _, library := range libraries {
+		candidate := filepath.Join(library, "steamapps", "compatdata", appID)
+		if seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		if info, err := os.Stat(filepath.Join(candidate, "pfx")); err == nil && info.IsDir() {
+			return candidate
+		}
+	}
+	return filepath.Join(preferredLibrary, "steamapps", "compatdata", appID)
+}
+
+func normalizedPaths(paths []string) []string {
+	seen := make(map[string]bool)
+	out := make([]string, 0, len(paths))
+	add := func(path string) {
+		if path == "" {
+			return
+		}
+		abs, err := filepath.Abs(path)
+		if err != nil || seen[abs] {
+			return
+		}
+		seen[abs] = true
+		out = append(out, abs)
+	}
+	for _, path := range paths {
+		add(path)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func symlinkTargets(paths []string) []string {
+	seen := make(map[string]bool)
+	out := make([]string, 0)
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		_ = filepath.Walk(path, func(walkPath string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil || info == nil || info.Mode()&os.ModeSymlink == 0 {
+				return nil
+			}
+			target, err := filepath.EvalSymlinks(walkPath)
+			if err != nil || seen[target] {
+				return nil
+			}
+			seen[target] = true
+			out = append(out, target)
+			return nil
+		})
+	}
+	sort.Strings(out)
+	return out
 }
 
 // steamIsRunning reports whether a process named exactly "steam" is currently running.
@@ -305,7 +553,8 @@ func (m *Manager) WineTranslatePath(prefixGameID string, gameCfg *config.GameCon
 	steamRoot, err := findSteamRoot()
 	if err == nil {
 		appID := strconv.Itoa(gameCfg.SteamAppID)
-		prefixPath := filepath.Join(steamRoot, "steamapps", "compatdata", appID, "pfx")
+		libraryRoot := resolveSteamLibrary(steamRoot, gameCfg)
+		prefixPath := filepath.Join(findCompatDataPath(steamRoot, libraryRoot, appID), "pfx")
 		if winepath, lerr := exec.LookPath("winepath"); lerr == nil {
 			cmd := exec.Command(winepath, "-w", abs)
 			cmd.Env = append(os.Environ(), "WINEPREFIX="+prefixPath)

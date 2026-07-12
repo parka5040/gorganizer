@@ -23,4 +23,4 @@ private:
         const std::filesystem::path& libraryFolder);
 };
 
-} // namespace gorganizer
+}

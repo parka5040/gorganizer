@@ -27,6 +27,10 @@ func main() {
 		os.Exit(runRecover(args))
 	case "recover-confirm":
 		os.Exit(runRecoverConfirm(args))
+	case "export":
+		os.Exit(runExport(args))
+	case "import":
+		os.Exit(runImport(args))
 	case "-h", "--help", "help":
 		usage()
 		os.Exit(0)
@@ -82,12 +86,26 @@ Subcommands:
   recover --data-path <path>   Same, but operate on a specific Data dir
                                without consulting the gorganizer config —
                                useful when the daemon was never set up.
+  export --game <id> --out <file>
+                               Export the game's instance (mods, profiles,
+                               Overwrite layer, game settings) to a tar+zstd
+                               archive via the running daemon. Optional:
+                               --mods a,b  --profiles p1,p2
+                               --no-overwrite  --no-game-settings
+  import --game <id> --archive <file>
+                               Import an exported instance archive via the
+                               running daemon. Optional:
+                               --policy abort|skip|rename|overwrite
+                               --dry-run (preview manifest + collisions)
 
-Either form requires that gorganizerd not be currently running.
+The recover forms require that gorganizerd not be currently running;
+export/import require it to be running.
 
 Examples:
   gorganizerctl recover --game falloutnv
   gorganizerctl recover --data-path "/home/me/.steam/steamapps/common/Fallout New Vegas/Data"
+  gorganizerctl export --game skyrimse --out ~/skyrimse-instance.tar.zst
+  gorganizerctl import --game skyrimse --archive ~/skyrimse-instance.tar.zst --policy rename
 `)
 }
 

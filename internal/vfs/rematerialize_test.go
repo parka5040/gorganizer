@@ -7,8 +7,6 @@ import (
 )
 
 // ReMaterialize must (a) make a newly-enabled mod visible on disk, and (b)
-// capture a loose write made against the live farm into Overwrite and re-link it
-// back into the rebuilt farm — with no staging residue left behind.
 func TestReMaterialize_AppliesModAndCapturesWrites(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -29,10 +27,8 @@ func TestReMaterialize_AppliesModAndCapturesWrites(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = mm.Deactivate() })
 
-	// A loose file written by a running game/tool (nlink==1) into the live farm.
 	mustFile(t, filepath.Join(dataPath, "Saves", "quicksave.ess"), "SAVE")
 
-	// Enable ModA and apply.
 	next := []Layer{
 		{Name: "__base__", RootPath: dataPath, Enabled: true},
 		{Name: "ModA", RootPath: modA, Enabled: true},
@@ -40,6 +36,9 @@ func TestReMaterialize_AppliesModAndCapturesWrites(t *testing.T) {
 	}
 	if err := mm.MarkDirty(next); err != nil {
 		t.Fatalf("MarkDirty: %v", err)
+	}
+	if appliedLayers := mm.AppliedLayers(); len(appliedLayers) != 2 || appliedLayers[1].Name != "Overwrite" {
+		t.Fatalf("applied layers changed before materialization: %+v", appliedLayers)
 	}
 	if !mm.IsDirty() {
 		t.Fatal("expected dirty after MarkDirty")
@@ -50,24 +49,23 @@ func TestReMaterialize_AppliesModAndCapturesWrites(t *testing.T) {
 	if mm.IsDirty() {
 		t.Error("expected clean after ReMaterialize")
 	}
+	if appliedLayers := mm.AppliedLayers(); len(appliedLayers) != 3 || appliedLayers[1].Name != "ModA" {
+		t.Fatalf("applied layers were not advanced: %+v", appliedLayers)
+	}
 	applied, desired := mm.Generations()
 	if applied != desired {
 		t.Errorf("applied(%d) != desired(%d)", applied, desired)
 	}
 
-	// ModA is now visible in the farm.
 	if got := mustRead(t, filepath.Join(dataPath, "ModA.esp")); got != "modA-plugin" {
 		t.Errorf("ModA.esp = %q, want materialized", got)
 	}
-	// The loose save was captured into Overwrite...
 	if got := mustRead(t, filepath.Join(overwrite, "Saves", "quicksave.ess")); got != "SAVE" {
 		t.Errorf("save not captured into Overwrite: %q", got)
 	}
-	// ...and re-linked back into the farm so it stays visible mid-session.
 	if got := mustRead(t, filepath.Join(dataPath, "Saves", "quicksave.ess")); got != "SAVE" {
 		t.Errorf("captured save not re-linked into farm: %q", got)
 	}
-	// No transient residue.
 	for _, sib := range []string{stagingDirPath(dataPath), oldFarmPath(dataPath), applyingIntentPath(dataPath)} {
 		if _, err := os.Stat(sib); !os.IsNotExist(err) {
 			t.Errorf("residue left behind: %s", sib)
@@ -76,7 +74,6 @@ func TestReMaterialize_AppliesModAndCapturesWrites(t *testing.T) {
 }
 
 // ReMaterialize must materialize the LATEST in-memory tree and set appliedGen to
-// the latest desiredGen — never a superseded one (the essence of Guard R1).
 func TestReMaterialize_MaterializesLatestTree(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -98,7 +95,6 @@ func TestReMaterialize_MaterializesLatestTree(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = mm.Deactivate() })
 
-	// Two successive edits; only the last (B) should win.
 	if err := mm.MarkDirty([]Layer{
 		{Name: "__base__", RootPath: dataPath, Enabled: true},
 		{Name: "ModA", RootPath: modA, Enabled: true},
@@ -157,13 +153,15 @@ func TestReMaterialize_NoopWhenClean(t *testing.T) {
 }
 
 // CaptureNewFilesInto with relink must move the loose file into the target AND
-// leave it readable at the original farm path (the tool-exit capture path).
 func TestCaptureNewFilesInto_Relink(t *testing.T) {
 	dir := t.TempDir()
 	farm := filepath.Join(dir, "Data")
 	target := filepath.Join(dir, "mods", "DynDOLOD Output")
 	mustDir(t, target)
 	mustFile(t, filepath.Join(farm, "meshes", "lod.nif"), "LODDATA")
+	if err := os.Chmod(filepath.Join(farm, "meshes", "lod.nif"), 0620); err != nil {
+		t.Fatal(err)
+	}
 
 	n, err := CaptureNewFilesInto(farm, target, true, false)
 	if err != nil {
@@ -175,8 +173,41 @@ func TestCaptureNewFilesInto_Relink(t *testing.T) {
 	if got := mustRead(t, filepath.Join(target, "meshes", "lod.nif")); got != "LODDATA" {
 		t.Errorf("target copy = %q", got)
 	}
-	// Still visible in the farm (re-linked), so a running session keeps seeing it.
 	if got := mustRead(t, filepath.Join(farm, "meshes", "lod.nif")); got != "LODDATA" {
 		t.Errorf("farm re-link = %q", got)
+	}
+	for _, path := range []string{
+		filepath.Join(target, "meshes", "lod.nif"),
+		filepath.Join(farm, "meshes", "lod.nif"),
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0620 {
+			t.Errorf("%s mode changed to %o, want 620", path, info.Mode().Perm())
+		}
+	}
+}
+
+func TestCaptureNewFilesIntoSkipsEngineControlFiles(t *testing.T) {
+	farm := t.TempDir()
+	target := t.TempDir()
+	for _, name := range []string{"Plugins.txt", "loadorder.txt"} {
+		if err := os.WriteFile(filepath.Join(farm, name), []byte("state"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := CaptureNewFilesInto(farm, target, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("captured %d engine control files", n)
+	}
+	for _, name := range []string{"Plugins.txt", "loadorder.txt"} {
+		if _, err := os.Stat(filepath.Join(farm, name)); err != nil {
+			t.Fatalf("control file %s was removed: %v", name, err)
+		}
 	}
 }

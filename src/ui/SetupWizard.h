@@ -49,4 +49,4 @@ private:
     QLabel* m_summaryLabel = nullptr;
 };
 
-} // namespace gorganizer
+}

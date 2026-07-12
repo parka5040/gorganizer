@@ -54,7 +54,7 @@ func TestMaterialize_BasicHardlinkFarm(t *testing.T) {
 		"Sound/fx/door.wav":     "base sound",
 	})
 	mod := fixture(t, map[string]string{
-		"Meshes/armor/iron.nif": "mod overrides iron",
+		"Meshes/armor/iron.nif":  "mod overrides iron",
 		"Meshes/armor/steel.nif": "mod adds steel",
 	})
 
@@ -102,8 +102,12 @@ func TestMaterialize_BasicHardlinkFarm(t *testing.T) {
 	}
 }
 
-func TestMaterialize_FilesAreReadOnly(t *testing.T) {
+func TestMaterialize_HardlinksPreserveSourceMode(t *testing.T) {
 	base := fixture(t, map[string]string{"a.esp": "x"})
+	source := filepath.Join(base, "a.esp")
+	if err := os.Chmod(source, 0754); err != nil {
+		t.Fatal(err)
+	}
 	tree := NewMergedTree()
 	if err := tree.Build([]Layer{{Name: "__base__", RootPath: base, Enabled: true}}); err != nil {
 		t.Fatal(err)
@@ -113,19 +117,31 @@ func TestMaterialize_FilesAreReadOnly(t *testing.T) {
 		t.Fatalf("BuildInto: %v", err)
 	}
 
-	info, err := os.Stat(filepath.Join(out, "a.esp"))
+	sourceInfo, err := os.Stat(source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mode := info.Mode().Perm()
-	if mode&0222 != 0 {
-		t.Errorf("expected file read-only, got mode %o", mode)
+	destInfo, err := os.Stat(filepath.Join(out, "a.esp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sourceInfo.Mode().Perm() != 0754 {
+		t.Errorf("source mode changed to %o, want 754", sourceInfo.Mode().Perm())
+	}
+	if destInfo.Mode().Perm() != sourceInfo.Mode().Perm() {
+		t.Errorf("materialized mode = %o, source mode = %o", destInfo.Mode().Perm(), sourceInfo.Mode().Perm())
 	}
 }
 
-func TestMaterialize_OverwriteModPreservesMode(t *testing.T) {
+func TestMaterialize_AllLayersPreserveSourceModes(t *testing.T) {
 	base := fixture(t, map[string]string{"a.esp": "base"})
 	overwrite := fixture(t, map[string]string{"b.esp": "overwrite"})
+	if err := os.Chmod(filepath.Join(base, "a.esp"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(overwrite, "b.esp"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	tree := NewMergedTree()
 	if err := tree.Build([]Layer{
@@ -143,16 +159,28 @@ func TestMaterialize_OverwriteModPreservesMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if infoA.Mode().Perm()&0222 != 0 {
-		t.Errorf("a.esp expected read-only, got %o", infoA.Mode().Perm())
+	if infoA.Mode().Perm() != 0640 {
+		t.Errorf("a.esp mode = %o, want source mode 640", infoA.Mode().Perm())
 	}
 
 	infoB, err := os.Stat(filepath.Join(out, "b.esp"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if infoB.Mode().Perm()&0222 == 0 {
-		t.Errorf("b.esp expected writable (overwrite mod), got %o", infoB.Mode().Perm())
+	if infoB.Mode().Perm() != 0600 {
+		t.Errorf("b.esp mode = %o, want source mode 600", infoB.Mode().Perm())
+	}
+	for path, want := range map[string]os.FileMode{
+		filepath.Join(base, "a.esp"):      0640,
+		filepath.Join(overwrite, "b.esp"): 0600,
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != want {
+			t.Errorf("source %s mode changed to %o, want %o", path, info.Mode().Perm(), want)
+		}
 	}
 }
 

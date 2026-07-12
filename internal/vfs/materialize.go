@@ -11,7 +11,6 @@ import (
 	"syscall"
 )
 
-// MaterializeStats reports what BuildInto did, surfaced via slog at activate time.
 type MaterializeStats struct {
 	FilesHardlinked int
 	FilesSymlinked  int
@@ -19,10 +18,8 @@ type MaterializeStats struct {
 	DirsCreated     int
 }
 
-// BuildInto materializes the merged view at outDir as a hardlink farm,
-// falling back to symlinks for cross-fs files. Files outside the named
-// overwrite mod are chmod'd to 0444.
-func BuildInto(outDir string, tree *MergedTree, layers []Layer, overwriteModName string) (MaterializeStats, error) {
+// BuildInto materializes a merged view as hardlinks with cross-filesystem symlink fallback.
+func BuildInto(outDir string, tree *MergedTree, _ []Layer, _ string) (MaterializeStats, error) {
 	var stats MaterializeStats
 
 	if tree == nil {
@@ -38,45 +35,6 @@ func BuildInto(outDir string, tree *MergedTree, layers []Layer, overwriteModName
 
 	tree.mu.RLock()
 	defer tree.mu.RUnlock()
-
-	type resolvedLayer struct {
-		idx     int
-		absRoot string
-		layer   Layer
-	}
-	resolvedLayers := make([]resolvedLayer, 0, len(layers))
-	for i, l := range layers {
-		if !l.Enabled {
-			continue
-		}
-		abs, err := filepath.Abs(l.RootPath)
-		if err != nil {
-			abs = l.RootPath
-		}
-		resolvedLayers = append(resolvedLayers, resolvedLayer{idx: i, absRoot: abs, layer: l})
-	}
-	for i := 0; i < len(resolvedLayers); i++ {
-		for j := i + 1; j < len(resolvedLayers); j++ {
-			if len(resolvedLayers[j].absRoot) > len(resolvedLayers[i].absRoot) {
-				resolvedLayers[i], resolvedLayers[j] = resolvedLayers[j], resolvedLayers[i]
-			}
-		}
-	}
-
-	overwriteLower := strings.ToLower(overwriteModName)
-
-	findOwningLayer := func(realPath string) (Layer, bool) {
-		abs, err := filepath.Abs(realPath)
-		if err != nil {
-			abs = realPath
-		}
-		for _, rl := range resolvedLayers {
-			if abs == rl.absRoot || strings.HasPrefix(abs, rl.absRoot+string(os.PathSeparator)) {
-				return rl.layer, true
-			}
-		}
-		return Layer{}, false
-	}
 
 	outDevID, err := devID(outDir)
 	if err != nil {
@@ -121,14 +79,6 @@ func BuildInto(outDir string, tree *MergedTree, layers []Layer, overwriteModName
 				continue
 			}
 
-			isOverwrite := false
-			if overwriteLower != "" {
-				if owner, ok := findOwningLayer(realPath); ok &&
-					strings.ToLower(owner.Name) == overwriteLower {
-					isOverwrite = true
-				}
-			}
-
 			linked, srcDevID, linkErr := tryHardlink(realPath, destChild, outDevID)
 			switch {
 			case linked:
@@ -141,15 +91,6 @@ func BuildInto(outDir string, tree *MergedTree, layers []Layer, overwriteModName
 				stats.FilesSymlinked++
 			case linkErr != nil:
 				return stats, fmt.Errorf("hardlink %q -> %q: %w", destChild, realPath, linkErr)
-			}
-
-			if !isOverwrite {
-				if linked {
-					if err := os.Chmod(destChild, 0444); err != nil {
-						slog.Warn("could not enforce 0444 on materialized file",
-							"path", destChild, "err", err)
-					}
-				}
 			}
 		}
 	}
@@ -189,18 +130,12 @@ func devID(path string) (uint64, error) {
 func devIDOf(path string) (uint64, error) { return devID(path) }
 
 // CaptureNewFiles moves files we didn't place (st_nlink == 1) into overwriteRoot.
-// It is the teardown/rebuild form: no re-link (the farm is about to be removed).
 func CaptureNewFiles(dataDir, overwriteRoot string) (int, error) {
 	return CaptureNewFilesInto(dataDir, overwriteRoot, false, false)
 }
 
 // CaptureNewFilesInto moves loose files we didn't place (st_nlink == 1) from
-// dataDir into targetRoot. When relink is true, each moved file is linked back
-// into dataDir (symlink fallback across filesystems; chmod 0444 unless
-// isOverwrite) so it stays visible in the live farm WITHOUT a full
-// re-materialize. This is how external-tool output (DynDOLOD/Nemesis/BodySlide)
-// is captured into a mod on tool exit while a session continues (plan §5.4).
-func CaptureNewFilesInto(dataDir, targetRoot string, relink, isOverwrite bool) (int, error) {
+func CaptureNewFilesInto(dataDir, targetRoot string, relink bool, _ bool) (int, error) {
 	if targetRoot == "" {
 		return 0, nil
 	}
@@ -231,6 +166,9 @@ func CaptureNewFilesInto(dataDir, targetRoot string, relink, isOverwrite bool) (
 		if relErr != nil {
 			return relErr
 		}
+		if filepath.Dir(rel) == "." && (strings.EqualFold(rel, "plugins.txt") || strings.EqualFold(rel, "loadorder.txt")) {
+			return nil
+		}
 		dst := filepath.Join(targetRoot, rel)
 		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 			return fmt.Errorf("mkdir %q: %w", filepath.Dir(dst), err)
@@ -242,7 +180,7 @@ func CaptureNewFilesInto(dataDir, targetRoot string, relink, isOverwrite bool) (
 		moved++
 
 		if relink {
-			if err := relinkCaptured(dst, path, isOverwrite); err != nil {
+			if err := relinkCaptured(dst, path); err != nil {
 				return err
 			}
 		}
@@ -251,16 +189,12 @@ func CaptureNewFilesInto(dataDir, targetRoot string, relink, isOverwrite bool) (
 	return moved, walkErr
 }
 
-// relinkCaptured hardlinks src (now in the target mod) back to farmPath, falling
-// back to an absolute symlink across filesystems, mirroring BuildInto.
-func relinkCaptured(src, farmPath string, isOverwrite bool) error {
+// relinkCaptured links captured output back into the materialized farm.
+func relinkCaptured(src, farmPath string) error {
 	outDevID, _ := devIDOf(filepath.Dir(farmPath))
 	linked, srcDevID, linkErr := tryHardlink(src, farmPath, outDevID)
 	switch {
 	case linked:
-		if !isOverwrite {
-			_ = os.Chmod(farmPath, 0444)
-		}
 		return nil
 	case errors.Is(linkErr, syscall.EXDEV) || (srcDevID != 0 && srcDevID != outDevID):
 		abs, _ := filepath.Abs(src)

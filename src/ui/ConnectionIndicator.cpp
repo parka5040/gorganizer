@@ -30,9 +30,6 @@ ConnectionIndicator::ConnectionIndicator(GrpcClient* grpc, QWidget* parent)
         onDisconnected();
 }
 
-// The dot's fill is driven by the themed QSS rule
-// QLabel#connectionDot[connected="true"/"false"], so it tracks the active theme
-// (success/error tokens) without a hardcoded color here.
 static void repolish(QLabel* dot, bool connected)
 {
     dot->setProperty("connected", connected);
@@ -52,4 +49,4 @@ void ConnectionIndicator::onDisconnected()
     m_text->setText("Disconnected");
 }
 
-} // namespace gorganizer
+}

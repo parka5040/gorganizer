@@ -8,7 +8,6 @@ import (
 )
 
 // writeActivatingIntent drops an "activating" intent marker beside dataPath,
-// standing in for a daemon that crashed mid-Activate.
 func writeActivatingIntent(t *testing.T, dataPath, backupPath string) {
 	t.Helper()
 	err := WriteIntent(activatingIntentPath(dataPath), &ActivationIntent{
@@ -26,8 +25,6 @@ func writeActivatingIntent(t *testing.T, dataPath, backupPath string) {
 }
 
 // Case B: an interrupted Activate left a partial farm (no valid sentinel) plus
-// an intent marker. Recovery must auto-roll-back to the backup — this used to
-// degrade to a manual RecoveryPending (H-3).
 func TestCleanupStale_IntentRollback_PartialFarm(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -35,7 +32,7 @@ func TestCleanupStale_IntentRollback_PartialFarm(t *testing.T) {
 
 	mustDir(t, backupPath)
 	mustFile(t, filepath.Join(backupPath, "Skyrim.esm"), "master")
-	mustDir(t, dataPath) // partial farm: some files, NO sentinel
+	mustDir(t, dataPath)
 	mustFile(t, filepath.Join(dataPath, "half-materialized.nif"), "junk")
 	writeActivatingIntent(t, dataPath, backupPath)
 
@@ -64,7 +61,6 @@ func TestCleanupStale_IntentRollback_PartialFarm(t *testing.T) {
 }
 
 // Case C: Data was already renamed away (absent) when the crash hit; restore
-// the backup.
 func TestCleanupStale_IntentRollback_DataAbsent(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -87,7 +83,6 @@ func TestCleanupStale_IntentRollback_DataAbsent(t *testing.T) {
 }
 
 // Case D: the crash hit before the rename, so Data is the pristine original and
-// there is no backup — recovery must leave Data untouched.
 func TestCleanupStale_IntentNoBackup_LeavesData(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -112,7 +107,6 @@ func TestCleanupStale_IntentNoBackup_LeavesData(t *testing.T) {
 }
 
 // A v1 sentinel (older build, no hash/identity) must still validate and recover
-// exactly as before — no capture, straight restore.
 func TestCleanupStale_V1Sentinel_BackCompat(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -143,7 +137,6 @@ func TestCleanupStale_V1Sentinel_BackCompat(t *testing.T) {
 }
 
 // A valid v2 sentinel with an OverwriteRoot: recovery must move new writes
-// (nlink==1 loose files, e.g. a save) into Overwrite before destroying the farm.
 func TestCleanupStale_CaptureAwareRecovery(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -154,7 +147,6 @@ func TestCleanupStale_CaptureAwareRecovery(t *testing.T) {
 	mustFile(t, filepath.Join(backupPath, "Skyrim.esm"), "master")
 	mustDir(t, overwriteRoot)
 	mustDir(t, dataPath)
-	// A brand-new loose file the game wrote during the crashed session (nlink==1).
 	mustFile(t, filepath.Join(dataPath, "Saves", "quicksave.ess"), "SAVEDATA")
 
 	s := &Sentinel{
@@ -189,7 +181,6 @@ func TestCleanupStale_CaptureAwareRecovery(t *testing.T) {
 }
 
 // Transient build siblings from an interrupted Apply must be reaped, and must
-// not block an otherwise-clean recovery.
 func TestCleanupStale_ReapsTransientSiblings(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -200,7 +191,6 @@ func TestCleanupStale_ReapsTransientSiblings(t *testing.T) {
 	mustDir(t, oldFarmPath(dataPath))
 	mustDir(t, backupPath)
 	mustFile(t, filepath.Join(backupPath, "Skyrim.esm"), "master")
-	// Empty Data alongside a backup -> the normal path removes Data and restores.
 	mustDir(t, dataPath)
 
 	if _, err := CleanupStale(dataPath); err != nil {
@@ -230,7 +220,6 @@ func TestValidateSentinel_V2HashMismatchRejected(t *testing.T) {
 	if err := ValidateSentinel(s); err != nil {
 		t.Fatalf("baseline should validate: %v", err)
 	}
-	// Tamper: flip a layer's enabled bit without updating the hash.
 	s.Layers[0].Enabled = false
 	if err := ValidateSentinel(s); !errors.Is(err, ErrSentinelInvalid) {
 		t.Errorf("tampered layers should be rejected, got %v", err)
@@ -238,7 +227,6 @@ func TestValidateSentinel_V2HashMismatchRejected(t *testing.T) {
 }
 
 // A successful Activate must commit: no intent marker left behind, and the
-// sentinel it writes is a valid v2 with identity populated.
 func TestActivate_CommitsNoIntentAndWritesV2(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -269,8 +257,6 @@ func TestActivate_CommitsNoIntentAndWritesV2(t *testing.T) {
 		t.Errorf("committed sentinel should validate: %v", err)
 	}
 }
-
-// helpers
 
 func mustDir(t *testing.T, p string) {
 	t.Helper()

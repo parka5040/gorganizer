@@ -13,11 +13,6 @@
 
 namespace gorganizer {
 
-// ---------------------------------------------------------------------------
-// Color math (WCAG contrast + blending). Kept file-local; the rest of the app
-// only ever sees resolved Palette colors.
-// ---------------------------------------------------------------------------
-
 static double lin(double c)
 {
     return c <= 0.03928 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
@@ -48,13 +43,11 @@ static QColor onAccent(const QColor& c)
     return relLum(c) > 0.45 ? QColor(0x1b, 0x1b, 0x1f) : QColor(0xff, 0xff, 0xff);
 }
 
-// Nudge `fg` lightness away from `bg` until it clears the WCAG ratio, so status
-// text stays readable in both light and dark forms.
 static QColor ensureContrast(QColor fg, const QColor& bg, double ratio)
 {
     if (contrast(fg, bg) >= ratio)
         return fg;
-    const bool darken = relLum(bg) > 0.4; // light bg -> darken the ink
+    const bool darken = relLum(bg) > 0.4;
     for (int i = 0; i < 100; ++i) {
         float h, s, l, a;
         fg.getHslF(&h, &s, &l, &a);
@@ -72,11 +65,6 @@ static QColor ensureContrast(QColor fg, const QColor& bg, double ratio)
     }
     return fg;
 }
-
-// ---------------------------------------------------------------------------
-// Palette construction: a handful of canonical anchors per theme; everything
-// else is derived so the two forms stay internally consistent.
-// ---------------------------------------------------------------------------
 
 static Palette buildPalette(bool dark, const char* window, const char* surface,
                             const char* input, const char* button, const char* border,
@@ -121,15 +109,8 @@ static Palette buildPalette(bool dark, const char* window, const char* surface,
     return p;
 }
 
-// ---------------------------------------------------------------------------
-// Theme registry. Canonical hex is anchored from each palette's upstream spec;
-// light companions for the dark-only palettes keep the hue and are tuned for
-// legibility on a light surface.
-// ---------------------------------------------------------------------------
-
 static const std::vector<Theme>& registry()
 {
-    //                     dark   window     surface    input      button     border     text       muted      accent     selBg      hover      success    warning    error      info
     static const std::vector<Theme> themes = {
         {"Neutral",
          buildPalette(false, "#ffffff", "#f4f5f7", "#ffffff", "#f4f5f7", "#d8dbe1", "#1f2328", "#57606a", "#2f7fe8", "#cfe3ff", "#eaecef", "#2da44e", "#bf8700", "#cf222e", "#2f7fe8"),
@@ -167,7 +148,6 @@ static const Theme& themeByName(const QString& name)
 {
     const auto& themes = registry();
     QString n = name.trimmed();
-    // Legacy aliases from older configs / the previous naming.
     if (n.isEmpty() || n.compare("Light", Qt::CaseInsensitive) == 0
         || n.compare("Default", Qt::CaseInsensitive) == 0)
         n = QStringLiteral("Neutral");
@@ -179,14 +159,8 @@ static const Theme& themeByName(const QString& name)
     for (const auto& t : themes)
         if (t.name.compare(n, Qt::CaseInsensitive) == 0)
             return t;
-    return themes.front(); // Neutral
+    return themes.front();
 }
-
-// ---------------------------------------------------------------------------
-// QSS generation. The template is a compiled-in string literal referenced by
-// apply(), so it can never be stripped by the linker — no Qt resource, no
-// Q_INIT_RESOURCE, no way for theming to silently fail to load.
-// ---------------------------------------------------------------------------
 
 static QString buildStyleSheet(const Palette& p)
 {
@@ -298,9 +272,6 @@ QToolTip { background-color: %window%; color: %text%; border: 1px solid %border%
     return s;
 }
 
-// Push the semantic Palette into QApplication's QPalette so Fusion sub-controls
-// (spinbox/scrollbar arrows, checkmarks, focus rings) and palette-based painters
-// (DownloadsRowDelegate reads Base/Window/Text/Mid) follow the active theme.
 static QPalette toQPalette(const Palette& p)
 {
     QPalette q;
@@ -334,10 +305,6 @@ static QPalette toQPalette(const Palette& p)
     return q;
 }
 
-// ---------------------------------------------------------------------------
-// ThemeManager
-// ---------------------------------------------------------------------------
-
 Palette ThemeManager::s_current;
 QString ThemeManager::s_currentMode;
 bool ThemeManager::s_applying = false;
@@ -346,7 +313,6 @@ ThemeManager::ThemeManager(QObject* parent) : QObject(parent) {}
 
 ThemeManager* ThemeManager::instance()
 {
-    // Intentionally leaked so it outlives QApplication teardown without warning.
     static ThemeManager* inst = new ThemeManager();
     return inst;
 }
@@ -364,22 +330,12 @@ QStringList ThemeManager::availableModes()
     return {"System", "Light", "Dark"};
 }
 
-QStringList ThemeManager::availableDarkVariants()
-{
-    return availableThemes();
-}
-
 bool ThemeManager::isKnownTheme(const QString& name)
 {
     for (const auto& t : registry())
         if (t.name.compare(name, Qt::CaseInsensitive) == 0)
             return true;
     return false;
-}
-
-bool ThemeManager::isDarkVariant(const QString& name)
-{
-    return isKnownTheme(name);
 }
 
 QString ThemeManager::canonicalThemeName(const QString& name)
@@ -411,8 +367,6 @@ void ThemeManager::applyMode(const QString& mode, const QString& themeName)
 
 void ThemeManager::apply(const QString& mode, const QString& themeName)
 {
-    // setColorScheme() below re-emits colorSchemeChanged, which main.cpp routes
-    // back into applyMode("system", ...). The guard makes that re-entry a no-op.
     if (s_applying)
         return;
     s_applying = true;
@@ -436,7 +390,6 @@ void ThemeManager::apply(const QString& mode, const QString& themeName)
 #endif
     } else {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
-        // Clear any prior override so colorScheme() reflects the real OS value.
         if (hints)
             hints->setColorScheme(Qt::ColorScheme::Unknown);
 #endif
@@ -454,4 +407,4 @@ void ThemeManager::apply(const QString& mode, const QString& themeName)
     emit instance()->themeChanged(s_current);
 }
 
-} // namespace gorganizer
+}

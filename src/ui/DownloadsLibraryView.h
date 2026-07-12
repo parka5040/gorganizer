@@ -12,7 +12,6 @@ namespace gorganizer {
 class DownloadsModel;
 class DownloadsRowDelegate;
 
-// Downloads tab: one row per archive with in-place status progression.
 class DownloadsLibraryView : public QWidget {
     Q_OBJECT
 public:
@@ -59,4 +58,4 @@ private:
     static void openNexusPage(const GrpcArchiveRow& row);
 };
 
-} // namespace gorganizer
+}

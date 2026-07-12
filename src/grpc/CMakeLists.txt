@@ -24,6 +24,7 @@ add_library(gorganizer_grpc STATIC
     ${PROTO_SRCS}
     ${GRPC_SRCS}
     GrpcClient.cpp
+    GrpcTypes.cpp
     GrpcWorker.cpp
 )
 
@@ -33,6 +34,7 @@ target_include_directories(gorganizer_grpc PUBLIC
 )
 
 target_link_libraries(gorganizer_grpc PUBLIC
+    gorganizer_core
     Qt6::Core
     PkgConfig::PROTOBUF
     PkgConfig::GRPC

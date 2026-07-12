@@ -4,32 +4,31 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/parka/gorganizer/internal/gamedef"
 )
 
-// ToolDefinition describes a script extender for a Bethesda game.
 type ToolDefinition struct {
-	ID            string
-	Name          string
-	LoaderExe     string
-	GameIDs       []string
-	DllPrefixes   []string
-	ExtraDlls     []string
-	LogName       string
-	MyGamesSubdir string
+	ID             string
+	Name           string
+	LoaderExe      string
+	InstallSubpath string
+	DllPrefixes    []string
+	ExtraDlls      []string
+	LogName        string
+	LogSubpath     string
+	MyGamesSubdir  string
 }
 
-// KnownTools is the registry of supported script extenders.
 var KnownTools = map[string]ToolDefinition{
 	"skse64": {
 		ID: "skse64", Name: "SKSE64", LoaderExe: "skse64_loader.exe",
-		GameIDs:       []string{"skyrimse"},
 		DllPrefixes:   []string{"skse64_"},
 		LogName:       "skse64.log",
 		MyGamesSubdir: "Skyrim Special Edition",
 	},
 	"skse": {
 		ID: "skse", Name: "SKSE", LoaderExe: "skse_loader.exe",
-		GameIDs:       []string{"skyrim"},
 		DllPrefixes:   []string{"skse_"},
 		ExtraDlls:     []string{"d3dx9_42.dll"},
 		LogName:       "skse.log",
@@ -37,7 +36,6 @@ var KnownTools = map[string]ToolDefinition{
 	},
 	"xnvse": {
 		ID: "xnvse", Name: "xNVSE", LoaderExe: "nvse_loader.exe",
-		GameIDs:       []string{"falloutnv", "ttw"},
 		DllPrefixes:   []string{"nvse_"},
 		ExtraDlls:     []string{"d3dx9_38.dll"},
 		LogName:       "nvse.log",
@@ -45,7 +43,6 @@ var KnownTools = map[string]ToolDefinition{
 	},
 	"fose": {
 		ID: "fose", Name: "FOSE", LoaderExe: "fose_loader.exe",
-		GameIDs:       []string{"fallout3"},
 		DllPrefixes:   []string{"fose_"},
 		ExtraDlls:     []string{"d3dx9_38.dll"},
 		LogName:       "fose.log",
@@ -53,14 +50,12 @@ var KnownTools = map[string]ToolDefinition{
 	},
 	"f4se": {
 		ID: "f4se", Name: "F4SE", LoaderExe: "f4se_loader.exe",
-		GameIDs:       []string{"fallout4"},
 		DllPrefixes:   []string{"f4se_"},
 		LogName:       "f4se.log",
 		MyGamesSubdir: "Fallout4",
 	},
 	"obse": {
 		ID: "obse", Name: "OBSE", LoaderExe: "obse_loader.exe",
-		GameIDs:       []string{"oblivion"},
 		DllPrefixes:   []string{"obse_"},
 		ExtraDlls:     []string{"d3dx9_27.dll", "d3dx9_9.dll"},
 		LogName:       "obse.log",
@@ -68,20 +63,49 @@ var KnownTools = map[string]ToolDefinition{
 	},
 	"sfse": {
 		ID: "sfse", Name: "SFSE", LoaderExe: "sfse_loader.exe",
-		GameIDs:       []string{"starfield"},
 		DllPrefixes:   []string{"sfse_"},
 		LogName:       "sfse.log",
 		MyGamesSubdir: "Starfield",
 	},
+	"obse64": {
+		ID: "obse64", Name: "OBSE64", LoaderExe: "obse64_loader.exe",
+		InstallSubpath: "OblivionRemastered/Binaries/Win64",
+		DllPrefixes:    []string{"obse64_"},
+		LogName:        "obse64.log",
+		LogSubpath:     "OBSE/Logs",
+		MyGamesSubdir:  "Oblivion Remastered",
+	},
 }
 
-// ScanNativeDlls returns filenames in gameInstallDir that should be forced native under Wine.
+// InstallDir returns the directory containing the loader and extender DLLs.
+func (t ToolDefinition) InstallDir(gameInstallDir string) string {
+	if t.InstallSubpath == "" {
+		return gameInstallDir
+	}
+	return filepath.Join(gameInstallDir, filepath.FromSlash(t.InstallSubpath))
+}
+
+// LoaderPath returns the absolute loader path for a game installation.
+func (t ToolDefinition) LoaderPath(gameInstallDir string) string {
+	return filepath.Join(t.InstallDir(gameInstallDir), t.LoaderExe)
+}
+
+// LoaderRelativePath returns the stable install-root-relative loader path.
+func (t ToolDefinition) LoaderRelativePath() string {
+	if t.InstallSubpath == "" {
+		return t.LoaderExe
+	}
+	return filepath.ToSlash(filepath.Join(filepath.FromSlash(t.InstallSubpath), t.LoaderExe))
+}
+
+// ScanNativeDlls returns filenames beside the loader that should be forced native under Wine.
 func (t ToolDefinition) ScanNativeDlls(gameInstallDir string) []string {
 	var out []string
 	seen := map[string]struct{}{}
+	toolDir := t.InstallDir(gameInstallDir)
 
 	if len(t.DllPrefixes) > 0 {
-		entries, err := os.ReadDir(gameInstallDir)
+		entries, err := os.ReadDir(toolDir)
 		if err == nil {
 			for _, e := range entries {
 				if e.IsDir() {
@@ -106,7 +130,7 @@ func (t ToolDefinition) ScanNativeDlls(gameInstallDir string) []string {
 	}
 
 	for _, extra := range t.ExtraDlls {
-		full := filepath.Join(gameInstallDir, extra)
+		full := filepath.Join(toolDir, extra)
 		if _, err := os.Stat(full); err != nil {
 			continue
 		}
@@ -136,15 +160,10 @@ func BuildDllOverrides(dlls []string) string {
 
 // DetectTool checks if any known tool's loader exe exists in the game directory.
 func DetectTool(gameInstallDir string, gameID string) (*ToolDefinition, bool) {
-	for _, tool := range KnownTools {
-		for _, gid := range tool.GameIDs {
-			if gid != gameID {
-				continue
-			}
-			loaderPath := filepath.Join(gameInstallDir, tool.LoaderExe)
-			if _, err := os.Stat(loaderPath); err == nil {
-				return &tool, true
-			}
+	for _, tool := range ToolsForGame(gameID) {
+		loaderPath := tool.LoaderPath(gameInstallDir)
+		if _, err := os.Stat(loaderPath); err == nil {
+			return &tool, true
 		}
 	}
 	return nil, false
@@ -152,13 +171,13 @@ func DetectTool(gameInstallDir string, gameID string) (*ToolDefinition, bool) {
 
 // ToolsForGame returns all known tools for a game ID.
 func ToolsForGame(gameID string) []ToolDefinition {
-	var result []ToolDefinition
-	for _, tool := range KnownTools {
-		for _, gid := range tool.GameIDs {
-			if gid == gameID {
-				result = append(result, tool)
-			}
-		}
+	g, ok := gamedef.ByID(gameID)
+	if !ok || g.ScriptExtenderToolID == "" {
+		return nil
 	}
-	return result
+	tool, ok := KnownTools[g.ScriptExtenderToolID]
+	if !ok {
+		return nil
+	}
+	return []ToolDefinition{tool}
 }

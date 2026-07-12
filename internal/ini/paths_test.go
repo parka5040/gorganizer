@@ -31,3 +31,23 @@ func TestDocumentsPath_ResolvesExistingPrefix(t *testing.T) {
 		t.Fatalf("parent of %s is not a directory: err=%v", got, err)
 	}
 }
+
+func TestExplicitCompatDataPaths(t *testing.T) {
+	compatData := filepath.Join(t.TempDir(), "steamapps", "compatdata", "489830")
+	docs, err := DocumentsPathAt(compatData, "Skyrim Special Edition")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDocs := filepath.Join(compatData, "pfx", "drive_c", "users", "steamuser", "My Documents", "My Games", "Skyrim Special Edition")
+	if docs != wantDocs {
+		t.Fatalf("DocumentsPathAt = %q, want %q", docs, wantDocs)
+	}
+	appData, err := AppDataLocalPathAt(compatData, "Skyrim Special Edition")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAppData := filepath.Join(compatData, "pfx", "drive_c", "users", "steamuser", "AppData", "Local", "Skyrim Special Edition")
+	if appData != wantAppData {
+		t.Fatalf("AppDataLocalPathAt = %q, want %q", appData, wantAppData)
+	}
+}

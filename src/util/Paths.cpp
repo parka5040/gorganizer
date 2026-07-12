@@ -46,4 +46,4 @@ std::filesystem::path steamRoot()
     return {};
 }
 
-} // namespace gorganizer::Paths
+}

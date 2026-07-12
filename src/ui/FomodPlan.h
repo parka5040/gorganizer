@@ -7,7 +7,6 @@
 
 namespace gorganizer {
 
-// One source-to-destination copy operation in a FOMOD install plan.
 struct FomodFile {
     QString source;
     QString destination;
@@ -68,7 +67,6 @@ struct FomodPlan {
     }
 };
 
-// Parses a FOMOD installer at the extract root.
 class FomodParser {
 public:
     static std::optional<FomodPlan> parse(const QString& extractRoot);
@@ -77,4 +75,4 @@ public:
     static void expandNestedFomods(const QString& extractRoot);
 };
 
-} // namespace gorganizer
+}

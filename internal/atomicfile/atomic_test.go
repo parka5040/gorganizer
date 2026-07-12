@@ -43,7 +43,6 @@ func TestWriteFile_OverwritesAtomically(t *testing.T) {
 	if string(got) != "v2-longer" {
 		t.Fatalf("content = %q, want v2-longer", got)
 	}
-	// No stray temp files should remain in the directory.
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 file, found %d: %v", len(entries), entries)
@@ -51,8 +50,6 @@ func TestWriteFile_OverwritesAtomically(t *testing.T) {
 }
 
 func TestWriteFile_LeavesNoTempOnBadDir(t *testing.T) {
-	// A non-existent directory makes CreateTemp fail; the destination and its
-	// parent must be untouched (nothing to clean up, no panic).
 	err := WriteFile(filepath.Join(t.TempDir(), "missing", "x.txt"), []byte("x"), 0644)
 	if err == nil {
 		t.Fatal("expected error writing into a missing directory")

@@ -22,13 +22,10 @@
 namespace gorganizer {
 
 namespace {
-// Status-text hues sourced from the active theme so they stay legible in both
-// light and dark. Transient messages are re-set on the next action, so they pick
-// up a theme change naturally.
 QString okHex() { return ThemeManager::currentPalette().successFg.name(); }
 QString errHex() { return ThemeManager::currentPalette().errorFg.name(); }
 QString warnHex() { return ThemeManager::currentPalette().warningFg.name(); }
-} // namespace
+}
 
 SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* parent)
     : QDialog(parent)
@@ -218,7 +215,7 @@ QString xdgDataHome()
     return QDir::homePath() + "/.local/share";
 }
 
-} // namespace
+}
 
 void SettingsDialog::onTestNxm()
 {
@@ -331,8 +328,6 @@ void SettingsDialog::onThemeChanged(const QString& name)
 {
     if (!m_config)
         return;
-    // Theme is decoupled from light/dark: pick the palette here, leave the
-    // light/dark axis to appearanceMode() (System follows the OS).
     m_config->setPreferredStyle(name);
     ThemeManager::applyMode(m_config->appearanceMode(), name);
 }
@@ -360,4 +355,4 @@ void SettingsDialog::onCollapsedSeparatorViewToggled(bool on)
     emit collapsedSeparatorViewChanged(on);
 }
 
-} // namespace gorganizer
+}

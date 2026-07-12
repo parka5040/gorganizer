@@ -1,9 +1,9 @@
 #include "ProfileSelectorWidget.h"
+#include "Dialogs.h"
 
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QInputDialog>
-#include <QMessageBox>
 
 namespace gorganizer {
 
@@ -87,7 +87,7 @@ void ProfileSelectorWidget::onProfilesListed(const std::vector<GrpcProfile>& pro
     emit profileChanged(m_combo->currentData().toString());
 }
 
-void ProfileSelectorWidget::onProfileCreated(const GrpcProfile& /*profile*/)
+void ProfileSelectorWidget::onProfileCreated(const GrpcProfile&)
 {
     if (!m_gameId.isEmpty())
         m_grpc->listProfiles(m_gameId);
@@ -99,7 +99,7 @@ void ProfileSelectorWidget::onProfileDeleted()
         m_grpc->listProfiles(m_gameId);
 }
 
-void ProfileSelectorWidget::onComboChanged(int /*index*/)
+void ProfileSelectorWidget::onComboChanged(int)
 {
     emit profileChanged(m_combo->currentData().toString());
 }
@@ -128,10 +128,8 @@ void ProfileSelectorWidget::onDeleteClicked()
     if (current.isEmpty())
         return;
 
-    auto reply = QMessageBox::question(this, "Delete Profile",
-                                        QString("Delete profile \"%1\"?\n\nThis cannot be undone.").arg(current),
-                                        QMessageBox::Yes | QMessageBox::No);
-    if (reply != QMessageBox::Yes)
+    if (!dialogs::confirm(this, "Delete Profile",
+                          QString("Delete profile \"%1\"?\n\nThis cannot be undone.").arg(current)))
         return;
 
     m_grpc->deleteProfile(m_gameId, current);
@@ -155,9 +153,6 @@ void ProfileSelectorWidget::onCopyClicked()
         return;
 
     m_grpc->createProfile(m_gameId, name.trimmed());
-
-    // TODO: After profileCreated fires, copy modlist from source to new profile.
-    // This requires sequencing two RPCs which is better done with a CopyProfile RPC.
 }
 
-} // namespace gorganizer
+}

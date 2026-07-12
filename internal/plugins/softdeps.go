@@ -11,7 +11,6 @@ import (
 	"time"
 )
 
-// V3DepRangesFields are the fields softdeps needs from GetModFileDependencyRanges.
 type V3DepRangesFields struct {
 	Definitions []V3DepDefinitionFields
 }
@@ -26,14 +25,12 @@ type V3DepRangeFields struct {
 	TargetModSlug string
 }
 
-// V3Adapter narrows a v3 client to what softdeps needs (mockable for tests).
 type V3Adapter interface {
 	ResolveGlobalFileID(ctx context.Context, gameDomain, gameScopedID string) (string, error)
 	FetchDependencyRanges(ctx context.Context, globalFileID string) (V3DepRangesFields, error)
 	RateLimitRemaining() (daily, hourly int)
 }
 
-// SoftDepRequest queues one plugin's soft-dep lookup.
 type SoftDepRequest struct {
 	Filename   string
 	GameDomain string
@@ -42,14 +39,12 @@ type SoftDepRequest struct {
 	FileID     int
 }
 
-// SoftDepResult is one plugin's resolved soft-dep status.
 type SoftDepResult struct {
 	Filename string
 	Issues   []DepIssue
 	Err      error
 }
 
-// SoftDepFetcher resolves V3 soft dependencies, caching global-file-ids and dep-range responses.
 type SoftDepFetcher struct {
 	resolver V3Adapter
 	cacheDir string

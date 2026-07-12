@@ -3,29 +3,28 @@ package daemon
 import (
 	"sync"
 
-	"github.com/parka/gorganizer/internal/ipc"
+	"github.com/parka/gorganizer/internal/dto"
 )
 
 type statusCoalescer struct {
 	mu     sync.Mutex
 	cond   *sync.Cond
-	latest map[string]ipc.StatusEventResult
+	latest map[string]dto.StatusEventResult
 	order  []string
-	sticky []ipc.StatusEventResult
+	sticky []dto.StatusEventResult
 	closed bool
 }
 
 func newStatusCoalescer() *statusCoalescer {
 	c := &statusCoalescer{
-		latest: make(map[string]ipc.StatusEventResult),
+		latest: make(map[string]dto.StatusEventResult),
 	}
 	c.cond = sync.NewCond(&c.mu)
 	return c
 }
 
 // Push inserts or updates an event in the coalescer. Never blocks beyond
-// a single mutex acquisition.
-func (c *statusCoalescer) Push(evt ipc.StatusEventResult) {
+func (c *statusCoalescer) Push(evt dto.StatusEventResult) {
 	id, terminal, coalescable := coalesceKey(evt)
 
 	c.mu.Lock()
@@ -55,8 +54,7 @@ func (c *statusCoalescer) Push(evt ipc.StatusEventResult) {
 }
 
 // Drain blocks until an event is available and returns it. Returns
-// ok=false once the coalescer is closed AND drained.
-func (c *statusCoalescer) Drain() (ipc.StatusEventResult, bool) {
+func (c *statusCoalescer) Drain() (dto.StatusEventResult, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for {
@@ -73,14 +71,13 @@ func (c *statusCoalescer) Drain() (ipc.StatusEventResult, bool) {
 			return evt, true
 		}
 		if c.closed {
-			return ipc.StatusEventResult{}, false
+			return dto.StatusEventResult{}, false
 		}
 		c.cond.Wait()
 	}
 }
 
 // Close wakes all Drain callers and refuses further Pushes. Any events
-// still buffered at Close time are delivered before Drain returns false.
 func (c *statusCoalescer) Close() {
 	c.mu.Lock()
 	c.closed = true
@@ -88,7 +85,7 @@ func (c *statusCoalescer) Close() {
 	c.mu.Unlock()
 }
 
-func coalesceKey(evt ipc.StatusEventResult) (string, bool, bool) {
+func coalesceKey(evt dto.StatusEventResult) (string, bool, bool) {
 	if vs := evt.VFSStatus; vs != nil {
 		return "vfs:" + vs.GameID, false, true
 	}

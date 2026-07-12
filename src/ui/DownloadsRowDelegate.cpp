@@ -13,8 +13,6 @@ DownloadsRowDelegate::DownloadsRowDelegate(QObject* parent)
 {
 }
 
-// Phase chip/progress hues resolve to semantic status tokens so they track the
-// active theme. Uninstalled/unknown fall back to the (theme-synced) Mid role.
 static QColor phaseColor(DownloadPhase phase, bool merged, const Palette& p)
 {
     if (merged && phase == DownloadPhase::Installed)
@@ -126,4 +124,4 @@ QSize DownloadsRowDelegate::sizeHint(const QStyleOptionViewItem& option,
     return sz;
 }
 
-} // namespace gorganizer
+}

@@ -153,12 +153,8 @@ void readInstallStep(QXmlStreamReader& xml, FomodStep& step)
     }
 }
 
-} // namespace
+}
 
-// Read an XML file as a QString, sniffing UTF-16 LE/BE BOMs. FOMOD authoring
-// tools (notably FOMOD Creation Tool on Windows) often emit UTF-16 without an
-// <?xml encoding="..."?> declaration; QXmlStreamReader fed a QIODevice in that
-// case assumes UTF-8 and fails. Decoding up front sidesteps that.
 namespace {
 QString readXmlAsString(const QString& path)
 {
@@ -216,7 +212,7 @@ void readLegacyInfo(const QString& fomodDir, FomodPlan& plan)
         }
     }
 }
-} // namespace
+}
 
 void FomodParser::expandNestedFomods(const QString& extractRoot)
 {
@@ -326,4 +322,4 @@ std::optional<FomodPlan> FomodParser::parse(const QString& extractRoot)
     return plan;
 }
 
-} // namespace gorganizer
+}

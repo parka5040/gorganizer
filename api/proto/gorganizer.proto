@@ -173,6 +173,9 @@ service Gorganizer {
   rpc DetectExecutables(DetectExecutablesRequest) returns (DetectExecutablesResponse);
   rpc LaunchExecutable(LaunchExecutableRequest) returns (LaunchExecutableResponse);
   rpc CancelExecutable(CancelExecutableRequest) returns (CancelExecutableResponse);
+  rpc GetManagedToolStatus(GetManagedToolStatusRequest) returns (ManagedToolStatus);
+  rpc InstallManagedTool(InstallManagedToolRequest) returns (ManagedToolStatus);
+  rpc RollbackManagedTool(RollbackManagedToolRequest) returns (ManagedToolStatus);
 
   rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
   // Lightweight, non-streaming readiness probe used by the splash screen.
@@ -197,6 +200,23 @@ service Gorganizer {
   // natural-discovery order. Canonical DLC ESM positions are preserved
   // regardless of override (engine requires them in fixed order).
   rpc SetPluginOrder(SetPluginOrderRequest) returns (SetPluginOrderResponse);
+
+  // Persist the complete ordered activation state for a profile. This is the
+  // authoritative mutation used by current clients; SetPluginOrder remains
+  // for backward compatibility with order-only clients.
+  rpc SetPluginLoadout(SetPluginLoadoutRequest) returns (SetPluginLoadoutResponse);
+
+  // --- Instance export / import ---
+  //
+  // ExportInstance streams a per-game snapshot (selected mods, profiles,
+  // optionally the Overwrite layer and game settings) into a tar+zstd
+  // archive at output_path. PreviewImport reads only the manifest from an
+  // archive and reports per-item collisions against the target instance.
+  // ImportInstance applies the archive under a collision policy, staging
+  // each mod before an atomic rename into ModsDir.
+  rpc ExportInstance(ExportInstanceRequest) returns (stream TransferEvent);
+  rpc PreviewImport(PreviewImportRequest) returns (PreviewImportResponse);
+  rpc ImportInstance(ImportInstanceRequest) returns (stream TransferEvent);
 }
 
 // --- Game messages ---
@@ -1177,6 +1197,19 @@ message SetPluginOrderRequest {
 
 message SetPluginOrderResponse {}
 
+message PluginLoadoutEntry {
+  string filename = 1;
+  bool enabled = 2;
+}
+
+message SetPluginLoadoutRequest {
+  string game_id = 1;
+  string profile_name = 2;
+  repeated PluginLoadoutEntry plugins = 3;
+}
+
+message SetPluginLoadoutResponse {}
+
 // DependencyWarning is one entry routed to the Activity Log. Severity is
 // implied by kind (absent / out-of-order → error; disabled / soft → warning).
 message DependencyWarning {
@@ -1198,6 +1231,12 @@ message Executable {
   bool sanitize_env = 8;
   repeated string extra_rw_paths = 9;
   bool auto_detected = 10;
+  string tool_id = 11;
+  string runner = 12;
+  map<string, string> environment = 13;
+  int32 prefix_app_id = 14;
+  string output_policy = 15;
+  string selected_input = 16;
 }
 
 message ListExecutablesRequest { string game_id = 1; }
@@ -1220,6 +1259,12 @@ message DetectedExecutable {
   string exe_path = 2;
   bool needs_vfs_mounted = 3;
   string capture_output_to_mod = 4;
+  string tool_id = 5;
+  string runner = 6;
+  int32 prefix_app_id = 7;
+  string output_policy = 8;
+  bool extra_rw_scratch = 9;
+  repeated string default_args = 10;
 }
 message DetectExecutablesResponse { repeated DetectedExecutable detected = 1; }
 
@@ -1227,6 +1272,7 @@ message LaunchExecutableRequest {
   string game_id = 1;
   string exec_id = 2;
   string profile_name = 3;
+  bool auto_sort = 4;
 }
 message LaunchExecutableResponse {
   int32 pid = 1;
@@ -1235,3 +1281,106 @@ message LaunchExecutableResponse {
 
 message CancelExecutableRequest { string run_id = 1; }
 message CancelExecutableResponse {}
+
+message ManagedToolStatus {
+  string tool_id = 1;
+  bool installed = 2;
+  string active_version = 3;
+  string previous_version = 4;
+  string executable_path = 5;
+  string update_available = 6;
+}
+
+message GetManagedToolStatusRequest { string tool_id = 1; }
+message InstallManagedToolRequest { string tool_id = 1; }
+message RollbackManagedToolRequest { string tool_id = 1; }
+
+// ---- Instance export / import ----
+
+// TransferCollisionPolicy decides what happens when an imported mod folder
+// or profile name already exists in the target instance. ABORT fails the
+// whole import before any write; the others resolve per item.
+enum TransferCollisionPolicy {
+  TRANSFER_POLICY_ABORT = 0;
+  TRANSFER_POLICY_SKIP = 1;
+  TRANSFER_POLICY_RENAME = 2;
+  TRANSFER_POLICY_OVERWRITE = 3;
+}
+
+message ExportInstanceRequest {
+  string game_id = 1;
+  string output_path = 2;
+  repeated string mod_folders = 3;    // empty = all installed mods
+  repeated string profile_names = 4;  // empty = all profiles
+  bool include_overwrite = 5;
+  bool include_game_settings = 6;
+}
+
+message PreviewImportRequest {
+  string game_id = 1;
+  string archive_path = 2;
+}
+
+message TransferModEntry {
+  string folder = 1;
+  string name = 2;
+  int32 file_count = 3;
+  int64 total_bytes = 4;
+  int32 nexus_mod_id = 5;
+  int32 nexus_file_id = 6;
+  // True when a mod folder with this name already exists in the target.
+  bool collision = 7;
+}
+
+message TransferProfileEntry {
+  string name = 1;
+  // True when a profile with this name already exists in the target.
+  bool collision = 2;
+}
+
+message PreviewImportResponse {
+  int32 schema_version = 1;
+  string gorganizer_version = 2;
+  string game_id = 3;
+  string exported_at = 4;             // RFC3339
+  repeated TransferModEntry mods = 5;
+  repeated TransferProfileEntry profiles = 6;
+  bool includes_overwrite = 7;
+  bool includes_game_settings = 8;
+}
+
+message ImportInstanceRequest {
+  string game_id = 1;
+  string archive_path = 2;
+  TransferCollisionPolicy policy = 3;
+  // Per-mod-folder policy overrides, keyed by the archive-side folder name.
+  map<string, TransferCollisionPolicy> mod_policy_overrides = 4;
+  repeated string mod_folders = 5;    // empty = all mods in the archive
+  repeated string profile_names = 6;  // empty = all profiles in the archive
+}
+
+message TransferProgress {
+  string step = 1;
+  string current_item = 2;
+  int32 items_done = 3;
+  int32 items_total = 4;
+  int64 bytes_done = 5;
+  int64 bytes_total = 6;
+}
+
+message TransferSummary {
+  int32 mods_exported = 1;
+  int32 mods_imported = 2;
+  int32 profiles_transferred = 3;
+  repeated string skipped = 4;
+  // original name → name actually used (RENAME policy).
+  map<string, string> renamed = 5;
+  string output_path = 6;
+}
+
+message TransferEvent {
+  oneof event {
+    TransferProgress progress = 1;
+    TransferSummary summary = 2;
+  }
+}

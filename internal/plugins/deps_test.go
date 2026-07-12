@@ -184,3 +184,23 @@ func TestAnalyzeHardDeps_ExtraMastersAcceptedAsImplicit(t *testing.T) {
 		t.Errorf("extraMasters should suppress missing-master, got %#v", out[0].HardIssues)
 	}
 }
+
+func TestAnalyzeHardDeps_DisabledDiscoveredMaster(t *testing.T) {
+	dir := t.TempDir()
+	masterDir := filepath.Join(dir, "Master")
+	patchDir := filepath.Join(dir, "Patch")
+	writePluginFile(t, masterDir, "Optional.esm", nil, false)
+	writePluginFile(t, patchDir, "Patch.esp", []string{"Optional.esm"}, false)
+
+	ordered := []Plugin{
+		{Filename: "Optional.esm", Ext: ".esm", Source: masterDir, Enabled: false},
+		{Filename: "Patch.esp", Ext: ".esp", Source: patchDir, Enabled: true},
+	}
+	out := AnalyzeHardDeps(context.Background(), NewHeaderCache(0), ordered, nil, Spec{}, nil)
+	if findIssue(out, "Patch.esp", DepMasterDisabled) == nil {
+		t.Fatalf("expected disabled-master issue, got %#v", out)
+	}
+	if status := findStatus(out, "Optional.esm"); status == nil || len(status.HardIssues) != 0 {
+		t.Fatalf("disabled plugin should not be analyzed: %#v", status)
+	}
+}

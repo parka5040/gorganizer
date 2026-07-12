@@ -5,44 +5,41 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/parka/gorganizer/internal/config"
+	"github.com/parka/gorganizer/internal/gamedef"
+	"github.com/parka/gorganizer/internal/tools"
 )
 
 var (
-	prefixRuntimeInstalled   = map[int]bool{}
+	prefixRuntimeInstalled   = map[string]bool{}
 	prefixRuntimeInstalledMu sync.Mutex
 )
 
-var prefixRuntimePackages = map[string][]string{
-	"falloutnv": {"vcrun2022", "d3dx9", "xact"},
-	"fallout3":  {"vcrun2022", "d3dx9", "xact"},
-	"oblivion":  {"vcrun2022", "d3dx9", "xact"},
-	"skyrim":    {"vcrun2022", "d3dx9"},
-	"skyrimse":  {"vcrun2022"},
-	"fallout4":  {"vcrun2022"},
-	"starfield": {"vcrun2022"},
-}
-
 // ensurePrefixRuntime runs protontricks against the game's Proton
-// prefix to install the Windows redistributables heavy mod loadouts
-func (d *Daemon) ensurePrefixRuntime(gameID string, gc config.GameConfig) {
-	pkgs, ok := prefixRuntimePackages[gameID]
-	if !ok || len(pkgs) == 0 {
+func (ls *LaunchService) ensurePrefixRuntime(gameID string, gc config.GameConfig) {
+	g, ok := gamedef.ByID(gameID)
+	if !ok || len(g.RedistPackages) == 0 {
 		return
 	}
+	pkgs := g.RedistPackages
 
 	appID := gc.SteamAppID
 	if appID == 0 {
 		return
 	}
+	compatData, err := tools.ResolveCompatDataPath(&gc, 0)
+	if err != nil {
+		slog.Warn("could not resolve Proton prefix for runtime setup", "game", gameID, "err", err)
+		return
+	}
 
 	prefixRuntimeInstalledMu.Lock()
-	if prefixRuntimeInstalled[appID] {
+	if prefixRuntimeInstalled[compatData] {
 		prefixRuntimeInstalledMu.Unlock()
 		return
 	}
@@ -54,13 +51,14 @@ func (d *Daemon) ensurePrefixRuntime(gameID string, gc config.GameConfig) {
 		return
 	}
 
-	script := "winetricks -q " + joinPkgs(pkgs)
-	args := []string{"--no-bwrap", "-c", script, strconv.Itoa(appID)}
+	args := []string{"--no-bwrap", fmt.Sprintf("%d", appID), "-q"}
+	args = append(args, pkgs...)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "protontricks", args...)
+	cmd.Env = append(os.Environ(), "STEAM_COMPAT_DATA_PATH="+compatData)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -78,7 +76,7 @@ func (d *Daemon) ensurePrefixRuntime(gameID string, gc config.GameConfig) {
 	}
 
 	prefixRuntimeInstalledMu.Lock()
-	prefixRuntimeInstalled[appID] = true
+	prefixRuntimeInstalled[compatData] = true
 	prefixRuntimeInstalledMu.Unlock()
 
 	slog.Info("Proton prefix runtime ready",
@@ -86,7 +84,6 @@ func (d *Daemon) ensurePrefixRuntime(gameID string, gc config.GameConfig) {
 }
 
 // joinPkgs is a local space-join so we don't pull in strings just for
-// one call inside prefix_runtime.
 func joinPkgs(pkgs []string) string {
 	out := ""
 	for i, p := range pkgs {
@@ -99,7 +96,6 @@ func joinPkgs(pkgs []string) string {
 }
 
 // trimForLog clamps a winetricks buffer to something that fits comfortably
-// in a single slog line while still being diagnostic.
 func trimForLog(s string) string {
 	const max = 1024
 	if len(s) <= max {

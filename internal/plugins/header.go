@@ -9,7 +9,6 @@ import (
 	"os"
 )
 
-// Header is the decoded TES4 record header (master list + light-master flag).
 type Header struct {
 	Masters []string
 	IsLight bool

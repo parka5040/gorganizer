@@ -1,7 +1,6 @@
 package download
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,11 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/config"
+	"github.com/parka/gorganizer/internal/kvfile"
 )
 
-// IndexEntry is a single archive row in the per-game Downloads index.
 type IndexEntry struct {
 	Path        string
 	ModID       int
@@ -23,12 +21,10 @@ type IndexEntry struct {
 	Uninstalled bool
 }
 
-// DownloadsIndex is the in-memory form of {DownloadsDir}/metadata.yaml.
 type DownloadsIndex struct {
 	Archives []IndexEntry
 }
 
-// ArchiveSidecar is the per-archive Nexus metadata written as <archive>.meta.yaml.
 type ArchiveSidecar struct {
 	ModID           int
 	ModName         string
@@ -77,29 +73,26 @@ func LoadIndex(gameID string) (*DownloadsIndex, error) {
 
 	idx := &DownloadsIndex{}
 	var cur *IndexEntry
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		raw := scanner.Text()
-		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") || line == "archives:" {
+	sc := kvfile.NewScanner(f)
+	for sc.Scan() {
+		l := sc.Line()
+		if l.Text == "archives:" {
 			continue
 		}
-		if strings.HasPrefix(line, "- ") {
+		if l.IsListItem {
 			if cur != nil {
 				idx.Archives = append(idx.Archives, *cur)
 			}
 			cur = &IndexEntry{}
-			line = strings.TrimPrefix(line, "- ")
 		}
 		if cur == nil {
 			continue
 		}
-		k, v, ok := strings.Cut(line, ":")
+		k, v, ok := kvfile.CutKV(l.Item)
 		if !ok {
 			continue
 		}
-		k = strings.TrimSpace(k)
-		v = strings.TrimSpace(strings.Trim(strings.TrimSpace(v), `"`))
+		v = kvfile.UnquoteValue(v)
 		switch k {
 		case "path":
 			cur.Path = v
@@ -116,7 +109,7 @@ func LoadIndex(gameID string) (*DownloadsIndex, error) {
 	if cur != nil {
 		idx.Archives = append(idx.Archives, *cur)
 	}
-	return idx, scanner.Err()
+	return idx, sc.Err()
 }
 
 // SaveIndex writes the index atomically.
@@ -127,18 +120,18 @@ func SaveIndex(gameID string, idx *DownloadsIndex) error {
 	}
 	path := filepath.Join(dir, "metadata.yaml")
 
-	var b strings.Builder
-	b.WriteString("# Gorganizer downloads index — auto-generated\n")
-	b.WriteString("archives:\n")
+	var w kvfile.Writer
+	w.Comment("Gorganizer downloads index — auto-generated")
+	w.ListHeader("archives")
 	for _, e := range idx.Archives {
-		fmt.Fprintf(&b, "  - path: %q\n", e.Path)
-		fmt.Fprintf(&b, "    mod_id: %d\n", e.ModID)
-		fmt.Fprintf(&b, "    file_id: %d\n", e.FileID)
-		fmt.Fprintf(&b, "    hidden: %t\n", e.Hidden)
-		fmt.Fprintf(&b, "    uninstalled: %t\n", e.Uninstalled)
+		w.ItemQuoted("path", e.Path)
+		w.ContInt("mod_id", e.ModID)
+		w.ContInt("file_id", e.FileID)
+		w.ContBool("hidden", e.Hidden)
+		w.ContBool("uninstalled", e.Uninstalled)
 	}
 
-	return atomicfile.WriteFile(path, []byte(b.String()), 0644)
+	return w.WriteAtomic(path, 0644)
 }
 
 // UpsertEntry adds or replaces an entry by path.
@@ -250,23 +243,23 @@ func SaveSidecar(archivePath string, s ArchiveSidecar, at time.Time) error {
 	if s.DownloadedAt == "" {
 		s.DownloadedAt = at.UTC().Format(time.RFC3339)
 	}
-	var b strings.Builder
-	b.WriteString("# Gorganizer archive metadata — auto-generated\n")
-	fmt.Fprintf(&b, "mod_id: %d\n", s.ModID)
-	fmt.Fprintf(&b, "mod_name: %q\n", s.ModName)
-	fmt.Fprintf(&b, "game_domain: %q\n", s.GameDomain)
-	fmt.Fprintf(&b, "thumbnail_url: %q\n", s.ThumbnailURL)
-	fmt.Fprintf(&b, "adult_content: %t\n", s.AdultContent)
-	fmt.Fprintf(&b, "file_id: %d\n", s.FileID)
-	fmt.Fprintf(&b, "file_name: %q\n", s.FileName)
-	fmt.Fprintf(&b, "file_archive_name: %q\n", s.FileArchiveName)
-	fmt.Fprintf(&b, "version: %q\n", s.Version)
-	fmt.Fprintf(&b, "category: %q\n", s.Category)
-	fmt.Fprintf(&b, "uploaded_at: %q\n", s.UploadedAt)
-	fmt.Fprintf(&b, "downloaded_at: %q\n", s.DownloadedAt)
-	fmt.Fprintf(&b, "size_bytes: %d\n", s.SizeBytes)
+	var w kvfile.Writer
+	w.Comment("Gorganizer archive metadata — auto-generated")
+	w.KVInt("mod_id", s.ModID)
+	w.KVQuoted("mod_name", s.ModName)
+	w.KVQuoted("game_domain", s.GameDomain)
+	w.KVQuoted("thumbnail_url", s.ThumbnailURL)
+	w.KVBool("adult_content", s.AdultContent)
+	w.KVInt("file_id", s.FileID)
+	w.KVQuoted("file_name", s.FileName)
+	w.KVQuoted("file_archive_name", s.FileArchiveName)
+	w.KVQuoted("version", s.Version)
+	w.KVQuoted("category", s.Category)
+	w.KVQuoted("uploaded_at", s.UploadedAt)
+	w.KVQuoted("downloaded_at", s.DownloadedAt)
+	w.KVInt64("size_bytes", s.SizeBytes)
 
-	return atomicfile.WriteFile(SidecarPath(archivePath), []byte(b.String()), 0644)
+	return w.WriteAtomic(SidecarPath(archivePath), 0644)
 }
 
 // LoadSidecar reads the per-archive .meta.yaml.
@@ -279,18 +272,13 @@ func LoadSidecar(archivePath string) (*ArchiveSidecar, error) {
 	defer f.Close()
 
 	s := &ArchiveSidecar{}
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		k, v, ok := strings.Cut(line, ":")
+	sc := kvfile.NewScanner(f)
+	for sc.Scan() {
+		k, v, ok := kvfile.CutKV(sc.Line().Text)
 		if !ok {
 			continue
 		}
-		k = strings.TrimSpace(k)
-		v = strings.TrimSpace(strings.Trim(strings.TrimSpace(v), `"`))
+		v = kvfile.UnquoteValue(v)
 		switch k {
 		case "mod_id":
 			s.ModID, _ = strconv.Atoi(v)
@@ -320,7 +308,7 @@ func LoadSidecar(archivePath string) (*ArchiveSidecar, error) {
 			s.SizeBytes, _ = strconv.ParseInt(v, 10, 64)
 		}
 	}
-	return s, scanner.Err()
+	return s, sc.Err()
 }
 
 // SanitizeForFolder makes a Nexus mod name safe to use as a directory name.

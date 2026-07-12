@@ -2,6 +2,7 @@
 #include "GameDetector.h"
 #include "DirectoryManager.h"
 #include "ThemeManager.h"
+#include "Dialogs.h"
 
 #include <QLabel>
 #include <QListWidget>
@@ -11,7 +12,6 @@
 #include <QPushButton>
 #include <QLineEdit>
 #include <QFormLayout>
-#include <QMessageBox>
 #include <QMenu>
 #include <QDesktopServices>
 #include <QUrl>
@@ -59,7 +59,7 @@ bool saveNexusApiKeyToConfig(const QString& apiKey)
     return true;
 }
 
-} // anonymous namespace
+}
 
 namespace gorganizer {
 
@@ -68,7 +68,7 @@ namespace {
 QString okHex() { return ThemeManager::currentPalette().successFg.name(); }
 QString errHex() { return ThemeManager::currentPalette().errorFg.name(); }
 QString mutedHex() { return ThemeManager::currentPalette().textMuted.name(); }
-} // namespace
+}
 
 SetupWizard::SetupWizard(AppConfig& config, QWidget* parent)
     : QWizard(parent)
@@ -142,7 +142,7 @@ QWizardPage* SetupWizard::createSteamDetectionPage()
     auto* btnRow = new QHBoxLayout;
     m_manualLocateBtn = new QPushButton("Manually locate game executable...");
     m_manualLocateBtn->setToolTip(
-        "Pick the .exe file for a Bethesda game (e.g. SkyrimSE.exe, Fallout4.exe). "
+        "Pick the .exe file for a Bethesda game (e.g. SkyrimSE.exe, Fallout4.exe, OblivionRemastered.exe). "
         "Use this for Lutris, GOG, or any install Steam does not recognize. "
         "Steam is still required for launching.");
     btnRow->addWidget(m_manualLocateBtn);
@@ -159,17 +159,18 @@ QWizardPage* SetupWizard::createSteamDetectionPage()
 
         auto detected = GameDetector::fromExecutable(std::filesystem::path(path.toStdString()));
         if (!detected) {
-            QMessageBox::warning(this, "Unrecognized Executable",
+            dialogs::warn(this, "Unrecognized Executable",
                 "That file doesn't match any known Bethesda game. "
                 "Expected one of: Morrowind.exe, Oblivion.exe, TESV.exe, SkyrimSE.exe, "
-                "Fallout3.exe, FalloutNV.exe, Fallout4.exe, Starfield.exe.");
+                "Fallout3.exe, FalloutNV.exe, Fallout4.exe, Starfield.exe, OblivionRemastered.exe, "
+                "OblivionRemastered-Win64-Shipping.exe.");
             return;
         }
 
         bool exists = std::any_of(m_detectedGames.begin(), m_detectedGames.end(),
             [&](const GameInfo& g) { return g.appId == detected->appId; });
         if (exists) {
-            QMessageBox::information(this, "Already detected",
+            dialogs::info(this, "Already detected",
                 QString("%1 is already in the list.").arg(detected->name));
             return;
         }
@@ -488,4 +489,4 @@ QWizardPage* SetupWizard::createFinishPage()
     return page;
 }
 
-} // namespace gorganizer
+}

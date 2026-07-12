@@ -1,22 +1,19 @@
 package download
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/config"
+	"github.com/parka/gorganizer/internal/kvfile"
 )
 
 const ledgerFilename = "inflight.yaml"
 
-// LedgerStatus is the on-disk status string for a download.
 type LedgerStatus string
 
 const (
@@ -27,7 +24,6 @@ const (
 	LedgerFailed      LedgerStatus = "failed"
 )
 
-// LedgerEntry is one durable row in inflight.yaml.
 type LedgerEntry struct {
 	ID             string
 	NXMURI         string
@@ -83,30 +79,27 @@ func LoadLedger(gameID string) ([]LedgerEntry, error) {
 
 	var out []LedgerEntry
 	var cur *LedgerEntry
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		raw := scanner.Text()
-		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") || line == "inflight:" {
+	sc := kvfile.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		l := sc.Line()
+		if l.Text == "inflight:" {
 			continue
 		}
-		if strings.HasPrefix(line, "- ") {
+		if l.IsListItem {
 			if cur != nil {
 				out = append(out, *cur)
 			}
 			cur = &LedgerEntry{GameID: gameID}
-			line = strings.TrimPrefix(line, "- ")
 		}
 		if cur == nil {
 			continue
 		}
-		k, v, ok := strings.Cut(line, ":")
+		k, v, ok := kvfile.CutKV(l.Item)
 		if !ok {
 			continue
 		}
-		k = strings.TrimSpace(k)
-		v = strings.TrimSpace(strings.Trim(strings.TrimSpace(v), `"`))
+		v = kvfile.UnquoteValue(v)
 		switch k {
 		case "id":
 			cur.ID = v
@@ -141,7 +134,7 @@ func LoadLedger(gameID string) ([]LedgerEntry, error) {
 	if cur != nil {
 		out = append(out, *cur)
 	}
-	return out, scanner.Err()
+	return out, sc.Err()
 }
 
 func SaveLedger(gameID string, entries []LedgerEntry) error {
@@ -151,31 +144,31 @@ func SaveLedger(gameID string, entries []LedgerEntry) error {
 	}
 	path := filepath.Join(dir, ledgerFilename)
 
-	var b strings.Builder
-	b.WriteString("# Gorganizer in-flight downloads ledger — auto-generated\n")
-	b.WriteString("inflight:\n")
+	var w kvfile.Writer
+	w.Comment("Gorganizer in-flight downloads ledger — auto-generated")
+	w.ListHeader("inflight")
 	for _, e := range entries {
-		fmt.Fprintf(&b, "  - id: %q\n", e.ID)
-		fmt.Fprintf(&b, "    nxm_uri: %q\n", e.NXMURI)
-		fmt.Fprintf(&b, "    game_slug: %q\n", e.GameSlug)
-		fmt.Fprintf(&b, "    mod_id: %d\n", e.ModID)
-		fmt.Fprintf(&b, "    file_id: %d\n", e.FileID)
-		fmt.Fprintf(&b, "    archive_rel: %q\n", e.ArchiveRelPath)
-		fmt.Fprintf(&b, "    bytes_done: %d\n", e.BytesDone)
-		fmt.Fprintf(&b, "    bytes_total: %d\n", e.BytesTotal)
+		w.ItemQuoted("id", e.ID)
+		w.ContQuoted("nxm_uri", e.NXMURI)
+		w.ContQuoted("game_slug", e.GameSlug)
+		w.ContInt("mod_id", e.ModID)
+		w.ContInt("file_id", e.FileID)
+		w.ContQuoted("archive_rel", e.ArchiveRelPath)
+		w.ContInt64("bytes_done", e.BytesDone)
+		w.ContInt64("bytes_total", e.BytesTotal)
 		if !e.StartedAt.IsZero() {
-			fmt.Fprintf(&b, "    started_at: %q\n", e.StartedAt.UTC().Format(time.RFC3339Nano))
+			w.ContQuoted("started_at", e.StartedAt.UTC().Format(time.RFC3339Nano))
 		}
 		if !e.UpdatedAt.IsZero() {
-			fmt.Fprintf(&b, "    updated_at: %q\n", e.UpdatedAt.UTC().Format(time.RFC3339Nano))
+			w.ContQuoted("updated_at", e.UpdatedAt.UTC().Format(time.RFC3339Nano))
 		}
-		fmt.Fprintf(&b, "    status: %q\n", string(e.Status))
+		w.ContQuoted("status", string(e.Status))
 		if e.Error != "" {
-			fmt.Fprintf(&b, "    error: %q\n", e.Error)
+			w.ContQuoted("error", e.Error)
 		}
 	}
 
-	return atomicfile.WriteFile(path, []byte(b.String()), 0644)
+	return w.WriteAtomic(path, 0644)
 }
 
 // UpsertLedgerEntry inserts or overwrites a single entry, keyed by ID.

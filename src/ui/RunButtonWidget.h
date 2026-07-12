@@ -7,7 +7,6 @@
 
 namespace gorganizer {
 
-// MO2-style compound run widget: combo box selector + primary Run button.
 class RunButtonWidget : public QWidget {
     Q_OBJECT
 public:
@@ -49,4 +48,4 @@ private:
     QString m_lastPreferredToolId;
 };
 
-} // namespace gorganizer
+}

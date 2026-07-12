@@ -10,7 +10,6 @@ import (
 	"unicode/utf16"
 )
 
-// LegacyFomodInfo is the parsed form of an NMM-style fomod/info.xml.
 type LegacyFomodInfo struct {
 	Name           string
 	Description    string

@@ -36,7 +36,7 @@ QString shortName(const QString& archiveRelPath, const QString& fallback)
     return fallback.isEmpty() ? QString("(unnamed)") : fallback;
 }
 
-} // namespace
+}
 
 ActivityLogPanel::ActivityLogPanel(GrpcClient* grpc, QWidget* parent)
     : QWidget(parent)
@@ -89,8 +89,6 @@ ActivityLogPanel::ActivityLogPanel(GrpcClient* grpc, QWidget* parent)
     connect(m_grpc, &GrpcClient::daemonError, this, &ActivityLogPanel::onDaemonError);
     connect(m_grpc, &GrpcClient::dependencyWarning, this, &ActivityLogPanel::onDependencyWarning);
 
-    // Recolor the whole scrollback when the theme changes so severity/timestamp
-    // hues stay legible in both light and dark.
     connect(ThemeManager::instance(), &ThemeManager::themeChanged,
             this, [this](const Palette&) { rerenderLog(); });
 }
@@ -123,7 +121,7 @@ QString ActivityLogPanel::renderEntry(const LogEntry& e) const
     case Severity::Success: color = p.successFg.name(); break;
     case Severity::Warning: color = p.warningFg.name(); break;
     case Severity::Error:   color = p.errorFg.name(); break;
-    case Severity::Info:    break; // default text color
+    case Severity::Info:    break;
     }
     if (color.isEmpty()) {
         return QString("<span style='color:%1;'>[%2]</span> %3")
@@ -253,4 +251,4 @@ void ActivityLogPanel::onDaemonError(const QString& err)
     log(Severity::Error, err);
 }
 
-} // namespace gorganizer
+}

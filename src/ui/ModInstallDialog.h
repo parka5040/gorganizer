@@ -21,7 +21,6 @@ namespace gorganizer {
 class GrpcClient;
 class InstallWorker;
 
-// Handles the full mod archive install flow: extract, detect Data/ root, copy to mod folder.
 class ModInstallDialog : public QDialog {
     Q_OBJECT
 public:
@@ -83,6 +82,7 @@ private:
     QThread* m_workerThread = nullptr;
     InstallWorker* m_worker = nullptr;
     QString m_installDestDir;
+    QString m_installStageDir;
 
     QPointer<QProcess> m_extractProc;
     QString m_extractToolUsed;
@@ -92,4 +92,4 @@ private:
     Phase m_phase = Extracting;
 };
 
-} // namespace gorganizer
+}

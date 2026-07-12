@@ -12,7 +12,8 @@ import (
 	"time"
 
 	"github.com/parka/gorganizer/internal/download"
-	"github.com/parka/gorganizer/internal/ipc"
+	"github.com/parka/gorganizer/internal/dto"
+	"github.com/parka/gorganizer/internal/gamedef"
 )
 
 const (
@@ -28,23 +29,23 @@ var (
 	fnv4gbErrAPIKeyMissing = errors.New("Nexus API key is required to download the 4GB patcher; paste one in Tools → Settings")
 )
 
-func (d *Daemon) Install4GBPatcher(gameID string) (ipc.FNV4GBInstallResult, error) {
-	var zero ipc.FNV4GBInstallResult
-	if gameID != "falloutnv" && gameID != "ttw" {
+func (fv *FNV4GBService) Install4GBPatcher(gameID string) (dto.FNV4GBInstallResult, error) {
+	var zero dto.FNV4GBInstallResult
+	g, known := gamedef.ByID(gameID)
+	if !known || !g.Supports4GBPatch {
 		return zero, fmt.Errorf("the 4GB patcher only applies to Fallout: New Vegas (got %q)", gameID)
 	}
-	gc, err := d.config.EffectiveGameConfig(gameID)
+	gc, err := fv.s.config.EffectiveGameConfig(gameID)
 	if err != nil {
 		return zero, err
 	}
-	if d.config.NexusAPIKey == "" {
+	if fv.s.config.NexusAPIKey == "" {
 		return zero, fnv4gbErrAPIKeyMissing
 	}
-	def, ok := KnownScriptExtenders[gameID]
-	if !ok || def.LoaderExe == "" {
+	if g.ScriptExtenderSource == nil || g.ScriptExtenderSource.LoaderExe == "" {
 		return zero, fmt.Errorf("internal: no script extender definition for %s", gameID)
 	}
-	loaderPath := filepath.Join(gc.InstallPath, def.LoaderExe)
+	loaderPath := filepath.Join(gc.InstallPath, g.ScriptExtenderSource.LoaderExe)
 	if _, err := os.Stat(loaderPath); err != nil {
 		return zero, fnv4gbErrXNVSEMissing
 	}
@@ -55,7 +56,7 @@ func (d *Daemon) Install4GBPatcher(gameID string) (ipc.FNV4GBInstallResult, erro
 	}
 	defer os.RemoveAll(tmpDir)
 
-	nx := download.NewNexusClient(d.config.NexusAPIKey)
+	nx := download.NewNexusClient(fv.s.config.NexusAPIKey)
 
 	details, err := nx.GetFileDetails(fnv4gbGameSlug, fnv4gbModID, fnv4gbFileID)
 	if err != nil {
@@ -107,16 +108,15 @@ func (d *Daemon) Install4GBPatcher(gameID string) (ipc.FNV4GBInstallResult, erro
 		"version", details.Version,
 		"path", patcherPath)
 
-	return ipc.FNV4GBInstallResult{
+	return dto.FNV4GBInstallResult{
 		PatcherExePath: patcherPath,
 		Version:        details.Version,
 	}, nil
 }
 
 // Get4GBPatchStatus reports whether FalloutNV.exe in the active game's
-// install directory has been patched by us. Apply4GBPatch is the only
-func (d *Daemon) Get4GBPatchStatus(gameID string) (bool, error) {
-	gc, err := d.config.EffectiveGameConfig(gameID)
+func (fv *FNV4GBService) Get4GBPatchStatus(gameID string) (bool, error) {
+	gc, err := fv.s.config.EffectiveGameConfig(gameID)
 	if err != nil {
 		return false, nil
 	}
@@ -124,12 +124,11 @@ func (d *Daemon) Get4GBPatchStatus(gameID string) (bool, error) {
 }
 
 // Apply4GBPatch executes the previously-installed patcher and, on success,
-// drops the marker file the GUI uses to decide whether to disable the xNVSE
-func (d *Daemon) Apply4GBPatch(gameID, patcherExePath string) (string, error) {
-	if gameID != "falloutnv" && gameID != "ttw" {
+func (fv *FNV4GBService) Apply4GBPatch(gameID, patcherExePath string) (string, error) {
+	if g, known := gamedef.ByID(gameID); !known || !g.Supports4GBPatch {
 		return "", fmt.Errorf("the 4GB patcher only applies to Fallout: New Vegas (got %q)", gameID)
 	}
-	gc, err := d.config.EffectiveGameConfig(gameID)
+	gc, err := fv.s.config.EffectiveGameConfig(gameID)
 	if err != nil {
 		return "", err
 	}
@@ -169,7 +168,6 @@ func IsFNV4GBApplied(installPath string) bool {
 }
 
 // locate4GBPatcherExe walks the extracted tree (which mirrors what was
-// copied into installPath) and returns the absolute path to the patcher
 func locate4GBPatcherExe(extractRoot, installPath string) (string, error) {
 	knownNames := map[string]bool{
 		"falloutnvpatcher": true,

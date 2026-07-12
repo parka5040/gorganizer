@@ -43,4 +43,4 @@ std::vector<PluginEntry> PluginScanner::scan(const std::filesystem::path& dataDi
     return plugins;
 }
 
-} // namespace gorganizer
+}

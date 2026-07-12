@@ -7,7 +7,6 @@ import (
 	"sync"
 )
 
-// HeaderCache is a bounded LRU memoising ParseHeader by (path, mtime, size).
 type HeaderCache struct {
 	mu      sync.Mutex
 	max     int

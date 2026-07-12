@@ -1,4 +1,3 @@
-// Package plugins discovers ESP/ESM/ESL files and writes plugins.txt / loadorder.txt.
 package plugins
 
 import (
@@ -7,142 +6,61 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/parka/gorganizer/internal/atomicfile"
+	"github.com/parka/gorganizer/internal/gamedef"
 )
 
-// Spec describes where and how to write plugins.txt / loadorder.txt for a Bethesda game.
-type Spec struct {
-	AppDataSubdir     string
-	PluginsFileName   string
-	LoadOrderFileName string
-	DLCListFileName   string
-	StarPrefix        bool
-	ImplicitMasters   []string
-	CanonicalDLCOrder []string
-}
-
-var specs = map[string]Spec{
-	"oblivion": {
-		AppDataSubdir:   "Oblivion",
-		PluginsFileName: "plugins.txt",
-		StarPrefix:      false,
-		ImplicitMasters: []string{"Oblivion.esm"},
-	},
-	"skyrim": {
-		AppDataSubdir:   "Skyrim",
-		PluginsFileName: "plugins.txt",
-		StarPrefix:      false,
-		ImplicitMasters: []string{"Skyrim.esm", "Update.esm"},
-	},
-	"skyrimse": {
-		AppDataSubdir:     "Skyrim Special Edition",
-		PluginsFileName:   "plugins.txt",
-		LoadOrderFileName: "loadorder.txt",
-		StarPrefix:        true,
-		// The five classic masters are always present. Anniversary Edition
-		// (1.6.x) auto-loads additional Creation Club masters (_ResourcePack.esl
-		// plus ccBGSSSE*/ccQDRSSE*/ccBGSSSE* .esm/.esl). Do NOT hardcode those
-		// here: they are absent on SE 1.5.x installs and listing them would
-		// misorder those users' load orders. Skyrim enablement (a later pass)
-		// should DETECT which CC masters actually exist under the game's Data/
-		// (they carry the ESM master flag and load before regular plugins) and
-		// treat the found set as implicit — verified against a real 1.6.x install.
-		ImplicitMasters: []string{
-			"Skyrim.esm", "Update.esm", "Dawnguard.esm",
-			"HearthFires.esm", "Dragonborn.esm",
-		},
-	},
-	"fallout3": {
-		AppDataSubdir:     "Fallout3",
-		PluginsFileName:   "plugins.txt",
-		DLCListFileName:   "DLCList.txt",
-		StarPrefix:        false,
-		ImplicitMasters:   []string{"Fallout3.esm"},
-		CanonicalDLCOrder: []string{
-			"Anchorage.esm",
-			"ThePitt.esm",
-			"BrokenSteel.esm",
-			"PointLookout.esm",
-			"Zeta.esm",
-		},
-	},
-	"falloutnv": {
-		AppDataSubdir:   "FalloutNV",
-		PluginsFileName: "plugins.txt",
-		DLCListFileName: "NVDLCList.txt",
-		StarPrefix:      false,
-		ImplicitMasters: []string{"FalloutNV.esm"},
-		CanonicalDLCOrder: []string{
-			"DeadMoney.esm",
-			"HonestHearts.esm",
-			"OldWorldBlues.esm",
-			"LonesomeRoad.esm",
-			"GunRunnersArsenal.esm",
-			"ClassicPack.esm",
-			"MercenaryPack.esm",
-			"TribalPack.esm",
-			"CaravanPack.esm",
-		},
-	},
-	"ttw": {
-		AppDataSubdir:   "FalloutNV",
-		PluginsFileName: "plugins.txt",
-		DLCListFileName: "NVDLCList.txt",
-		StarPrefix:      false,
-		ImplicitMasters: []string{"FalloutNV.esm"},
-		CanonicalDLCOrder: []string{
-			"DeadMoney.esm",
-			"HonestHearts.esm",
-			"OldWorldBlues.esm",
-			"LonesomeRoad.esm",
-			"GunRunnersArsenal.esm",
-			"ClassicPack.esm",
-			"MercenaryPack.esm",
-			"TribalPack.esm",
-			"CaravanPack.esm",
-			"Fallout3.esm",
-			"Anchorage.esm",
-			"ThePitt.esm",
-			"BrokenSteel.esm",
-			"PointLookout.esm",
-			"Zeta.esm",
-			"TaleOfTwoWastelands.esm",
-		},
-	},
-	"fallout4": {
-		AppDataSubdir:     "Fallout4",
-		PluginsFileName:   "plugins.txt",
-		LoadOrderFileName: "loadorder.txt",
-		StarPrefix:        true,
-		ImplicitMasters: []string{
-			"Fallout4.esm", "DLCRobot.esm", "DLCworkshop01.esm",
-			"DLCCoast.esm", "DLCworkshop02.esm", "DLCworkshop03.esm",
-			"DLCNukaWorld.esm",
-		},
-	},
-	"starfield": {
-		AppDataSubdir:   "Starfield",
-		PluginsFileName: "Plugins.txt",
-		StarPrefix:      true,
-		ImplicitMasters: []string{
-			"Starfield.esm", "Constellation.esm", "OldMars.esm",
-			"SFBGS003.esm", "SFBGS006.esm", "SFBGS007.esm", "SFBGS008.esm",
-		},
-	},
-}
+type Spec = gamedef.PluginSpec
 
 // SpecFor returns the plugins.txt spec for a gameID; (zero, false) if none.
 func SpecFor(gameID string) (Spec, bool) {
-	s, ok := specs[gameID]
-	return s, ok
+	g, ok := gamedef.ByID(gameID)
+	if !ok || g.Plugins == nil {
+		return Spec{}, false
+	}
+	return *g.Plugins, true
 }
 
-// Plugin is one ESP/ESM/ESL discovered in a mod or the base Data dir.
 type Plugin struct {
 	Filename string
 	Ext      string
 	Source   string
 	FromMod  string
 	Enabled  bool
+}
+
+// ApplyActivationState applies case-insensitive profile activation while preserving pinned plugins.
+func ApplyActivationState(list []Plugin, spec Spec, state map[string]bool) {
+	implicit := make(map[string]struct{}, len(spec.ImplicitMasters))
+	for _, name := range spec.ImplicitMasters {
+		implicit[strings.ToLower(name)] = struct{}{}
+	}
+	defaultDisabled := make(map[string]struct{}, len(spec.DefaultDisabled))
+	for _, name := range spec.DefaultDisabled {
+		defaultDisabled[strings.ToLower(name)] = struct{}{}
+	}
+	for i := range list {
+		key := strings.ToLower(list[i].Filename)
+		_, pinned := implicit[key]
+		if !pinned {
+			for _, prefix := range spec.PinnedPrefixes {
+				if strings.HasPrefix(key, strings.ToLower(prefix)) {
+					pinned = true
+					break
+				}
+			}
+		}
+		if pinned {
+			list[i].Enabled = true
+			continue
+		}
+		if enabled, ok := state[key]; ok {
+			list[i].Enabled = enabled
+		} else if _, disabled := defaultDisabled[key]; disabled {
+			list[i].Enabled = false
+		}
+	}
 }
 
 // TypeOrder ranks .esm < .esl < .esp.
@@ -160,12 +78,6 @@ func (p Plugin) TypeOrder() int {
 }
 
 // ApplyUserOrder reorders the slice in place so that plugins listed in
-// `userOrder` (case-insensitive filenames) appear in that order, while
-// plugins absent from `userOrder` keep their relative natural order at
-// the end. Canonical DLC ESMs in spec.CanonicalDLCOrder are pinned to
-// their canonical positions even if the user order omits them or places
-// them elsewhere — the engine refuses to load otherwise. Empty userOrder
-// is a no-op.
 func ApplyUserOrder(plugins []Plugin, spec Spec, userOrder []string) {
 	if len(userOrder) == 0 || len(plugins) == 0 {
 		return
@@ -180,7 +92,7 @@ func ApplyUserOrder(plugins []Plugin, spec Spec, userOrder []string) {
 		if key == "" {
 			continue
 		}
-		if _, isCanonical := canonical[key]; isCanonical {
+		if _, isCanonical := canonical[key]; isCanonical && !spec.PreserveOrder {
 			continue
 		}
 		if _, dup := rank[key]; dup {
@@ -215,9 +127,6 @@ func ApplyUserOrder(plugins []Plugin, spec Spec, userOrder []string) {
 		}
 		return ai < bi
 	})
-	// Reapply canonical DLC pinning AFTER user order so canonical ESMs
-	// are guaranteed to be at the top of the ESM band regardless of what
-	// the user dragged around.
 	for i := range indexed_ {
 		plugins[i] = indexed_[i].p
 	}
@@ -226,7 +135,7 @@ func ApplyUserOrder(plugins []Plugin, spec Spec, userOrder []string) {
 
 // ApplyCanonicalOrder sorts ESMs in spec.CanonicalDLCOrder first, then other ESMs.
 func ApplyCanonicalOrder(plugins []Plugin, spec Spec) {
-	if len(spec.CanonicalDLCOrder) == 0 {
+	if spec.PreserveOrder || len(spec.CanonicalDLCOrder) == 0 {
 		return
 	}
 	dlcRank := make(map[string]int, len(spec.CanonicalDLCOrder))
@@ -256,10 +165,50 @@ func ApplyCanonicalOrder(plugins []Plugin, spec Spec) {
 	})
 }
 
+// ApplyDefaultOrder applies pinned-master and canonical DLC order without type sorting.
+func ApplyDefaultOrder(list []Plugin, spec Spec) {
+	rank := make(map[string]int, len(spec.ImplicitMasters)+len(spec.CanonicalDLCOrder))
+	next := 0
+	for _, names := range [][]string{spec.ImplicitMasters, spec.CanonicalDLCOrder} {
+		for _, name := range names {
+			key := strings.ToLower(name)
+			if _, exists := rank[key]; exists {
+				continue
+			}
+			rank[key] = next
+			next++
+		}
+	}
+	if len(rank) == 0 {
+		return
+	}
+	sort.SliceStable(list, func(i, j int) bool {
+		ir, iKnown := rank[strings.ToLower(list[i].Filename)]
+		jr, jKnown := rank[strings.ToLower(list[j].Filename)]
+		switch {
+		case iKnown && jKnown:
+			return ir < jr
+		case iKnown:
+			return true
+		case jKnown:
+			return false
+		default:
+			return false
+		}
+	})
+}
+
 // DiscoverPlugins walks base Data plus enabled mods, returning the combined ordered list.
-func DiscoverPlugins(baseDataDir string, enabledMods []ModEntry) ([]Plugin, error) {
+func DiscoverPlugins(baseDataDir string, enabledMods []ModEntry, spec Spec) ([]Plugin, error) {
 	seen := map[string]int{}
 	var out []Plugin
+	supported := make(map[string]struct{}, len(spec.SupportedExts))
+	for _, ext := range spec.SupportedExts {
+		ext = strings.ToLower(strings.TrimSpace(ext))
+		if ext != "" {
+			supported[ext] = struct{}{}
+		}
+	}
 
 	scan := func(dir, modName string) error {
 		entries, err := os.ReadDir(dir)
@@ -276,6 +225,11 @@ func DiscoverPlugins(baseDataDir string, enabledMods []ModEntry) ([]Plugin, erro
 			ext := strings.ToLower(filepath.Ext(e.Name()))
 			if ext != ".esp" && ext != ".esm" && ext != ".esl" {
 				continue
+			}
+			if len(supported) > 0 {
+				if _, ok := supported[ext]; !ok {
+					continue
+				}
 			}
 			key := strings.ToLower(e.Name())
 			p := Plugin{
@@ -304,13 +258,14 @@ func DiscoverPlugins(baseDataDir string, enabledMods []ModEntry) ([]Plugin, erro
 		}
 	}
 
-	sort.SliceStable(out, func(i, j int) bool {
-		return out[i].TypeOrder() < out[j].TypeOrder()
-	})
+	if !spec.PreserveOrder {
+		sort.SliceStable(out, func(i, j int) bool {
+			return out[i].TypeOrder() < out[j].TypeOrder()
+		})
+	}
 	return out, nil
 }
 
-// ModEntry is the minimal mod info DiscoverPlugins needs.
 type ModEntry struct {
 	Name string
 	Path string
@@ -328,10 +283,13 @@ func Write(spec Spec, destDir string, plugins []Plugin) error {
 	}
 	visible := plugins[:0:0]
 	for _, p := range plugins {
-		if implicit[strings.ToLower(p.Filename)] {
+		if implicit[strings.ToLower(p.Filename)] && !spec.PreserveOrder {
 			continue
 		}
 		visible = append(visible, p)
+	}
+	if spec.StateLocation == gamedef.PluginStateGameRootIni {
+		return writeMorrowindINI(filepath.Join(destDir, spec.PluginsFileName), visible)
 	}
 
 	ApplyCanonicalOrder(visible, spec)
@@ -344,8 +302,11 @@ func Write(spec Spec, destDir string, plugins []Plugin) error {
 			}
 			b.WriteString(p.Filename)
 		} else {
-			if !p.Enabled {
+			if !p.Enabled && spec.DisabledPrefix == "" {
 				continue
+			}
+			if !p.Enabled {
+				b.WriteString(spec.DisabledPrefix)
 			}
 			b.WriteString(p.Filename)
 		}
@@ -388,11 +349,174 @@ func Write(spec Spec, destDir string, plugins []Plugin) error {
 	return nil
 }
 
-// writeAtomic writes to a temp sibling and renames into place.
-func writeAtomic(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+type EngineLoadoutEntry struct {
+	Filename string
+	Enabled  bool
+}
+
+// ReadEngineLoadout parses engine-facing plugin state and treats missing files as empty.
+func ReadEngineLoadout(spec Spec, dir string) ([]EngineLoadoutEntry, error) {
+	path := filepath.Join(dir, spec.PluginsFileName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading engine plugin state %s: %w", path, err)
+	}
+	if spec.StateLocation == gamedef.PluginStateGameRootIni {
+		return readMorrowindINI(data, spec), nil
+	}
+
+	supported := make(map[string]struct{}, len(spec.SupportedExts))
+	for _, ext := range spec.SupportedExts {
+		supported[strings.ToLower(ext)] = struct{}{}
+	}
+	var out []EngineLoadoutEntry
+	seen := make(map[string]struct{})
+	for _, raw := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(strings.TrimPrefix(raw, "\ufeff"))
+		if line == "" {
+			continue
+		}
+		enabled := true
+		if spec.StarPrefix {
+			enabled = strings.HasPrefix(line, "*")
+			line = strings.TrimSpace(strings.TrimPrefix(line, "*"))
+		} else if spec.DisabledPrefix != "" && strings.HasPrefix(line, spec.DisabledPrefix) {
+			enabled = false
+			line = strings.TrimSpace(strings.TrimPrefix(line, spec.DisabledPrefix))
+		} else if strings.HasPrefix(line, "#") {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(line))
+		if ext != ".esm" && ext != ".esp" && ext != ".esl" {
+			continue
+		}
+		if len(supported) > 0 {
+			if _, ok := supported[ext]; !ok {
+				continue
+			}
+		}
+		key := strings.ToLower(line)
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, EngineLoadoutEntry{Filename: line, Enabled: enabled})
+	}
+	return out, nil
+}
+
+func readMorrowindINI(data []byte, spec Spec) []EngineLoadoutEntry {
+	inGameFiles := false
+	seen := make(map[string]bool)
+	out := make([]EngineLoadoutEntry, 0)
+	for _, raw := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+		line := strings.TrimSpace(strings.TrimPrefix(raw, "\ufeff"))
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			inGameFiles = strings.EqualFold(line, "[Game Files]")
+			continue
+		}
+		if !inGameFiles {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(key)), "gamefile") {
+			continue
+		}
+		name := strings.TrimSpace(value)
+		if name == "" || !isSupportedEnginePlugin(spec, name) || seen[strings.ToLower(name)] {
+			continue
+		}
+		seen[strings.ToLower(name)] = true
+		out = append(out, EngineLoadoutEntry{Filename: name, Enabled: true})
+	}
+	return out
+}
+
+func writeMorrowindINI(path string, plugins []Plugin) error {
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	return os.Rename(tmp, path)
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(lines)+len(plugins)+2)
+	inGameFiles := false
+	foundSection := false
+	inserted := false
+	insert := func() {
+		if inserted {
+			return
+		}
+		for _, plugin := range plugins {
+			if plugin.Enabled {
+				out = append(out, fmt.Sprintf("GameFile%d=%s", lenGameFileLines(out), plugin.Filename))
+			}
+		}
+		inserted = true
+	}
+	for _, raw := range lines {
+		trimmed := strings.TrimSpace(raw)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			if inGameFiles {
+				insert()
+			}
+			inGameFiles = strings.EqualFold(trimmed, "[Game Files]")
+			if inGameFiles {
+				foundSection = true
+			}
+			out = append(out, raw)
+			continue
+		}
+		if inGameFiles {
+			key, _, ok := strings.Cut(trimmed, "=")
+			if ok && strings.HasPrefix(strings.ToLower(strings.TrimSpace(key)), "gamefile") {
+				continue
+			}
+		}
+		out = append(out, raw)
+	}
+	if inGameFiles {
+		insert()
+	}
+	if !foundSection {
+		if len(out) > 0 && strings.TrimSpace(out[len(out)-1]) != "" {
+			out = append(out, "")
+		}
+		out = append(out, "[Game Files]")
+		insert()
+	}
+	return writeAtomic(path, []byte(strings.Join(out, "\r\n")))
+}
+
+func lenGameFileLines(lines []string) int {
+	count := 0
+	for _, line := range lines {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "gamefile") {
+			count++
+		}
+	}
+	return count
+}
+
+func isSupportedEnginePlugin(spec Spec, name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	if ext != ".esm" && ext != ".esp" && ext != ".esl" {
+		return false
+	}
+	if len(spec.SupportedExts) == 0 {
+		return true
+	}
+	for _, supported := range spec.SupportedExts {
+		if strings.EqualFold(ext, supported) {
+			return true
+		}
+	}
+	return false
+}
+
+// writeAtomic writes to a temp sibling and renames into place.
+func writeAtomic(path string, data []byte) error {
+	return atomicfile.WriteFile(path, data, 0644)
 }

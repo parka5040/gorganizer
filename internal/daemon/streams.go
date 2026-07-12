@@ -56,7 +56,6 @@ func (b *streamBus[T]) Subscribe(ctx context.Context, gameID string) (<-chan T, 
 }
 
 // Publish delivers the event to every subscriber of `gameID`. Non-blocking:
-// drops on a full subscriber buffer.
 func (b *streamBus[T]) Publish(gameID string, evt T) {
 	b.mu.Lock()
 	subs := b.subscribers[gameID]

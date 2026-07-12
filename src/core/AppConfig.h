@@ -28,20 +28,13 @@ public:
     void setManagedGamesByAppId(const std::vector<uint32_t>& appIds);
     std::vector<uint32_t> managedGamesByAppId() const;
 
-    // Selected theme name (e.g. "Neutral", "Dracula"); the light/dark form is
-    // chosen by appearanceMode(). Stored under ui/style; defaults to "Neutral".
     void setPreferredStyle(const QString& style);
     QString preferredStyle() const;
 
     // Light/Dark/System appearance mode; "system" follows the OS color scheme.
-    // The theme name (preferredStyle()) applies in every mode.
     void setAppearanceMode(const QString& mode);
     QString appearanceMode() const;
 
-    // Fuses Separator View and True View into one ordering. When on, the
-    // Separator View checkbox in the mod list is forced on and disabled,
-    // and any reorder writes the same index into both visual_index and
-    // true_index. Toggling off leaves any cross-stamping in place.
     void setCollapsedSeparatorView(bool on);
     bool collapsedSeparatorView() const;
 
@@ -59,4 +52,4 @@ private:
     QSettings m_settings;
 };
 
-} // namespace gorganizer
+}

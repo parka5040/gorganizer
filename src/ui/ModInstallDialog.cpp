@@ -3,6 +3,7 @@
 #include "GrpcClient.h"
 #include "InstallWorker.h"
 #include "ThemeManager.h"
+#include "Dialogs.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -11,7 +12,6 @@
 #include <QDirIterator>
 #include <QFileInfo>
 #include <QTemporaryDir>
-#include <QMessageBox>
 #include <QCoreApplication>
 #include <QLineEdit>
 #include <QFormLayout>
@@ -19,6 +19,7 @@
 #include <QTextStream>
 #include <QDateTime>
 #include <QFile>
+#include <QUuid>
 #include <QCloseEvent>
 
 namespace gorganizer {
@@ -89,6 +90,9 @@ ModInstallDialog::~ModInstallDialog()
     if (!m_extractDir.isEmpty()) {
         QDir(m_extractDir).removeRecursively();
     }
+    if (!m_installStageDir.isEmpty()) {
+        QDir(m_installStageDir).removeRecursively();
+    }
 }
 
 void ModInstallDialog::startExtraction()
@@ -101,9 +105,6 @@ void ModInstallDialog::startExtraction()
 
     auto* proc = new QProcess(this);
     m_extractProc = proc;
-    // Merge stderr into stdout so we capture both with one read on finish; the
-    // old dialog discarded 7z's output entirely, which made "exit code N"
-    // failures impossible to diagnose.
     proc->setProcessChannelMode(QProcess::MergedChannels);
     connect(proc, &QProcess::finished,
             this, &ModInstallDialog::onExtractFinished);
@@ -143,9 +144,6 @@ void ModInstallDialog::onExtractFinished(int exitCode, QProcess::ExitStatus stat
             ? QString("crashed (signal %1)").arg(exitCode)
             : QString("exit code %1").arg(exitCode);
 
-        // Log the full failure so it's recoverable from a terminal-launched
-        // GUI. Status label is space-constrained, so it gets a short summary
-        // plus the last line of tool output.
         QString cmdline = m_extractToolUsed + " " + m_extractArgsUsed.join(" ");
         qWarning().noquote() << "Extraction failed:" << cmdline;
         qWarning().noquote() << "  reason:" << reason;
@@ -201,6 +199,32 @@ void ModInstallDialog::scanExtractedTree()
 
     QDir root(m_extractDir);
     auto entries = root.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+
+    if (m_gameId.compare("oblivionremastered", Qt::CaseInsensitive) == 0) {
+        bool rooted = false;
+        for (const auto& entry : entries) {
+            if (entry.compare("Engine", Qt::CaseInsensitive) == 0
+                || entry.compare("OblivionRemastered", Qt::CaseInsensitive) == 0) {
+                rooted = true;
+                break;
+            }
+        }
+        if (!rooted) {
+            for (const auto& file : root.entryList(QDir::Files)) {
+                if (file.compare("OblivionRemastered.exe", Qt::CaseInsensitive) == 0) {
+                    rooted = true;
+                    break;
+                }
+            }
+        }
+        if (rooted) {
+            m_detectedDataRoot = m_extractDir;
+            m_statusLabel->setText("Found Oblivion Remastered game-root layout. Ready to install.");
+            m_installBtn->setEnabled(true);
+            m_phase = Choosing;
+            return;
+        }
+    }
 
     if (entries.contains("Data", Qt::CaseInsensitive)) {
         for (const auto& e : entries) {
@@ -336,16 +360,38 @@ void ModInstallDialog::onInstallClicked()
 void ModInstallDialog::installFrom(const QString& sourceDir)
 {
     m_installDestDir = m_modsDir + "/" + m_modName;
-    QDir().mkpath(m_installDestDir);
+    if (m_modName.isEmpty() || QFileInfo(m_modName).fileName() != m_modName
+        || m_modName == "." || m_modName == "..") {
+        m_phase = Done;
+        m_statusLabel->setText("Install failed: invalid mod folder name.");
+        m_progressBar->hide();
+        return;
+    }
+    if (QFileInfo::exists(m_installDestDir)) {
+        m_phase = Done;
+        m_statusLabel->setText("Install failed: a mod with this folder name already exists.");
+        m_progressBar->hide();
+        m_cancelBtn->setText("Close");
+        m_cancelBtn->setEnabled(true);
+        return;
+    }
+    m_installStageDir = m_modsDir + "/.stage-ui-"
+        + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if (!QDir().mkpath(m_installStageDir)) {
+        m_phase = Done;
+        m_statusLabel->setText("Install failed: could not create staging directory.");
+        m_progressBar->hide();
+        return;
+    }
 
     m_worker = new InstallWorker;
     if (m_legacyFomodFlatCopy) {
-        m_worker->configureLegacyFomod(m_fomodModulePath, m_installDestDir);
+        m_worker->configureLegacyFomod(m_fomodModulePath, m_installStageDir, m_gameId);
     } else if (!m_fomodSelections.isEmpty()) {
         m_worker->configureFomodSelections(m_fomodModulePath, m_fomodSelections,
-                                           m_installDestDir);
+                                           m_installStageDir, m_gameId);
     } else {
-        m_worker->configureRecursive(sourceDir, m_installDestDir);
+        m_worker->configureRecursive(sourceDir, m_installStageDir, m_gameId);
     }
 
     m_workerThread = new QThread(this);
@@ -412,12 +458,9 @@ void ModInstallDialog::onWorkerFinished(bool ok, bool cancelled, int fileCount,
     QDir(m_extractDir).removeRecursively();
 
     if (cancelled || !ok) {
-        if (!m_installDestDir.isEmpty()) {
-            QString destAbs = QDir(m_installDestDir).absolutePath();
-            QString modsAbs = QDir(m_modsDir).absolutePath();
-            if (destAbs.startsWith(modsAbs + "/"))
-                QDir(destAbs).removeRecursively();
-        }
+        if (!m_installStageDir.isEmpty())
+            QDir(m_installStageDir).removeRecursively();
+        m_installStageDir.clear();
         m_progressBar->hide();
         m_phase = Done;
         if (cancelled) {
@@ -428,6 +471,30 @@ void ModInstallDialog::onWorkerFinished(bool ok, bool cancelled, int fileCount,
         }
         return;
     }
+
+    if (fileCount <= 0) {
+        QDir(m_installStageDir).removeRecursively();
+        m_installStageDir.clear();
+        m_progressBar->hide();
+        m_phase = Done;
+        m_statusLabel->setText("No files were installed. The selected folder may be empty.");
+        m_cancelBtn->setText("Close");
+        m_cancelBtn->setEnabled(true);
+        return;
+    }
+
+    if (QFileInfo::exists(m_installDestDir)
+        || !QDir(m_modsDir).rename(QFileInfo(m_installStageDir).fileName(), m_modName)) {
+        QDir(m_installStageDir).removeRecursively();
+        m_installStageDir.clear();
+        m_progressBar->hide();
+        m_phase = Done;
+        m_statusLabel->setText("Install failed: the destination appeared or staging could not be committed.");
+        m_cancelBtn->setText("Close");
+        m_cancelBtn->setEnabled(true);
+        return;
+    }
+    m_installStageDir.clear();
 
     if (fileCount > 0)
         writeMetadata(m_installDestDir);
@@ -446,14 +513,10 @@ void ModInstallDialog::onWorkerFinished(bool ok, bool cancelled, int fileCount,
                 archiveRel = archAbs.mid(modsDirNorm.length() + 1);
             QString rpcErr;
             if (!m_grpc->registerManualInstall(m_gameId, m_modName, archiveRel, rpcErr)) {
-                // U-5: the files are on disk, but the daemon never learned about
-                // this mod — do NOT accept() (which reads as full success). Make
-                // the failure loud and leave the dialog open with a clear exit so
-                // the user knows to rescan/restart rather than assume it worked.
                 m_statusLabel->setText(
                     QString("Copied %1 files, but notifying the daemon failed: %2")
                         .arg(fileCount).arg(rpcErr));
-                QMessageBox::warning(this, "Install incomplete",
+                dialogs::warn(this, "Install incomplete",
                     QString("The mod files were copied to disk, but the daemon "
                             "could not be notified:\n\n%1\n\nThe mod may not appear "
                             "or be enabled until you rescan mods or restart Gorganizer.")
@@ -573,4 +636,4 @@ void ModInstallDialog::writeMetadata(const QString& modDir)
     meta.close();
 }
 
-} // namespace gorganizer
+}

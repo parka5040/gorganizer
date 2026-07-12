@@ -14,6 +14,8 @@ import (
 	pb "github.com/parka/gorganizer/api/proto"
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/daemon"
+	"github.com/parka/gorganizer/internal/ipc"
+	"github.com/parka/gorganizer/internal/transfer"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -44,6 +46,8 @@ func main() {
 		}
 		return
 	}
+
+	transfer.GorganizerVersion = version
 
 	_ = configPath
 	cfg, err := config.Load()
@@ -102,7 +106,12 @@ func main() {
 	}()
 
 	slog.Info("starting gorganizerd", "version", version, "commit", commit, "socket", sock)
-	if err := d.Run(sock); err != nil {
+	srv := ipc.NewServer(sock, d)
+	if err := srv.Start(); err != nil {
+		slog.Error("daemon failed", "err", fmt.Errorf("starting IPC server: %w", err))
+		os.Exit(1)
+	}
+	if err := d.Run(srv.Stop); err != nil {
 		slog.Error("daemon failed", "err", err)
 		os.Exit(1)
 	}

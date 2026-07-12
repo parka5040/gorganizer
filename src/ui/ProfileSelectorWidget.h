@@ -8,7 +8,6 @@
 
 namespace gorganizer {
 
-// MO2-style profile selector: combo box + create/delete/copy buttons.
 class ProfileSelectorWidget : public QWidget {
     Q_OBJECT
 public:
@@ -40,4 +39,4 @@ private:
     QString m_pendingPreferred;
 };
 
-} // namespace gorganizer
+}

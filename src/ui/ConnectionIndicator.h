@@ -21,4 +21,4 @@ private:
     QLabel* m_text;
 };
 
-} // namespace gorganizer
+}

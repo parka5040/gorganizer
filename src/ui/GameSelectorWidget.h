@@ -25,4 +25,4 @@ private:
     std::vector<GameInfo> m_games;
 };
 
-} // namespace gorganizer
+}

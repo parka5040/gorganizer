@@ -3,6 +3,7 @@
 #include "DownloadsRowDelegate.h"
 #include "ModInstallDialog.h"
 #include "ThemeManager.h"
+#include "Dialogs.h"
 
 #include <QVBoxLayout>
 #include <QHeaderView>
@@ -19,7 +20,6 @@
 
 namespace gorganizer {
 
-// Proxy that delegates filtering to DownloadsModel because "hidden" is a model role.
 class DownloadsProxy : public QSortFilterProxyModel {
 public:
     using QSortFilterProxyModel::QSortFilterProxyModel;
@@ -69,7 +69,7 @@ DownloadsLibraryView::DownloadsLibraryView(GrpcClient* grpc, QWidget* parent)
         GrpcGameSettings s;
         QString err;
         if (!m_grpc->setGameSettings(m_game.shortName, checked, s, err))
-            QMessageBox::warning(this, "Settings Error", err);
+            dialogs::warn(this, "Settings Error", err);
     });
     header->addWidget(m_autoInstallToggle);
 
@@ -255,7 +255,7 @@ void DownloadsLibraryView::onContextMenu(const QPoint& pos)
             if (d.merged && !d.installedModFolder.isEmpty()) {
                 QString folder = d.installedModFolder;
                 menu.addAction("Show Containing Mod", this, [this, folder] {
-                    QMessageBox::information(this, "Merged Into",
+                    dialogs::info(this, "Merged Into",
                         QString("This archive was merged into:\n\n%1\n\n"
                                 "Open the Mods tab to inspect or rearrange it.")
                             .arg(folder));
@@ -270,7 +270,7 @@ void DownloadsLibraryView::onContextMenu(const QPoint& pos)
                 QString err;
                 GrpcArchiveRow fresh;
                 if (!m_grpc->refreshArchiveMetadata(m_game.shortName, row.archiveRelPath, fresh, err)) {
-                    QMessageBox::warning(this, "Refresh Failed", err);
+                    dialogs::warn(this, "Refresh Failed", err);
                     return;
                 }
                 reloadFromDaemon();
@@ -355,7 +355,7 @@ void DownloadsLibraryView::onDoubleClicked(const QModelIndex& idx)
                                           QString(), GrpcInstallMergeIntoMod,
                                           existingFolder, QString(), {},
                                           modFolder, fileCount, err)) {
-                QMessageBox::warning(this, "Merge Failed", err);
+                dialogs::warn(this, "Merge Failed", err);
                 return;
             }
             emit modInstalledFromDownload();
@@ -368,26 +368,6 @@ void DownloadsLibraryView::onDoubleClicked(const QModelIndex& idx)
     }
 
     actionInstall(row, false);
-}
-
-static QString modsDirectoryForGame(const QString& gameShortName)
-{
-    static const QHash<QString, QString> dirNames = {
-        {"morrowind", "Morrowind_Mods"}, {"oblivion", "Oblivion_Mods"},
-        {"skyrim", "Skyrim_Mods"}, {"skyrimse", "SkyrimSE_Mods"},
-        {"fallout3", "Fallout3_Mods"}, {"falloutnv", "FalloutNV_Mods"},
-        {"fallout4", "Fallout4_Mods"}, {"starfield", "Starfield_Mods"},
-        {"ttw", "TTW_Mods"},
-    };
-    QByteArray root = qgetenv("GORGANIZER_ROOT");
-    if (!root.isEmpty()) {
-        QString name = dirNames.value(gameShortName, gameShortName + "_Mods");
-        return QString::fromUtf8(root) + "/" + name;
-    }
-    QString dataHome = qEnvironmentVariable("XDG_DATA_HOME");
-    if (dataHome.isEmpty())
-        dataHome = QDir::homePath() + "/.local/share";
-    return dataHome + "/gorganizer/" + gameShortName + "/mods";
 }
 
 void DownloadsLibraryView::actionInstall(const GrpcArchiveRow& row, bool forceNewMod)
@@ -406,7 +386,7 @@ void DownloadsLibraryView::actionInstall(const GrpcArchiveRow& row, bool forceNe
                                   mode, target, QString(), {},
                                   modFolder, fileCount, err)) {
         if (err.contains("fomod_required")) {
-            QString modsDir = modsDirectoryForGame(m_game.shortName);
+            QString modsDir = GameInfo::modsDirPathFor(m_game.shortName);
             QString archiveAbs = modsDir + "/Downloads/" + row.archiveRelPath;
             QString defaultModName = row.modName.isEmpty()
                 ? QFileInfo(row.fileArchiveName).completeBaseName()
@@ -422,7 +402,7 @@ void DownloadsLibraryView::actionInstall(const GrpcArchiveRow& row, bool forceNe
             reloadFromDaemon();
             return;
         }
-        QMessageBox::warning(this, "Install Failed", err);
+        dialogs::warn(this, "Install Failed", err);
         return;
     }
     emit modInstalledFromDownload();
@@ -454,7 +434,7 @@ void DownloadsLibraryView::actionMergeInto(const GrpcArchiveRow& row)
     if (!m_grpc->startInstallSync(m_game.shortName, row.archiveRelPath, QString(),
                                   GrpcInstallMergeIntoMod, target, QString(), {},
                                   modFolder, fileCount, err)) {
-        QMessageBox::warning(this, "Merge Failed", err);
+        dialogs::warn(this, "Merge Failed", err);
         return;
     }
     emit modInstalledFromDownload();
@@ -465,7 +445,7 @@ void DownloadsLibraryView::actionHide(const QString& archivePath, bool hidden)
 {
     QString err;
     if (!m_grpc->setArchiveHidden(m_game.shortName, archivePath, hidden, err)) {
-        QMessageBox::warning(this, "Hide Failed", err);
+        dialogs::warn(this, "Hide Failed", err);
         return;
     }
     m_model->setHidden(archivePath, hidden);
@@ -477,7 +457,7 @@ void DownloadsLibraryView::actionBulkHide(GrpcBulkHideScope scope, bool hidden)
     QString err;
     int affected = 0;
     if (!m_grpc->setArchivesHiddenBulk(m_game.shortName, hidden, scope, affected, err)) {
-        QMessageBox::warning(this, "Bulk Hide Failed", err);
+        dialogs::warn(this, "Bulk Hide Failed", err);
         return;
     }
     reloadFromDaemon();
@@ -485,13 +465,12 @@ void DownloadsLibraryView::actionBulkHide(GrpcBulkHideScope scope, bool hidden)
 
 void DownloadsLibraryView::actionDelete(const GrpcArchiveRow& row)
 {
-    auto reply = QMessageBox::question(this, "Delete Archive",
-        QString("Delete %1 from disk? This cannot be undone.").arg(row.fileArchiveName));
-    if (reply != QMessageBox::Yes)
+    if (!dialogs::confirm(this, "Delete Archive",
+        QString("Delete %1 from disk? This cannot be undone.").arg(row.fileArchiveName)))
         return;
     QString err;
     if (!m_grpc->removeArchive(m_game.shortName, row.archiveRelPath, err)) {
-        QMessageBox::warning(this, "Delete Failed", err);
+        dialogs::warn(this, "Delete Failed", err);
         return;
     }
     m_model->removeByKey(row.archiveRelPath);
@@ -521,4 +500,4 @@ void DownloadsLibraryView::onInstallProgress(const GrpcInstallProgress& progress
     }
 }
 
-} // namespace gorganizer
+}

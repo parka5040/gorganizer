@@ -30,7 +30,7 @@ COMMIT  ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(DATE)
 
-.PHONY: all build ctl test vet clean proto gui install
+.PHONY: all build ctl test vet clean proto gui install check-comments verify
 
 all: proto build ctl
 
@@ -57,6 +57,11 @@ test:
 
 vet:
 	$(GO) vet ./...
+
+check-comments:
+	$(GO) run ./scripts/commentcheck
+
+verify: vet test check-comments
 
 clean:
 	rm -f $(BINARY) $(CTL_BINARY)

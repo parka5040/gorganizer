@@ -1,6 +1,7 @@
 package download
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,7 +13,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// InstallMode controls the disposition of an install (new mod vs merge into existing).
 type InstallMode int
 
 const (
@@ -20,7 +20,6 @@ const (
 	ModeMergeIntoMod InstallMode = 1
 )
 
-// InstallProgress reports one step in the install lifecycle.
 type InstallProgress struct {
 	InstallID   string
 	Step        InstallStage
@@ -31,10 +30,8 @@ type InstallProgress struct {
 	Error       string
 }
 
-// ProgressSink is the non-blocking progress callback shared by every install entry point.
 type ProgressSink func(InstallProgress)
 
-// InstallRequest is the canonical input to every install.
 type InstallRequest struct {
 	GameID             string
 	ArchivePath        string
@@ -51,7 +48,6 @@ type InstallRequest struct {
 	InstallID          string
 }
 
-// InstallResult summarizes a successful install.
 type InstallResult struct {
 	ModFolder string
 	FileCount int
@@ -59,7 +55,6 @@ type InstallResult struct {
 	InstallID string
 }
 
-// FomodFile is the set-lookup form of a FOMOD user selection.
 type FomodFile struct {
 	Source      string
 	Destination string
@@ -67,7 +62,6 @@ type FomodFile struct {
 	Priority    int32
 }
 
-// InstallStage is the coarse phase reported via ProgressSink, aligned with the proto enum.
 type InstallStage int
 
 const (
@@ -145,9 +139,9 @@ func Install(req InstallRequest) (*InstallResult, error) {
 
 	var written []string
 	if len(req.FomodSelectedFiles) > 0 {
-		written, err = copyFomodSelection(extractRoot, stageDir, req.FomodSelectedFiles, req.InstallID, req.ProgressSink)
+		written, err = copyFomodSelection(req.GameID, extractRoot, stageDir, req.FomodSelectedFiles, req.InstallID, req.ProgressSink)
 	} else {
-		written, err = copyFlatten(extractRoot, stageDir, req.InstallID, req.ProgressSink)
+		written, err = copyFlatten(req.GameID, extractRoot, stageDir, req.InstallID, req.ProgressSink)
 	}
 	if err != nil {
 		emit(InstallProgress{Step: StageFailed, Error: err.Error()})
@@ -241,11 +235,16 @@ func IsCollisionMarker(err error) (string, bool) {
 }
 
 // copyFlatten replays the archive's content root into stage.
-func copyFlatten(extractRoot, stageDir, installID string, sink ProgressSink) ([]string, error) {
+func copyFlatten(gameID, extractRoot, stageDir, installID string, sink ProgressSink) ([]string, error) {
 	contentRoot := findContentRoot(extractRoot)
+	rootedOblivionRemastered := gameID == "oblivionremastered" && hasOblivionRemasteredRootMarkers(contentRoot)
+	resolvedContentRoot, err := filepath.EvalSymlinks(contentRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolving archive content root: %w", err)
+	}
 
 	var written []string
-	err := filepath.WalkDir(contentRoot, func(path string, d os.DirEntry, err error) error {
+	err = filepath.WalkDir(contentRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -256,14 +255,29 @@ func copyFlatten(extractRoot, stageDir, installID string, sink ProgressSink) ([]
 		if rel == "." {
 			return nil
 		}
-		dst := filepath.Join(stageDir, rel)
+		installRel := routeOblivionRemasteredPath(rel, rootedOblivionRemastered)
+		dst := filepath.Join(stageDir, installRel)
 		if d.IsDir() {
 			return os.MkdirAll(dst, 0755)
 		}
-		if err := copyFile(path, dst); err != nil {
+		copySource := path
+		if d.Type()&os.ModeSymlink != 0 {
+			copySource, err = filepath.EvalSymlinks(path)
+			if err != nil || !pathContainedBy(resolvedContentRoot, copySource) {
+				return fmt.Errorf("archive symlink %q resolves outside its content root", rel)
+			}
+		}
+		info, err := os.Stat(copySource)
+		if err != nil {
 			return err
 		}
-		written = append(written, rel)
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("archive contains unsupported special file %q", rel)
+		}
+		if err := copyFile(copySource, dst); err != nil {
+			return err
+		}
+		written = append(written, installRel)
 		if sink != nil && len(written)%32 == 0 {
 			sink(InstallProgress{
 				InstallID:   installID,
@@ -279,19 +293,38 @@ func copyFlatten(extractRoot, stageDir, installID string, sink ProgressSink) ([]
 }
 
 // copyFomodSelection applies a FOMOD plugin's file/folder rules.
-func copyFomodSelection(extractRoot, stageDir string, files []FomodFile, installID string, sink ProgressSink) ([]string, error) {
+func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile, installID string, sink ProgressSink) ([]string, error) {
 	var written []string
 	for _, f := range files {
-		src := filepath.Join(extractRoot, filepath.FromSlash(f.Source))
+		src, err := containedInstallPath(extractRoot, f.Source, false)
+		if err != nil {
+			return written, fmt.Errorf("unsafe FOMOD source %q: %w", f.Source, err)
+		}
 		destRel := f.Destination
 		if destRel == "" {
 			destRel = f.Source
+		}
+		if gameID == "oblivionremastered" {
+			destRel = routeOblivionRemasteredPath(filepath.FromSlash(strings.ReplaceAll(destRel, `\`, `/`)), hasOblivionRemasteredRootMarkers(extractRoot))
+		}
+		destRoot, err := containedInstallPath(stageDir, destRel, true)
+		if err != nil {
+			return written, fmt.Errorf("unsafe FOMOD destination %q: %w", f.Destination, err)
 		}
 		info, err := os.Stat(src)
 		if err != nil {
 			slog.Warn("fomod file missing, skipping", "path", f.Source)
 			continue
 		}
+		resolvedSource, err := filepath.EvalSymlinks(src)
+		if err != nil {
+			return written, fmt.Errorf("resolving FOMOD source %q: %w", f.Source, err)
+		}
+		resolvedRoot, err := filepath.EvalSymlinks(extractRoot)
+		if err != nil || !pathContainedBy(resolvedRoot, resolvedSource) {
+			return written, fmt.Errorf("unsafe FOMOD source %q: resolves outside extraction root", f.Source)
+		}
+		src = resolvedSource
 		if f.IsFolder || info.IsDir() {
 			err := filepath.WalkDir(src, func(path string, d os.DirEntry, walkErr error) error {
 				if walkErr != nil {
@@ -301,11 +334,18 @@ func copyFomodSelection(extractRoot, stageDir string, files []FomodFile, install
 				if err != nil {
 					return err
 				}
-				dst := filepath.Join(stageDir, filepath.FromSlash(destRel), rel)
+				dst := filepath.Join(destRoot, rel)
 				if d.IsDir() {
 					return os.MkdirAll(dst, 0755)
 				}
-				if err := copyFile(path, dst); err != nil {
+				copySource := path
+				if d.Type()&os.ModeSymlink != 0 {
+					copySource, err = filepath.EvalSymlinks(path)
+					if err != nil || !pathContainedBy(resolvedRoot, copySource) {
+						return fmt.Errorf("FOMOD source symlink %q resolves outside extraction root", path)
+					}
+				}
+				if err := copyFile(copySource, dst); err != nil {
 					return err
 				}
 				rec := filepath.ToSlash(filepath.Join(destRel, rel))
@@ -316,8 +356,7 @@ func copyFomodSelection(extractRoot, stageDir string, files []FomodFile, install
 				return written, err
 			}
 		} else {
-			dst := filepath.Join(stageDir, filepath.FromSlash(destRel))
-			if err := copyFile(src, dst); err != nil {
+			if err := copyFile(src, destRoot); err != nil {
 				return written, err
 			}
 			written = append(written, destRel)
@@ -331,6 +370,30 @@ func copyFomodSelection(extractRoot, stageDir string, files []FomodFile, install
 		}
 	}
 	return written, nil
+}
+
+func containedInstallPath(root, relative string, allowDot bool) (string, error) {
+	relative = filepath.FromSlash(strings.ReplaceAll(strings.TrimSpace(relative), `\`, `/`))
+	if relative == "" || filepath.IsAbs(relative) {
+		return "", errors.New("path must be non-empty and relative")
+	}
+	clean := filepath.Clean(relative)
+	if clean == "." && !allowDot {
+		return "", errors.New("path must name an extracted entry")
+	}
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", errors.New("path escapes its root")
+	}
+	joined := filepath.Join(root, clean)
+	if !pathContainedBy(root, joined) {
+		return "", errors.New("path escapes its root")
+	}
+	return joined, nil
+}
+
+func pathContainedBy(root, candidate string) bool {
+	rel, err := filepath.Rel(root, candidate)
+	return err == nil && rel != ".." && !filepath.IsAbs(rel) && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // mergeTree copies every file from src into dst, overwriting on collision.

@@ -10,21 +10,18 @@ import (
 	"time"
 )
 
-// MountManager activates a per-game overlay as a hardlink farm at gameDataPath,
-// preserving the original Data/ at gameDataPath + ".orig".
 type MountManager struct {
 	gameDataPath  string
 	backupSuffix  string
 	overwriteRoot string
 	gameID        string
 
-	tree        *MergedTree
-	layers      []Layer // current desired layout (base already pointed at backup)
-	profileName string
-	mounted     bool
+	tree          *MergedTree
+	layers        []Layer
+	appliedLayers []Layer
+	profileName   string
+	mounted       bool
 
-	// desiredGen advances on every MarkDirty; appliedGen catches up when the
-	// on-disk farm is (re)materialized. IsDirty ⇔ desiredGen != appliedGen.
 	desiredGen uint64
 	appliedGen uint64
 
@@ -32,7 +29,6 @@ type MountManager struct {
 }
 
 // NewMountManager creates a MountManager; overwriteRoot may be "" to disable
-// write capture. gameID is recorded in the sentinel for identity/forensics.
 func NewMountManager(gameDataPath string, overwriteRoot string, gameID string) *MountManager {
 	return &MountManager{
 		gameDataPath:  gameDataPath,
@@ -57,9 +53,6 @@ func (m *MountManager) SetMountedForTesting(mounted bool) {
 }
 
 // Activate replaces Data/ with a materialized hardlink farm; layer 0 must be
-// "__base__". It is intent-first: an activation marker is written before the
-// destructive rename so a crash anywhere below self-heals via CleanupStale
-// rather than degrading to a manual recovery prompt (H-3).
 func (m *MountManager) Activate(layers []Layer, profileName string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -81,14 +74,10 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 		return fmt.Errorf("%w: %s", ErrBackupExists, backupPath)
 	}
 
-	// Reap stale transient siblings from a prior interrupted run before dropping
-	// our own intent marker (defensive; recovery normally clears these first).
 	_ = os.RemoveAll(stagingDirPath(dataPath))
 	_ = os.RemoveAll(oldFarmPath(dataPath))
 	_ = RemoveIntent(applyingIntentPath(dataPath))
 
-	// Point the base layer at the (soon-to-be) backup before building, so the
-	// farm links base files from Data.orig rather than the path we rename away.
 	if len(layers) > 0 && layers[0].Name == "__base__" {
 		layers[0].RootPath = backupPath
 	}
@@ -151,11 +140,11 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 		return fmt.Errorf("writing sentinel: %w", err)
 	}
 
-	// Commit: the sentinel is durable, so the intent marker is no longer needed.
 	_ = RemoveIntent(intentPath)
 
 	m.tree = tree
 	m.layers = layers
+	m.appliedLayers = append([]Layer(nil), layers...)
 	m.profileName = profileName
 	m.mounted = true
 	m.desiredGen = 1
@@ -173,11 +162,9 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 }
 
 // Deactivate validates the sentinel, captures new writes, then restores
-// Data.orig. On a capture failure it aborts and leaves the farm intact (H-1).
 func (m *MountManager) Deactivate() error { return m.deactivate(false) }
 
 // ForceDeactivate tears down even if capturing new writes fails, discarding the
-// uncaptured files. Only for explicit, user-consented teardown.
 func (m *MountManager) ForceDeactivate() error { return m.deactivate(true) }
 
 func (m *MountManager) deactivate(force bool) error {
@@ -203,9 +190,6 @@ func (m *MountManager) deactivate(force bool) error {
 		moved, capErr := CaptureNewFiles(dataPath, m.overwriteRoot)
 		if capErr != nil {
 			if !force {
-				// Do NOT proceed to RemoveAll — that would destroy the uncaptured
-				// writes we just failed to save (saves, tool output). Leave the farm
-				// mounted and intact; the user can retry, fix the cause, or force (H-1).
 				return fmt.Errorf("%w: %v", ErrCaptureFailed, capErr)
 			}
 			slog.Warn("force deactivate: capture failed, proceeding and discarding uncaptured writes",
@@ -227,6 +211,7 @@ func (m *MountManager) deactivate(force bool) error {
 
 	m.tree = nil
 	m.layers = nil
+	m.appliedLayers = nil
 	m.mounted = false
 	m.desiredGen = 0
 	m.appliedGen = 0
@@ -236,10 +221,6 @@ func (m *MountManager) deactivate(force bool) error {
 }
 
 // MarkDirty updates the in-memory desired layout without touching the on-disk
-// farm and advances desiredGen, coalescing rapid edits. The farm is brought in
-// sync later by ReMaterialize (before launch, or on explicit Apply). The base
-// layer is re-pointed at the backup since, while mounted, the real base files
-// live in Data.orig.
 func (m *MountManager) MarkDirty(layers []Layer) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -260,12 +241,6 @@ func (m *MountManager) MarkDirty(layers []Layer) error {
 }
 
 // ReMaterialize rebuilds the on-disk farm to match the current in-memory tree,
-// making pending MarkDirty edits visible to the game/tools. It captures new
-// writes first (H-1), builds a fresh farm in a staging sibling, then atomically
-// swaps it into place — Data is never observed partial, and open FDs survive.
-// It takes no layers argument: it materializes exactly the current tree and
-// advances appliedGen to the desiredGen captured under this lock (Guard R1), so
-// a concurrent MarkDirty can never be mis-reported as clean.
 func (m *MountManager) ReMaterialize() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -276,7 +251,7 @@ func (m *MountManager) ReMaterialize() error {
 	dataPath := m.gameDataPath
 	targetGen := m.desiredGen
 	if m.appliedGen == targetGen {
-		return nil // already in sync
+		return nil
 	}
 
 	s, err := ReadSentinel(dataPath)
@@ -287,17 +262,12 @@ func (m *MountManager) ReMaterialize() error {
 		return fmt.Errorf("sentinel rejected: %w", vErr)
 	}
 
-	// Capture new writes (saves, tool output) into Overwrite BEFORE we rebuild,
-	// so they are durable and reappear in the rebuilt farm. On failure, abort
-	// without swapping (H-1).
 	if m.overwriteRoot != "" {
 		if _, capErr := CaptureNewFiles(dataPath, m.overwriteRoot); capErr != nil {
 			return fmt.Errorf("%w: %v", ErrCaptureFailed, capErr)
 		}
 	}
 
-	// Rebuild the tree from the current layers AFTER capture, so freshly-captured
-	// files (now in the Overwrite layer) are included in the materialized farm.
 	tree := NewMergedTree()
 	if err := tree.Build(m.layers); err != nil {
 		return fmt.Errorf("rebuilding merged tree for apply: %w", err)
@@ -347,12 +317,7 @@ func (m *MountManager) ReMaterialize() error {
 		return fmt.Errorf("writing apply intent: %w", err)
 	}
 
-	// Atomic commit: swap the fresh staging farm with the live Data farm. After
-	// this, dataPath is the new farm and staging is the old one.
 	if err := renameExchange(dataPath, staging); err != nil {
-		// Fallback for filesystems without RENAME_EXCHANGE: two renames with a
-		// brief window where Data is absent. Recovery reaps oldfarm/staging and
-		// restores from backup if interrupted.
 		oldFarm := oldFarmPath(dataPath)
 		_ = os.RemoveAll(oldFarm)
 		if rerr := os.Rename(dataPath, oldFarm); rerr != nil {
@@ -361,7 +326,6 @@ func (m *MountManager) ReMaterialize() error {
 			return fmt.Errorf("apply swap (fallback, aside): %w", rerr)
 		}
 		if rerr := os.Rename(staging, dataPath); rerr != nil {
-			// Best-effort roll back to the old farm.
 			_ = os.Rename(oldFarm, dataPath)
 			_ = RemoveIntent(applyPath)
 			return fmt.Errorf("apply swap (fallback, in): %w", rerr)
@@ -372,6 +336,7 @@ func (m *MountManager) ReMaterialize() error {
 	_ = os.RemoveAll(staging)
 	_ = RemoveIntent(applyPath)
 	m.appliedGen = targetGen
+	m.appliedLayers = append([]Layer(nil), m.layers...)
 
 	slog.Info("VFS re-materialized to apply pending changes",
 		"path", dataPath, "applied_gen", m.appliedGen, "desired_gen", m.desiredGen)
@@ -390,6 +355,12 @@ func (m *MountManager) Generations() (applied, desired uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.appliedGen, m.desiredGen
+}
+
+func (m *MountManager) AppliedLayers() []Layer {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]Layer(nil), m.appliedLayers...)
 }
 
 // RecoverIfNeeded handles startup recovery via CleanupStale.

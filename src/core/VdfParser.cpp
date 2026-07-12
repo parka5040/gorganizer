@@ -131,4 +131,4 @@ std::optional<QVariantMap> VdfParser::parseFile(const std::filesystem::path& fil
     return parse(content);
 }
 
-} // namespace gorganizer
+}

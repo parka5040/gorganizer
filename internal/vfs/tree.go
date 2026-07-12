@@ -5,13 +5,11 @@ import (
 	"sync"
 )
 
-// ChildEntry is a single child in a directory listing; Name preserves original case.
 type ChildEntry struct {
 	Name  string
 	IsDir bool
 }
 
-// MergedTree is a precomputed merged view of all layers, walked by the materializer.
 type MergedTree struct {
 	mu     sync.RWMutex
 	dirs   map[string]map[string]ChildEntry

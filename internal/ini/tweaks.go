@@ -1,13 +1,11 @@
 package ini
 
-// TweakEntry is one (section, key, value) triple a tweak writes.
 type TweakEntry struct {
 	Section string
 	Key     string
 	Value   string
 }
 
-// Tweak is a named preset of INI edits targeting the game's Custom.ini.
 type Tweak struct {
 	ID          string
 	Name        string
@@ -98,21 +96,24 @@ var tweakAllowConsole = Tweak{
 	},
 }
 
-var gameTweaks = map[string][]Tweak{
-	"oblivion":  {tweakArchiveInvalidationOblivion},
-	"fallout3":  {tweakArchiveInvalidationFallout, tweakFaceGenLoad, tweakDisableIntroFallout, tweakAllowConsole},
-	"falloutnv": {tweakArchiveInvalidationFallout, tweakFaceGenLoad, tweakDisableIntroFallout, tweakAllowConsole},
-	"skyrim":    {tweakArchiveInvalidationSkyrimLE, tweakDisableIntroSkyrim, tweakPapyrusLog},
-	"skyrimse":  {tweakDisableIntroSkyrim, tweakPapyrusLog},
+var tweakSets = map[string][]Tweak{
+	"oblivion": {tweakArchiveInvalidationOblivion},
+	"fallout":  {tweakArchiveInvalidationFallout, tweakFaceGenLoad, tweakDisableIntroFallout, tweakAllowConsole},
+	"skyrimle": {tweakArchiveInvalidationSkyrimLE, tweakDisableIntroSkyrim, tweakPapyrusLog},
+	"skyrimse": {tweakDisableIntroSkyrim, tweakPapyrusLog},
 }
 
 // AvailableTweaks returns the preset list for a game, or nil when none defined.
 func AvailableTweaks(gameID string) []Tweak {
-	return gameTweaks[gameID]
+	spec, ok := SpecFor(gameID)
+	if !ok || spec.TweakSet == "" {
+		return nil
+	}
+	return tweakSets[spec.TweakSet]
 }
 
 func FindTweak(gameID, tweakID string) (Tweak, bool) {
-	for _, t := range gameTweaks[gameID] {
+	for _, t := range AvailableTweaks(gameID) {
 		if t.ID == tweakID {
 			return t, true
 		}

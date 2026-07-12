@@ -2,6 +2,7 @@ add_library(gorganizer_core STATIC
     VdfParser.cpp
     GameInfo.cpp
     GameDetector.cpp
+    ModCatalog.cpp
     AppConfig.cpp
     DirectoryManager.cpp
     PluginScanner.cpp

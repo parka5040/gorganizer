@@ -1,9 +1,17 @@
 add_library(gorganizer_ui STATIC
     MainWindow.cpp
+    SessionController.cpp
+    LaunchController.cpp
+    FalloutPatchController.cpp
+    GameSetupController.cpp
     SetupWizard.cpp
     GameSelectorWidget.cpp
     ModListWidget.cpp
+    ModListModel.cpp
+    ModListRowDelegate.cpp
     PluginListWidget.cpp
+    PluginListModel.cpp
+    PluginRowDelegate.cpp
     RunButtonWidget.cpp
     ProfileSelectorWidget.cpp
     ConnectionIndicator.cpp
@@ -20,7 +28,10 @@ add_library(gorganizer_ui STATIC
     IniEditorDialog.cpp
     TTWInstallDialog.cpp
     ExecutablesDialog.cpp
+    ExportDialog.cpp
+    ImportDialog.cpp
     ThemeManager.cpp
+    Dialogs.cpp
 )
 target_include_directories(gorganizer_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(gorganizer_ui PUBLIC

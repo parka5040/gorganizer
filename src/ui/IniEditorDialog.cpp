@@ -1,5 +1,6 @@
 #include "IniEditorDialog.h"
 #include "ThemeManager.h"
+#include "Dialogs.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -27,7 +28,7 @@ namespace {
 // Status-text hues from the active theme so they read in both light and dark.
 QString okHex() { return ThemeManager::currentPalette().successFg.name(); }
 QString errHex() { return ThemeManager::currentPalette().errorFg.name(); }
-} // namespace
+}
 
 IniEditorDialog::IniEditorDialog(GrpcClient* grpc,
                                  const QString& gameId,
@@ -227,7 +228,7 @@ void IniEditorDialog::onTweakToggled(const QString& tweakId, bool enabled)
     GrpcIniTweakState state;
     QString err;
     if (!m_grpc->setIniTweak(m_gameId, m_profileName, tweakId, enabled, state, err)) {
-        QMessageBox::warning(this, "Tweak Failed", err);
+        dialogs::warn(this, "Tweak Failed", err);
         return;
     }
     m_statusLabel->setText(QString("<span style='color:%1;'>%2 %3 %4.</span>")
@@ -311,7 +312,7 @@ void IniEditorDialog::onSave()
             continue;
         QString err;
         if (!m_grpc->saveProfileIniFile(m_gameId, m_profileName, h.filename, current, err)) {
-            QMessageBox::warning(this, "Save Failed",
+            dialogs::warn(this, "Save Failed",
                 QString("Failed to save %1: %2").arg(h.filename, err));
             return;
         }
@@ -329,7 +330,7 @@ void IniEditorDialog::onToggleEnabled(bool checked)
     GrpcProfileIniStatus status;
     QString err;
     if (!m_grpc->setProfileIniEnabled(m_gameId, m_profileName, checked, status, err)) {
-        QMessageBox::warning(this, "Error", err);
+        dialogs::warn(this, "Error", err);
         m_suppressEnabledSignal = true;
         m_enabledCheck->setChecked(!checked);
         m_suppressEnabledSignal = false;
@@ -343,17 +344,16 @@ void IniEditorDialog::onToggleEnabled(bool checked)
 void IniEditorDialog::onApplyNow()
 {
     if (anyDirty()) {
-        auto reply = QMessageBox::question(this, "Unsaved Edits",
+        if (!dialogs::confirm(this, "Unsaved Edits",
             "You have unsaved edits. Save before applying?",
-            QMessageBox::Save | QMessageBox::Cancel);
-        if (reply == QMessageBox::Cancel)
+            QMessageBox::NoButton, QMessageBox::Save, QMessageBox::Cancel))
             return;
         onSave();
     }
     GrpcProfileIniStatus status;
     QString err;
     if (!m_grpc->getProfileIniStatus(m_gameId, m_profileName, status, err)) {
-        QMessageBox::warning(this, "Error", err);
+        dialogs::warn(this, "Error", err);
         return;
     }
     if (status.useCustomIni) {
@@ -433,7 +433,7 @@ QString patchIniSectionKey(const QString& original, const QString& section,
     return lines.join('\n');
 }
 
-} // anonymous namespace
+}
 
 void IniEditorDialog::buildResolutionTab(const std::vector<GrpcProfileIniFile>& files)
 {
@@ -654,4 +654,4 @@ void IniEditorDialog::onFindClose()
     if (editor) editor->setFocus();
 }
 
-} // namespace gorganizer
+}

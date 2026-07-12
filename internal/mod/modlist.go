@@ -7,7 +7,6 @@ import (
 	"strings"
 )
 
-// ModListEntry represents a single entry in modlist.txt.
 type ModListEntry struct {
 	Name    string
 	Enabled bool

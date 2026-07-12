@@ -14,6 +14,6 @@ std::filesystem::path appDataDir();
 
 std::filesystem::path steamRoot();
 
-} // namespace Paths
+}
 
-} // namespace gorganizer
+}

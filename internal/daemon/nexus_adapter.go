@@ -8,7 +8,6 @@ import (
 	"github.com/parka/gorganizer/internal/plugins"
 )
 
-// nexusV3Adapter narrows *download.NexusClient to the plugins.V3Adapter
 type nexusV3Adapter struct {
 	client *download.NexusClient
 }
@@ -46,7 +45,6 @@ func (a *nexusV3Adapter) RateLimitRemaining() (int, int) {
 }
 
 // readSubdirs returns the names of immediate subdirectories under root.
-// Used to walk every mod folder under ModsDir(gameID). Hidden entries
 func readSubdirs(root string) ([]string, error) {
 	d, err := os.Open(root)
 	if err != nil {

@@ -13,22 +13,18 @@ import (
 	"time"
 )
 
-// ErrInvalidKey is returned by ValidateAPIKey when the Nexus API rejects the key.
 var ErrInvalidKey = errors.New("invalid API key")
 
-// URLResolver abstracts Nexus API calls for testability.
 type URLResolver interface {
 	ResolveDownloadURL(link *NXMLink) (string, error)
 	GetModInfo(gameSlug string, modID int) (*NexusModInfo, error)
 	GetFileDetails(gameSlug string, modID, fileID int) (*NexusFileDetails, error)
 }
 
-// NexusFileList is the envelope returned by /v1/games/{game}/mods/{id}/files.
 type NexusFileList struct {
 	Files []NexusFileDetails `json:"files"`
 }
 
-// NexusModInfo holds basic mod metadata from the Nexus v1 API.
 type NexusModInfo struct {
 	Name          string `json:"name"`
 	Version       string `json:"version"`
@@ -39,7 +35,6 @@ type NexusModInfo struct {
 	ModID         int    `json:"mod_id,omitempty"`
 }
 
-// NexusFileDetails mirrors the v3 MinimalModFile shape we surface from v1.
 type NexusFileDetails struct {
 	FileID       int    `json:"file_id"`
 	Name         string `json:"name"`
@@ -51,7 +46,6 @@ type NexusFileDetails struct {
 	Description  string `json:"description,omitempty"`
 }
 
-// NexusClient talks to the Nexus Mods API using MO2-compatible headers.
 type NexusClient struct {
 	apiKey     string
 	httpClient *http.Client
@@ -288,7 +282,6 @@ func (c *NexusClient) ValidateAPIKey(ctx context.Context) error {
 	}
 }
 
-// V3ModFile is the subset of v3 GetModFile we need.
 type V3ModFile struct {
 	ID              string `json:"id"`
 	GameScopedID    string `json:"game_scoped_id"`
@@ -296,7 +289,6 @@ type V3ModFile struct {
 	ModGameScopedID string `json:"mod_game_scoped_id"`
 }
 
-// V3MinimalMod is the slice of MinimalMod surfaced by dependency range responses.
 type V3MinimalMod struct {
 	ID           string `json:"id"`
 	GameScopedID string `json:"game_scoped_id"`
@@ -304,13 +296,11 @@ type V3MinimalMod struct {
 	ThumbnailURL string `json:"thumbnail_url"`
 }
 
-// V3DepDefinition is one dependency definition with its ranges.
 type V3DepDefinition struct {
 	ID     string       `json:"id"`
 	Ranges []V3DepRange `json:"ranges"`
 }
 
-// V3DepRange is one alternative within a dep definition.
 type V3DepRange struct {
 	ID          string `json:"id"`
 	TargetGroup struct {
@@ -320,7 +310,6 @@ type V3DepRange struct {
 	} `json:"target_group"`
 }
 
-// V3DepRangesResponse is the envelope of GET /mod-files/{id}/dependencies/ranges.
 type V3DepRangesResponse struct {
 	DependencyDefinitions []V3DepDefinition `json:"dependency_definitions"`
 }

@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
-// Mod represents a single installed mod; its folder overlays the game's Data/ directly.
+const ImportStagePrefix = ".gorganizer-import-"
+
 type Mod struct {
 	Name      string
 	GameID    string
@@ -84,9 +86,12 @@ func ListMods(modsDir, gameID string) ([]Mod, error) {
 	return mods, nil
 }
 
-// isReservedDirName flags non-mod entries (Downloads, dotfiles) inside the mods dir.
+// isReservedDirName flags non-mod entries (Downloads, dotfiles, import staging) inside the mods dir.
 func isReservedDirName(name string) bool {
 	if name == "" || name[0] == '.' {
+		return true
+	}
+	if strings.HasPrefix(name, ImportStagePrefix) {
 		return true
 	}
 	switch name {

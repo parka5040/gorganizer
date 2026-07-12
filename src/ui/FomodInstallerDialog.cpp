@@ -49,7 +49,7 @@ bool initialChecked(FomodGroupType type, FomodPluginState state, int indexInGrou
     }
 }
 
-} // namespace
+}
 
 FomodInstallerDialog::FomodInstallerDialog(const FomodPlan& plan, QWidget* parent)
     : QDialog(parent)
@@ -289,4 +289,4 @@ void FomodInstallerDialog::collectSelections()
     }
 }
 
-} // namespace gorganizer
+}

@@ -9,7 +9,6 @@ import (
 	"github.com/parka/gorganizer/internal/game"
 )
 
-// NXMLink holds the parsed components of an nxm:// URI.
 type NXMLink struct {
 	GameSlug string
 	ModID    int
@@ -19,7 +18,6 @@ type NXMLink struct {
 }
 
 // GameSlug returns the canonical Nexus slug for an internal gameID, or "".
-// The slug data lives on the central game registry (game.GameDefinition.NxmSlug).
 func GameSlug(gameID string) string {
 	return game.NxmSlugForID(gameID)
 }

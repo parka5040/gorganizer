@@ -2,46 +2,16 @@ package ipc
 
 import (
 	"context"
-	"errors"
-	"os"
 
 	pb "github.com/parka/gorganizer/api/proto"
-	"github.com/parka/gorganizer/internal/config"
-	"github.com/parka/gorganizer/internal/vfs"
+	"github.com/parka/gorganizer/internal/dto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-// gorganizerServer implements the generated GorganizerServer interface.
 type gorganizerServer struct {
 	pb.UnimplementedGorganizerServer
 	ctrl DaemonController
-}
-
-// grpcError maps errors to gRPC status codes. Typed errors from errors.go
-// go through MapError first; everything else falls back to the sentinel
-func grpcError(err error) error {
-	if mapped, ok := MapError(err); ok {
-		return mapped
-	}
-	switch {
-	case errors.Is(err, vfs.ErrAlreadyMounted):
-		return status.Error(codes.AlreadyExists, err.Error())
-	case errors.Is(err, vfs.ErrNotMounted):
-		return status.Error(codes.FailedPrecondition, err.Error())
-	case errors.Is(err, vfs.ErrBackupExists):
-		return status.Error(codes.FailedPrecondition, err.Error())
-	case errors.Is(err, vfs.ErrDataDirMissing):
-		return status.Error(codes.NotFound, err.Error())
-	case errors.Is(err, config.ErrInvalidGameID):
-		return status.Error(codes.InvalidArgument, err.Error())
-	case errors.Is(err, config.ErrNoAPIKey):
-		return status.Error(codes.FailedPrecondition, err.Error())
-	case errors.Is(err, os.ErrNotExist):
-		return status.Error(codes.NotFound, err.Error())
-	default:
-		return status.Error(codes.Internal, err.Error())
-	}
 }
 
 func (s *gorganizerServer) ListGames(_ context.Context, _ *pb.ListGamesRequest) (*pb.ListGamesResponse, error) {
@@ -208,9 +178,9 @@ func (s *gorganizerServer) ListSeparators(_ context.Context, req *pb.ListSeparat
 
 func (s *gorganizerServer) SetSeparators(_ context.Context, req *pb.SetSeparatorsRequest) (*pb.SetSeparatorsResponse, error) {
 	in := req.GetSeparators()
-	seps := make([]SeparatorResult, len(in))
+	seps := make([]dto.SeparatorResult, len(in))
 	for i, sp := range in {
-		seps[i] = SeparatorResult{Name: sp.GetName(), VisualIndex: sp.GetVisualIndex(), Collapsed: sp.GetCollapsed()}
+		seps[i] = dto.SeparatorResult{Name: sp.GetName(), VisualIndex: sp.GetVisualIndex(), Collapsed: sp.GetCollapsed()}
 	}
 	if err := s.ctrl.SetSeparators(req.GetGameId(), req.GetProfileName(), seps, req.GetViewEnabled()); err != nil {
 		return nil, grpcError(err)
@@ -220,7 +190,7 @@ func (s *gorganizerServer) SetSeparators(_ context.Context, req *pb.SetSeparator
 
 func (s *gorganizerServer) MountVFS(_ context.Context, req *pb.MountVFSRequest) (*pb.MountVFSResponse, error) {
 	var (
-		st  *VFSStatusResult
+		st  *dto.VFSStatusResult
 		err error
 	)
 	if req.GetAutoSwap() {
@@ -329,7 +299,7 @@ func (s *gorganizerServer) SetArchiveHidden(_ context.Context, req *pb.SetArchiv
 }
 
 func (s *gorganizerServer) SetArchivesHiddenBulk(_ context.Context, req *pb.SetArchivesHiddenBulkRequest) (*pb.SetArchivesHiddenBulkResponse, error) {
-	scope := BulkHideScope(req.GetScope())
+	scope := dto.BulkHideScope(req.GetScope())
 	affected, err := s.ctrl.SetArchivesHiddenBulk(req.GetGameId(), req.GetHidden(), scope)
 	if err != nil {
 		return nil, grpcError(err)
@@ -390,18 +360,18 @@ func (s *gorganizerServer) PreviewInstall(_ context.Context, req *pb.PreviewInst
 }
 
 func (s *gorganizerServer) StartInstall(_ context.Context, req *pb.StartInstallRequest) (*pb.StartInstallResponse, error) {
-	files := make([]FomodFileResult, len(req.GetFomodSelectedFiles()))
+	files := make([]dto.FomodFileResult, len(req.GetFomodSelectedFiles()))
 	for i, f := range req.GetFomodSelectedFiles() {
-		files[i] = FomodFileResult{
+		files[i] = dto.FomodFileResult{
 			Source: f.GetSource(), Destination: f.GetDestination(),
 			IsFolder: f.GetIsFolder(), Priority: f.GetPriority(),
 		}
 	}
-	folder, count, err := s.ctrl.StartInstall(StartInstallRequest{
+	folder, count, err := s.ctrl.StartInstall(dto.StartInstallRequest{
 		GameID:              req.GetGameId(),
 		ArchiveRelPath:      req.GetArchiveRelPath(),
 		ExternalArchivePath: req.GetExternalArchivePath(),
-		Mode:                InstallMode(req.GetMode()),
+		Mode:                dto.InstallMode(req.GetMode()),
 		TargetMod:           req.GetTargetMod(),
 		PreviewID:           req.GetPreviewId(),
 		FomodSelectedFiles:  files,
@@ -496,7 +466,7 @@ func (s *gorganizerServer) GetProfileIniStatus(_ context.Context, req *pb.GetPro
 	return profileIniStatusToProto(st), nil
 }
 
-func profileIniStatusToProto(st *ProfileIniStatusResult) *pb.ProfileIniStatus {
+func profileIniStatusToProto(st *dto.ProfileIniStatusResult) *pb.ProfileIniStatus {
 	return &pb.ProfileIniStatus{
 		GameId:          st.GameID,
 		ProfileName:     st.ProfileName,
@@ -526,7 +496,7 @@ func (s *gorganizerServer) SetIniTweak(_ context.Context, req *pb.SetIniTweakReq
 	return iniTweakToProto(*st), nil
 }
 
-func iniTweakToProto(t IniTweakStateResult) *pb.IniTweakState {
+func iniTweakToProto(t dto.IniTweakStateResult) *pb.IniTweakState {
 	return &pb.IniTweakState{
 		Id: t.ID, Name: t.Name, Description: t.Description,
 		TargetFile: t.TargetFile, Enabled: t.Enabled,
@@ -681,6 +651,23 @@ func (s *gorganizerServer) SetPluginOrder(_ context.Context, req *pb.SetPluginOr
 	return &pb.SetPluginOrderResponse{}, nil
 }
 
+func (s *gorganizerServer) SetPluginLoadout(_ context.Context, req *pb.SetPluginLoadoutRequest) (*pb.SetPluginLoadoutResponse, error) {
+	entries := make([]dto.PluginLoadoutEntryResult, 0, len(req.GetPlugins()))
+	for _, entry := range req.GetPlugins() {
+		if entry == nil {
+			continue
+		}
+		entries = append(entries, dto.PluginLoadoutEntryResult{
+			Filename: entry.GetFilename(),
+			Enabled:  entry.GetEnabled(),
+		})
+	}
+	if err := s.ctrl.SetPluginLoadout(req.GetGameId(), req.GetProfileName(), entries); err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.SetPluginLoadoutResponse{}, nil
+}
+
 func (s *gorganizerServer) StreamPluginStatus(req *pb.StreamPluginStatusRequest, stream pb.Gorganizer_StreamPluginStatusServer) error {
 	ch, err := s.ctrl.StreamPluginStatus(stream.Context(), req.GetGameId(), req.GetProfileName())
 	if err != nil {
@@ -711,7 +698,7 @@ func (s *gorganizerServer) StreamPluginStatus(req *pb.StreamPluginStatusRequest,
 	return nil
 }
 
-func pluginStatusToProto(p *PluginStatusItemResult) *pb.PluginStatusItem {
+func pluginStatusToProto(p *dto.PluginStatusItemResult) *pb.PluginStatusItem {
 	issues := make([]*pb.DepIssue, 0, len(p.Issues))
 	for _, i := range p.Issues {
 		issues = append(issues, &pb.DepIssue{
@@ -733,7 +720,7 @@ func pluginStatusToProto(p *PluginStatusItemResult) *pb.PluginStatusItem {
 	}
 }
 
-func gamesToProto(games []GameInfo) []*pb.Game {
+func gamesToProto(games []dto.GameInfo) []*pb.Game {
 	result := make([]*pb.Game, len(games))
 	for i, g := range games {
 		result[i] = &pb.Game{
@@ -746,7 +733,7 @@ func gamesToProto(games []GameInfo) []*pb.Game {
 	return result
 }
 
-func modToProto(m *ModInfoResult) *pb.ModInfo {
+func modToProto(m *dto.ModInfoResult) *pb.ModInfo {
 	return &pb.ModInfo{
 		Name: m.Name, GameId: m.GameID,
 		BasePath:  m.BasePath,
@@ -756,7 +743,7 @@ func modToProto(m *ModInfoResult) *pb.ModInfo {
 	}
 }
 
-func modsToProto(mods []ModInfoResult) []*pb.ModInfo {
+func modsToProto(mods []dto.ModInfoResult) []*pb.ModInfo {
 	result := make([]*pb.ModInfo, len(mods))
 	for i := range mods {
 		result[i] = modToProto(&mods[i])
@@ -858,7 +845,7 @@ func (s *gorganizerServer) LaunchTTWInstaller(_ context.Context, req *pb.LaunchT
 	if info == nil {
 		return nil, status.Error(codes.InvalidArgument, "info is required")
 	}
-	id, err := s.ctrl.LaunchTTWInstaller(TTWInstallerInfoResult{
+	id, err := s.ctrl.LaunchTTWInstaller(dto.TTWInstallerInfoResult{
 		Backend:       int(info.GetBackend()),
 		MpiFile:       info.GetMpiFile(),
 		InstallerExe:  info.GetInstallerExe(),
@@ -926,11 +913,11 @@ func (s *gorganizerServer) TranslateWinePath(_ context.Context, req *pb.Translat
 	return &pb.TranslateWinePathResponse{WinePath: out}, nil
 }
 
-func profileToProto(p *ProfileResult) *pb.Profile {
+func profileToProto(p *dto.ProfileResult) *pb.Profile {
 	return &pb.Profile{Name: p.Name, GameId: p.GameID, CreatedAt: p.CreatedAt}
 }
 
-func profilesToProto(profiles []ProfileResult) []*pb.Profile {
+func profilesToProto(profiles []dto.ProfileResult) []*pb.Profile {
 	result := make([]*pb.Profile, len(profiles))
 	for i := range profiles {
 		result[i] = profileToProto(&profiles[i])
@@ -938,7 +925,7 @@ func profilesToProto(profiles []ProfileResult) []*pb.Profile {
 	return result
 }
 
-func modListToProto(entries []ModListEntryResult) []*pb.ModListEntry {
+func modListToProto(entries []dto.ModListEntryResult) []*pb.ModListEntry {
 	result := make([]*pb.ModListEntry, len(entries))
 	for i, e := range entries {
 		result[i] = &pb.ModListEntry{
@@ -948,17 +935,17 @@ func modListToProto(entries []ModListEntryResult) []*pb.ModListEntry {
 	return result
 }
 
-func modListFromProto(entries []*pb.ModListEntry) []ModListEntryResult {
-	result := make([]ModListEntryResult, len(entries))
+func modListFromProto(entries []*pb.ModListEntry) []dto.ModListEntryResult {
+	result := make([]dto.ModListEntryResult, len(entries))
 	for i, e := range entries {
-		result[i] = ModListEntryResult{
+		result[i] = dto.ModListEntryResult{
 			ModName: e.GetModName(), Enabled: e.GetEnabled(), Priority: int(e.GetPriority()),
 		}
 	}
 	return result
 }
 
-func vfsStatusToProto(st *VFSStatusResult) *pb.VFSStatus {
+func vfsStatusToProto(st *dto.VFSStatusResult) *pb.VFSStatus {
 	return &pb.VFSStatus{
 		Mounted:         st.Mounted,
 		GameId:          st.GameID,
@@ -972,7 +959,7 @@ func vfsStatusToProto(st *VFSStatusResult) *pb.VFSStatus {
 	}
 }
 
-func downloadProgressToProto(p *DownloadProgressResult) *pb.DownloadProgress {
+func downloadProgressToProto(p *dto.DownloadProgressResult) *pb.DownloadProgress {
 	return &pb.DownloadProgress{
 		DownloadId:      p.DownloadID,
 		ModName:         p.ModName,
@@ -984,7 +971,7 @@ func downloadProgressToProto(p *DownloadProgressResult) *pb.DownloadProgress {
 	}
 }
 
-func installProgressToProto(p *InstallProgressResult) *pb.InstallProgress {
+func installProgressToProto(p *dto.InstallProgressResult) *pb.InstallProgress {
 	return &pb.InstallProgress{
 		InstallId:      p.InstallID,
 		ArchiveRelPath: p.ArchiveRelPath,
@@ -998,7 +985,7 @@ func installProgressToProto(p *InstallProgressResult) *pb.InstallProgress {
 	}
 }
 
-func archiveRowToProto(r ArchiveRowResult) *pb.ArchiveRow {
+func archiveRowToProto(r dto.ArchiveRowResult) *pb.ArchiveRow {
 	return &pb.ArchiveRow{
 		ArchiveRelPath:     r.ArchiveRelPath,
 		ModId:              int32(r.ModID),
@@ -1024,14 +1011,14 @@ func archiveRowToProto(r ArchiveRowResult) *pb.ArchiveRow {
 	}
 }
 
-func gameSettingsToProto(gs *GameSettingsResult) *pb.GameSettings {
+func gameSettingsToProto(gs *dto.GameSettingsResult) *pb.GameSettings {
 	return &pb.GameSettings{
 		GameId:      gs.GameID,
 		AutoInstall: gs.AutoInstall,
 	}
 }
 
-func fomodPlanToProto(p *FomodPlanResult) *pb.FomodPlan {
+func fomodPlanToProto(p *dto.FomodPlanResult) *pb.FomodPlan {
 	out := &pb.FomodPlan{
 		ModuleName:     p.ModuleName,
 		ModulePath:     p.ModulePath,
@@ -1072,15 +1059,19 @@ func fomodPlanToProto(p *FomodPlanResult) *pb.FomodPlan {
 	return out
 }
 
-// ---- External executables ----
-
-func execSpecToProto(s ExecutableSpec) *pb.Executable {
+func execSpecToProto(s dto.ExecutableSpec) *pb.Executable {
 	return &pb.Executable{
 		Id:                 s.ID,
 		Title:              s.Title,
 		ExePath:            s.ExePath,
+		ToolId:             s.ToolID,
+		Runner:             s.Runner,
 		Args:               s.Args,
+		Environment:        s.Environment,
 		WorkingDir:         s.WorkingDir,
+		PrefixAppId:        int32(s.PrefixAppID),
+		OutputPolicy:       s.OutputPolicy,
+		SelectedInput:      s.SelectedInput,
 		NeedsVfsMounted:    s.NeedsVFSMounted,
 		CaptureOutputToMod: s.CaptureOutputToMod,
 		SanitizeEnv:        s.SanitizeEnv,
@@ -1089,16 +1080,22 @@ func execSpecToProto(s ExecutableSpec) *pb.Executable {
 	}
 }
 
-func protoToExecSpec(e *pb.Executable) ExecutableSpec {
+func protoToExecSpec(e *pb.Executable) dto.ExecutableSpec {
 	if e == nil {
-		return ExecutableSpec{}
+		return dto.ExecutableSpec{}
 	}
-	return ExecutableSpec{
+	return dto.ExecutableSpec{
 		ID:                 e.GetId(),
 		Title:              e.GetTitle(),
 		ExePath:            e.GetExePath(),
+		ToolID:             e.GetToolId(),
+		Runner:             e.GetRunner(),
 		Args:               e.GetArgs(),
+		Environment:        e.GetEnvironment(),
 		WorkingDir:         e.GetWorkingDir(),
+		PrefixAppID:        int(e.GetPrefixAppId()),
+		OutputPolicy:       e.GetOutputPolicy(),
+		SelectedInput:      e.GetSelectedInput(),
 		NeedsVFSMounted:    e.GetNeedsVfsMounted(),
 		CaptureOutputToMod: e.GetCaptureOutputToMod(),
 		SanitizeEnv:        e.GetSanitizeEnv(),
@@ -1142,17 +1139,23 @@ func (s *gorganizerServer) DetectExecutables(_ context.Context, req *pb.DetectEx
 	resp := &pb.DetectExecutablesResponse{}
 	for _, f := range found {
 		resp.Detected = append(resp.Detected, &pb.DetectedExecutable{
+			ToolId:             f.ToolID,
 			Title:              f.Title,
 			ExePath:            f.ExePath,
+			Runner:             f.Runner,
+			PrefixAppId:        int32(f.PrefixAppID),
+			OutputPolicy:       f.OutputPolicy,
 			NeedsVfsMounted:    f.NeedsVFSMounted,
 			CaptureOutputToMod: f.CaptureOutputToMod,
+			ExtraRwScratch:     f.ExtraRWScratch,
+			DefaultArgs:        f.DefaultArgs,
 		})
 	}
 	return resp, nil
 }
 
 func (s *gorganizerServer) LaunchExecutable(_ context.Context, req *pb.LaunchExecutableRequest) (*pb.LaunchExecutableResponse, error) {
-	pid, runID, err := s.ctrl.LaunchExecutable(req.GetGameId(), req.GetExecId(), req.GetProfileName())
+	pid, runID, err := s.ctrl.LaunchExecutable(req.GetGameId(), req.GetExecId(), req.GetProfileName(), req.GetAutoSort())
 	if err != nil {
 		return nil, grpcError(err)
 	}
@@ -1164,4 +1167,36 @@ func (s *gorganizerServer) CancelExecutable(_ context.Context, req *pb.CancelExe
 		return nil, grpcError(err)
 	}
 	return &pb.CancelExecutableResponse{}, nil
+}
+
+func managedToolStatusToProto(status dto.ManagedToolStatusResult) *pb.ManagedToolStatus {
+	return &pb.ManagedToolStatus{
+		ToolId: status.ID, Installed: status.Installed, ActiveVersion: status.ActiveVersion,
+		PreviousVersion: status.PreviousVersion, ExecutablePath: status.ExecutablePath,
+		UpdateAvailable: status.UpdateAvailable,
+	}
+}
+
+func (s *gorganizerServer) GetManagedToolStatus(_ context.Context, req *pb.GetManagedToolStatusRequest) (*pb.ManagedToolStatus, error) {
+	status, err := s.ctrl.GetManagedToolStatus(req.GetToolId())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return managedToolStatusToProto(status), nil
+}
+
+func (s *gorganizerServer) InstallManagedTool(ctx context.Context, req *pb.InstallManagedToolRequest) (*pb.ManagedToolStatus, error) {
+	status, err := s.ctrl.InstallManagedTool(ctx, req.GetToolId())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return managedToolStatusToProto(status), nil
+}
+
+func (s *gorganizerServer) RollbackManagedTool(_ context.Context, req *pb.RollbackManagedToolRequest) (*pb.ManagedToolStatus, error) {
+	status, err := s.ctrl.RollbackManagedTool(req.GetToolId())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return managedToolStatusToProto(status), nil
 }

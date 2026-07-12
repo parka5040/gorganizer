@@ -13,7 +13,7 @@ namespace gorganizer {
 
 namespace {
 constexpr int kPollIntervalMs = 150;
-} // namespace
+}
 
 SplashScreen::SplashScreen(GrpcClient* grpc, QWidget* parent)
     : QWidget(parent, Qt::FramelessWindowHint | Qt::SplashScreen | Qt::WindowStaysOnTopHint)
@@ -98,4 +98,4 @@ void SplashScreen::poll()
     }
 }
 
-} // namespace gorganizer
+}

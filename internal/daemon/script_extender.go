@@ -16,18 +16,18 @@ import (
 	"time"
 
 	"github.com/parka/gorganizer/internal/download"
+	"github.com/parka/gorganizer/internal/gamedef"
+	"github.com/parka/gorganizer/internal/tools"
 )
 
 const seManifestFilename = ".gorganizer-script-extender.manifest"
 
-// seManifestEntry records one file from the installed extender tree.
 type seManifestEntry struct {
 	RelPath string
 	Size    int64
 	SHA256  string
 }
 
-// seInstallManifest is the on-disk record of what an extender install
 type seInstallManifest struct {
 	GameID          string
 	ExtenderName    string
@@ -36,50 +36,6 @@ type seInstallManifest struct {
 	Entries         []seManifestEntry
 }
 
-// ScriptExtenderDef describes where to pull a script extender from plus
-// the post-extraction layout. Two source flavors are supported: a public
-type ScriptExtenderDef struct {
-	Name        string
-	LoaderExe   string
-	DataSubdirs []string
-
-	GitHubRepo  string
-	AssetSuffix string
-
-	GameSlug string
-	ModID    int
-}
-
-var KnownScriptExtenders = map[string]ScriptExtenderDef{
-	"fallout3": {
-		Name: "FOSE", GameSlug: "fallout3", ModID: 8606,
-		LoaderExe: "fose_loader.exe", DataSubdirs: []string{"FOSE"},
-	},
-	"falloutnv": {
-		Name:        "xNVSE",
-		GitHubRepo:  "xNVSE/NVSE",
-		AssetSuffix: ".7z",
-		LoaderExe:   "nvse_loader.exe",
-		DataSubdirs: []string{"NVSE"},
-	},
-	"ttw": {
-		Name:        "xNVSE",
-		GitHubRepo:  "xNVSE/NVSE",
-		AssetSuffix: ".7z",
-		LoaderExe:   "nvse_loader.exe",
-		DataSubdirs: []string{"NVSE"},
-	},
-	"skyrimse": {
-		Name: "SKSE64", GameSlug: "skyrimspecialedition", ModID: 30379,
-		LoaderExe: "skse64_loader.exe", DataSubdirs: []string{"SKSE"},
-	},
-	"fallout4": {
-		Name: "F4SE", GameSlug: "fallout4", ModID: 42147,
-		LoaderExe: "f4se_loader.exe", DataSubdirs: []string{"F4SE"},
-	},
-}
-
-// gitHubReleaseAsset is the subset of the GitHub Releases REST payload
 type gitHubReleaseAsset struct {
 	Name               string `json:"name"`
 	BrowserDownloadURL string `json:"browser_download_url"`
@@ -92,7 +48,6 @@ type gitHubRelease struct {
 }
 
 // fetchLatestGitHubRelease grabs a repo's latest (non-draft, non-
-// prerelease) release from the GitHub REST API and downloads the first
 func fetchLatestGitHubRelease(repo, suffix, destDir string) (archivePath, version string, err error) {
 	if repo == "" {
 		return "", "", errors.New("empty repo")
@@ -151,15 +106,35 @@ func fetchLatestGitHubRelease(repo, suffix, destDir string) (archivePath, versio
 }
 
 // InstallScriptExtender resolves the latest build of the game's script
-// extender, downloads it, and extracts the archive into the game's
-func (d *Daemon) InstallScriptExtender(gameID string) (string, error) {
-	gc, err := d.config.EffectiveGameConfig(gameID)
+func (ls *LaunchService) InstallScriptExtender(gameID string) (string, error) {
+	if err := ls.s.awaitRecovery(); err != nil {
+		return "", err
+	}
+	if pending := ls.s.recoveryPendingFor(gameID); pending != nil {
+		return "", fmt.Errorf("recovery pending for %s: %s", gameID, pending.Reason)
+	}
+	gc, err := ls.s.config.EffectiveGameConfig(gameID)
 	if err != nil {
 		return "", err
 	}
-	def, ok := KnownScriptExtenders[gameID]
-	if !ok {
+	g, ok := gamedef.ByID(gameID)
+	if !ok || g.ScriptExtenderSource == nil {
 		return "", fmt.Errorf("no known script extender for %q", gameID)
+	}
+	def := *g.ScriptExtenderSource
+	runtimeNeedle := ""
+	requiredRuntimeDLL := ""
+	if gameID == "skyrim" || gameID == "skyrimse" {
+		var runtimeVersion tools.PEFileVersion
+		requiredRuntimeDLL, runtimeVersion, err = tools.RequiredSKSERuntimeDLL(gameID, gc.InstallPath)
+		if err != nil {
+			return "", err
+		}
+		runtimeNeedle = fmt.Sprintf("%d.%d.%d", runtimeVersion.Major, runtimeVersion.Minor, runtimeVersion.Patch)
+	}
+	installDir, loaderRelPath, err := scriptExtenderInstallPaths(gc.InstallPath, def)
+	if err != nil {
+		return "", err
 	}
 
 	tmpDir, err := os.MkdirTemp("", "gorganizer-se-*")
@@ -175,7 +150,7 @@ func (d *Daemon) InstallScriptExtender(gameID string) (string, error) {
 			return "", fmt.Errorf("fetching %s from GitHub: %w", def.Name, err)
 		}
 	} else {
-		archivePath, versionLabel, err = fetchLatestFromNexus(d.config.NexusAPIKey, def, tmpDir)
+		archivePath, versionLabel, err = fetchLatestFromNexus(ls.s.config.NexusAPIKey, def, tmpDir, runtimeNeedle)
 		if err != nil {
 			return "", err
 		}
@@ -197,8 +172,30 @@ func (d *Daemon) InstallScriptExtender(gameID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := copyTree(srcRoot, gc.InstallPath); err != nil {
-		return "", fmt.Errorf("copying to install dir: %w", err)
+	if requiredRuntimeDLL != "" {
+		if info, err := os.Stat(filepath.Join(srcRoot, requiredRuntimeDLL)); err != nil || info.IsDir() {
+			return "", fmt.Errorf("downloaded %s archive does not match the game runtime; expected %s", def.Name, requiredRuntimeDLL)
+		}
+	}
+	ls.s.mu.Lock()
+	defer ls.s.mu.Unlock()
+	if ls.s.mountBusy(gameID) {
+		return "", fmt.Errorf("cannot install %s while %s is running", def.Name, gameID)
+	}
+	if mm, ok := ls.s.mountMgrs[gameID]; ok && mm.IsMounted() {
+		return "", fmt.Errorf("cannot install %s while the %s VFS is mounted", def.Name, gameID)
+	}
+	if rootManager, ok := ls.s.rootDeployMgrs[gameID]; ok {
+		manifest, manifestErr := rootManager.ActiveManifest()
+		if manifestErr != nil {
+			return "", fmt.Errorf("checking game-root deployment before script-extender install: %w", manifestErr)
+		}
+		if manifest != nil {
+			return "", fmt.Errorf("cannot install %s while game-root deployment is active", def.Name)
+		}
+	}
+	if err := copyTree(srcRoot, installDir); err != nil {
+		return "", fmt.Errorf("copying to extender install dir: %w", err)
 	}
 
 	subpath := gc.DataSubpath
@@ -209,15 +206,17 @@ func (d *Daemon) InstallScriptExtender(gameID string) (string, error) {
 		_ = os.MkdirAll(filepath.Join(gc.InstallPath, subpath, sub), 0755)
 	}
 
-	saved := d.config.Games[gameID]
+	saved := ls.s.config.Games[gameID]
 	saved.Tool = strings.ToLower(def.Name)
-	saved.ToolExe = def.LoaderExe
-	d.config.Games[gameID] = saved
-	if err := d.config.Save(); err != nil {
+	saved.ToolExe = loaderRelPath
+	ls.s.config.Games[gameID] = saved
+	if err := ls.s.config.Save(); err != nil {
 		slog.Warn("saving script extender tool config failed", "err", err)
 	}
 
-	if err := writeScriptExtenderManifest(gameID, def.Name, srcRoot, gc.InstallPath); err != nil {
+	if err := writeScriptExtenderManifest(
+		gameID, def.Name, srcRoot, gc.InstallPath, def.InstallSubpath,
+	); err != nil {
 		slog.Warn("writing script-extender manifest failed — Steam-update drift detection will be disabled",
 			"game", gameID, "err", err)
 	}
@@ -225,14 +224,43 @@ func (d *Daemon) InstallScriptExtender(gameID string) (string, error) {
 	slog.Info("script extender installed",
 		"game", gameID, "name", def.Name,
 		"version", versionLabel,
-		"destination", gc.InstallPath)
+		"destination", installDir)
 
-	go d.ensurePrefixRuntime(gameID, gc)
+	go ls.ensurePrefixRuntime(gameID, gc)
 
 	return def.Name, nil
 }
 
-func fetchLatestFromNexus(apiKey string, def ScriptExtenderDef, destDir string) (archivePath, version string, err error) {
+func scriptExtenderInstallPaths(installRoot string, def gamedef.ScriptExtenderSource) (installDir, loaderRel string, err error) {
+	if def.LoaderExe == "" || filepath.Base(def.LoaderExe) != def.LoaderExe {
+		return "", "", fmt.Errorf("invalid script-extender loader filename %q", def.LoaderExe)
+	}
+	subpath, err := cleanRelativeInstallSubpath(def.InstallSubpath)
+	if err != nil {
+		return "", "", err
+	}
+	if subpath == "" {
+		return installRoot, def.LoaderExe, nil
+	}
+	return filepath.Join(installRoot, subpath),
+		filepath.ToSlash(filepath.Join(subpath, def.LoaderExe)), nil
+}
+
+func cleanRelativeInstallSubpath(subpath string) (string, error) {
+	if subpath == "" {
+		return "", nil
+	}
+	clean := filepath.Clean(filepath.FromSlash(subpath))
+	if clean == "." {
+		return "", nil
+	}
+	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("invalid script-extender install subpath %q", subpath)
+	}
+	return clean, nil
+}
+
+func fetchLatestFromNexus(apiKey string, def gamedef.ScriptExtenderSource, destDir, runtimeNeedle string) (archivePath, version string, err error) {
 	if apiKey == "" {
 		return "", "", fmt.Errorf("nexus API key required for %s — paste one in Tools → Settings", def.Name)
 	}
@@ -242,17 +270,18 @@ func fetchLatestFromNexus(apiKey string, def ScriptExtenderDef, destDir string) 
 	if err != nil {
 		return "", "", fmt.Errorf("listing %s files: %w", def.Name, err)
 	}
-	// gorganizer launches every game through Steam/Proton on Linux, so a
-	// script extender must target the Steam runtime. Nexus hosts separate
-	// Steam and GOG builds of the same extender (SKSE64 AE, for example) as
-	// distinct MAIN-category files, and a GOG build ships a loader/DLL that
-	// the Steam game .exe rejects at launch ("compatible with the GOG
-	// version"). Never pick a GOG build, prefer an explicitly Steam-tagged
-	// one, and otherwise fall back to the newest remaining file.
 	mentions := func(f *download.NexusFileDetails, needle string) bool {
 		return strings.Contains(strings.ToLower(f.Name), needle) ||
 			strings.Contains(strings.ToLower(f.FileName), needle) ||
 			strings.Contains(strings.ToLower(f.Description), needle)
+	}
+	mentionsRuntime := func(f *download.NexusFileDetails, version string) bool {
+		for _, candidate := range []string{version, strings.ReplaceAll(version, ".", "_"), strings.ReplaceAll(version, ".", "-")} {
+			if mentions(f, strings.ToLower(candidate)) {
+				return true
+			}
+		}
+		return false
 	}
 	var chosen *download.NexusFileDetails
 	chosenSteam := false
@@ -262,16 +291,19 @@ func fetchLatestFromNexus(apiKey string, def ScriptExtenderDef, destDir string) 
 			continue
 		}
 		if mentions(f, "gog") {
-			continue // wrong distribution for a Steam/Proton install
+			continue
+		}
+		if runtimeNeedle != "" && !mentionsRuntime(f, runtimeNeedle) {
+			continue
 		}
 		isSteam := mentions(f, "steam")
 		switch {
 		case chosen == nil:
 			chosen, chosenSteam = f, isSteam
 		case isSteam && !chosenSteam:
-			chosen, chosenSteam = f, true // a Steam build outranks an untagged one
+			chosen, chosenSteam = f, true
 		case isSteam == chosenSteam && f.FileID > chosen.FileID:
-			chosen = f // same tier: newest wins
+			chosen = f
 		}
 	}
 	if chosen == nil {
@@ -294,8 +326,11 @@ func fetchLatestFromNexus(apiKey string, def ScriptExtenderDef, destDir string) 
 }
 
 // writeScriptExtenderManifest records the sha256 of every file the extender
-// installer placed under installPath. Walks `srcRoot` (the extractor's
-func writeScriptExtenderManifest(gameID, extenderName, srcRoot, installPath string) error {
+func writeScriptExtenderManifest(gameID, extenderName, srcRoot, installPath, installSubpath string) error {
+	subpath, err := cleanRelativeInstallSubpath(installSubpath)
+	if err != nil {
+		return err
+	}
 	manifest := seInstallManifest{
 		GameID:         gameID,
 		ExtenderName:   extenderName,
@@ -314,14 +349,18 @@ func writeScriptExtenderManifest(gameID, extenderName, srcRoot, installPath stri
 		if err != nil {
 			return err
 		}
-		target := filepath.Join(installPath, rel)
+		installedRel := rel
+		if subpath != "" {
+			installedRel = filepath.Join(subpath, rel)
+		}
+		target := filepath.Join(installPath, installedRel)
 		sum, size, hashErr := hashFile(target)
 		if hashErr != nil {
 			slog.Warn("manifest: could not hash installed file", "path", target, "err", hashErr)
 			return nil
 		}
 		entries = append(entries, seManifestEntry{
-			RelPath: filepath.ToSlash(rel),
+			RelPath: filepath.ToSlash(installedRel),
 			Size:    size,
 			SHA256:  sum,
 		})
@@ -337,7 +376,6 @@ func writeScriptExtenderManifest(gameID, extenderName, srcRoot, installPath stri
 }
 
 // hashFile returns (sha256-hex, size, error) for a single file. Errors are
-// returned verbatim so the caller can decide fatal-vs-warn.
 func hashFile(path string) (string, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -353,7 +391,6 @@ func hashFile(path string) (string, int64, error) {
 }
 
 // saveScriptExtenderManifest writes a manifest as a minimal one-line-per-
-// entry text file so it's both human-readable and trivial to parse back
 func saveScriptExtenderManifest(installPath string, m seInstallManifest) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# game: %s\n", m.GameID)
@@ -415,7 +452,6 @@ func loadScriptExtenderManifest(installPath string) (*seInstallManifest, error) 
 }
 
 // VerifyScriptExtenderManifest re-hashes every file in the manifest and
-// returns the list of entries whose sha256 no longer matches (missing
 func VerifyScriptExtenderManifest(installPath string) ([]string, error) {
 	m, err := loadScriptExtenderManifest(installPath)
 	if err != nil {
@@ -436,7 +472,6 @@ func VerifyScriptExtenderManifest(installPath string) ([]string, error) {
 }
 
 // resolvePathCaseInsensitive walks `relPath` against `base` one component
-// at a time, matching each segment case-insensitively against the actual
 func resolvePathCaseInsensitive(base, relPath string) string {
 	parts := strings.Split(relPath, string(filepath.Separator))
 	cur := base
@@ -461,7 +496,6 @@ func resolvePathCaseInsensitive(base, relPath string) string {
 }
 
 // streamTo does a plain HTTP GET into `path`, following redirects, with a
-// generous timeout so slower CDNs don't fail mid-archive.
 func streamTo(url, path string) error {
 	client := &http.Client{Timeout: 10 * time.Minute}
 	resp, err := client.Get(url)
@@ -483,7 +517,6 @@ func streamTo(url, path string) error {
 }
 
 // findExtenderRoot locates the directory containing the loader exe inside
-// the extracted archive. Walks at most two levels deep — every shipped
 func findExtenderRoot(extractDir, loaderExe string) (string, error) {
 	if _, err := os.Stat(filepath.Join(extractDir, loaderExe)); err == nil {
 		return extractDir, nil
@@ -505,8 +538,14 @@ func findExtenderRoot(extractDir, loaderExe string) (string, error) {
 }
 
 // copyTree walks src and copies every file into dst, preserving relative
-// paths. Overwrites existing files — script extender updates are a full
 func copyTree(src, dst string) error {
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		return err
+	}
+	destinationRoot, err := filepath.EvalSymlinks(dst)
+	if err != nil {
+		return err
+	}
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -518,26 +557,87 @@ func copyTree(src, dst string) error {
 		if rel == "." {
 			return nil
 		}
-		target := filepath.Join(dst, rel)
 		if info.IsDir() {
-			return os.MkdirAll(target, 0755)
+			return ensureScriptExtenderDirectory(destinationRoot, rel)
 		}
-		in, err := os.Open(path)
-		if err != nil {
-			return err
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("script-extender archive contains unsupported file %q", rel)
 		}
-		defer in.Close()
-		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-			return err
+		parentRel := filepath.Dir(rel)
+		if parentRel != "." {
+			if err := ensureScriptExtenderDirectory(destinationRoot, parentRel); err != nil {
+				return err
+			}
 		}
-		out, err := os.Create(target)
-		if err != nil {
-			return err
-		}
-		defer out.Close()
-		if _, err := io.Copy(out, in); err != nil {
-			return err
-		}
-		return os.Chmod(target, info.Mode())
+		target := filepath.Join(destinationRoot, rel)
+		return copyFileAtomic(path, target, info.Mode().Perm())
 	})
+}
+
+func ensureScriptExtenderDirectory(root, relative string) error {
+	clean := filepath.Clean(relative)
+	if clean == "." {
+		return nil
+	}
+	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("script-extender destination escapes install root: %q", relative)
+	}
+	current := root
+	for _, component := range strings.Split(clean, string(filepath.Separator)) {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			if err := os.Mkdir(current, 0755); err != nil && !os.IsExist(err) {
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("script-extender destination parent is not a physical directory: %s", current)
+		}
+	}
+	return nil
+}
+
+func copyFileAtomic(source, target string, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		return err
+	}
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.CreateTemp(filepath.Dir(target), ".gorganizer-se-")
+	if err != nil {
+		return err
+	}
+	tempPath := out.Name()
+	cleanup := true
+	defer func() {
+		_ = out.Close()
+		if cleanup {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	if err := out.Chmod(mode); err != nil {
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, target); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
 }
