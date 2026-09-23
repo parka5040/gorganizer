@@ -75,7 +75,7 @@ func (tt *TTWService) LaunchTTWInstaller(info dto.TTWInstallerInfoResult, dataMo
 	return h.ID, nil
 }
 
-// GetTTWInstallResult is the interface-form adapter around
+// GetTTWInstallResult returns the TTW install result for id as a DTO.
 func (tt *TTWService) GetTTWInstallResult(id string, block bool) (dto.TTWInstallResultData, error) {
 	res, err := tt.getTTWInstallResultInternal(id, block)
 	if err != nil {
@@ -102,7 +102,7 @@ func (tt *TTWService) GetTTWInstallResult(id string, block bool) (dto.TTWInstall
 	return out, nil
 }
 
-// TranslateWinePath delegates to the tool manager. Synthetic games use
+// TranslateWinePath converts a Unix path to a Wine path, using the parent game's prefix for synthetic games.
 func (tt *TTWService) TranslateWinePath(gameID, unixPath string) (string, error) {
 	if tt.s.toolMgr == nil {
 		return "", nil

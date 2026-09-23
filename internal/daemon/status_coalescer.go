@@ -23,7 +23,7 @@ func newStatusCoalescer() *statusCoalescer {
 	return c
 }
 
-// Push inserts or updates an event in the coalescer. Never blocks beyond
+// Push inserts or updates an event in the coalescer without blocking beyond one mutex acquisition.
 func (c *statusCoalescer) Push(evt dto.StatusEventResult) {
 	id, terminal, coalescable := coalesceKey(evt)
 
@@ -53,7 +53,7 @@ func (c *statusCoalescer) Push(evt dto.StatusEventResult) {
 	c.cond.Signal()
 }
 
-// Drain blocks until an event is available and returns it. Returns
+// Drain blocks until an event is available; it returns false once the coalescer is closed and drained.
 func (c *statusCoalescer) Drain() (dto.StatusEventResult, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -77,7 +77,7 @@ func (c *statusCoalescer) Drain() (dto.StatusEventResult, bool) {
 	}
 }
 
-// Close wakes all Drain callers and refuses further Pushes. Any events
+// Close wakes all Drain callers and rejects further pushes; buffered events are still delivered.
 func (c *statusCoalescer) Close() {
 	c.mu.Lock()
 	c.closed = true

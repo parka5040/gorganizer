@@ -14,11 +14,12 @@
 #                         menu, or run `./gorganizer.sh launch`.
 #   launch                Start the daemon + GUI. Used by the desktop entry.
 #   setup                 Detect distro, install build deps via system PM.
+#   doctor                Check build and runtime dependencies without changes.
 #   build [--rebuild]     Build only. --rebuild forces a clean rebuild.
-#   update                Pull latest from origin/main, rebuild, re-register.
+#   update [--restart]    Pull latest from origin/main, rebuild, re-register.
 #                         Refuses to run if the working tree is dirty or not
 #                         a git checkout. User config and *_Mods/ are
-#                         preserved.
+#                         preserved. --restart bounces a running daemon.
 #   register              (Re-)install desktop file + icon + nxm:// handler.
 #   unregister            Reverse `register`.
 #   nxm <URI>             One-shot: forward an nxm:// URL to the running daemon.
@@ -129,11 +130,12 @@ Subcommands:
                         menu, or run \`./gorganizer.sh launch\`.
   launch                Start the daemon + GUI (used by the desktop entry).
   setup                 Detect distro, install build deps via system PM.
+  doctor                Check build and runtime dependencies without changes.
   build [--rebuild]     Build only. --rebuild forces a clean rebuild.
-  update                Pull latest from origin/main, rebuild, re-register.
+  update [--restart]    Pull latest from origin/main, rebuild, re-register.
                         Refuses to run if the working tree is dirty or not
                         a git checkout. User config and *_Mods/ are
-                        preserved.
+                        preserved. --restart bounces a running daemon.
   register              (Re-)install desktop file + icon + nxm:// handler.
   unregister            Reverse \`register\`.
   nxm <URI>             One-shot: forward an nxm:// URL to the running daemon.
@@ -179,52 +181,75 @@ detect_distro_family() {
     echo "$family"
 }
 
-# Build deps per family. Covers both build and runtime — building locally
-# requires the dev headers anyway, and the runtime libs come along for free.
-#
-# xdelta3 is required by the TTW native installer backend (Backend B,
-# SulfurNitride/TTW_Linux_Installer) for `.mpi` patching. It's available
-# in every distro's main repos, so it costs nothing to add unconditionally.
-#
-# Recommended host packages NOT installed by this script (each lives
-# outside our packaging story):
-#
-#   - protontricks: needed for TTW Backend A (.NET 4.8 install in FNV's
-#     Proton prefix). Not in standard Debian stable / Ubuntu LTS pre-22.04
-#     repos. Install via:
-#       Flatpak: flatpak install com.github.Matoking.protontricks
-#       pipx:    pipx install protontricks
-#     The TTW dialog's Page 1 will show a friendly "install protontricks"
-#     hint when missing.
-#
-#   - winetricks: in every distro's repos; install via package manager.
-#
-#   - gstreamer codec suite: needed for FNV/TTW in-game music. Lives
-#     outside the Proton prefix and cannot be installed via protontricks.
-#     Distro-specific package set:
-#       Debian/Ubuntu: gstreamer1.0-libav, gstreamer1.0-plugins-good,
-#                      gstreamer1.0-plugins-bad
-#       Arch:          gst-libav, gst-plugins-good, gst-plugins-bad
-#       Fedora:        gstreamer1-libav, gstreamer1-plugins-good,
-#                      gstreamer1-plugins-bad-free
-#     The TTW dialog's Page 1 surfaces a hint when missing.
+# Build dependencies are logical tools paired with package-name candidates.
+# The first candidate available from configured repositories is used, avoiding
+# a single stale package name aborting an otherwise valid package-manager run.
 deps_for_family() {
     case "$1" in
-        arch)
-            echo "base-devel cmake ninja go protobuf grpc qt6-base p7zip unzip xdelta3"
+        arch) cat <<'EOF'
+base-devel|base-devel
+cmake|cmake
+ninja|ninja
+go|go
+protobuf|protobuf
+grpc|grpc
+qt6-base|qt6-base
+7-Zip|7zip p7zip
+unzip|unzip
+xdelta3|xdelta3
+EOF
             ;;
-        debian)
-            echo "build-essential cmake ninja-build golang-go protobuf-compiler protobuf-compiler-grpc libgrpc++-dev qt6-base-dev p7zip-full unzip xdelta3"
+        debian) cat <<'EOF'
+build-essential|build-essential
+cmake|cmake
+ninja-build|ninja-build
+golang-go|golang-go
+protobuf-compiler|protobuf-compiler
+protobuf-compiler-grpc|protobuf-compiler-grpc
+libgrpc++-dev|libgrpc++-dev
+qt6-base-dev|qt6-base-dev
+7-Zip|7zip p7zip-full
+unzip|unzip
+xdelta3|xdelta3
+EOF
             ;;
-        fedora)
-            echo "gcc-c++ cmake ninja-build golang protobuf-compiler grpc-plugins grpc-devel qt6-qtbase-devel p7zip unzip xdelta3"
+        fedora) cat <<'EOF'
+gcc-c++|gcc-c++
+cmake|cmake
+ninja-build|ninja-build
+golang|golang
+protobuf-compiler|protobuf-compiler
+grpc-plugins|grpc-plugins
+grpc-devel|grpc-devel
+qt6-qtbase-devel|qt6-qtbase-devel
+7-Zip|7zip p7zip
+unzip|unzip
+xdelta3|xdelta3
+EOF
             ;;
-        suse)
-            echo "gcc-c++ cmake ninja go protobuf-devel grpc-devel qt6-base-devel p7zip-full unzip xdelta"
+        suse) cat <<'EOF'
+gcc-c++|gcc-c++
+cmake|cmake
+ninja|ninja
+go|go
+protobuf-devel|protobuf-devel
+grpc-devel|grpc-devel
+qt6-base-devel|qt6-base-devel
+7-Zip|7zip p7zip-full
+unzip|unzip
+xdelta3|xdelta
+EOF
             ;;
-        *)
-            echo ""
-            ;;
+    esac
+}
+
+pkg_available() {   # $1=family $2=package
+    case "$1" in
+        arch)   pacman -Si "$2" >/dev/null 2>&1 ;;
+        debian) apt-cache show "$2" >/dev/null 2>&1 ;;
+        fedora) dnf info "$2" >/dev/null 2>&1 ;;
+        suse)   zypper info "$2" >/dev/null 2>&1 ;;
+        *) return 1 ;;
     esac
 }
 
@@ -237,6 +262,19 @@ pkg_installed() {
         suse)   rpm -q "$pkg" >/dev/null 2>&1 ;;
         *) return 1 ;;
     esac
+}
+
+resolve_package_candidates() {
+    local family="$1" candidates="$2" candidate
+    local -a candidate_list=()
+    read -r -a candidate_list <<< "$candidates"
+    for candidate in "${candidate_list[@]}"; do
+        if pkg_available "$family" "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
 }
 
 pm_install_cmd() {
@@ -259,56 +297,153 @@ pm_remove_cmd() {
     esac
 }
 
-# Returns missing packages on stdout (space-separated). Returns 0 if any are
-# missing, 1 if family is unknown, 2 if all installed.
+# Populates MISSING_BUILD_PACKAGES and UNRESOLVED_BUILD_DEPS. Returns 0 when
+# a build dependency is missing, 1 for an unknown family, and 2 when complete.
+MISSING_BUILD_PACKAGES=()
+UNRESOLVED_BUILD_DEPS=()
 missing_deps() {
-    local family="$1" deps missing=()
-    deps="$(deps_for_family "$family")"
-    [ -z "$deps" ] && return 1
-    for p in $deps; do
-        pkg_installed "$family" "$p" || missing+=("$p")
-    done
-    if [ ${#missing[@]} -eq 0 ]; then
+    local family="$1" logical candidates resolved
+    MISSING_BUILD_PACKAGES=()
+    UNRESOLVED_BUILD_DEPS=()
+    if [ -z "$(deps_for_family "$family")" ]; then
+        return 1
+    fi
+    while IFS='|' read -r logical candidates; do
+        resolved="$(resolve_package_candidates "$family" "$candidates" || true)"
+        if [ -z "$resolved" ]; then
+            warn "No available package for build dependency $logical (candidates: $candidates); install it manually."
+            UNRESOLVED_BUILD_DEPS+=("$logical")
+        elif ! pkg_installed "$family" "$resolved"; then
+            MISSING_BUILD_PACKAGES+=("$resolved")
+        fi
+    done < <(deps_for_family "$family")
+    if [ ${#MISSING_BUILD_PACKAGES[@]} -eq 0 ] && [ ${#UNRESOLVED_BUILD_DEPS[@]} -eq 0 ]; then
         return 2
     fi
-    echo "${missing[*]}"
+    printf '%s\n' "${MISSING_BUILD_PACKAGES[*]}"
     return 0
 }
 
 # Prompt-and-install build deps. Used by `setup` and the first-run flow.
 # Returns 0 on success, non-zero if the user declined or the install failed.
 install_deps_interactive() {
-    local family="$1" missing install_cmd
+    local family="$1" missing install_cmd deps_rc=0
+    local -a install_cmd_parts=()
     install_cmd="$(pm_install_cmd "$family")"
     if [ -z "$install_cmd" ]; then
         warn "Unknown distro family ($family). Install build deps manually:"
         warn "    Need: cmake, ninja, go (1.26+), protoc, protoc-gen-grpc,"
-        warn "          qt6-base dev, grpc dev, p7zip, unzip."
+        warn "          qt6-base dev, grpc dev, 7zip, unzip."
         return 1
     fi
-    case "$(missing_deps "$family"; echo "rc=$?")" in
-        *"rc=2") ok "All build deps already installed."; return 0 ;;
-        *"rc=1") warn "Distro family unknown; can't auto-install."; return 1 ;;
+    missing_deps "$family" >/dev/null || deps_rc=$?
+    case "$deps_rc" in
+        2) ok "All build deps already installed."; return 0 ;;
+        1) warn "Distro family unknown; can't auto-install."; return 1 ;;
     esac
-    missing="$(missing_deps "$family" || true)"
-    [ -z "$missing" ] && { ok "All build deps already installed."; return 0; }
+    missing="${MISSING_BUILD_PACKAGES[*]}"
+    if [ -z "$missing" ]; then
+        warn "Build dependency packages could not be resolved; continuing without an install."
+        return 0
+    fi
 
     log "Missing build dependencies (${BOLD}$family${RESET}):"
     echo "    $missing" >&2
     log "Install command:"
     echo "    $install_cmd $missing" >&2
     if ! prompt_yn "Install now via sudo?" Y; then
-        warn "Skipped. Run \`sudo $install_cmd $missing\` yourself, then rerun."
+        warn "Skipped. Run \`$install_cmd $missing\` yourself, then rerun."
         return 1
     fi
     sudo -v || { err "sudo authentication failed."; return 1; }
-    # shellcheck disable=SC2086
-    if ! $install_cmd $missing; then
+    read -r -a install_cmd_parts <<< "$install_cmd"
+    if ! "${install_cmd_parts[@]}" "${MISSING_BUILD_PACKAGES[@]}"; then
         err "Package install failed."
         return 1
     fi
     ok "Build deps installed."
     check_go_version_warning
+    return 0
+}
+
+# Required runtime binaries, their per-family package candidates, and the
+# feature that degrades when they are unavailable.
+runtime_tools() {
+    cat <<'EOF'
+7z|7zip p7zip|7zip p7zip-full|7zip p7zip|7zip p7zip-full|extracting .7z and .rar mod archives
+unzip|unzip|unzip|unzip|unzip|extracting .zip mod archives
+xdelta3|xdelta3|xdelta3|xdelta|xdelta3|Tale of Two Wastelands installs
+protontricks|protontricks|protontricks|protontricks|protontricks|installing .NET and VC++ into Proton prefixes for modding tools and TTW
+gst-launch-1.0|gstreamer|gstreamer1.0-tools|gstreamer1|gstreamer|audio conversion during Tale of Two Wastelands installs
+EOF
+}
+
+RUNTIME_MISSING_PACKAGES=()
+add_runtime_package() {
+    local package="$1" existing
+    for existing in "${RUNTIME_MISSING_PACKAGES[@]}"; do
+        [ "$existing" = "$package" ] && return 0
+    done
+    RUNTIME_MISSING_PACKAGES+=("$package")
+}
+
+# Reports missing optional runtime tools and collects resolvable packages.
+# It always returns success so missing feature-specific tools cannot abort an
+# install or a doctor report.
+runtime_tools_check() {
+    local family="$1" binary arch debian fedora suse reason candidates resolved install_cmd
+    RUNTIME_MISSING_PACKAGES=()
+    install_cmd="$(pm_install_cmd "$family")"
+    while IFS='|' read -r binary arch debian fedora suse reason; do
+        if command -v "$binary" >/dev/null 2>&1; then
+            printf 'present: %s\n' "$binary"
+            continue
+        fi
+        case "$family" in
+            arch) candidates="$arch" ;;
+            debian) candidates="$debian" ;;
+            fedora) candidates="$fedora" ;;
+            suse) candidates="$suse" ;;
+            *) candidates="" ;;
+        esac
+        resolved="$(resolve_package_candidates "$family" "$candidates" || true)"
+        printf 'missing: %s — %s\n' "$binary" "$reason"
+        if [ -n "$resolved" ] && [ -n "$install_cmd" ]; then
+            printf '         fix: %s %s\n' "$install_cmd" "$resolved"
+            add_runtime_package "$resolved"
+        else
+            printf '         fix: install %s manually for this distro\n' "$binary"
+        fi
+    done < <(runtime_tools)
+    return 0
+}
+
+# Offers to install all resolvable optional runtime tools after a successful
+# build. Non-interactive runs deliberately never auto-accept a sudo action.
+install_runtime_tools_interactive() {
+    local family="$1" install_cmd
+    local -a install_cmd_parts=()
+    runtime_tools_check "$family"
+    [ ${#RUNTIME_MISSING_PACKAGES[@]} -eq 0 ] && return 0
+    if [ ! -t 0 ]; then
+        warn "Runtime tool installation skipped because stdin is not a terminal."
+        return 0
+    fi
+    if ! prompt_yn "Install missing runtime tools now via sudo?" Y; then
+        warn "Skipped optional runtime tool installation."
+        return 0
+    fi
+    install_cmd="$(pm_install_cmd "$family")"
+    if ! sudo -v; then
+        warn "sudo authentication failed; optional runtime tools were not installed."
+        return 0
+    fi
+    read -r -a install_cmd_parts <<< "$install_cmd"
+    if ! "${install_cmd_parts[@]}" "${RUNTIME_MISSING_PACKAGES[@]}"; then
+        warn "Optional runtime tool installation failed."
+        return 0
+    fi
+    ok "Optional runtime tools installed."
     return 0
 }
 
@@ -759,6 +894,11 @@ cmd_install() {
         ok "Binaries up to date — skipping build."
     fi
 
+    # Optional runtime tools only affect specific features, never the build.
+    local runtime_family
+    runtime_family="$(detect_distro_family)"
+    install_runtime_tools_interactive "$runtime_family"
+
     # First-install migration only — gated by the sentinel so updates
     # never re-prompt for legacy *_Mods/ moves.
     if [ ! -f "$BOOTSTRAP_SENTINEL" ]; then
@@ -956,6 +1096,45 @@ cmd_setup() {
     install_deps_interactive "$family"
 }
 
+# --- doctor -----------------------------------------------------------------
+
+cmd_doctor() {
+    local family logical candidates resolved install_cmd build_rc=0
+    family="$(detect_distro_family)"
+    install_cmd="$(pm_install_cmd "$family")"
+    log "Distro family: ${BOLD}$family${RESET}"
+    if [ -n "$install_cmd" ]; then
+        log "Package manager: $install_cmd"
+    else
+        warn "Package manager: unavailable for this distro family"
+        build_rc=1
+    fi
+    log "Build dependencies:"
+    if [ -z "$(deps_for_family "$family")" ]; then
+        warn "missing: unsupported distro family"
+        echo "         fix: install the documented build dependencies manually"
+        build_rc=1
+    else
+        while IFS='|' read -r logical candidates; do
+            resolved="$(resolve_package_candidates "$family" "$candidates" || true)"
+            if [ -z "$resolved" ]; then
+                warn "missing: $logical (no candidate is available: $candidates)"
+                echo "         fix: install $logical manually"
+                build_rc=1
+            elif pkg_installed "$family" "$resolved"; then
+                echo "present: $logical ($resolved)"
+            else
+                warn "missing: $logical ($resolved)"
+                echo "         fix: $install_cmd $resolved"
+                build_rc=1
+            fi
+        done < <(deps_for_family "$family")
+    fi
+    log "Runtime tools (optional):"
+    runtime_tools_check "$family"
+    return "$build_rc"
+}
+
 # --- uninstall -------------------------------------------------------------
 
 cmd_uninstall() {
@@ -1032,6 +1211,9 @@ case "${1:-}" in
         ;;
     setup)
         shift; cmd_setup "$@"
+        ;;
+    doctor)
+        shift; cmd_doctor "$@"
         ;;
     build)
         shift

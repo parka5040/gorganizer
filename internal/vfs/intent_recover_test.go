@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// writeActivatingIntent drops an "activating" intent marker beside dataPath,
+// writeActivatingIntent writes an activating intent marker beside dataPath to simulate a crash mid-Activate.
 func writeActivatingIntent(t *testing.T, dataPath, backupPath string) {
 	t.Helper()
 	err := WriteIntent(activatingIntentPath(dataPath), &ActivationIntent{
@@ -24,7 +24,7 @@ func writeActivatingIntent(t *testing.T, dataPath, backupPath string) {
 	}
 }
 
-// Case B: an interrupted Activate left a partial farm (no valid sentinel) plus
+// TestCleanupStale_IntentRollback_PartialFarm locks that a partial farm with an intent marker rolls back.
 func TestCleanupStale_IntentRollback_PartialFarm(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -60,7 +60,7 @@ func TestCleanupStale_IntentRollback_PartialFarm(t *testing.T) {
 	}
 }
 
-// Case C: Data was already renamed away (absent) when the crash hit; restore
+// TestCleanupStale_IntentRollback_DataAbsent locks that the backup is restored when the crash left Data absent.
 func TestCleanupStale_IntentRollback_DataAbsent(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -82,7 +82,7 @@ func TestCleanupStale_IntentRollback_DataAbsent(t *testing.T) {
 	}
 }
 
-// Case D: the crash hit before the rename, so Data is the pristine original and
+// TestCleanupStale_IntentNoBackup_LeavesData locks that Data is left untouched when the crash preceded the rename.
 func TestCleanupStale_IntentNoBackup_LeavesData(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -106,7 +106,7 @@ func TestCleanupStale_IntentNoBackup_LeavesData(t *testing.T) {
 	}
 }
 
-// A v1 sentinel (older build, no hash/identity) must still validate and recover
+// TestCleanupStale_V1Sentinel_BackCompat locks that a v1 sentinel still validates and restores without capture.
 func TestCleanupStale_V1Sentinel_BackCompat(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -136,7 +136,7 @@ func TestCleanupStale_V1Sentinel_BackCompat(t *testing.T) {
 	}
 }
 
-// A valid v2 sentinel with an OverwriteRoot: recovery must move new writes
+// TestCleanupStale_CaptureAwareRecovery locks that recovery moves new writes into Overwrite before removing the farm.
 func TestCleanupStale_CaptureAwareRecovery(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -180,7 +180,7 @@ func TestCleanupStale_CaptureAwareRecovery(t *testing.T) {
 	}
 }
 
-// Transient build siblings from an interrupted Apply must be reaped, and must
+// TestCleanupStale_ReapsTransientSiblings locks that leftover Apply siblings are reaped without blocking recovery.
 func TestCleanupStale_ReapsTransientSiblings(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -226,7 +226,7 @@ func TestValidateSentinel_V2HashMismatchRejected(t *testing.T) {
 	}
 }
 
-// A successful Activate must commit: no intent marker left behind, and the
+// TestActivate_CommitsNoIntentAndWritesV2 locks that Activate leaves no intent marker and writes a valid v2 sentinel.
 func TestActivate_CommitsNoIntentAndWritesV2(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")

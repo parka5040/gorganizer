@@ -124,7 +124,11 @@ type TTWService struct{ s *session }
 
 type PluginStatusService struct{ s *session }
 
-type FNV4GBService struct{ s *session }
+type FNV4GBService struct {
+	s           *session
+	patcherMu   sync.Mutex
+	patcherPath string
+}
 
 type TransferService struct{ s *session }
 

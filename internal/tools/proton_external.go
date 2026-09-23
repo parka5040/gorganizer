@@ -44,7 +44,7 @@ type ExternalLaunchOpts struct {
 	PrefixReserved  bool
 }
 
-// LaunchExternal launches a Windows executable inside a Proton prefix for
+// LaunchExternal launches a Windows executable inside a Proton prefix via LaunchExternalWithOptions.
 func (m *Manager) LaunchExternal(
 	prefixGameID string,
 	gameCfg *config.GameConfig,
@@ -67,7 +67,7 @@ func (m *Manager) LaunchExternal(
 	})
 }
 
-// LaunchExternalWithOptions is the general external-tool launcher: any Windows
+// LaunchExternalWithOptions launches a Windows executable through a game's Proton prefix with the given options.
 func (m *Manager) LaunchExternalWithOptions(o ExternalLaunchOpts) (*ExternalLaunchHandle, error) {
 	if o.GameCfg == nil {
 		return nil, fmt.Errorf("LaunchExternal: gameCfg is nil")

@@ -1,7 +1,6 @@
 package download
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/parka/gorganizer/internal/fsutil"
 )
 
 type InstallMode int
@@ -263,7 +263,7 @@ func copyFlatten(gameID, extractRoot, stageDir, installID string, sink ProgressS
 		copySource := path
 		if d.Type()&os.ModeSymlink != 0 {
 			copySource, err = filepath.EvalSymlinks(path)
-			if err != nil || !pathContainedBy(resolvedContentRoot, copySource) {
+			if err != nil || !fsutil.ContainedBy(resolvedContentRoot, copySource) {
 				return fmt.Errorf("archive symlink %q resolves outside its content root", rel)
 			}
 		}
@@ -296,7 +296,7 @@ func copyFlatten(gameID, extractRoot, stageDir, installID string, sink ProgressS
 func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile, installID string, sink ProgressSink) ([]string, error) {
 	var written []string
 	for _, f := range files {
-		src, err := containedInstallPath(extractRoot, f.Source, false)
+		src, err := fsutil.SafeJoin(extractRoot, f.Source, false)
 		if err != nil {
 			return written, fmt.Errorf("unsafe FOMOD source %q: %w", f.Source, err)
 		}
@@ -307,7 +307,7 @@ func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile,
 		if gameID == "oblivionremastered" {
 			destRel = routeOblivionRemasteredPath(filepath.FromSlash(strings.ReplaceAll(destRel, `\`, `/`)), hasOblivionRemasteredRootMarkers(extractRoot))
 		}
-		destRoot, err := containedInstallPath(stageDir, destRel, true)
+		destRoot, err := fsutil.SafeJoin(stageDir, destRel, true)
 		if err != nil {
 			return written, fmt.Errorf("unsafe FOMOD destination %q: %w", f.Destination, err)
 		}
@@ -321,7 +321,7 @@ func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile,
 			return written, fmt.Errorf("resolving FOMOD source %q: %w", f.Source, err)
 		}
 		resolvedRoot, err := filepath.EvalSymlinks(extractRoot)
-		if err != nil || !pathContainedBy(resolvedRoot, resolvedSource) {
+		if err != nil || !fsutil.ContainedBy(resolvedRoot, resolvedSource) {
 			return written, fmt.Errorf("unsafe FOMOD source %q: resolves outside extraction root", f.Source)
 		}
 		src = resolvedSource
@@ -341,7 +341,7 @@ func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile,
 				copySource := path
 				if d.Type()&os.ModeSymlink != 0 {
 					copySource, err = filepath.EvalSymlinks(path)
-					if err != nil || !pathContainedBy(resolvedRoot, copySource) {
+					if err != nil || !fsutil.ContainedBy(resolvedRoot, copySource) {
 						return fmt.Errorf("FOMOD source symlink %q resolves outside extraction root", path)
 					}
 				}
@@ -370,30 +370,6 @@ func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile,
 		}
 	}
 	return written, nil
-}
-
-func containedInstallPath(root, relative string, allowDot bool) (string, error) {
-	relative = filepath.FromSlash(strings.ReplaceAll(strings.TrimSpace(relative), `\`, `/`))
-	if relative == "" || filepath.IsAbs(relative) {
-		return "", errors.New("path must be non-empty and relative")
-	}
-	clean := filepath.Clean(relative)
-	if clean == "." && !allowDot {
-		return "", errors.New("path must name an extracted entry")
-	}
-	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return "", errors.New("path escapes its root")
-	}
-	joined := filepath.Join(root, clean)
-	if !pathContainedBy(root, joined) {
-		return "", errors.New("path escapes its root")
-	}
-	return joined, nil
-}
-
-func pathContainedBy(root, candidate string) bool {
-	rel, err := filepath.Rel(root, candidate)
-	return err == nil && rel != ".." && !filepath.IsAbs(rel) && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // mergeTree copies every file from src into dst, overwriting on collision.

@@ -8,6 +8,7 @@ PROTO_DIR   := api/proto
 PROTO_SRC   := $(PROTO_DIR)/gorganizer.proto
 PROTO_GO    := $(PROTO_DIR)/gorganizer.pb.go
 PROTO_GRPC  := $(PROTO_DIR)/gorganizer_grpc.pb.go
+TOOLS_BIN   := $(CURDIR)/.tools/bin
 
 # Version stamping. The VERSION file at the repo root is the canonical
 # source of truth — bump it on release. `git describe` is appended as a
@@ -37,7 +38,12 @@ all: proto build ctl
 proto: $(PROTO_GO) $(PROTO_GRPC)
 
 $(PROTO_GO) $(PROTO_GRPC): $(PROTO_SRC)
-	PATH="$(HOME)/go/bin:$(PATH)" protoc \
+	# Build pinned protobuf plugins locally so fresh clones need no global Go tools.
+	mkdir -p $(TOOLS_BIN)
+	$(GO) build -o $(TOOLS_BIN)/ \
+		google.golang.org/protobuf/cmd/protoc-gen-go \
+		google.golang.org/grpc/cmd/protoc-gen-go-grpc
+	PATH="$(TOOLS_BIN):$(HOME)/go/bin:$(PATH)" protoc \
 		--go_out=. --go_opt=paths=source_relative \
 		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
 		$(PROTO_SRC)
@@ -66,7 +72,7 @@ verify: vet test check-comments
 clean:
 	rm -f $(BINARY) $(CTL_BINARY)
 	rm -f $(PROTO_GO) $(PROTO_GRPC)
-	rm -rf build
+	rm -rf build .tools
 
 install: build
 	install -Dm755 $(BINARY) $(DESTDIR)/usr/bin/$(BINARY)

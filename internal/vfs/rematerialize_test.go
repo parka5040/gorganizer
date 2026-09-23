@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// ReMaterialize must (a) make a newly-enabled mod visible on disk, and (b)
+// TestReMaterialize_AppliesModAndCapturesWrites locks that a new mod appears and live writes are captured and relinked.
 func TestReMaterialize_AppliesModAndCapturesWrites(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -73,7 +73,7 @@ func TestReMaterialize_AppliesModAndCapturesWrites(t *testing.T) {
 	}
 }
 
-// ReMaterialize must materialize the LATEST in-memory tree and set appliedGen to
+// TestReMaterialize_MaterializesLatestTree locks that the latest tree is applied and appliedGen reaches desiredGen.
 func TestReMaterialize_MaterializesLatestTree(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -129,7 +129,7 @@ func TestReMaterialize_MaterializesLatestTree(t *testing.T) {
 	}
 }
 
-// A clean farm ReMaterialize is a no-op.
+// TestReMaterialize_NoopWhenClean locks that ReMaterialize is a no-op on a clean farm.
 func TestReMaterialize_NoopWhenClean(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
@@ -152,7 +152,7 @@ func TestReMaterialize_NoopWhenClean(t *testing.T) {
 	}
 }
 
-// CaptureNewFilesInto with relink must move the loose file into the target AND
+// TestCaptureNewFilesInto_Relink locks that relinked captures stay readable at their original farm path.
 func TestCaptureNewFilesInto_Relink(t *testing.T) {
 	dir := t.TempDir()
 	farm := filepath.Join(dir, "Data")

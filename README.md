@@ -43,10 +43,12 @@ first run the script:
    start menu (works on KDE, GNOME, Niri, anything that reads
    `~/.local/share/applications/`) and registers `nxm://` so Nexus "Mod
    Manager Download" buttons route to the running daemon.
-5. Launches the GUI.
 
-Subsequent runs are zero-friction. The script verifies the desktop entry
-each launch and refreshes it automatically if you moved the clone.
+It does not start the GUI. Launch Gorganizer from your application menu, or
+run `./gorganizer.sh launch`.
+
+Re-running `./gorganizer.sh` later is an in-place update: it rebuilds only
+when sources changed and refreshes the desktop entry if you moved the clone.
 
 Mod folders live alongside the script: `<clone>/<Game>_Mods/` (e.g.
 `~/gorganizer/FalloutNV_Mods/`). The daemon log lands at
@@ -67,14 +69,18 @@ launching the app:
 
 | Command | What it does |
 |---|---|
-| `./gorganizer.sh` | Build if needed (prompting for deps), then run. |
+| `./gorganizer.sh` | Install or update: build if needed (prompting for deps), register the desktop entry. |
+| `./gorganizer.sh launch` | Start the daemon and GUI (what the desktop entry runs). |
 | `./gorganizer.sh setup` | Detect distro, install build deps via `sudo $PM`. |
+| `./gorganizer.sh doctor` | Check build and runtime dependencies without changing anything. |
 | `./gorganizer.sh build [--rebuild]` | Build only. `--rebuild` forces a clean rebuild. |
+| `./gorganizer.sh update [--restart]` | Pull the latest `main`, rebuild, re-register. `--restart` bounces a running daemon. |
 | `./gorganizer.sh register` | Install menu entry + icon + nxm:// handler. |
 | `./gorganizer.sh unregister` | Reverse `register`. |
 | `./gorganizer.sh nxm <URI>` | One-shot: forward an `nxm://` URL to the daemon. |
 | `./gorganizer.sh import [--from PATH]` | Migrate `*_Mods/` folders from a previous install. |
-| `./gorganizer.sh uninstall [--purge]` | Stop daemon, unregister, prompt for user data + system packages. |
+| `./gorganizer.sh uninstall [--purge]` | Stop the daemon, unregister, delete build artifacts. User data is kept unless `--purge`. |
+| `./gorganizer.sh --version` | Print the version. |
 | `./gorganizer.sh --help` | Usage. |
 
 ### Migrating from a previous install
@@ -95,11 +101,10 @@ Walks the source for any known `*_Mods/` folders (Skyrim_Mods, FalloutNV_Mods,
 
 ## Usage
 
-After install, launch from your application menu (if you ran `register`), or
-just:
+After install, launch from your application menu, or:
 
 ```bash
-./gorganizer.sh
+./gorganizer.sh launch
 ```
 
 The script manages the daemon's lifetime — it spawns `gorganizerd`, waits
@@ -111,15 +116,36 @@ Steam, which the daemon does not track).
 
 ### Runtime requirements
 
-`./gorganizer.sh setup` will install these for you, but for reference:
+The normal install flow offers to install the applicable packages; for reference:
 
-- Qt6 (Core, Gui, Widgets) — runtime libraries
+- Qt6 (Core, Gui, Widgets, Network) — runtime libraries
 - gRPC C++ runtime + libprotobuf
 - (optional) `fusermount3` — only used to clean up stale mounts left by
   pre-hardlink-farm versions of gorganizer
-- (optional) `7z`, `unrar`, `unzip` for archive extraction
-- `protontricks` when a managed Windows tool needs a prefix runtime such as
-  LOOT's MSVC 2022 redistributable
+- `7z` and `unzip` for archive extraction. 7-Zip handles RAR archives too,
+  so `unrar` is not required.
+- `protontricks` for installing Proton prefix runtimes such as .NET and VC++
+  for managed Windows modding tools
+- GStreamer for audio conversion during Tale of Two Wastelands installs
+
+`./gorganizer.sh doctor` reports missing build dependencies and these optional
+runtime tools without changing anything.
+
+### Crash recovery
+
+If the daemon dies while a game's mods are deployed, it repairs the game's
+`Data/` folder on its next start, asking you to confirm only when the on-disk
+state is ambiguous. To recover by hand instead, stop Gorganizer and run:
+
+```bash
+./gorganizerctl recover --game skyrimse
+```
+
+If recovery reports that it needs confirmation, inspect the listed folder
+first, then follow the `recover-confirm` command it prints.
+`./gorganizerctl export` and `./gorganizerctl import` back up and restore a
+game's mods and profiles while the daemon is running; see
+`./gorganizerctl --help`.
 
 ## Building manually
 
@@ -129,6 +155,7 @@ If you'd rather drive `make` yourself:
 make all      # generate proto, build gorganizerd + gorganizerctl
 make gui      # CMake/Qt6 frontend → build/src/gorganizer
 make test     # Go unit tests
+make verify   # vet + tests + comment-policy check
 make clean    # wipe build artifacts and generated proto
 ```
 
@@ -141,10 +168,15 @@ gRPC dev headers.
 - `cmd/gorganizerd/` — daemon entry point
 - `cmd/gorganizerctl/` — maintenance CLI: offline crash recovery, plus
   instance export/import against the running daemon
+- `cmd/vfs-smoke/`, `cmd/runtime-probe/` — developer diagnostics
 - `internal/` — Go packages (daemon services, ipc, vfs, download, transfer, ...)
 - `api/proto/` — gRPC service definition
 - `src/` — Qt6 GUI (C++)
 - `scripts/` — dev tooling (comment-policy checker)
 - `resources/icons/` — bundled app icon
-- `docs/` — local-only architecture and agent docs (gitignored)
 - `gorganizer.sh` — single entry point: build, run, register, uninstall
+- `cleaner.sh` — developer reset to a first-run state (deletes mods and config)
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).

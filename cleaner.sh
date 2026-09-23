@@ -69,20 +69,28 @@ if ! $ASSUME_YES; then
     fi
 fi
 
-# Kill running daemon if its socket exists.
-SOCKET="${XDG_RUNTIME_DIR:-/tmp}/gorganizer/gorganizer.sock"
-if [ -S "$SOCKET" ]; then
-    warn "Daemon socket found, attempting shutdown..."
-    if [ -x "$SCRIPT_DIR/gorganizerd" ]; then
-        timeout 2 "$SCRIPT_DIR/gorganizerd" --handle-nxm "shutdown" 2>/dev/null || true
+# Stop a running daemon before deleting anything. SIGTERM lets it capture
+# new writes and restore each game's vanilla Data/ on the way out; wait out
+# the daemon's own 45s shutdown watchdog instead of killing it mid-teardown.
+if pgrep -x gorganizerd >/dev/null 2>&1; then
+    warn "Stopping running gorganizerd..."
+    pkill -TERM -x gorganizerd 2>/dev/null || true
+    for _ in $(seq 1 460); do
+        pgrep -x gorganizerd >/dev/null 2>&1 || break
+        sleep 0.1
+    done
+    if pgrep -x gorganizerd >/dev/null 2>&1; then
+        warn "gorganizerd did not exit. Nothing was removed; stop it and re-run."
+        exit 1
     fi
+    ok "Daemon stopped."
 fi
 
 # Build artifacts.
 log "Removing build artifacts..."
 rm -rf "$SCRIPT_DIR/build"
 rm -rf "$SCRIPT_DIR/CMakeFiles"
-rm -f  "$SCRIPT_DIR/gorganizerd"
+rm -f  "$SCRIPT_DIR/gorganizerd" "$SCRIPT_DIR/gorganizerctl"
 rm -f  "$SCRIPT_DIR/api/proto/"*.pb.go
 ok "Build artifacts removed."
 

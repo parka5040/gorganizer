@@ -144,7 +144,10 @@ func (ar *ArchiveService) ListArchives(gameID string) ([]dto.ArchiveRowResult, e
 
 	rows := make([]dto.ArchiveRowResult, 0, len(idx.Archives))
 	for _, e := range idx.Archives {
-		absArchive := filepath.Join(downloadsDir, e.Path)
+		absArchive, err := archivePath(downloadsDir, e.Path)
+		if err != nil {
+			return nil, err
+		}
 		row := dto.ArchiveRowResult{
 			ArchiveRelPath:  e.Path,
 			ModID:           e.ModID,
@@ -247,7 +250,10 @@ func (ar *ArchiveService) RemoveArchive(gameID, archiveRelPath string) error {
 		return fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	downloadsDir := config.DownloadsDir(gameID)
-	absArchive := filepath.Join(downloadsDir, archiveRelPath)
+	absArchive, err := archivePath(downloadsDir, archiveRelPath)
+	if err != nil {
+		return err
+	}
 	_ = os.Remove(absArchive)
 	_ = os.Remove(download.SidecarPath(absArchive))
 	_ = os.Remove(download.PartPath(absArchive))
@@ -317,7 +323,10 @@ func (ar *ArchiveService) RefreshArchiveMetadata(gameID, archiveRelPath string) 
 		return nil, fmt.Errorf("nexus API key required — paste one in Tools → Settings")
 	}
 	downloadsDir := config.DownloadsDir(gameID)
-	absArchive := filepath.Join(downloadsDir, archiveRelPath)
+	absArchive, err := archivePath(downloadsDir, archiveRelPath)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(absArchive); err != nil {
 		return nil, &ArchiveMissingError{GameID: gameID, Path: archiveRelPath}
 	}
@@ -362,7 +371,10 @@ func (ar *ArchiveService) RefreshArchiveMetadata(gameID, archiveRelPath string) 
 // buildArchiveRow composes a single archive row on demand.
 func (ar *ArchiveService) buildArchiveRow(gameID, archiveRelPath string) (*dto.ArchiveRowResult, error) {
 	downloadsDir := config.DownloadsDir(gameID)
-	absArchive := filepath.Join(downloadsDir, archiveRelPath)
+	absArchive, err := archivePath(downloadsDir, archiveRelPath)
+	if err != nil {
+		return nil, err
+	}
 
 	idx, err := download.LoadIndex(gameID)
 	if err != nil {

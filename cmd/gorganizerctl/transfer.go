@@ -190,6 +190,7 @@ func drainTransferStream(stream grpc.ServerStreamingClient[pb.TransferEvent], ve
 	}
 }
 
+// printTransferSummary prints the final counts, skipped and renamed items, and archive path.
 func printTransferSummary(s *pb.TransferSummary, verb string) {
 	fmt.Printf("%s complete: %d mods exported, %d mods imported, %d profiles transferred\n",
 		verb, s.GetModsExported(), s.GetModsImported(), s.GetProfilesTransferred())
@@ -211,6 +212,7 @@ func printTransferSummary(s *pb.TransferSummary, verb string) {
 	}
 }
 
+// parsePolicy maps a collision policy name to its proto enum, reporting false when unknown.
 func parsePolicy(s string) (pb.TransferCollisionPolicy, bool) {
 	switch strings.ToLower(s) {
 	case "abort":
@@ -226,6 +228,7 @@ func parsePolicy(s string) (pb.TransferCollisionPolicy, bool) {
 	}
 }
 
+// splitList splits a comma-separated flag value into trimmed, non-empty items.
 func splitList(s string) []string {
 	if s == "" {
 		return nil

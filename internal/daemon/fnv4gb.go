@@ -11,8 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/dto"
+	"github.com/parka/gorganizer/internal/fsutil"
 	"github.com/parka/gorganizer/internal/gamedef"
 )
 
@@ -28,6 +30,43 @@ var (
 	fnv4gbErrXNVSEMissing  = errors.New("xNVSE is required to install the 4GB patcher; install xNVSE first via the Run combo")
 	fnv4gbErrAPIKeyMissing = errors.New("Nexus API key is required to download the 4GB patcher; paste one in Tools → Settings")
 )
+
+// resolvePatcherExe validates that the patcher is a regular file inside the game install path.
+func resolvePatcherExe(installPath, candidate string) (string, error) {
+	unsafePath := func() (string, error) {
+		return "", &UnsafePathError{Field: "patcher_exe_path"}
+	}
+	if candidate == "" || !filepath.IsAbs(candidate) {
+		return unsafePath()
+	}
+	resolvedCandidate, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return unsafePath()
+	}
+	resolvedInstallPath, err := filepath.EvalSymlinks(installPath)
+	if err != nil || !fsutil.ContainedBy(resolvedInstallPath, resolvedCandidate) {
+		return unsafePath()
+	}
+	info, err := os.Stat(resolvedCandidate)
+	if err != nil || !info.Mode().IsRegular() {
+		return unsafePath()
+	}
+	return resolvedCandidate, nil
+}
+
+// recordPatcherExe remembers the patcher installed during this daemon lifetime.
+func (fv *FNV4GBService) recordPatcherExe(path string) {
+	fv.patcherMu.Lock()
+	defer fv.patcherMu.Unlock()
+	fv.patcherPath = path
+}
+
+// recordedPatcherExe returns the patcher installed during this daemon lifetime.
+func (fv *FNV4GBService) recordedPatcherExe() string {
+	fv.patcherMu.Lock()
+	defer fv.patcherMu.Unlock()
+	return fv.patcherPath
+}
 
 func (fv *FNV4GBService) Install4GBPatcher(gameID string) (dto.FNV4GBInstallResult, error) {
 	var zero dto.FNV4GBInstallResult
@@ -102,19 +141,24 @@ func (fv *FNV4GBService) Install4GBPatcher(gameID string) (dto.FNV4GBInstallResu
 	if err := os.Chmod(patcherPath, 0755); err != nil {
 		return zero, fmt.Errorf("making patcher executable: %w", err)
 	}
+	resolvedPatcherPath, err := resolvePatcherExe(gc.InstallPath, patcherPath)
+	if err != nil {
+		return zero, err
+	}
+	fv.recordPatcherExe(resolvedPatcherPath)
 
 	slog.Info("FNV4GB patcher installed",
 		"game", gameID,
 		"version", details.Version,
-		"path", patcherPath)
+		"path", resolvedPatcherPath)
 
 	return dto.FNV4GBInstallResult{
-		PatcherExePath: patcherPath,
+		PatcherExePath: resolvedPatcherPath,
 		Version:        details.Version,
 	}, nil
 }
 
-// Get4GBPatchStatus reports whether FalloutNV.exe in the active game's
+// Get4GBPatchStatus reports whether the game's FalloutNV.exe has been 4GB-patched by Gorganizer.
 func (fv *FNV4GBService) Get4GBPatchStatus(gameID string) (bool, error) {
 	gc, err := fv.s.config.EffectiveGameConfig(gameID)
 	if err != nil {
@@ -123,7 +167,7 @@ func (fv *FNV4GBService) Get4GBPatchStatus(gameID string) (bool, error) {
 	return IsFNV4GBApplied(gc.InstallPath), nil
 }
 
-// Apply4GBPatch executes the previously-installed patcher and, on success,
+// Apply4GBPatch runs the installed 4GB patcher in the game directory and writes the applied marker on success.
 func (fv *FNV4GBService) Apply4GBPatch(gameID, patcherExePath string) (string, error) {
 	if g, known := gamedef.ByID(gameID); !known || !g.Supports4GBPatch {
 		return "", fmt.Errorf("the 4GB patcher only applies to Fallout: New Vegas (got %q)", gameID)
@@ -132,14 +176,15 @@ func (fv *FNV4GBService) Apply4GBPatch(gameID, patcherExePath string) (string, e
 	if err != nil {
 		return "", err
 	}
-	if patcherExePath == "" {
-		return "", errors.New("empty patcher exe path")
+	resolvedPatcherPath, err := resolvePatcherExe(gc.InstallPath, patcherExePath)
+	if err != nil {
+		return "", err
 	}
-	if _, err := os.Stat(patcherExePath); err != nil {
-		return "", fmt.Errorf("patcher executable missing — re-run install: %w", err)
+	if recordedPatcherPath := fv.recordedPatcherExe(); recordedPatcherPath != "" && resolvedPatcherPath != recordedPatcherPath {
+		return "", &UnsafePathError{Field: "patcher_exe_path"}
 	}
 
-	cmd := exec.Command(patcherExePath)
+	cmd := exec.Command(resolvedPatcherPath)
 	cmd.Dir = gc.InstallPath
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -148,17 +193,16 @@ func (fv *FNV4GBService) Apply4GBPatch(gameID, patcherExePath string) (string, e
 
 	marker := filepath.Join(gc.InstallPath, fnv4gbMarkerFilename)
 	contents := fmt.Sprintf("# applied_at: %s\n# patcher: %s\n",
-		time.Now().UTC().Format(time.RFC3339), patcherExePath)
-	if writeErr := os.WriteFile(marker, []byte(contents), 0644); writeErr != nil {
-		slog.Warn("FNV4GB applied but marker file could not be written — UI may not reflect patched state",
-			"err", writeErr, "marker", marker)
+		time.Now().UTC().Format(time.RFC3339), resolvedPatcherPath)
+	if writeErr := atomicfile.WriteFile(marker, []byte(contents), 0644); writeErr != nil {
+		return string(out), fmt.Errorf("writing patch marker: %w", writeErr)
 	}
 
 	slog.Info("FNV4GB patch applied", "game", gameID, "install", gc.InstallPath)
 	return string(out), nil
 }
 
-// IsFNV4GBApplied reports whether the marker file is present in the game
+// IsFNV4GBApplied reports whether the 4GB-patch marker file exists in installPath.
 func IsFNV4GBApplied(installPath string) bool {
 	if installPath == "" {
 		return false
@@ -167,7 +211,7 @@ func IsFNV4GBApplied(installPath string) bool {
 	return err == nil
 }
 
-// locate4GBPatcherExe walks the extracted tree (which mirrors what was
+// locate4GBPatcherExe finds the 4GB patcher in the extracted tree and returns its absolute path under installPath.
 func locate4GBPatcherExe(extractRoot, installPath string) (string, error) {
 	knownNames := map[string]bool{
 		"falloutnvpatcher": true,

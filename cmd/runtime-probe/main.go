@@ -10,6 +10,7 @@ import (
 	"github.com/parka/gorganizer/internal/tools"
 )
 
+// main prints the Steam Linux Runtime each Proton build in the default Steam library resolves to.
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 

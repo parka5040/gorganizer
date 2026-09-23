@@ -28,7 +28,7 @@ type MountManager struct {
 	mu sync.Mutex
 }
 
-// NewMountManager creates a MountManager; overwriteRoot may be "" to disable
+// NewMountManager creates a MountManager; an empty overwriteRoot disables write capture.
 func NewMountManager(gameDataPath string, overwriteRoot string, gameID string) *MountManager {
 	return &MountManager{
 		gameDataPath:  gameDataPath,
@@ -52,7 +52,7 @@ func (m *MountManager) SetMountedForTesting(mounted bool) {
 	m.mounted = mounted
 }
 
-// Activate replaces Data/ with a materialized hardlink farm; layer 0 must be
+// Activate replaces Data/ with a hardlink farm of the given layers; layer 0 must be "__base__".
 func (m *MountManager) Activate(layers []Layer, profileName string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -161,10 +161,10 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 	return nil
 }
 
-// Deactivate validates the sentinel, captures new writes, then restores
+// Deactivate captures new writes into Overwrite and restores Data.orig, leaving the farm intact if capture fails.
 func (m *MountManager) Deactivate() error { return m.deactivate(false) }
 
-// ForceDeactivate tears down even if capturing new writes fails, discarding the
+// ForceDeactivate tears down the farm even if capture fails, discarding uncaptured files.
 func (m *MountManager) ForceDeactivate() error { return m.deactivate(true) }
 
 func (m *MountManager) deactivate(force bool) error {
@@ -220,7 +220,7 @@ func (m *MountManager) deactivate(force bool) error {
 	return nil
 }
 
-// MarkDirty updates the in-memory desired layout without touching the on-disk
+// MarkDirty updates the in-memory desired layout and advances desiredGen without touching the on-disk farm.
 func (m *MountManager) MarkDirty(layers []Layer) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -240,7 +240,7 @@ func (m *MountManager) MarkDirty(layers []Layer) error {
 	return nil
 }
 
-// ReMaterialize rebuilds the on-disk farm to match the current in-memory tree,
+// ReMaterialize captures new writes and atomically swaps in a farm rebuilt from the current in-memory tree.
 func (m *MountManager) ReMaterialize() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

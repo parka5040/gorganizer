@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"runtime"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/parka/gorganizer/internal/httpx"
 )
 
 var ErrInvalidKey = errors.New("invalid API key")
@@ -59,11 +62,9 @@ type NexusClient struct {
 
 func NewNexusClient(apiKey string) *NexusClient {
 	return &NexusClient{
-		apiKey:  apiKey,
-		baseURL: "https://api.nexusmods.com",
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		apiKey:            apiKey,
+		baseURL:           "https://api.nexusmods.com",
+		httpClient:        httpx.APIClient(),
 		rlDailyRemaining:  -1,
 		rlHourlyRemaining: -1,
 	}
@@ -110,7 +111,7 @@ func (c *NexusClient) ResolveDownloadURL(link *NXMLink) (string, error) {
 		c.baseURL, link.GameSlug, link.ModID, link.FileID)
 
 	if link.Key != "" {
-		endpoint += fmt.Sprintf("?key=%s&expires=%d", link.Key, link.Expires)
+		endpoint += fmt.Sprintf("?key=%s&expires=%d", url.QueryEscape(link.Key), link.Expires)
 	}
 
 	req, err := http.NewRequest("GET", endpoint, nil)

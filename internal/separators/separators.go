@@ -98,7 +98,7 @@ func SaveLayout(profileDir string, l Layout) error {
 	return w.WriteAtomic(path, 0644)
 }
 
-// Load is the legacy separator-only reader; kept for callers that don't
+// Load returns the profile's separators, ignoring the view-enabled flag.
 func Load(profileDir string) ([]Separator, error) {
 	l, err := LoadLayout(profileDir)
 	if err != nil {
@@ -107,7 +107,7 @@ func Load(profileDir string) ([]Separator, error) {
 	return l.Separators, nil
 }
 
-// Save is the legacy separator-only writer; preserves the existing
+// Save writes the profile's separators while preserving the stored view-enabled flag.
 func Save(profileDir string, sep []Separator) error {
 	prev, _ := LoadLayout(profileDir)
 	return SaveLayout(profileDir, Layout{ViewEnabled: prev.ViewEnabled, Separators: sep})

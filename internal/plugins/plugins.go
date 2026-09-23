@@ -77,7 +77,7 @@ func (p Plugin) TypeOrder() int {
 	}
 }
 
-// ApplyUserOrder reorders the slice in place so that plugins listed in
+// ApplyUserOrder sorts plugins in place by userOrder, appending unlisted ones and pinning canonical DLC masters.
 func ApplyUserOrder(plugins []Plugin, spec Spec, userOrder []string) {
 	if len(userOrder) == 0 || len(plugins) == 0 {
 		return

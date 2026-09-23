@@ -14,6 +14,7 @@ import (
 	"github.com/parka/gorganizer/internal/vfs"
 )
 
+// main round-trips a Data dir through activate, rematerialize, and deactivate, verifying byte identity.
 func main() {
 	if len(os.Args) != 2 {
 		fmt.Fprintln(os.Stderr, "usage: vfs-smoke /path/to/Game/Data")

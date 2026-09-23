@@ -76,7 +76,7 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// Save writes config.json with 0600 perms since the API key is sensitive.
+// Save writes config.json atomically with 0600 permissions.
 func (c *Config) Save() error {
 	dir := ConfigDir()
 	if _, err := EnsureDir(dir); err != nil {
@@ -107,7 +107,7 @@ func (c *Config) GameDataPath(gameID string) (string, error) {
 	return filepath.Join(gc.InstallPath, subpath), nil
 }
 
-// EffectiveGameConfig resolves a synthetic gameID to its runtime config,
+// EffectiveGameConfig resolves a synthetic gameID to its runtime config, inheriting install paths from its parent.
 func (c *Config) EffectiveGameConfig(gameID string) (GameConfig, error) {
 	gc, ok := c.Games[gameID]
 	if !ok {

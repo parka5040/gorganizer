@@ -128,7 +128,7 @@ func (h *TTWInstallHandle) Cancel(ctx context.Context) {
 	}
 }
 
-// Result returns the install result once Done has closed; nil + nil before
+// Result returns the install result once Done has closed, or nil, nil before then.
 func (h *TTWInstallHandle) Result() (*TTWInstallResult, error) {
 	h.resultMu.Lock()
 	defer h.resultMu.Unlock()
@@ -146,7 +146,7 @@ func mintTTWInstallID(backend TTWBackend) string {
 	return fmt.Sprintf("ttw-%s-%d", backend.String(), ttwIDCounter.Add(1))
 }
 
-// PrepareTTWInstallerInternal resolves a user-supplied path into a
+// PrepareTTWInstallerInternal resolves a user-supplied installer path into backend-specific installer info.
 func (tt *TTWService) PrepareTTWInstallerInternal(userPath string, backend TTWBackend) (TTWInstallerInfo, error) {
 	if userPath == "" {
 		return TTWInstallerInfo{}, fmt.Errorf("PrepareTTWInstaller: path is required")
@@ -218,7 +218,7 @@ func (tt *TTWService) PrepareTTWInstallerInternal(userPath string, backend TTWBa
 	return info, nil
 }
 
-// parseTTWVersionFromMpi extracts a "3.4" / "3.4.0" version string from
+// parseTTWVersionFromMpi extracts a version string from an .mpi filename, returning "" when unrecognized.
 func parseTTWVersionFromMpi(mpiPath string) string {
 	base := filepath.Base(mpiPath)
 	base = strings.TrimSuffix(base, filepath.Ext(base))
@@ -237,7 +237,7 @@ func parseTTWVersionFromMpi(mpiPath string) string {
 	return ""
 }
 
-// CheckTTWPrereqsInternal is the daemon-private form of CheckTTWPrereqs
+// CheckTTWPrereqsInternal returns the typed TTW prerequisite status for the given backend.
 func (tt *TTWService) CheckTTWPrereqsInternal(backend TTWBackend) (TTWPrereqStatus, error) {
 	st := TTWPrereqStatus{Backend: backend}
 	st.GstreamerInstalled = detectGstreamer()
@@ -271,7 +271,7 @@ func (tt *TTWService) CheckTTWPrereqsInternal(backend TTWBackend) (TTWPrereqStat
 	return st, nil
 }
 
-// collectMissing builds a friendly "what's blocking the user" list from a
+// collectMissing builds the user-facing list of unmet prerequisites from a TTWPrereqStatus.
 func collectMissing(st *TTWPrereqStatus) []string {
 	var missing []string
 	if !st.FNVVanilla {
@@ -343,7 +343,7 @@ func readMpiInstallerVersion(path string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// populateWinePrereqs fills the Backend A fields by inspecting FNV's
+// populateWinePrereqs fills the Wine-backend prerequisite fields by inspecting FNV's Proton prefix.
 func (tt *TTWService) populateWinePrereqs(st *TTWPrereqStatus) {
 	st.SteamRunning = tools.SteamIsRunningForTTW()
 	st.ProtontricksAvailable = onPath("protontricks") || onPath("flatpak")
@@ -416,7 +416,7 @@ func readDotNet48ReleaseRev(prefixPath string) uint32 {
 	return 0
 }
 
-// isDotNet48ReleaseRevValid checks against the known set of .NET 4.8
+// isDotNet48ReleaseRevValid reports whether a registry Release value indicates .NET Framework 4.8 or later.
 func isDotNet48ReleaseRevValid(rev uint32) bool {
 	switch rev {
 	case 528040, 528049, 528209, 528372, 528449, 528562,
@@ -426,7 +426,7 @@ func isDotNet48ReleaseRevValid(rev uint32) bool {
 	return rev >= 528040
 }
 
-// prefixHasWineMono detects a Wine Mono install in the prefix that must
+// prefixHasWineMono reports whether Wine Mono is installed in the prefix.
 func prefixHasWineMono(prefixPath string) bool {
 	monoDir := filepath.Join(prefixPath, "drive_c", "windows", "mono")
 	if info, err := os.Stat(monoDir); err == nil && info.IsDir() {
@@ -435,7 +435,7 @@ func prefixHasWineMono(prefixPath string) bool {
 	return false
 }
 
-// prefixHasNativeOverride checks whether a DLL override has been registered
+// prefixHasNativeOverride reports whether a DLL override is registered for the named DLL.
 func prefixHasNativeOverride(prefixPath, dllName string) bool {
 	regPath := filepath.Join(prefixPath, "user.reg")
 	data, err := os.ReadFile(regPath)
@@ -445,7 +445,7 @@ func prefixHasNativeOverride(prefixPath, dllName string) bool {
 	return strings.Contains(string(data), `"`+dllName+`"=`)
 }
 
-// prefixHasVcrun2022 checks for the 2015–2022 redistributable's filesystem
+// prefixHasVcrun2022 checks the prefix's syswow64 for the VC++ 2015–2022 redistributable's files.
 func prefixHasVcrun2022(prefixPath string) bool {
 	for _, dll := range []string{"vcruntime140.dll", "msvcp140.dll", "vcruntime140_1.dll"} {
 		path := filepath.Join(prefixPath, "drive_c", "windows", "syswow64", dll)
@@ -456,7 +456,7 @@ func prefixHasVcrun2022(prefixPath string) bool {
 	return false
 }
 
-// prefixHasCorefonts looks for Arial.TTF as a stand-in for the corefonts
+// prefixHasCorefonts reports whether corefonts is installed, using Arial.TTF as the marker.
 func prefixHasCorefonts(prefixPath string) bool {
 	for _, p := range []string{"arial.ttf", "Arial.ttf", "ARIAL.TTF"} {
 		full := filepath.Join(prefixPath, "drive_c", "windows", "Fonts", p)
@@ -467,7 +467,7 @@ func prefixHasCorefonts(prefixPath string) bool {
 	return false
 }
 
-// detectGstreamer is a host-level check (gstreamer codecs cannot be
+// detectGstreamer reports whether GStreamer is installed on the host by looking for gst-launch-1.0.
 func detectGstreamer() bool {
 	return onPath("gst-launch-1.0") || onPath("gst-inspect-1.0")
 }
@@ -484,7 +484,7 @@ func (tt *TTWService) CheckTTWDiskSpace() (free int64, required int64, err error
 	return free, minTTWFreeBytes, err
 }
 
-// checkTTWDiskBytes returns the bytes available on the filesystem holding
+// checkTTWDiskBytes returns the free bytes on the filesystem holding the mods root.
 func (tt *TTWService) checkTTWDiskBytes() (int64, error) {
 	target := os.Getenv("GORGANIZER_ROOT")
 	if target == "" {
@@ -505,7 +505,7 @@ func (tt *TTWService) checkTTWDiskBytes() (int64, error) {
 	return int64(stat.Bavail) * int64(stat.Bsize), nil
 }
 
-// CheckFNVNotMounted refuses TTW installer launches while FNV's VFS is
+// CheckFNVNotMounted returns an error while FNV's VFS is active, blocking TTW installer launches.
 func (tt *TTWService) CheckFNVNotMounted() error {
 	mm, ok := tt.s.mountMgrs["falloutnv"]
 	if !ok {
@@ -566,7 +566,7 @@ func (tt *TTWService) ensureNativeMpiInstaller() (string, error) {
 
 const maxNativeInstallerZipBytes = 64 * 1024 * 1024
 
-// downloadAndVerifyZip fetches `url`, verifies its sha256 matches
+// downloadAndVerifyZip downloads a size-capped zip from url and returns its bytes if the SHA-256 matches.
 func downloadAndVerifyZip(url, wantSha256 string) ([]byte, error) {
 	resp, err := http.Get(url)
 	if err != nil {
@@ -596,7 +596,7 @@ func downloadAndVerifyZip(url, wantSha256 string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// extractFromZip returns the bytes of the named file from the in-memory
+// extractFromZip returns the bytes of the named file, matched by basename, from an in-memory zip.
 func extractFromZip(zipBytes []byte, name string) ([]byte, error) {
 	zr, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
 	if err != nil {
@@ -624,12 +624,15 @@ func extractFromZip(zipBytes []byte, name string) ([]byte, error) {
 	return nil, fmt.Errorf("entry %q not found in zip", name)
 }
 
-// CreateBlankTTWMod creates an empty TTW_Mods/<modName>/ folder ready to
+// CreateBlankTTWMod creates an empty TTW_Mods/<modName>/ folder for installer output, refusing on collision.
 func (tt *TTWService) CreateBlankTTWMod(modName string) (string, error) {
 	if modName == "" {
 		return "", fmt.Errorf("mod name is required")
 	}
-	dest := filepath.Join(config.ModsDir("ttw"), modName)
+	dest, err := resolveModDir("ttw", modName)
+	if err != nil {
+		return "", err
+	}
 	if _, err := os.Stat(dest); err == nil {
 		return "", &ModCollisionError{
 			Name:         modName,
@@ -673,7 +676,7 @@ func (tt *TTWService) LaunchTTWInstallerInternal(info TTWInstallerInfo, dataModN
 	}
 }
 
-// pruneFinishedTTWInstalls drops handles whose Done channel has already
+// pruneFinishedTTWInstalls drops install handles whose Done channel has closed.
 func pruneFinishedTTWInstalls() {
 	ttwInstalls.Lock()
 	defer ttwInstalls.Unlock()
@@ -686,7 +689,7 @@ func pruneFinishedTTWInstalls() {
 	}
 }
 
-// getTTWInstallResultInternal returns the typed result for an in-flight
+// getTTWInstallResultInternal returns the typed result for install id, optionally blocking until it finishes.
 func (tt *TTWService) getTTWInstallResultInternal(id string, block bool) (*TTWInstallResult, error) {
 	ttwInstalls.Lock()
 	h, ok := ttwInstalls.m[id]
@@ -711,12 +714,15 @@ func (tt *TTWService) getTTWInstallResultInternal(id string, block bool) (*TTWIn
 	return res, nil
 }
 
-// ensureTTWModDir resolves and (if absent) materializes the destination
+// ensureTTWModDir returns the TTW install destination, creating it if absent and refusing a non-empty folder.
 func (tt *TTWService) ensureTTWModDir(modName string) (string, error) {
 	if modName == "" {
 		return "", fmt.Errorf("mod name is required")
 	}
-	dest := filepath.Join(config.ModsDir("ttw"), modName)
+	dest, err := resolveModDir("ttw", modName)
+	if err != nil {
+		return "", err
+	}
 	info, err := os.Stat(dest)
 	switch {
 	case err == nil && info.IsDir():
@@ -746,7 +752,7 @@ func (tt *TTWService) ensureTTWModDir(modName string) (string, error) {
 	}
 }
 
-// launchNativeTTW spawns mpi_installer with the resolved paths. Captures
+// launchNativeTTW starts the native mpi_installer for a TTW install and returns its handle.
 func (tt *TTWService) launchNativeTTW(
 	id string, info TTWInstallerInfo, dest string,
 	fo3, fnv config.GameConfig, dataModName string,
@@ -831,7 +837,7 @@ func (tt *TTWService) launchNativeTTW(
 	return handle, nil
 }
 
-// launchWineTTW runs TTW Install.exe under sanitized Proton in FNV's
+// launchWineTTW runs the TTW Windows installer under sanitized Proton in FNV's prefix and returns its handle.
 func (tt *TTWService) launchWineTTW(
 	id string, info TTWInstallerInfo, dest string,
 	fo3, fnv config.GameConfig, dataModName string,
@@ -893,7 +899,7 @@ func (tt *TTWService) launchWineTTW(
 	return handle, nil
 }
 
-// streamTTWPipes drains the installer's stdout/stderr into the daemon's
+// streamTTWPipes forwards the installer's stdout and stderr lines to the daemon status channel.
 func (tt *TTWService) streamTTWPipes(id string, stdout, stderr io.Reader) {
 	consume := func(r io.Reader, stream string) {
 		buf := make([]byte, 4096)
@@ -949,7 +955,7 @@ func (tt *TTWService) emitTTWInfo(id, kind, msg string) {
 	}
 }
 
-// runTTWHeartbeat emits an `[<id>:tick] elapsed=Ns` event every 5
+// runTTWHeartbeat emits an elapsed-time tick event every 5 seconds while the install runs.
 func (tt *TTWService) runTTWHeartbeat(id string, done <-chan struct{}, started time.Time) {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
@@ -963,7 +969,7 @@ func (tt *TTWService) runTTWHeartbeat(id string, done <-chan struct{}, started t
 	}
 }
 
-// finalizeTTWInstall runs the post-install steps: layout fix (lift any
+// finalizeTTWInstall runs post-install steps: nested Data/ lift, file count, changed-exe scan, and marker write.
 func (tt *TTWService) finalizeTTWInstall(
 	dest string, fnv config.GameConfig, dataModName string, info TTWInstallerInfo, exit int,
 	preFnvExes map[string]exeFingerprint,
@@ -1054,7 +1060,7 @@ func (tt *TTWService) finalizeTTWInstall(
 	return res, nil
 }
 
-// ensureTTWModEnabled inserts the TTW data-mod entry into every TTW
+// ensureTTWModEnabled enables the TTW data mod in every TTW profile's mod list.
 func (tt *TTWService) ensureTTWModEnabled(modName string) {
 	tt.s.invalidateInstalledArchiveCache("ttw")
 	profiles, err := tt.s.profileMgr.List("ttw")
@@ -1115,7 +1121,7 @@ func snapshotExeFiles(root string) map[string]exeFingerprint {
 	return out
 }
 
-// partialFileSHA256 hashes the first 4 KB + last 4 KB of a file. Cheap
+// partialFileSHA256 hashes a file's first and last 4 KB as a cheap change fingerprint.
 func partialFileSHA256(path string) string {
 	f, err := os.Open(path)
 	if err != nil {
@@ -1141,7 +1147,7 @@ func partialFileSHA256(path string) string {
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
-// CancelTTWInstaller looks up the install handle by id and runs its
+// CancelTTWInstaller cancels the in-flight TTW install with the given id.
 func (tt *TTWService) CancelTTWInstaller(id string) error {
 	ttwInstalls.Lock()
 	h, ok := ttwInstalls.m[id]
@@ -1155,7 +1161,7 @@ func (tt *TTWService) CancelTTWInstaller(id string) error {
 	return nil
 }
 
-// SetTTWLauncherExe stores the relative path to the launcher exe (typically
+// SetTTWLauncherExe saves the TTW launcher executable's relative path to the config.
 func (tt *TTWService) SetTTWLauncherExe(relPath string) error {
 	tt.s.mu.Lock()
 	defer tt.s.mu.Unlock()
@@ -1172,7 +1178,7 @@ func (tt *TTWService) SetTTWLauncherExe(relPath string) error {
 	return nil
 }
 
-// VerifyTTWIntegrity runs at TTW launch time. Reports drift via typed
+// VerifyTTWIntegrity checks the installed TTW files for drift and reports it as a TTWDriftError.
 func (tt *TTWService) VerifyTTWIntegrity() error {
 	tt.s.mu.RLock()
 	fnv, ok := tt.s.config.Games["falloutnv"]
@@ -1196,7 +1202,11 @@ func (tt *TTWService) VerifyTTWIntegrity() error {
 	if marker.ModName == "" {
 		return &TTWDriftError{InstallPath: fnv.InstallPath, Reason: "marker-missing"}
 	}
-	masterPath := filepath.Join(config.ModsDir("ttw"), marker.ModName, "TaleOfTwoWastelands.esm")
+	modDir, err := resolveModDir("ttw", marker.ModName)
+	if err != nil {
+		return err
+	}
+	masterPath := filepath.Join(modDir, "TaleOfTwoWastelands.esm")
 	if _, err := os.Stat(masterPath); err != nil {
 		return &TTWDriftError{InstallPath: fnv.InstallPath, Reason: "ttw-master-missing"}
 	}
@@ -1214,7 +1224,7 @@ func (tt *TTWService) VerifyTTWIntegrity() error {
 	return nil
 }
 
-// hasXNVSEDlls reports whether at least one nvse_*.dll lives in the FNV
+// hasXNVSEDlls reports whether at least one nvse_*.dll exists in the FNV install directory.
 func hasXNVSEDlls(installPath string) bool {
 	entries, err := os.ReadDir(installPath)
 	if err != nil {
@@ -1265,7 +1275,7 @@ func (tt *TTWService) BootstrapFNVPrefix() error {
 	return nil
 }
 
-// manualWineboot is the fallback bootstrap path: wine wineboot --init
+// manualWineboot initializes a Wine prefix with wineboot --init as a fallback bootstrap.
 func manualWineboot(prefixPath string) error {
 	wine, err := exec.LookPath("wine")
 	if err != nil {
@@ -1283,7 +1293,7 @@ func manualWineboot(prefixPath string) error {
 	return nil
 }
 
-// InstallTTWPrereqs runs protontricks against FNV's prefix to install
+// InstallTTWPrereqs starts installing TTW's Windows prerequisites into FNV's prefix and returns the run ID.
 func (tt *TTWService) InstallTTWPrereqs() (string, error) {
 	tt.s.mu.RLock()
 	fnv, ok := tt.s.config.Games["falloutnv"]

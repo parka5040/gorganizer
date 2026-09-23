@@ -10,11 +10,11 @@ import (
 const stalePosixMountinfoFixture = `21 26 0:20 / /proc rw,nosuid,nodev,noexec,relatime shared:5 - proc proc rw
 22 26 0:21 / /sys rw,nosuid,nodev,noexec,relatime shared:6 - sysfs sysfs rw
 26 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw
-138 26 0:51 / /home/parka/.local/share/Steam/steamapps/common/Fallout\040New\040Vegas/Data rw,nosuid,nodev,relatime shared:90 - fuse.gorganizer gorganizer rw,user_id=1000,group_id=1000,default_permissions
+138 26 0:51 / /home/user/.local/share/Steam/steamapps/common/Fallout\040New\040Vegas/Data rw,nosuid,nodev,relatime shared:90 - fuse.gorganizer gorganizer rw,user_id=1000,group_id=1000,default_permissions
 `
 
 func TestParseMountinfo_FindsStaleFuseMount(t *testing.T) {
-	target := "/home/parka/.local/share/Steam/steamapps/common/Fallout New Vegas/Data"
+	target := "/home/user/.local/share/Steam/steamapps/common/Fallout New Vegas/Data"
 	got := parseMountinfo(strings.NewReader(stalePosixMountinfoFixture), target)
 	if got == nil {
 		t.Fatalf("expected to find FUSE mount at %q, got nil", target)
@@ -39,9 +39,9 @@ func TestParseMountinfo_NoMatchReturnsNil(t *testing.T) {
 }
 
 func TestParseMountinfo_IgnoresNonFuseMountsAtSamePath(t *testing.T) {
-	fixture := `99 26 0:99 / /home/parka/Data rw,relatime shared:99 - ext4 /dev/sda1 rw
+	fixture := `99 26 0:99 / /home/user/Data rw,relatime shared:99 - ext4 /dev/sda1 rw
 `
-	got := parseMountinfo(strings.NewReader(fixture), "/home/parka/Data")
+	got := parseMountinfo(strings.NewReader(fixture), "/home/user/Data")
 	if got != nil {
 		t.Errorf("expected nil for non-FUSE mount, got %+v", got)
 	}

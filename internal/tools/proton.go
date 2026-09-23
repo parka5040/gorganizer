@@ -450,7 +450,7 @@ func buildSteamParityEnv(compatDataPath, steamRoot, appID, installPath, dllOverr
 	return env
 }
 
-// mergeDllOverrides combines inherited and our WINEDLLOVERRIDES values; ours wins on key collision.
+// mergeDllOverrides merges inherited WINEDLLOVERRIDES with Gorganizer's, which win on key collision.
 func mergeDllOverrides(inherited, ours string) string {
 	if ours == "" {
 		return inherited

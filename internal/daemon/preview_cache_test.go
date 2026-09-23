@@ -16,7 +16,7 @@ func newLeasedEntry(t *testing.T, dir, name string) *previewEntry {
 	return &previewEntry{ExtractRoot: root}
 }
 
-// A leased entry must survive eviction pressure from put(), and only be removed
+// TestPreviewCache_LeasedSurvivesEvictionThenReclaimed locks that eviction waits for the last lease release.
 func TestPreviewCache_LeasedSurvivesEvictionThenReclaimed(t *testing.T) {
 	dir := t.TempDir()
 	c := newPreviewCache(time.Hour, 1)
@@ -47,7 +47,7 @@ func TestPreviewCache_LeasedSurvivesEvictionThenReclaimed(t *testing.T) {
 	c.release(id)
 }
 
-// sweep must defer removal of a leased-but-expired entry.
+// TestPreviewCache_SweepDefersLeased locks that sweep defers removal of a leased but expired entry.
 func TestPreviewCache_SweepDefersLeased(t *testing.T) {
 	dir := t.TempDir()
 	c := newPreviewCache(time.Nanosecond, 10)

@@ -92,7 +92,7 @@ func (es *ExecutableService) ListExecutables(gameID string) ([]dto.ExecutableSpe
 	return out, nil
 }
 
-// UpsertExecutable adds or updates an executable (assigning an ID when empty)
+// UpsertExecutable validates and adds or updates an executable, assigning an ID when empty, then saves the config.
 func (es *ExecutableService) UpsertExecutable(gameID string, spec dto.ExecutableSpec) (dto.ExecutableSpec, error) {
 	if strings.TrimSpace(spec.Title) == "" || strings.TrimSpace(spec.ExePath) == "" {
 		return dto.ExecutableSpec{}, fmt.Errorf("executable requires a title and exe path")
@@ -189,7 +189,7 @@ func (es *ExecutableService) RemoveExecutable(gameID, id string) error {
 	return es.s.config.Save()
 }
 
-// DetectExecutables scans the game's base (Data.orig when mounted, else Data)
+// DetectExecutables scans the game's vanilla base and enabled mod folders for known modding tools.
 func (es *ExecutableService) DetectExecutables(gameID string) ([]dto.DetectedExecutable, error) {
 	es.s.mu.RLock()
 	gc, ok := es.s.config.Games[gameID]
@@ -257,7 +257,7 @@ func (es *ExecutableService) resolveDetectedExecutablePath(gameID string, gc con
 	return detected
 }
 
-// executableScanRoots returns the directories to scan for tool executables: the
+// executableScanRoots returns the vanilla base directory (the backup while mounted) and each enabled mod folder.
 func (es *ExecutableService) executableScanRoots(gameID string, gc config.GameConfig, mm *vfs.MountManager, profileName string) []string {
 	subpath := gc.DataSubpath
 	if subpath == "" {
@@ -279,7 +279,7 @@ func (es *ExecutableService) executableScanRoots(gameID string, gc config.GameCo
 	return roots
 }
 
-// LaunchExecutable runs a registered tool through the game's Proton prefix
+// LaunchExecutable launches a registered tool under its runner and output policy, returning its PID and run ID.
 func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string, requestedAutoSort ...bool) (int, string, error) {
 	es.s.execLaunchMu.Lock()
 	defer es.s.execLaunchMu.Unlock()

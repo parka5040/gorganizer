@@ -216,7 +216,7 @@ func resolveNestedDirectoryFold(base, relative string) string {
 	return current
 }
 
-// FindContentRoot is the exported shim over findContentRoot.
+// FindContentRoot is the exported form of findContentRoot.
 func FindContentRoot(extractDir string) string { return findContentRoot(extractDir) }
 
 func hasOblivionRemasteredRootMarkers(root string) bool {
@@ -670,39 +670,20 @@ func (e *ZipExtractor) CanHandle(archivePath string) bool {
 func (e *ZipExtractor) Extract(archivePath, destDir string) error {
 	r, err := zip.OpenReader(archivePath)
 	if err != nil {
+		_ = os.RemoveAll(destDir)
 		return fmt.Errorf("opening zip: %w", err)
 	}
 	defer r.Close()
 
-	for _, f := range r.File {
-		destPath := filepath.Join(destDir, f.Name)
-		if !strings.HasPrefix(filepath.Clean(destPath), filepath.Clean(destDir)+string(os.PathSeparator)) {
-			continue
-		}
-		if f.FileInfo().IsDir() {
-			os.MkdirAll(destPath, 0755)
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-			return err
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-		out, err := os.Create(destPath)
-		if err != nil {
-			rc.Close()
-			return err
-		}
-		_, err = io.Copy(out, rc)
-		out.Close()
-		rc.Close()
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+	return extractEntries(r.File, destDir, defaultExtractLimits(), func(f *zip.File) string {
+		return f.Name
+	}, func(f *zip.File) bool {
+		return f.FileInfo().IsDir()
+	}, func(f *zip.File) os.FileMode {
+		return f.Mode()
+	}, func(f *zip.File) (io.ReadCloser, error) {
+		return f.Open()
+	})
 }
 
 type SevenZipExtractor struct{}
@@ -714,39 +695,20 @@ func (e *SevenZipExtractor) CanHandle(archivePath string) bool {
 func (e *SevenZipExtractor) Extract(archivePath, destDir string) error {
 	r, err := sevenzip.OpenReader(archivePath)
 	if err != nil {
+		_ = os.RemoveAll(destDir)
 		return fmt.Errorf("opening 7z: %w", err)
 	}
 	defer r.Close()
 
-	for _, f := range r.File {
-		destPath := filepath.Join(destDir, f.Name)
-		if !strings.HasPrefix(filepath.Clean(destPath), filepath.Clean(destDir)+string(os.PathSeparator)) {
-			continue
-		}
-		if f.FileInfo().IsDir() {
-			os.MkdirAll(destPath, 0755)
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-			return err
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-		out, err := os.Create(destPath)
-		if err != nil {
-			rc.Close()
-			return err
-		}
-		_, err = io.Copy(out, rc)
-		out.Close()
-		rc.Close()
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+	return extractEntries(r.File, destDir, defaultExtractLimits(), func(f *sevenzip.File) string {
+		return f.Name
+	}, func(f *sevenzip.File) bool {
+		return f.FileInfo().IsDir()
+	}, func(f *sevenzip.File) os.FileMode {
+		return f.Mode()
+	}, func(f *sevenzip.File) (io.ReadCloser, error) {
+		return f.Open()
+	})
 }
 
 type RarExtractor struct{}
@@ -756,15 +718,18 @@ func (e *RarExtractor) CanHandle(archivePath string) bool {
 }
 
 func (e *RarExtractor) Extract(archivePath, destDir string) error {
-	cmd := exec.Command("unrar", "x", "-o+", archivePath, destDir+"/")
+	cmd := exec.Command("unrar", "x", "-o+", "--", archivePath, destDir+"/")
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
 		slog.Warn("unrar failed, trying 7z fallback", "err", err)
-		cmd = exec.Command("7z", "x", "-o"+destDir, "-y", archivePath)
+		cmd = exec.Command("7z", "x", "-o"+destDir, "-y", "--", archivePath)
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard
-		return cmd.Run()
+		if err := cmd.Run(); err != nil {
+			_ = os.RemoveAll(destDir)
+			return err
+		}
 	}
-	return nil
+	return validateRarExtraction(destDir, defaultExtractLimits())
 }

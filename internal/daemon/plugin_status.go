@@ -37,7 +37,7 @@ func (pl *PluginStatusService) SetPluginLoadout(gameID, profileName string, entr
 	return pl.s.profileMgr.SavePluginLoadout(gameID, profileName, loadout)
 }
 
-// StreamPluginStatus is the daemon-side implementation of the IPC streaming
+// StreamPluginStatus returns a channel that delivers one plugin status snapshot for the game's profile.
 func (pl *PluginStatusService) StreamPluginStatus(ctx context.Context, gameID, profileName string) (<-chan dto.PluginStatusEventResult, error) {
 	gc, ok := pl.s.config.Games[gameID]
 	if !ok {
@@ -307,7 +307,7 @@ func (pl *PluginStatusService) softDepFetcherLazy() *plugins.SoftDepFetcher {
 	return pl.s.softDepFetcher
 }
 
-// installedModIDs returns the set of Nexus mod-ids installed under the
+// installedModIDs returns the set of Nexus mod IDs installed in a game's active mod set.
 func (pl *PluginStatusService) installedModIDs(gameID string) map[int]bool {
 	out := map[int]bool{}
 	modsDir := config.ModsDir(gameID)

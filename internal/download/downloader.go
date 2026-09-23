@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/dto"
+	"github.com/parka/gorganizer/internal/httpx"
 )
 
 const (
@@ -51,6 +52,7 @@ type PostInstallHook func(gameID, modName string)
 
 type Manager struct {
 	nexus       URLResolver
+	httpClient  *http.Client
 	config      *config.Config
 	mu          sync.RWMutex
 	active      map[string]*Download
@@ -87,13 +89,14 @@ func NewManager(nexus URLResolver, cfg *config.Config, maxConcurrent int, hooks 
 		maxConcurrent = 3
 	}
 	m := &Manager{
-		nexus:     nexus,
-		config:    cfg,
-		active:    make(map[string]*Download),
-		hooks:     hooks,
-		maxConcur: maxConcurrent,
-		queuePump: make(chan struct{}, 1),
-		stop:      make(chan struct{}),
+		nexus:      nexus,
+		httpClient: httpx.DownloadClient(),
+		config:     cfg,
+		active:     make(map[string]*Download),
+		hooks:      hooks,
+		maxConcur:  maxConcurrent,
+		queuePump:  make(chan struct{}, 1),
+		stop:       make(chan struct{}),
 	}
 	go m.runQueuePump()
 	return m
@@ -547,7 +550,7 @@ func (m *Manager) streamToFile(ctx context.Context, cdnURL, destPath string, res
 	if resumeFrom > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", resumeFrom))
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := m.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrDownloadFailed, err)
 	}

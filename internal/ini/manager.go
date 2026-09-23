@@ -68,7 +68,7 @@ func (m *Manager) Write(gameID, profileName, filename, content string) error {
 	return writeFileOverwritable(path, []byte(content))
 }
 
-// SeedFromDocuments seeds the profile's ini dir from the game's My Games dir
+// SeedFromDocuments seeds missing profile INIs from the game's My Games dir, matching names case-insensitively.
 func (m *Manager) SeedFromDocuments(gameID, profileName string, steamAppID int) error {
 	return m.SeedFromDocumentsAt(gameID, profileName, steamAppID, "")
 }
@@ -137,7 +137,7 @@ func toLowerASCII(s string) string {
 	return string(out)
 }
 
-// PushToDocuments copies profile INIs into the game's My Games dir,
+// PushToDocuments copies profile INIs into the game's My Games dir, merging Custom.ini for engines that lack it.
 func (m *Manager) PushToDocuments(gameID, profileName string, steamAppID int) ([]PushedIniReport, error) {
 	return m.PushToDocumentsAt(gameID, profileName, steamAppID, "")
 }
@@ -355,7 +355,7 @@ func mergedKey(doc *Document, section, key string) string {
 	return "<unset>"
 }
 
-// writeFileOverwritable writes data to path, restoring u+w first if Wine's DOS
+// writeFileOverwritable writes data to path, restoring owner write permission first if it was removed.
 func writeFileOverwritable(path string, data []byte) error {
 	if info, err := os.Stat(path); err == nil {
 		if info.Mode()&0200 == 0 {

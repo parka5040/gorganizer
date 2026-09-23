@@ -31,6 +31,9 @@ func (ps *ProfileService) ListProfiles(gameID string) ([]dto.ProfileResult, erro
 }
 
 func (ps *ProfileService) CreateProfile(gameID, name string) (*dto.ProfileResult, error) {
+	if err := validateProfileName(name); err != nil {
+		return nil, err
+	}
 	p, err := ps.s.profileMgr.Create(gameID, name)
 	if err != nil {
 		return nil, err
@@ -43,10 +46,16 @@ func (ps *ProfileService) CreateProfile(gameID, name string) (*dto.ProfileResult
 }
 
 func (ps *ProfileService) DeleteProfile(gameID, name string) error {
+	if err := validateProfileName(name); err != nil {
+		return err
+	}
 	return ps.s.profileMgr.Delete(gameID, name)
 }
 
 func (ps *ProfileService) GetModList(gameID, profileName string) ([]dto.ModListEntryResult, error) {
+	if err := validateProfileName(profileName); err != nil {
+		return nil, err
+	}
 	_, entries, err := ps.s.profileMgr.Load(gameID, profileName)
 	if err != nil {
 		return nil, err
@@ -64,6 +73,9 @@ func (ps *ProfileService) GetModList(gameID, profileName string) ([]dto.ModListE
 }
 
 func (ps *ProfileService) SetModList(gameID, profileName string, entries []dto.ModListEntryResult) error {
+	if err := validateProfileName(profileName); err != nil {
+		return err
+	}
 	p, _, err := ps.s.profileMgr.Load(gameID, profileName)
 	if err != nil {
 		return err
@@ -130,6 +142,9 @@ func (ps *ProfileService) writeTrueIndexes(gameID string, entries []mod.ModListE
 
 // ListSeparators returns the profile's stored separator layout plus the view state.
 func (ps *ProfileService) ListSeparators(gameID, profileName string) ([]dto.SeparatorResult, bool, error) {
+	if err := validateProfileName(profileName); err != nil {
+		return nil, false, err
+	}
 	dir := ps.s.profileMgr.ProfileDir(gameID, profileName)
 	layout, err := separators.LoadLayout(dir)
 	if err != nil {
@@ -147,6 +162,9 @@ func (ps *ProfileService) ListSeparators(gameID, profileName string) ([]dto.Sepa
 }
 
 func (ps *ProfileService) SetSeparators(gameID, profileName string, seps []dto.SeparatorResult, viewEnabled bool) error {
+	if err := validateProfileName(profileName); err != nil {
+		return err
+	}
 	dir := ps.s.profileMgr.ProfileDir(gameID, profileName)
 	out := make([]separators.Separator, len(seps))
 	for i, s := range seps {

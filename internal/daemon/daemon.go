@@ -159,7 +159,7 @@ func (s *session) setReadinessStep(step string, mutate func(*dto.ReadinessResult
 	s.readinessMu.Unlock()
 }
 
-// warmupAsync runs the slow cold-start tasks (crash recovery, Steam scan,
+// warmupAsync runs crash recovery, game detection, and per-game warmup in the background.
 func (d *Daemon) warmupAsync() {
 	d.RecoverAll()
 
@@ -234,7 +234,7 @@ func (d *Daemon) shutdownAll(ctx context.Context, stopIPC func()) {
 	<-d.coalescerDone
 }
 
-// waitForLaunchedExit blocks until every registered Proton launch has
+// waitForLaunchedExit blocks until every registered Proton launch has exited or ctx is cancelled.
 func (d *Daemon) waitForLaunchedExit(ctx context.Context) {
 	d.launchedMu.Lock()
 	dones := make([]<-chan struct{}, 0, len(d.launched))
@@ -263,7 +263,7 @@ func (d *Daemon) waitForLaunchedExit(ctx context.Context) {
 	slog.Info("all launched games have exited — proceeding with shutdown")
 }
 
-// Shutdown signals every consumer of d.shutdownCh by closing it. Idempotent
+// Shutdown closes d.shutdownCh to signal shutdown; repeated calls are no-ops.
 func (d *Daemon) Shutdown() {
 	d.shutdownOnce.Do(func() { close(d.shutdownCh) })
 }

@@ -30,7 +30,7 @@ func SteamRoot() (string, error) {
 	return "", fmt.Errorf("Steam root not found")
 }
 
-// DocumentsPath returns the Documents/My Games/{subdir}/ dir, probing both
+// DocumentsPath returns the prefix's My Games/{subdir} dir, checking both "My Documents" and "Documents".
 func DocumentsPath(steamAppID int, subdir string) (string, error) {
 	if subdir == "" {
 		return "", fmt.Errorf("empty my-games subdir")

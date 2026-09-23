@@ -102,7 +102,7 @@ func TestRecovery_PathKeyedSharedFNVAndTTW(t *testing.T) {
 	}
 }
 
-// TestRecovery_PathKeyedSingleGameUnaffected verifies that a non-shared
+// TestRecovery_PathKeyedSingleGameUnaffected locks that an unshared Data path maps to exactly one game.
 func TestRecovery_PathKeyedSingleGameUnaffected(t *testing.T) {
 	dir := t.TempDir()
 	skyrimInstall := filepath.Join(dir, "skyrim-install")
@@ -140,7 +140,7 @@ func TestRecovery_PathKeyedSingleGameUnaffected(t *testing.T) {
 	}
 }
 
-// TestRecovery_NoAmbiguityNoPending — if the on-disk state is clean,
+// TestRecovery_NoAmbiguityNoPending locks that clean on-disk state creates no pending recovery entry.
 func TestRecovery_NoAmbiguityNoPending(t *testing.T) {
 	dir := t.TempDir()
 	install := filepath.Join(dir, "install")
@@ -204,7 +204,7 @@ func TestRootDeploymentProtectsManagerOwnedMarkers(t *testing.T) {
 	}
 }
 
-// TestRecovery_SyntheticVFSMutexSurfacesError — mounting one game in a
+// TestRecovery_SyntheticVFSMutexSurfacesError locks that mounting TTW while FNV is mounted returns a VFSMutexError.
 func TestRecovery_SyntheticVFSMutexSurfacesError(t *testing.T) {
 	dir := t.TempDir()
 	install := filepath.Join(dir, "install")
@@ -250,7 +250,7 @@ func TestRecovery_SyntheticVFSMutexSurfacesError(t *testing.T) {
 	}
 }
 
-// mockMountedManager returns a vfs.MountManager whose IsMounted reports
+// mockMountedManager returns a MountManager that reports mounted without touching the filesystem.
 func mockMountedManager(dataPath string) *vfs.MountManager {
 	mm := vfs.NewMountManager(dataPath, "", "testgame")
 	mm.SetMountedForTesting(true)

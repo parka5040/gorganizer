@@ -97,7 +97,7 @@ func RemoveIntent(markerPath string) error {
 	return nil
 }
 
-// ComputeLayerHash fingerprints the layer identity set (name, root, enabled) in
+// ComputeLayerHash fingerprints the ordered layer identity set (name, root, enabled).
 func ComputeLayerHash(layers []SentinelLayer) string {
 	h := sha256.New()
 	for _, l := range layers {
@@ -165,7 +165,7 @@ func ReadSentinel(dataPath string) (*Sentinel, error) {
 	return &s, nil
 }
 
-// ValidateSentinel checks magic, schema version, backup_path existence, and —
+// ValidateSentinel checks a sentinel's magic, schema version, backup path, and v2 identity fields and layer hash.
 func ValidateSentinel(s *Sentinel) error {
 	if s == nil {
 		return fmt.Errorf("%w: nil", ErrSentinelInvalid)

@@ -1,5 +1,7 @@
 # Build output
 build/
+# Repo-local Go build tools
+.tools/
 cmake-build-*/
 .cache/
 compile_commands.json

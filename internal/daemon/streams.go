@@ -22,7 +22,7 @@ func newStreamBus[T any](bufSize int) *streamBus[T] {
 	}
 }
 
-// Subscribe registers a listener for `gameID`. Returns a receive-only
+// Subscribe returns a channel of gameID's events and an unsubscribe func; cancelling ctx also unsubscribes.
 func (b *streamBus[T]) Subscribe(ctx context.Context, gameID string) (<-chan T, func()) {
 	b.mu.Lock()
 	id := b.nextID
@@ -55,7 +55,7 @@ func (b *streamBus[T]) Subscribe(ctx context.Context, gameID string) (<-chan T, 
 	return ch, func() { close(done) }
 }
 
-// Publish delivers the event to every subscriber of `gameID`. Non-blocking:
+// Publish delivers the event to every subscriber of gameID, dropping it for any subscriber whose buffer is full.
 func (b *streamBus[T]) Publish(gameID string, evt T) {
 	b.mu.Lock()
 	subs := b.subscribers[gameID]

@@ -42,7 +42,10 @@ func (is *InstallService) PreviewInstall(gameID, archiveRelPath string) (*dto.Pr
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	downloadsDir := config.DownloadsDir(gameID)
-	absArchive := filepath.Join(downloadsDir, archiveRelPath)
+	absArchive, err := archivePath(downloadsDir, archiveRelPath)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(absArchive); err != nil {
 		return nil, &ArchiveMissingError{GameID: gameID, Path: archiveRelPath}
 	}
@@ -123,7 +126,11 @@ func (is *InstallService) StartInstall(req dto.StartInstallRequest) (string, int
 	var indexRef download.SourceArchiveRef
 	if req.ArchiveRelPath != "" {
 		downloadsDir := config.DownloadsDir(req.GameID)
-		absArchive = filepath.Join(downloadsDir, req.ArchiveRelPath)
+		var err error
+		absArchive, err = archivePath(downloadsDir, req.ArchiveRelPath)
+		if err != nil {
+			return "", 0, err
+		}
 		if _, err := os.Stat(absArchive); err != nil {
 			return "", 0, &ArchiveMissingError{GameID: req.GameID, Path: req.ArchiveRelPath}
 		}

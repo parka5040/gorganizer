@@ -40,7 +40,10 @@ func (md *ModService) ListMods(gameID string) ([]dto.ModInfoResult, error) {
 
 // GetMod returns an info snapshot for a single mod folder.
 func (md *ModService) GetMod(gameID, modName string) (*dto.ModInfoResult, error) {
-	modDir := filepath.Join(config.ModsDir(gameID), modName)
+	modDir, err := resolveModDir(gameID, modName)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(modDir); err != nil {
 		if os.IsNotExist(err) {
 			return nil, &ModNotFoundError{GameID: gameID, Name: modName}
@@ -57,7 +60,10 @@ func (md *ModService) GetMod(gameID, modName string) (*dto.ModInfoResult, error)
 
 // RescanMod rewalks a mod folder and returns the full file list.
 func (md *ModService) RescanMod(gameID, modName string) (*dto.ModInfoResult, error) {
-	modDir := filepath.Join(config.ModsDir(gameID), modName)
+	modDir, err := resolveModDir(gameID, modName)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(modDir); err != nil {
 		if os.IsNotExist(err) {
 			return nil, &ModNotFoundError{GameID: gameID, Name: modName}
@@ -182,7 +188,10 @@ func (md *ModService) uninstallModSync(gameID, modName string, force bool) ([]st
 	if _, ok := md.s.config.Games[gameID]; !ok {
 		return nil, "", fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
-	modDir := filepath.Join(config.ModsDir(gameID), modName)
+	modDir, err := resolveModDir(gameID, modName)
+	if err != nil {
+		return nil, "", err
+	}
 	meta, err := download.LoadModMetadata(modDir)
 	if err != nil || meta == nil || (len(meta.SourceArchives) == 0 && meta.Name == "") {
 		if _, statErr := os.Stat(modDir); os.IsNotExist(statErr) {
@@ -282,7 +291,10 @@ func (md *ModService) UninstallMod(gameID, modName string, force bool) ([]string
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	defer md.s.lockMods(gameID, modName)()
-	modDir := filepath.Join(config.ModsDir(gameID), modName)
+	modDir, err := resolveModDir(gameID, modName)
+	if err != nil {
+		return nil, err
+	}
 	meta, err := download.LoadModMetadata(modDir)
 	if err != nil || meta == nil || (len(meta.SourceArchives) == 0 && meta.Name == "") {
 		if _, statErr := os.Stat(modDir); os.IsNotExist(statErr) {
@@ -514,7 +526,10 @@ func (md *ModService) RegisterManualInstall(gameID, modName, archiveRelPath stri
 	if modName == "" {
 		return 0, fmt.Errorf("mod_name required")
 	}
-	modDir := filepath.Join(config.ModsDir(gameID), modName)
+	modDir, err := resolveModDir(gameID, modName)
+	if err != nil {
+		return 0, err
+	}
 	if _, err := os.Stat(modDir); err != nil {
 		if os.IsNotExist(err) {
 			return 0, &ModNotFoundError{GameID: gameID, Name: modName}

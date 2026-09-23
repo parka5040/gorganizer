@@ -129,12 +129,12 @@ func devID(path string) (uint64, error) {
 
 func devIDOf(path string) (uint64, error) { return devID(path) }
 
-// CaptureNewFiles moves files we didn't place (st_nlink == 1) into overwriteRoot.
+// CaptureNewFiles moves files not placed by the farm (st_nlink == 1) into overwriteRoot.
 func CaptureNewFiles(dataDir, overwriteRoot string) (int, error) {
 	return CaptureNewFilesInto(dataDir, overwriteRoot, false, false)
 }
 
-// CaptureNewFilesInto moves loose files we didn't place (st_nlink == 1) from
+// CaptureNewFilesInto moves unplaced (st_nlink == 1) files from dataDir into targetRoot, optionally linking them back.
 func CaptureNewFilesInto(dataDir, targetRoot string, relink bool, _ bool) (int, error) {
 	if targetRoot == "" {
 		return 0, nil

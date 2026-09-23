@@ -76,6 +76,12 @@ func TestMapErrorTypedErrors(t *testing.T) {
 			"mod_collision:name=SkyUI:existing=",
 		},
 		{
+			"unsafe_path",
+			&daemon.UnsafePathError{Field: "mod_name"},
+			codes.InvalidArgument,
+			"unsafe_path:field=mod_name",
+		},
+		{
 			"mod_not_found",
 			&daemon.ModNotFoundError{GameID: "skyrimse", Name: "SkyUI"},
 			codes.NotFound,

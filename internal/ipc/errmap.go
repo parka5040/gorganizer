@@ -44,6 +44,11 @@ func MapError(err error) (error, bool) {
 			collision.Name, strings.Join(collision.ExistingMods, ","))
 		return status.Error(codes.AlreadyExists, msg), true
 	}
+	var unsafePath *daemon.UnsafePathError
+	if errors.As(err, &unsafePath) {
+		msg := fmt.Sprintf("unsafe_path:field=%s", unsafePath.Field)
+		return status.Error(codes.InvalidArgument, msg), true
+	}
 	var notFound *daemon.ModNotFoundError
 	if errors.As(err, &notFound) {
 		msg := fmt.Sprintf("mod_not_found:game=%s:name=%s", notFound.GameID, notFound.Name)

@@ -33,6 +33,15 @@ func (e *ModCollisionError) Error() string {
 	return fmt.Sprintf("mod folder %q already exists", e.Name)
 }
 
+type UnsafePathError struct {
+	Field string
+}
+
+// Error returns the safe field-only unsafe path message.
+func (e *UnsafePathError) Error() string {
+	return fmt.Sprintf("unsafe path in field %q", e.Field)
+}
+
 type ModNotFoundError struct {
 	GameID string
 	Name   string

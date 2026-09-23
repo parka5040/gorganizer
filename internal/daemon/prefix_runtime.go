@@ -20,7 +20,7 @@ var (
 	prefixRuntimeInstalledMu sync.Mutex
 )
 
-// ensurePrefixRuntime runs protontricks against the game's Proton
+// ensurePrefixRuntime installs the game's declared redistributables into its Proton prefix via protontricks.
 func (ls *LaunchService) ensurePrefixRuntime(gameID string, gc config.GameConfig) {
 	g, ok := gamedef.ByID(gameID)
 	if !ok || len(g.RedistPackages) == 0 {
@@ -83,7 +83,7 @@ func (ls *LaunchService) ensurePrefixRuntime(gameID string, gc config.GameConfig
 		"game", gameID, "app_id", appID, "packages", pkgs)
 }
 
-// joinPkgs is a local space-join so we don't pull in strings just for
+// joinPkgs joins package names with single spaces.
 func joinPkgs(pkgs []string) string {
 	out := ""
 	for i, p := range pkgs {
@@ -95,7 +95,7 @@ func joinPkgs(pkgs []string) string {
 	return out
 }
 
-// trimForLog clamps a winetricks buffer to something that fits comfortably
+// trimForLog truncates winetricks output to a length that fits in a single log line.
 func trimForLog(s string) string {
 	const max = 1024
 	if len(s) <= max {

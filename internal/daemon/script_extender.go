@@ -47,7 +47,7 @@ type gitHubRelease struct {
 	Assets  []gitHubReleaseAsset `json:"assets"`
 }
 
-// fetchLatestGitHubRelease grabs a repo's latest (non-draft, non-
+// fetchLatestGitHubRelease downloads a repo's latest GitHub release asset with the given suffix into destDir.
 func fetchLatestGitHubRelease(repo, suffix, destDir string) (archivePath, version string, err error) {
 	if repo == "" {
 		return "", "", errors.New("empty repo")
@@ -105,7 +105,7 @@ func fetchLatestGitHubRelease(repo, suffix, destDir string) (archivePath, versio
 	return archivePath, tag, nil
 }
 
-// InstallScriptExtender resolves the latest build of the game's script
+// InstallScriptExtender downloads the game's matching script extender build and installs it into the game directory.
 func (ls *LaunchService) InstallScriptExtender(gameID string) (string, error) {
 	if err := ls.s.awaitRecovery(); err != nil {
 		return "", err
@@ -325,7 +325,7 @@ func fetchLatestFromNexus(apiKey string, def gamedef.ScriptExtenderSource, destD
 	return archivePath, chosen.Version, nil
 }
 
-// writeScriptExtenderManifest records the sha256 of every file the extender
+// writeScriptExtenderManifest records the SHA-256 of every file the extender install placed under installPath.
 func writeScriptExtenderManifest(gameID, extenderName, srcRoot, installPath, installSubpath string) error {
 	subpath, err := cleanRelativeInstallSubpath(installSubpath)
 	if err != nil {
@@ -375,7 +375,7 @@ func writeScriptExtenderManifest(gameID, extenderName, srcRoot, installPath, ins
 	return saveScriptExtenderManifest(installPath, manifest)
 }
 
-// hashFile returns (sha256-hex, size, error) for a single file. Errors are
+// hashFile returns the SHA-256 hex digest and size of a file.
 func hashFile(path string) (string, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -390,7 +390,7 @@ func hashFile(path string) (string, int64, error) {
 	return hex.EncodeToString(h.Sum(nil)), n, nil
 }
 
-// saveScriptExtenderManifest writes a manifest as a minimal one-line-per-
+// saveScriptExtenderManifest writes the manifest as a commented header plus one sha256, size, path line per file.
 func saveScriptExtenderManifest(installPath string, m seInstallManifest) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# game: %s\n", m.GameID)
@@ -451,7 +451,7 @@ func loadScriptExtenderManifest(installPath string) (*seInstallManifest, error) 
 	return m, nil
 }
 
-// VerifyScriptExtenderManifest re-hashes every file in the manifest and
+// VerifyScriptExtenderManifest re-hashes each manifest entry and returns the paths that are missing or changed.
 func VerifyScriptExtenderManifest(installPath string) ([]string, error) {
 	m, err := loadScriptExtenderManifest(installPath)
 	if err != nil {
@@ -471,7 +471,7 @@ func VerifyScriptExtenderManifest(installPath string) ([]string, error) {
 	return drifted, nil
 }
 
-// resolvePathCaseInsensitive walks `relPath` against `base` one component
+// resolvePathCaseInsensitive resolves relPath under base, matching each path segment case-insensitively.
 func resolvePathCaseInsensitive(base, relPath string) string {
 	parts := strings.Split(relPath, string(filepath.Separator))
 	cur := base
@@ -495,7 +495,7 @@ func resolvePathCaseInsensitive(base, relPath string) string {
 	return cur
 }
 
-// streamTo does a plain HTTP GET into `path`, following redirects, with a
+// streamTo downloads url to path with an HTTP GET, following redirects, under a 10-minute timeout.
 func streamTo(url, path string) error {
 	client := &http.Client{Timeout: 10 * time.Minute}
 	resp, err := client.Get(url)
@@ -516,7 +516,7 @@ func streamTo(url, path string) error {
 	return err
 }
 
-// findExtenderRoot locates the directory containing the loader exe inside
+// findExtenderRoot returns the directory containing loaderExe, checking extractDir and its immediate subdirectories.
 func findExtenderRoot(extractDir, loaderExe string) (string, error) {
 	if _, err := os.Stat(filepath.Join(extractDir, loaderExe)); err == nil {
 		return extractDir, nil
@@ -537,7 +537,7 @@ func findExtenderRoot(extractDir, loaderExe string) (string, error) {
 	return "", errors.New("loader exe not found in extracted archive")
 }
 
-// copyTree walks src and copies every file into dst, preserving relative
+// copyTree copies every file under src into dst, preserving relative paths and overwriting existing files.
 func copyTree(src, dst string) error {
 	if err := os.MkdirAll(dst, 0755); err != nil {
 		return err

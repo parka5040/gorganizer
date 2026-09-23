@@ -26,8 +26,8 @@ var (
 	buildDate = "unknown"
 )
 
+// main parses flags, then either forwards an NXM URI or runs the daemon until shutdown.
 func main() {
-	configPath := flag.String("config", "", "Path to config.json (default: $XDG_CONFIG_HOME/gorganizer/config.json)")
 	socketPath := flag.String("socket-path", "", "Path to Unix domain socket (default: $XDG_RUNTIME_DIR/gorganizer/gorganizer.sock)")
 	logLevel := flag.String("log-level", "", "Log level (debug, info, warn, error)")
 	handleNXM := flag.String("handle-nxm", "", "Forward NXM URI to running daemon and exit")
@@ -49,7 +49,6 @@ func main() {
 
 	transfer.GorganizerVersion = version
 
-	_ = configPath
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
@@ -133,11 +132,7 @@ func forwardNXM(uri, socketPath string) error {
 		socketPath = config.SocketPath()
 	}
 
-	target := "unix://" + socketPath
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	conn, err := grpc.DialContext(ctx, target,
+	conn, err := grpc.NewClient("unix://"+socketPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {
@@ -145,6 +140,8 @@ func forwardNXM(uri, socketPath string) error {
 	}
 	defer conn.Close()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	client := pb.NewGorganizerClient(conn)
 	resp, err := client.StartDownload(ctx, &pb.StartDownloadRequest{NxmUri: uri})
 	if err != nil {
@@ -165,6 +162,7 @@ func checkProtontricksAvailable() {
 	slog.Info("protontricks available — Proton prefix redists will auto-install on script extender install")
 }
 
+// parseLogLevel maps a log level name to its slog level, defaulting to info.
 func parseLogLevel(s string) slog.Level {
 	switch s {
 	case "debug":

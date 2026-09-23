@@ -13,6 +13,7 @@ import (
 	"github.com/parka/gorganizer/internal/vfs"
 )
 
+// main dispatches the first argument to its subcommand and exits with its status.
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -77,12 +78,14 @@ func runRecoverConfirm(args []string) int {
 	return 0
 }
 
+// usage prints the subcommand help to stderr.
 func usage() {
-	fmt.Fprint(os.Stderr, `gorganizerctl — gorganizer offline maintenance
+	fmt.Fprint(os.Stderr, `gorganizerctl — gorganizer maintenance CLI
 
 Subcommands:
-  recover --game <id>          Tear down a stale FUSE mount and restore
-                               Data.orig to Data for the given game.
+  recover --game <id>          Recover the game's Data dir after a crash or
+                               unclean shutdown: tear down any leftover mod
+                               farm and restore Data.orig to Data.
   recover --data-path <path>   Same, but operate on a specific Data dir
                                without consulting the gorganizer config —
                                useful when the daemon was never set up.
@@ -103,12 +106,13 @@ export/import require it to be running.
 
 Examples:
   gorganizerctl recover --game falloutnv
-  gorganizerctl recover --data-path "/home/me/.steam/steamapps/common/Fallout New Vegas/Data"
+  gorganizerctl recover --data-path "$HOME/.local/share/Steam/steamapps/common/Fallout New Vegas/Data"
   gorganizerctl export --game skyrimse --out ~/skyrimse-instance.tar.zst
   gorganizerctl import --game skyrimse --archive ~/skyrimse-instance.tar.zst --policy rename
 `)
 }
 
+// runRecover runs offline crash recovery on a game's Data dir while the daemon is stopped.
 func runRecover(args []string) int {
 	fs := flag.NewFlagSet("recover", flag.ExitOnError)
 	gameID := fs.String("game", "", "internal game id (e.g. falloutnv, skyrimse)")
