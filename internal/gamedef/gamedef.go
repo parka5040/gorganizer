@@ -1,5 +1,7 @@
 package gamedef
 
+import "strconv"
+
 type PluginStateLocation uint8
 
 const (
@@ -47,6 +49,55 @@ type ScriptExtenderSource struct {
 	ModID          int
 }
 
+type InstallLayout uint8
+
+const (
+	LayoutDataRoot InstallLayout = iota
+	LayoutSMAPIManifest
+)
+
+// String returns the stable snake_case name of an install layout.
+func (l InstallLayout) String() string {
+	switch l {
+	case LayoutDataRoot:
+		return "data_root"
+	case LayoutSMAPIManifest:
+		return "smapi_manifest"
+	}
+	return "layout_" + strconv.Itoa(int(l))
+}
+
+type ModLoaderKind uint8
+
+const (
+	ModLoaderNone ModLoaderKind = iota
+	ModLoaderSMAPI
+)
+
+type ModLoaderSpec struct {
+	Kind                ModLoaderKind
+	DisplayName         string
+	GitHubRepo          string
+	AssetPattern        string
+	InstallerRelPath    string
+	PayloadRelPath      string
+	LauncherName        string
+	LauncherBackupName  string
+	LauncherPayloadName string
+	LoaderExecutable    string
+	GameAssembly        string
+	GameVersionFile     string
+	GameVersionPackage  string
+	LoaderDepsFile      string
+	NativeMarkers       []string
+	ForeignMarkers      []string
+	BundledModIDs       []string
+	UninstallPaths      []string
+	ProtectedRootPaths  []string
+	WebAPIBaseURL       string
+	WebAPIVersion       string
+}
+
 type Definition struct {
 	ID                   string
 	Name                 string
@@ -65,4 +116,7 @@ type Definition struct {
 	ScriptExtenderSource *ScriptExtenderSource
 	RedistPackages       []string
 	Supports4GBPatch     bool
+	DataDirOptional      bool
+	Layout               InstallLayout
+	ModLoader            *ModLoaderSpec
 }

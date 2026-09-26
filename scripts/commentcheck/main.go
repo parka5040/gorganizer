@@ -101,11 +101,44 @@ func checkGoFile(path string) int {
 	return count
 }
 
+type scopeKind int
+
+const (
+	scopeNamespace scopeKind = iota
+	scopeClass
+	scopeBlock
+)
+
 type cppLine struct {
 	num          int
 	hasCode      bool
 	commentStart bool
 	blockComment bool
+	declScope    bool
+	classScope   bool
+}
+
+type cppViolation struct {
+	line int
+	kind string
+}
+
+var (
+	namespaceBrace = regexp.MustCompile(`(^|[^\w])(namespace(\s+[\w:]+)?|extern\s*"")\s*$`)
+	enumBrace      = regexp.MustCompile(`(^|[^\w])enum\b`)
+	classBrace     = regexp.MustCompile(`(^|[^\w])(class|struct|union)\b[^=(){};]*$`)
+	macroCall      = regexp.MustCompile(`^[A-Z][A-Z0-9_]*\s*\(`)
+	leadingWord    = regexp.MustCompile(`^[A-Za-z_]\w*`)
+	initializerArg = regexp.MustCompile(`^\(\s*("|'|-?\d|(nullptr|true|false|this|QStringLiteral|QLatin1String|QLatin1Char)\b|u8?"|[uUL]'|[uUL]"|R")`)
+)
+
+var statementKeywords = map[string]bool{
+	"if": true, "else": true, "for": true, "while": true, "do": true, "switch": true, "case": true,
+	"default": true, "return": true, "break": true, "continue": true, "goto": true, "try": true,
+	"catch": true, "throw": true, "new": true, "delete": true, "emit": true, "Q_EMIT": true,
+	"co_return": true, "co_await": true, "co_yield": true, "sizeof": true, "static_assert": true,
+	"using": true, "typedef": true, "namespace": true, "public": true, "protected": true,
+	"private": true, "signals": true, "slots": true,
 }
 
 // checkCppFile reports comment-policy violations in one C++ file via a small lexer.
@@ -115,54 +148,133 @@ func checkCppFile(path string) int {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", path, err)
 		return 1
 	}
-	lines := lexCpp(string(data))
-	raw := strings.Split(string(data), "\n")
-	count := 0
-	report := func(n int, kind string) {
-		fmt.Printf("%s:%d: forbidden comment (%s)\n", path, n, kind)
-		count++
+	found := cppViolations(string(data))
+	for _, v := range found {
+		fmt.Printf("%s:%d: forbidden comment (%s)\n", path, v.line, v.kind)
 	}
-	for i := 0; i < len(lines); i++ {
-		l := lines[i]
-		if l.blockComment {
-			report(l.num, "block")
-			continue
-		}
-		if !l.commentStart {
-			continue
-		}
-		if l.hasCode {
-			report(l.num, "trailing")
-			continue
-		}
-		if i+1 < len(lines) && lines[i+1].commentStart && !lines[i+1].hasCode {
-			report(l.num, "multi-line")
-			continue
-		}
-		next := ""
-		for j := i + 1; j < len(raw); j++ {
-			if strings.TrimSpace(raw[j]) != "" {
-				next = raw[j]
-				break
-			}
-		}
-		if !strings.Contains(next, "(") {
-			report(l.num, "non-header")
-		}
-	}
-	return count
+	return len(found)
 }
 
-// lexCpp classifies each line, tracking string/char/raw-string/block-comment state.
+// cppViolations returns every comment in src that is not a single aligned line directly above a function declaration outside any function body.
+func cppViolations(src string) []cppViolation {
+	lines := lexCpp(src)
+	raw := strings.Split(src, "\n")
+	var found []cppViolation
+	for i := 0; i < len(lines); i++ {
+		l := lines[i]
+		kind := ""
+		switch {
+		case l.blockComment:
+			kind = "block"
+		case !l.commentStart:
+			continue
+		case l.hasCode:
+			kind = "trailing"
+		case i+1 < len(lines) && lines[i+1].commentStart && !lines[i+1].hasCode:
+			kind = "multi-line"
+		case !l.declScope:
+			kind = "in-body"
+		default:
+			kind = headerProblem(raw, l)
+		}
+		if kind != "" {
+			found = append(found, cppViolation{line: l.num, kind: kind})
+		}
+	}
+	return found
+}
+
+// headerProblem names what disqualifies a comment outside function bodies from being a function header comment, or returns "" when it is one.
+func headerProblem(raw []string, l cppLine) string {
+	next := ""
+	for j := l.num; j < len(raw); j++ {
+		if strings.TrimSpace(raw[j]) != "" {
+			next = raw[j]
+			break
+		}
+	}
+	commentIndent := leadingSpace(raw[l.num-1])
+	if commentIndent != leadingSpace(next) {
+		return "misaligned"
+	}
+	if !l.classScope && commentIndent != "" {
+		return "indented"
+	}
+	if !looksLikeDeclaration(next) {
+		return "non-header"
+	}
+	return ""
+}
+
+// leadingSpace returns the run of spaces and tabs that starts line.
+func leadingSpace(line string) string {
+	return line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+}
+
+// looksLikeDeclaration reports whether line starts a function or method declaration rather than a statement, macro or variable.
+func looksLikeDeclaration(line string) bool {
+	t := strings.TrimSpace(line)
+	open := strings.Index(t, "(")
+	if open <= 0 || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "}") || strings.HasPrefix(t, "{") {
+		return false
+	}
+	if statementKeywords[leadingWord.FindString(t)] || macroCall.MatchString(t) {
+		return false
+	}
+	head := t[:open]
+	if !strings.Contains(head, "operator") && (strings.ContainsAny(head, "=.") || strings.Contains(head, "->")) {
+		return false
+	}
+	return !initializerArg.MatchString(t[open:])
+}
+
+// classifyBrace decides from the statement text before an opening brace whether it opens a namespace, a class body, or any other block.
+func classifyBrace(prefix string) scopeKind {
+	switch {
+	case namespaceBrace.MatchString(prefix):
+		return scopeNamespace
+	case enumBrace.MatchString(prefix):
+		return scopeBlock
+	case classBrace.MatchString(prefix):
+		return scopeClass
+	}
+	return scopeBlock
+}
+
+// preprocessorLines marks the lines that belong to preprocessor directives, including backslash continuations.
+func preprocessorLines(src string) []bool {
+	raw := strings.Split(src, "\n")
+	marks := make([]bool, len(raw))
+	continued := false
+	for i, line := range raw {
+		trimmed := strings.TrimSpace(line)
+		marks[i] = continued || strings.HasPrefix(trimmed, "#")
+		continued = marks[i] && strings.HasSuffix(trimmed, "\\")
+	}
+	return marks
+}
+
+// lexCpp classifies each line, tracking string/char/raw-string/block-comment state and the brace scopes a comment sits in.
 func lexCpp(src string) []cppLine {
 	var out []cppLine
+	preproc := preprocessorLines(src)
 	line := cppLine{num: 1}
 	inBlock, inStr, inChar, inRaw := false, false, false, false
 	rawDelim := ""
+	var scopes []scopeKind
+	var prefix strings.Builder
 	i := 0
 	flush := func() {
 		out = append(out, line)
 		line = cppLine{num: line.num + 1}
+	}
+	directive := func() bool {
+		return line.num-1 < len(preproc) && preproc[line.num-1]
+	}
+	note := func(text string) {
+		if !directive() {
+			prefix.WriteString(text)
+		}
 	}
 	for i < len(src) {
 		c := src[i]
@@ -170,6 +282,7 @@ func lexCpp(src string) []cppLine {
 			if inBlock {
 				line.blockComment = line.blockComment || line.commentStart || true
 			}
+			note("\n")
 			flush()
 			i++
 			continue
@@ -213,6 +326,13 @@ func lexCpp(src string) []cppLine {
 			i++
 		case c == '/' && i+1 < len(src) && src[i+1] == '/':
 			line.commentStart = true
+			line.declScope = true
+			for _, kind := range scopes {
+				if kind == scopeBlock {
+					line.declScope = false
+				}
+			}
+			line.classScope = len(scopes) > 0 && scopes[len(scopes)-1] == scopeClass
 			for i < len(src) && src[i] != '\n' {
 				i++
 			}
@@ -228,6 +348,7 @@ func lexCpp(src string) []cppLine {
 						rawDelim = src[i+1 : i+1+m]
 						inRaw = true
 						line.hasCode = true
+						note(`""`)
 						i += 1 + m + 1
 						continue
 					}
@@ -235,14 +356,34 @@ func lexCpp(src string) []cppLine {
 			}
 			inStr = true
 			line.hasCode = true
+			note(`""`)
 			i++
 		case c == '\'':
 			inChar = true
 			line.hasCode = true
+			note(`''`)
 			i++
 		default:
 			if c != ' ' && c != '\t' && c != '\r' {
 				line.hasCode = true
+			}
+			if directive() {
+				i++
+				continue
+			}
+			switch c {
+			case '{':
+				scopes = append(scopes, classifyBrace(prefix.String()))
+				prefix.Reset()
+			case '}':
+				if len(scopes) > 0 {
+					scopes = scopes[:len(scopes)-1]
+				}
+				prefix.Reset()
+			case ';':
+				prefix.Reset()
+			default:
+				prefix.WriteByte(c)
 			}
 			i++
 		}

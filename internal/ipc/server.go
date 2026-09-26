@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	pb "github.com/parka/gorganizer/api/proto"
 	"github.com/parka/gorganizer/internal/dto"
@@ -30,6 +31,21 @@ type DaemonController interface {
 	TTWController
 	ExecutableController
 	TransferController
+	ModLoaderController
+	ModDependencyController
+}
+
+type ModDependencyController interface {
+	GetModDependencyReport(ctx context.Context, gameID, profileName string, refreshRemote, forceRemote bool) (dto.ModDependencyReportResult, error)
+	FetchModDependencies(ctx context.Context, gameID, profileName string, uniqueIDs []string) ([]dto.DependencyFetchResult, error)
+	AckDependencyEnable(ctx context.Context, gameID, batchID string, uniqueIDs []string) (int, error)
+}
+
+type ModLoaderController interface {
+	GetModLoaderStatus(ctx context.Context, gameID string, checkLatest bool) (dto.ModLoaderStatusResult, error)
+	InstallModLoader(ctx context.Context, gameID string, repairOnly bool) (dto.ModLoaderStatusResult, error)
+	UninstallModLoader(ctx context.Context, gameID string) (dto.ModLoaderStatusResult, error)
+	RollbackModLoader(ctx context.Context, gameID string) (dto.ModLoaderStatusResult, error)
 }
 
 type TransferController interface {
@@ -169,6 +185,11 @@ type LifecycleController interface {
 	Health() dto.ReadinessResult
 }
 
+var (
+	gracefulStopTimeout = 3 * time.Second
+	forcedStopWait      = 2 * time.Second
+)
+
 type Server struct {
 	socketPath string
 	grpcServer *grpc.Server
@@ -210,10 +231,26 @@ func (s *Server) Start() error {
 	return nil
 }
 
+// Stop stops serving within gracefulStopTimeout plus forcedStopWait, force-closing connections in the background and then abandoning handlers that still do not return, and removes the socket.
 func (s *Server) Stop() {
 	if s.grpcServer != nil {
 		slog.Info("stopping gRPC server")
-		s.grpcServer.GracefulStop()
+		done := make(chan struct{})
+		go func() {
+			s.grpcServer.GracefulStop()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(gracefulStopTimeout):
+			slog.Warn("gRPC graceful stop timed out; cancelling open streams", "timeout", gracefulStopTimeout)
+			go s.grpcServer.Stop()
+			select {
+			case <-done:
+			case <-time.After(forcedStopWait):
+				slog.Warn("gRPC handlers still running after the forced stop; abandoning them", "waited", forcedStopWait)
+			}
+		}
 	}
 	if s.socketPath != "" {
 		_ = os.Remove(s.socketPath)

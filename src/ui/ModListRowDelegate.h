@@ -11,6 +11,9 @@ public:
 
     void paint(QPainter* painter, const QStyleOptionViewItem& option,
                const QModelIndex& index) const override;
+
+private:
+    void applyDependencyIcon(QStyleOptionViewItem& opt, const QModelIndex& index) const;
 };
 
 }

@@ -175,6 +175,7 @@ int main(int argc, char* argv[])
     }
 
     gorganizer::MainWindow mainWindow(config, &grpcClient);
+    mainWindow.setDaemonOwned(daemonOwned);
     mainWindow.show();
 
     for (int i = 1; i < argc; ++i) {

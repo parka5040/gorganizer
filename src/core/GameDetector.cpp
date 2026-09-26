@@ -17,8 +17,18 @@ bool validInstallLayout(const std::filesystem::path& installDir,
 {
     std::error_code ec;
     const auto dataDir = installDir / relativePath(game.dataSubpath);
-    if (!std::filesystem::is_directory(dataDir, ec))
+    bool dataDirMissing = false;
+    if (game.dataDirOptional) {
+        ec.clear();
+        const auto dataStatus = std::filesystem::symlink_status(dataDir, ec);
+        if (dataStatus.type() == std::filesystem::file_type::not_found) {
+            dataDirMissing = true;
+        } else if (ec || dataStatus.type() != std::filesystem::file_type::directory) {
+            return false;
+        }
+    } else if (!std::filesystem::is_directory(dataDir, ec)) {
         return false;
+    }
 
     if (!game.executablePaths.isEmpty()) {
         const bool foundMarker = std::any_of(
@@ -32,10 +42,12 @@ bool validInstallLayout(const std::filesystem::path& installDir,
             return false;
     }
 
-    for (const auto& rel : game.requiredDataFiles) {
-        std::error_code requiredEc;
-        if (!std::filesystem::is_regular_file(dataDir / relativePath(rel), requiredEc))
-            return false;
+    if (!dataDirMissing) {
+        for (const auto& rel : game.requiredDataFiles) {
+            std::error_code requiredEc;
+            if (!std::filesystem::is_regular_file(dataDir / relativePath(rel), requiredEc))
+                return false;
+        }
     }
 
     if (dataDirOut)
@@ -195,7 +207,7 @@ std::optional<GameInfo> GameDetector::fromExecutable(const std::filesystem::path
 
     QString stem = QString::fromStdString(exePath.stem().string()).toLower();
     auto game = GameInfo::findByExeStem(stem);
-    if (!game)
+    if (!game || game->dataDirOptional)
         return std::nullopt;
 
     auto installDir = installRootForExecutable(*game, exePath);

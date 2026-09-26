@@ -134,7 +134,7 @@ func CaptureNewFiles(dataDir, overwriteRoot string) (int, error) {
 	return CaptureNewFilesInto(dataDir, overwriteRoot, false, false)
 }
 
-// CaptureNewFilesInto moves unplaced (st_nlink == 1) files from dataDir into targetRoot, optionally linking them back.
+// CaptureNewFilesInto moves unplaced (st_nlink == 1) files other than the sentinel and its interrupted temporary copies from dataDir into targetRoot, optionally linking them back.
 func CaptureNewFilesInto(dataDir, targetRoot string, relink bool, _ bool) (int, error) {
 	if targetRoot == "" {
 		return 0, nil
@@ -148,7 +148,7 @@ func CaptureNewFilesInto(dataDir, targetRoot string, relink bool, _ bool) (int, 
 		if info.IsDir() {
 			return nil
 		}
-		if filepath.Base(path) == SentinelFilename {
+		if isSentinelFile(filepath.Base(path)) {
 			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {

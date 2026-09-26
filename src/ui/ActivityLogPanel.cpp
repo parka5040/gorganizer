@@ -1,5 +1,6 @@
 #include "ActivityLogPanel.h"
 #include "GrpcClient.h"
+#include "InstallErrorText.h"
 #include "ThemeManager.h"
 
 #include <QVBoxLayout>
@@ -172,7 +173,7 @@ void ActivityLogPanel::onInstallProgress(const GrpcInstallProgress& p)
     case 5:
         if (stepChanged) {
             QString msg = p.error.isEmpty() ? QString("(unknown error)") : p.error;
-            if (msg.contains("fomod_required")) {
+            if (parseInstallError(msg).token == QLatin1String("fomod_required")) {
                 log(Severity::Info, QString("%1 needs the FOMOD installer wizard...").arg(name));
             } else {
                 log(Severity::Error, QString("Install of %1 failed: %2").arg(name, msg));

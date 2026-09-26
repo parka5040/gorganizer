@@ -19,6 +19,7 @@
 #include <QTextStream>
 #include <QDateTime>
 #include <QFile>
+#include <QSaveFile>
 #include <QUuid>
 #include <QCloseEvent>
 
@@ -601,7 +602,7 @@ void ModInstallDialog::writeMetadata(const QString& modDir)
             fileList.append(rel);
     }
 
-    QFile meta(modDir + "/metadata.yaml");
+    QSaveFile meta(modDir + "/metadata.yaml");
     if (!meta.open(QIODevice::WriteOnly | QIODevice::Text))
         return;
 
@@ -633,7 +634,8 @@ void ModInstallDialog::writeMetadata(const QString& modDir)
     for (const auto& f : fileList)
         out << "  - \"" << f << "\"\n";
 
-    meta.close();
+    out.flush();
+    meta.commit();
 }
 
 }

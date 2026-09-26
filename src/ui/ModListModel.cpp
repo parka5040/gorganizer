@@ -83,10 +83,24 @@ QVariant ModListModel::data(const QModelIndex& idx, int role) const
     if (!idx.isValid() || idx.row() < 0 || idx.row() >= static_cast<int>(m_rows.size()))
         return {};
     const ModListRow& r = m_rows[idx.row()];
+    const ModDependencySummary* dependency = nullptr;
+    if (r.kind == RowKindMod && !m_dependencySummaries.isEmpty()) {
+        const auto it = m_dependencySummaries.constFind(r.folder);
+        if (it != m_dependencySummaries.constEnd())
+            dependency = &it.value();
+    }
 
     switch (role) {
         case RowKindRole:
             return static_cast<int>(r.kind);
+        case DependencyIssueRole:
+            return dependency ? dependency->severity : 0;
+        case DependencyTooltipRole:
+            return dependency ? dependency->tooltip : QString();
+        case UpdateAvailableRole:
+            return dependency ? dependency->updateVersion : QString();
+        case UpdateUrlRole:
+            return dependency ? dependency->updateUrl : QString();
         case ModFolderRole:
             return r.folder;
         case ModIndexRole:
@@ -130,6 +144,8 @@ QVariant ModListModel::data(const QModelIndex& idx, int role) const
                     "highest priority. Right-click to extract into a real mod folder.");
             if (r.kind == RowKindMod && idx.column() == ModColConflicts)
                 return conflictTooltip(r);
+            if (dependency && idx.column() == ModColName && !dependency->tooltip.isEmpty())
+                return dependency->tooltip;
             return {};
         default:
             return {};
@@ -156,12 +172,14 @@ bool ModListModel::setData(const QModelIndex& idx, const QVariant& value, int ro
 Qt::ItemFlags ModListModel::flags(const QModelIndex& idx) const
 {
     if (!idx.isValid())
-        return Qt::ItemIsDropEnabled;
+        return m_editable ? Qt::ItemIsDropEnabled : Qt::NoItemFlags;
     if (idx.row() < 0 || idx.row() >= static_cast<int>(m_rows.size()))
         return Qt::NoItemFlags;
     const ModListRow& r = m_rows[idx.row()];
     if (r.kind == RowKindOverwrite)
         return Qt::ItemIsEnabled;
+    if (!m_editable)
+        return Qt::ItemIsEnabled | Qt::ItemIsSelectable;
     Qt::ItemFlags f = Qt::ItemIsEnabled | Qt::ItemIsSelectable
                     | Qt::ItemIsDragEnabled | Qt::ItemIsDropEnabled;
     if (r.kind == RowKindMod && idx.column() == ModColName)
@@ -408,6 +426,20 @@ void ModListModel::clearTints()
     for (auto& r : m_rows)
         r.tint = TintNone;
     emitAllRowsChanged({TintRole, Qt::BackgroundRole});
+}
+
+void ModListModel::setDependencySummaries(const QHash<QString, ModDependencySummary>& summaries)
+{
+    if (summaries.isEmpty() && m_dependencySummaries.isEmpty())
+        return;
+    m_dependencySummaries = summaries;
+    emitAllRowsChanged({DependencyIssueRole, DependencyTooltipRole, UpdateAvailableRole, UpdateUrlRole,
+                        Qt::ToolTipRole, Qt::DecorationRole});
+}
+
+void ModListModel::setEditable(bool editable)
+{
+    m_editable = editable;
 }
 
 void ModListModel::setCategoryAt(int row, const QString& category)

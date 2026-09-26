@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/parka/gorganizer/internal/atomicfile"
@@ -26,7 +27,19 @@ const (
 	applyingSuffix   = ".gorganizer-applying"
 	stagingSuffix    = ".gorganizer-staging"
 	oldFarmSuffix    = ".gorganizer-oldfarm"
+	farmBackupSuffix = ".orig"
+	sentinelTempName = ".tmp-" + SentinelFilename + "-"
 )
+
+// FarmSiblingSuffixes returns the suffixes of every sibling a farm lifecycle leaves next to its deploy folder: the transition intents and folders and the parked original.
+func FarmSiblingSuffixes() []string {
+	return []string{activatingSuffix, applyingSuffix, stagingSuffix, oldFarmSuffix, farmBackupSuffix}
+}
+
+// isSentinelFile reports whether name is the sentinel or a temporary file of an interrupted atomic sentinel write.
+func isSentinelFile(name string) bool {
+	return name == SentinelFilename || strings.HasPrefix(name, sentinelTempName)
+}
 
 const IntentMagic = "gorganizer-intent"
 
@@ -52,9 +65,13 @@ type ActivationIntent struct {
 }
 
 func activatingIntentPath(dataPath string) string { return dataPath + activatingSuffix }
-func applyingIntentPath(dataPath string) string   { return dataPath + applyingSuffix }
-func stagingDirPath(dataPath string) string       { return dataPath + stagingSuffix }
-func oldFarmPath(dataPath string) string          { return dataPath + oldFarmSuffix }
+
+// ActivationIntentPath returns the activation intent path for dataPath.
+func ActivationIntentPath(dataPath string) string { return activatingIntentPath(dataPath) }
+
+func applyingIntentPath(dataPath string) string { return dataPath + applyingSuffix }
+func stagingDirPath(dataPath string) string     { return dataPath + stagingSuffix }
+func oldFarmPath(dataPath string) string        { return dataPath + oldFarmSuffix }
 
 var ErrIntentMissing = errors.New("vfs: activation intent missing")
 
@@ -132,7 +149,7 @@ var (
 	ErrSentinelInvalid = errors.New("vfs: overlay sentinel invalid")
 )
 
-// WriteSentinel serializes s to <dataPath>/SentinelFilename with 0644.
+// WriteSentinel atomically serializes s to <dataPath>/SentinelFilename with 0644.
 func WriteSentinel(dataPath string, s *Sentinel) error {
 	if s == nil {
 		return errors.New("vfs: WriteSentinel: nil sentinel")
@@ -142,7 +159,7 @@ func WriteSentinel(dataPath string, s *Sentinel) error {
 		return fmt.Errorf("marshalling sentinel: %w", err)
 	}
 	target := filepath.Join(dataPath, SentinelFilename)
-	if err := os.WriteFile(target, body, 0644); err != nil {
+	if err := atomicfile.WriteFile(target, body, 0644); err != nil {
 		return fmt.Errorf("writing %s: %w", target, err)
 	}
 	return nil

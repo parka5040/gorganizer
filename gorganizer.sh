@@ -96,6 +96,7 @@ GAME_MODS_DIRS=(
     "starfield:Starfield_Mods"
     "oblivionremastered:OblivionRemastered_Mods"
     "ttw:TTW_Mods"
+    "stardewvalley:StardewValley_Mods"
 )
 
 # --- output helpers --------------------------------------------------------
@@ -517,7 +518,7 @@ Exec=$SCRIPT_DIR/gorganizer.sh launch
 Icon=$ICON_DEST
 Terminal=false
 Categories=Game;Utility;
-Keywords=mod;organizer;skyrim;fallout;bethesda;
+Keywords=mod;organizer;skyrim;fallout;bethesda;stardew;smapi;
 Version=$(gorganizer_version)
 EOF
 }

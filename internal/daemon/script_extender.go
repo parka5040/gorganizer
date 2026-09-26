@@ -15,7 +15,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/download"
+	"github.com/parka/gorganizer/internal/dto"
 	"github.com/parka/gorganizer/internal/gamedef"
 	"github.com/parka/gorganizer/internal/tools"
 )
@@ -110,10 +112,13 @@ func (ls *LaunchService) InstallScriptExtender(gameID string) (string, error) {
 	if err := ls.s.awaitRecovery(); err != nil {
 		return "", err
 	}
-	if pending := ls.s.recoveryPendingFor(gameID); pending != nil {
+	ls.s.mu.RLock()
+	pending := ls.s.recoveryPendingFor(gameID)
+	gc, err := ls.s.config.EffectiveGameConfig(gameID)
+	ls.s.mu.RUnlock()
+	if pending != nil {
 		return "", fmt.Errorf("recovery pending for %s: %s", gameID, pending.Reason)
 	}
-	gc, err := ls.s.config.EffectiveGameConfig(gameID)
 	if err != nil {
 		return "", err
 	}
@@ -179,7 +184,7 @@ func (ls *LaunchService) InstallScriptExtender(gameID string) (string, error) {
 	}
 	ls.s.mu.Lock()
 	defer ls.s.mu.Unlock()
-	if ls.s.mountBusy(gameID) {
+	if ls.s.applyBusyLocked(gameID) {
 		return "", fmt.Errorf("cannot install %s while %s is running", def.Name, gameID)
 	}
 	if mm, ok := ls.s.mountMgrs[gameID]; ok && mm.IsMounted() {
@@ -194,6 +199,11 @@ func (ls *LaunchService) InstallScriptExtender(gameID string) (string, error) {
 			return "", fmt.Errorf("cannot install %s while game-root deployment is active", def.Name)
 		}
 	}
+	release, err := ls.s.reserveShared(gameID, dto.BusyOperationScriptExtender)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	if err := copyTree(srcRoot, installDir); err != nil {
 		return "", fmt.Errorf("copying to extender install dir: %w", err)
 	}
@@ -270,44 +280,9 @@ func fetchLatestFromNexus(apiKey string, def gamedef.ScriptExtenderSource, destD
 	if err != nil {
 		return "", "", fmt.Errorf("listing %s files: %w", def.Name, err)
 	}
-	mentions := func(f *download.NexusFileDetails, needle string) bool {
-		return strings.Contains(strings.ToLower(f.Name), needle) ||
-			strings.Contains(strings.ToLower(f.FileName), needle) ||
-			strings.Contains(strings.ToLower(f.Description), needle)
-	}
-	mentionsRuntime := func(f *download.NexusFileDetails, version string) bool {
-		for _, candidate := range []string{version, strings.ReplaceAll(version, ".", "_"), strings.ReplaceAll(version, ".", "-")} {
-			if mentions(f, strings.ToLower(candidate)) {
-				return true
-			}
-		}
-		return false
-	}
-	var chosen *download.NexusFileDetails
-	chosenSteam := false
-	for i := range files.Files {
-		f := &files.Files[i]
-		if !strings.EqualFold(f.CategoryName, "MAIN") {
-			continue
-		}
-		if mentions(f, "gog") {
-			continue
-		}
-		if runtimeNeedle != "" && !mentionsRuntime(f, runtimeNeedle) {
-			continue
-		}
-		isSteam := mentions(f, "steam")
-		switch {
-		case chosen == nil:
-			chosen, chosenSteam = f, isSteam
-		case isSteam && !chosenSteam:
-			chosen, chosenSteam = f, true
-		case isSteam == chosenSteam && f.FileID > chosen.FileID:
-			chosen = f
-		}
-	}
-	if chosen == nil {
-		return "", "", fmt.Errorf("no Steam-compatible MAIN-category file found for %s (only GOG builds available?)", def.Name)
+	chosen, err := download.SelectMainFile(files.Files, scriptExtenderMainFileOptions(runtimeNeedle))
+	if err != nil {
+		return "", "", scriptExtenderSelectError(def.Name, err)
 	}
 	cdnURL, err := nx.ResolveDownloadURLByID(def.GameSlug, def.ModID, chosen.FileID)
 	if err != nil {
@@ -315,14 +290,40 @@ func fetchLatestFromNexus(apiKey string, def gamedef.ScriptExtenderSource, destD
 			def.Name, err)
 	}
 
-	archivePath = filepath.Join(destDir, chosen.FileName)
-	if archivePath == filepath.Join(destDir, "") {
-		archivePath = filepath.Join(destDir, fmt.Sprintf("%s-%d.archive", def.Name, chosen.FileID))
-	}
+	archivePath = filepath.Join(destDir, scriptExtenderArchiveName(def, chosen))
 	if err := streamTo(cdnURL, archivePath); err != nil {
 		return "", "", fmt.Errorf("downloading %s: %w", def.Name, err)
 	}
 	return archivePath, chosen.Version, nil
+}
+
+// scriptExtenderMainFileOptions returns the Steam-build selection policy for Nexus-hosted script extenders.
+func scriptExtenderMainFileOptions(runtimeNeedle string) download.MainFileOptions {
+	opts := download.MainFileOptions{
+		RejectMentions: []string{"gog"},
+		PreferMentions: []string{"steam"},
+	}
+	if runtimeNeedle != "" {
+		opts.RequireVersionAnyOf = []string{runtimeNeedle}
+	}
+	return opts
+}
+
+// scriptExtenderSelectError maps a MAIN-file selection failure to the user-facing script-extender error.
+func scriptExtenderSelectError(extenderName string, err error) error {
+	if errors.Is(err, download.ErrNoMainFile) {
+		return fmt.Errorf("no Steam-compatible MAIN-category file found for %s (only GOG builds available?)", extenderName)
+	}
+	return fmt.Errorf("selecting %s file: %w", extenderName, err)
+}
+
+// scriptExtenderArchiveName reduces a Nexus-supplied file name to a safe base name, falling back to one derived from the extender and file ID.
+func scriptExtenderArchiveName(def gamedef.ScriptExtenderSource, file *download.NexusFileDetails) string {
+	name := filepath.Base(filepath.Clean("/" + file.FileName))
+	if name == "" || name == "." || name == ".." || name == "/" || strings.ContainsRune(name, filepath.Separator) {
+		return fmt.Sprintf("%s-%d.archive", def.Name, file.FileID)
+	}
+	return name
 }
 
 // writeScriptExtenderManifest records the SHA-256 of every file the extender install placed under installPath.
@@ -390,7 +391,7 @@ func hashFile(path string) (string, int64, error) {
 	return hex.EncodeToString(h.Sum(nil)), n, nil
 }
 
-// saveScriptExtenderManifest writes the manifest as a commented header plus one sha256, size, path line per file.
+// saveScriptExtenderManifest atomically writes the manifest as a commented header plus one sha256, size, path line per file.
 func saveScriptExtenderManifest(installPath string, m seInstallManifest) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# game: %s\n", m.GameID)
@@ -400,7 +401,7 @@ func saveScriptExtenderManifest(installPath string, m seInstallManifest) error {
 		fmt.Fprintf(&b, "%s\t%d\t%s\n", e.SHA256, e.Size, e.RelPath)
 	}
 	target := filepath.Join(installPath, seManifestFilename)
-	return os.WriteFile(target, []byte(b.String()), 0644)
+	return atomicfile.WriteFile(target, []byte(b.String()), 0644)
 }
 
 func loadScriptExtenderManifest(installPath string) (*seInstallManifest, error) {

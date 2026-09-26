@@ -8,11 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/bodgit/sevenzip"
 
+	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/fsutil"
 	"github.com/parka/gorganizer/internal/kvfile"
 )
@@ -416,23 +418,6 @@ func findCaseInsensitiveChild(parent, target string) (string, error) {
 	return "", nil
 }
 
-// ClearModFiles removes everything under modDir except metadata.yaml.
-func ClearModFiles(modDir string) error {
-	entries, err := os.ReadDir(modDir)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if e.Name() == "metadata.yaml" {
-			continue
-		}
-		if err := os.RemoveAll(filepath.Join(modDir, e.Name())); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 type SourceArchiveRef struct {
 	Path        string
 	ModID       int
@@ -601,6 +586,58 @@ func SaveModMetadata(modDir string, m *ModMetadata) error {
 		w.ItemString(f)
 	}
 	return w.WriteAtomic(filepath.Join(modDir, "metadata.yaml"), 0644)
+}
+
+// PatchModMetadataField rewrites one top-level key of {modDir}/metadata.yaml in place, returning false without writing when the file is missing.
+func PatchModMetadataField(modDir, key, value string) (bool, error) {
+	path := filepath.Join(modDir, "metadata.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	replacement := key + ": " + strconv.Quote(value)
+	lines := strings.Split(string(data), "\n")
+	replaced := false
+	anchor := -1
+	for i, line := range lines {
+		if line == "" || line[0] == ' ' || line[0] == '\t' || line[0] == '#' {
+			continue
+		}
+		name, _, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(name) {
+		case key:
+			lines[i] = replacement
+			replaced = true
+		case "source_archives":
+			if anchor < 0 {
+				anchor = i
+			}
+		}
+	}
+	if !replaced {
+		switch {
+		case anchor >= 0:
+			lines = append(lines[:anchor], append([]string{replacement}, lines[anchor:]...)...)
+		case len(lines) > 0 && lines[len(lines)-1] == "":
+			lines = append(lines[:len(lines)-1], replacement, "")
+		default:
+			lines = append(lines, replacement)
+		}
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	if err := atomicfile.WriteFile(path, []byte(strings.Join(lines, "\n")), info.Mode().Perm()); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // AppendSourceArchive adds an archive ref and merges newFiles into the files list.

@@ -29,7 +29,7 @@ public:
     // Simple line-based YAML parser for metadata.yaml — no external library required.
     static ModMetadata readMetadata(const QString& yamlPath);
 
-    // Sets/unsets a single top-level key in metadata.yaml without disturbing other lines; empty value removes the key.
+    // Sets/unsets a single top-level key in metadata.yaml without disturbing other lines, replacing the file atomically; empty value removes the key.
     static void patchMetadataField(const QString& yamlPath, const QString& key,
                                    const QString& value);
 

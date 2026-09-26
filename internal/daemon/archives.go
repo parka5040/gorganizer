@@ -27,6 +27,9 @@ func (ar *ArchiveService) managerHooks() download.ManagerHooks {
 					QueuedAhead: snap.QueuedAhead, GameID: snap.GameID,
 				},
 			})
+			if ar.s.svc.modDeps != nil {
+				ar.s.svc.modDeps.observeDownload(snap)
+			}
 		},
 		OnArchiveLanded: func(snap download.DownloadSnapshot, archivePath string, sidecar download.ArchiveSidecar) {
 			if row, err := ar.buildArchiveRow(snap.GameID, relFromDownloads(snap.GameID, archivePath)); err == nil {
@@ -36,14 +39,25 @@ func (ar *ArchiveService) managerHooks() download.ManagerHooks {
 				})
 			}
 			ar.s.invalidateInstalledArchiveCache(snap.GameID)
-
-			settings, _ := config.LoadGameSettings(snap.GameID)
-			if !settings.AutoInstall {
-				return
-			}
-			go ar.autoInstallAfterDownload(snap.GameID, archivePath, sidecar)
+			ar.s.goBackground("landed archive", func() { ar.handleLandedArchive(snap, archivePath, sidecar) })
 		},
 	}
+}
+
+// handleLandedArchive waits for startup recovery, then installs a landed archive for the dependency requests it satisfies, otherwise auto-installs it when the game's setting is on.
+func (ar *ArchiveService) handleLandedArchive(snap download.DownloadSnapshot, archivePath string, sidecar download.ArchiveSidecar) {
+	if err := ar.s.awaitRecovery(); err != nil {
+		slog.Warn("handling a landed archive skipped; the next start consumes it for waiting dependency requests but never auto-installs it", "game", snap.GameID, "archive", archivePath, "err", err)
+		return
+	}
+	if deps := ar.s.svc.modDeps; deps != nil && deps.consumeLandedArchive(snap.GameID, snap.ID, archivePath, sidecar) {
+		return
+	}
+	settings, _ := config.LoadGameSettings(snap.GameID)
+	if !settings.AutoInstall {
+		return
+	}
+	ar.autoInstallAfterDownload(snap.GameID, archivePath, sidecar)
 }
 
 // relFromDownloads converts an absolute archive path under DownloadsDir into the index-relative form.
@@ -75,10 +89,7 @@ func (ar *ArchiveService) autoInstallAfterDownload(gameID, archivePath string, s
 func (ar *ArchiveService) StartDownload(nxmURI string) (string, int, error) {
 	if ar.s.downloadMgr == nil {
 		const msg = "NXM ignored: no Nexus API key set — open Settings to add one"
-		select {
-		case ar.s.statusCh <- dto.StatusEventResult{Error: msg}:
-		default:
-		}
+		ar.s.publishGuarded(dto.StatusEventResult{Error: msg})
 		return "", 0, fmt.Errorf("download manager not initialized (set nexus_api_key in config)")
 	}
 	override := ar.resolveActiveGameOverride(nxmURI)

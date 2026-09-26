@@ -29,6 +29,7 @@ type ImportOptions struct {
 	ModFolders         []string
 	ProfileNames       []string
 	LockMod            func(name string) func()
+	LockProfiles       func() func()
 }
 
 // ReadManifest opens an archive and returns its validated manifest without extracting anything.
@@ -63,6 +64,11 @@ func readManifestEntry(tr *tar.Reader, gameID string) (*Manifest, error) {
 	}
 	if m.GameID != gameID {
 		return nil, &TransferGameMismatchError{Want: gameID, Got: m.GameID}
+	}
+	for _, me := range m.Mods {
+		if err := download.ValidateTargetModName(me.Folder); err != nil {
+			return nil, err
+		}
 	}
 	return m, nil
 }
@@ -364,6 +370,11 @@ func finalizeProfile(opts ImportOptions, name, staged string, summary *dto.Trans
 	if err := rewriteModlist(filepath.Join(staged, "modlist.txt"), summary.Renamed); err != nil {
 		return err
 	}
+	unlock := func() {}
+	if opts.LockProfiles != nil {
+		unlock = opts.LockProfiles()
+	}
+	defer unlock()
 	target := filepath.Join(config.ProfilesDir(opts.GameID), name)
 	if _, err := os.Stat(target); err == nil {
 		switch opts.Policy {

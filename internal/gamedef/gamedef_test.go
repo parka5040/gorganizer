@@ -2,6 +2,8 @@ package gamedef
 
 import (
 	"reflect"
+	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -16,6 +18,7 @@ var legacyModsDirNames = map[string]string{
 	"starfield":          "Starfield_Mods",
 	"oblivionremastered": "OblivionRemastered_Mods",
 	"ttw":                "TTW_Mods",
+	"stardewvalley":      "StardewValley_Mods",
 }
 
 var legacyPluginSpecs = map[string]PluginSpec{
@@ -296,8 +299,8 @@ var legacy4GBGames = map[string]bool{
 }
 
 func TestAllCount(t *testing.T) {
-	if len(All) != 10 {
-		t.Fatalf("expected 10 games in All, got %d", len(All))
+	if len(All) != 11 {
+		t.Fatalf("expected 11 games in All, got %d", len(All))
 	}
 	for id := range legacyModsDirNames {
 		if _, ok := ByID(id); !ok {
@@ -479,5 +482,64 @@ func TestMorrowindUsesDataFiles(t *testing.T) {
 	}
 	if g.DataSubpath != "Data Files" {
 		t.Errorf("DataSubpath = %q, want Data Files", g.DataSubpath)
+	}
+}
+
+func TestStardewDefinition(t *testing.T) {
+	g, ok := ByID("stardewvalley")
+	if !ok {
+		t.Fatal("stardewvalley missing from registry")
+	}
+	if g.DataSubpath != "Mods" {
+		t.Errorf("DataSubpath = %q, want Mods", g.DataSubpath)
+	}
+	if !g.DataDirOptional {
+		t.Error("DataDirOptional = false, want true")
+	}
+	if g.Layout != LayoutSMAPIManifest {
+		t.Errorf("Layout = %d, want %d", g.Layout, LayoutSMAPIManifest)
+	}
+	if LayoutDataRoot.String() != "data_root" || LayoutSMAPIManifest.String() != "smapi_manifest" {
+		t.Errorf("layout names = %q, %q", LayoutDataRoot.String(), LayoutSMAPIManifest.String())
+	}
+	if g.ModLoader == nil {
+		t.Fatal("ModLoader = nil")
+	}
+	if g.ModLoader.Kind != ModLoaderSMAPI {
+		t.Errorf("ModLoader.Kind = %d, want %d", g.ModLoader.Kind, ModLoaderSMAPI)
+	}
+	pattern, err := regexp.Compile(g.ModLoader.AssetPattern)
+	if err != nil {
+		t.Fatalf("compiling AssetPattern: %v", err)
+	}
+	match := pattern.FindStringSubmatch("SMAPI-4.5.2-installer.zip")
+	if len(match) != 2 || match[1] != "4.5.2" {
+		t.Errorf("AssetPattern match = %v, want version capture 4.5.2", match)
+	}
+	for _, name := range []string{
+		"SMAPI-4.5.2-installer-double-zipped.zip",
+		"SMAPI-4.5.2-installer-for-developers.zip",
+	} {
+		if pattern.MatchString(name) {
+			t.Errorf("AssetPattern matched %q", name)
+		}
+	}
+	for _, path := range g.ModLoader.UninstallPaths {
+		if path == "steam_appid.txt" {
+			t.Error("UninstallPaths contains game-owned steam_appid.txt")
+		}
+	}
+	for _, path := range g.ModLoader.ProtectedRootPaths {
+		if path == "" || strings.HasPrefix(path, "/") || strings.Contains(path, "\\") {
+			t.Errorf("ProtectedRootPaths contains non-slash-relative path %q", path)
+		}
+	}
+	for _, other := range All {
+		if other.ID == "stardewvalley" {
+			continue
+		}
+		if other.DataDirOptional || other.Layout != LayoutDataRoot || other.ModLoader != nil {
+			t.Errorf("game %q has unexpected framework fields: optional=%v layout=%d loader=%+v", other.ID, other.DataDirOptional, other.Layout, other.ModLoader)
+		}
 	}
 }

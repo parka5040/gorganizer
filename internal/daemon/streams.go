@@ -58,13 +58,8 @@ func (b *streamBus[T]) Subscribe(ctx context.Context, gameID string) (<-chan T, 
 // Publish delivers the event to every subscriber of gameID, dropping it for any subscriber whose buffer is full.
 func (b *streamBus[T]) Publish(gameID string, evt T) {
 	b.mu.Lock()
-	subs := b.subscribers[gameID]
-	channels := make([]chan T, 0, len(subs))
-	for _, c := range subs {
-		channels = append(channels, c)
-	}
-	b.mu.Unlock()
-	for _, c := range channels {
+	defer b.mu.Unlock()
+	for _, c := range b.subscribers[gameID] {
 		select {
 		case c <- evt:
 		default:
@@ -74,17 +69,13 @@ func (b *streamBus[T]) Publish(gameID string, evt T) {
 
 func (b *streamBus[T]) PublishAll(evt T) {
 	b.mu.Lock()
-	channels := make([]chan T, 0)
+	defer b.mu.Unlock()
 	for _, subs := range b.subscribers {
 		for _, c := range subs {
-			channels = append(channels, c)
-		}
-	}
-	b.mu.Unlock()
-	for _, c := range channels {
-		select {
-		case c <- evt:
-		default:
+			select {
+			case c <- evt:
+			default:
+			}
 		}
 	}
 }

@@ -9,12 +9,57 @@ import (
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/dto"
 	"github.com/parka/gorganizer/internal/game"
+	"github.com/parka/gorganizer/internal/gamedef"
+	"github.com/parka/gorganizer/internal/tools"
 )
 
 // isSynthetic returns true if the gameID corresponds to a synthetic game definition.
 func isSynthetic(gameID string) bool {
 	def, ok := game.FindByID(gameID)
 	return ok && def.Synthetic
+}
+
+// capabilitiesFor derives the GUI feature set for a game from its registry definition, or nil when unknown.
+func capabilitiesFor(gameID string) *dto.GameCapabilities {
+	def, ok := gamedef.ByID(gameID)
+	if !ok {
+		return nil
+	}
+	_, loot := tools.LOOTGameID(gameID)
+	caps := &dto.GameCapabilities{
+		Plugins:              def.Plugins != nil,
+		Ini:                  def.Ini != nil,
+		Loot:                 loot,
+		ModLoader:            dto.ModLoaderKindNone,
+		InstallLayout:        installLayoutResult(def.Layout),
+		ManifestDependencies: def.Layout == gamedef.LayoutSMAPIManifest,
+	}
+	if def.ModLoader != nil {
+		caps.ModLoader = modLoaderKindResult(def.ModLoader.Kind)
+	}
+	return caps
+}
+
+// modLoaderKindResult maps a registry mod-loader kind to its wire value.
+func modLoaderKindResult(kind gamedef.ModLoaderKind) dto.ModLoaderKindResult {
+	switch kind {
+	case gamedef.ModLoaderSMAPI:
+		return dto.ModLoaderKindSMAPI
+	default:
+		return dto.ModLoaderKindNone
+	}
+}
+
+// installLayoutResult maps a registry install layout to its wire value, unknown layouts to Unspecified.
+func installLayoutResult(layout gamedef.InstallLayout) dto.InstallLayoutResult {
+	switch layout {
+	case gamedef.LayoutDataRoot:
+		return dto.InstallLayoutDataRoot
+	case gamedef.LayoutSMAPIManifest:
+		return dto.InstallLayoutSMAPIManifest
+	default:
+		return dto.InstallLayoutUnspecified
+	}
 }
 
 func (gs *GameService) ListConfiguredGames() ([]dto.GameInfo, error) {
@@ -48,11 +93,13 @@ func (gs *GameService) ListConfiguredGames() ([]dto.GameInfo, error) {
 			Synthetic:        isSynthetic(gameID),
 			LinkedFromGameID: gc.LinkedFromGameID,
 			VFSActive:        vfsActive,
+			Capabilities:     capabilitiesFor(gameID),
 		})
 	}
 	return games, nil
 }
 
+// DetectInstalledGames configures every newly detected game, recovers interrupted mod-loader transactions at their installs once startup recovery finished, and lists the detected games.
 func (gs *GameService) DetectInstalledGames() ([]dto.GameInfo, error) {
 	detected, err := game.DetectInstalledGames()
 	if err != nil {
@@ -62,6 +109,7 @@ func (gs *GameService) DetectInstalledGames() ([]dto.GameInfo, error) {
 	detected = gs.applyTTWPlayableProbe(detected)
 
 	gs.s.mu.Lock()
+	var added []string
 	for _, g := range detected {
 		if _, exists := gs.s.config.Games[g.ID]; !exists {
 			gc := config.GameConfig{
@@ -77,11 +125,19 @@ func (gs *GameService) DetectInstalledGames() ([]dto.GameInfo, error) {
 			}
 			gs.s.config.Games[g.ID] = gc
 			gs.s.ensureMountManager(g.ID, gc)
+			added = append(added, g.ID)
 			slog.Info("auto-configured detected game", "id", g.ID, "path", g.InstallPath, "synthetic", g.Synthetic)
 		}
 	}
 	saveErr := gs.s.config.Save()
 	gs.s.mu.Unlock()
+	if len(added) > 0 {
+		if err := gs.s.awaitRecovery(); err != nil {
+			slog.Warn("mod-loader recovery of detected games skipped; mounting and launching stay refused while an intent exists", "games", added, "err", err)
+		} else {
+			gs.s.recoverAddedLoaderGames(added)
+		}
+	}
 	if saveErr != nil {
 		return nil, saveErr
 	}
@@ -92,9 +148,11 @@ func (gs *GameService) DetectInstalledGames() ([]dto.GameInfo, error) {
 	var games []dto.GameInfo
 	for _, g := range detected {
 		vfsActive := false
+		gs.s.mu.RLock()
 		if mm, ok := gs.s.mountMgrs[g.ID]; ok {
 			vfsActive = mm.IsMounted()
 		}
+		gs.s.mu.RUnlock()
 		games = append(games, dto.GameInfo{
 			GameID:           g.ID,
 			Name:             g.Name,
@@ -104,6 +162,7 @@ func (gs *GameService) DetectInstalledGames() ([]dto.GameInfo, error) {
 			Synthetic:        g.Synthetic,
 			LinkedFromGameID: g.ParentGameID,
 			VFSActive:        vfsActive,
+			Capabilities:     capabilitiesFor(g.ID),
 		})
 	}
 	return games, nil
@@ -139,12 +198,29 @@ func (gs *GameService) applyTTWPlayableProbe(detected []game.DetectedGame) []gam
 	return game.AppendSyntheticGames(detected, probe)
 }
 
-// ConfigureGame persists a game to the daemon's config and creates its mount manager.
+// defaultDataSubpath returns the registry deploy subpath for a known game, or "Data" for an unknown one.
+func defaultDataSubpath(gameID string) string {
+	if def, ok := gamedef.ByID(gameID); ok && def.DataSubpath != "" {
+		return def.DataSubpath
+	}
+	return "Data"
+}
+
+// ConfigureGame waits for startup recovery, then persists a game to the daemon's config, creates its mount manager, and recovers an interrupted mod-loader transaction at its install.
 func (gs *GameService) ConfigureGame(gameID, name string, steamAppID uint32, installPath, dataSubpath string) error {
+	if err := gs.s.awaitRecovery(); err != nil {
+		return err
+	}
 	gs.s.mu.Lock()
+	release, err := gs.s.reserveShared(gameID, dto.BusyOperationConfigure)
+	if err != nil {
+		gs.s.mu.Unlock()
+		return err
+	}
+	defer release()
 
 	if dataSubpath == "" {
-		dataSubpath = "Data"
+		dataSubpath = defaultDataSubpath(gameID)
 	}
 
 	gc := config.GameConfig{
@@ -161,6 +237,8 @@ func (gs *GameService) ConfigureGame(gameID, name string, steamAppID uint32, ins
 		return fmt.Errorf("saving config after configuring game %s: %w", gameID, err)
 	}
 	gs.s.mu.Unlock()
+	release()
+	gs.s.recoverAddedLoaderGames([]string{gameID})
 	if err := gs.s.svc.execs.syncInstalledManagedLOOT(); err != nil {
 		slog.Warn("could not register installed LOOT after configuring game", "game", gameID, "err", err)
 	}

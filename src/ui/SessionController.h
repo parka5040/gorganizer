@@ -1,6 +1,8 @@
 #pragma once
 
+#include <QHash>
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include "AppConfig.h"
 #include "GameInfo.h"
@@ -48,6 +50,15 @@ public:
     // Refreshes the permanent "<game> - <profile>" status-bar label.
     void refreshStatusInfo();
 
+    // Unmounts gameId without asking, for maintenance flows that already confirmed with the user, and returns the request id maintenanceUnmountFinished carries, or 0 when nothing was sent.
+    quint64 unmountForMaintenance(const QString& gameId);
+    // Blocks automatic mounting, Apply and user unmounts of gameId until finishMaintenance lifts the block.
+    void suppressAutoMount(const QString& gameId);
+    // Lifts the suppression of gameId after a maintenance flow and mounts remountProfile when given, else replays a skipped automatic mount when replaySkipped is set.
+    void finishMaintenance(const QString& gameId, const QString& remountProfile, bool replaySkipped);
+    // Mounts profileName of gameId at the user's request after a maintenance flow, or defers it while a SMAPI operation suppresses automatic mounting.
+    void remountAfterMaintenance(const QString& gameId, const QString& profileName);
+
 public slots:
     // Switches the active game; synthetic appId==0 games (TTW) fall back to the selector's current entry.
     void switchToGame(uint32_t appId);
@@ -61,17 +72,26 @@ public slots:
 signals:
     void activeGameChanged(const GameInfo& game);
     void profileChanged(const QString& profileName);
-    void vfsStateChanged(bool mounted, bool dirty);
 
 private:
     // Rebuilds the managed-game list from a daemon detection pass (authoritative over local detection).
     void onGamesDetected(const std::vector<GrpcGame>& detectedGames);
     // Tracks daemon VFS state for the active game and surfaces the Apply affordance.
     void onVfsStatusChanged(const GrpcVFSStatus& status);
-    // U-4: reverts an optimistic SetModList failure to authoritative state with a loud dialog.
+    // Tracks the mount state and pending changes of the active game from a polled VFS status, ignoring other games.
+    void onVfsStatusReceived(const GrpcVFSStatus& status);
+    // Reverts a failed SetModList loudly (U-4), warns when Apply is refused because the game runs, and shows other RPC errors as readable status text.
     void onRpcError(const QString& method, const QString& error);
     // Shows/enables the Apply button while the daemon reports the VFS dirty (U-2).
     void setVfsDirty(bool dirty);
+    // Mounts the active game's current profile unless automatic mounting is suppressed for it.
+    void autoMountActiveProfile();
+    // Sends the unmount RPC for gameId and reports it in the status bar.
+    void requestUnmount(const QString& gameId);
+    // Mounts profileName of gameId with auto-swap and reports it in the status bar, or keeps it pending until the daemon reconnects.
+    void mountForMaintenance(const QString& gameId, const QString& profileName);
+    // Sends the maintenance remount that waited for the daemon when its game is still active and not suppressed.
+    void onConnected();
 
     AppConfig& m_config;
     GrpcClient* m_grpc;
@@ -91,6 +111,9 @@ private:
     QString m_currentProfile = "Default";
     bool m_vfsDirty = false;
     bool m_vfsMounted = false;
+    QSet<QString> m_autoMountSuppressed;
+    QSet<QString> m_autoMountSkipped;
+    QHash<QString, QString> m_pendingRemounts;
 };
 
 }

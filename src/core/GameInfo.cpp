@@ -75,6 +75,9 @@ const std::vector<GameInfo>& GameInfo::knownGames()
           "Anchorage.esm", "ThePitt.esm", "BrokenSteel.esm",
           "PointLookout.esm", "Zeta.esm",
           "TaleOfTwoWastelands.esm"}},
+        {413150, "Stardew Valley", "stardewvalley",
+         {}, {}, false, false, "", false,
+         "Mods", "StardewValley_Mods", {"Stardew Valley", "StardewValley"}, {}, "", "", "", {}, {}, true},
     };
     return games;
 }
@@ -146,6 +149,24 @@ QStringList GameInfo::dlcOrderFor(const QString& shortName)
     if (auto game = findByShortName(shortName))
         return game->canonicalDlcOrder;
     return {};
+}
+
+bool usesLocalDataRootInstall(const GameInfo& game)
+{
+    if (game.capabilitiesKnown)
+        return game.capabilities.installLayout == InstallLayout::DataRoot;
+    const auto known = GameInfo::findByShortName(game.shortName);
+    return known && !known->dataDirOptional;
+}
+
+bool usesPlugins(const GameInfo& game)
+{
+    return !game.capabilitiesKnown || game.capabilities.plugins;
+}
+
+bool managesSmapi(const GameInfo& game)
+{
+    return game.detected && game.capabilitiesKnown && game.capabilities.modLoader == ModLoaderKind::Smapi;
 }
 
 }

@@ -43,12 +43,22 @@ func (pl *PluginStatusService) StreamPluginStatus(ctx context.Context, gameID, p
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
+	spec, ok := plugins.SpecFor(gameID)
+	if !ok {
+		out := make(chan dto.PluginStatusEventResult, 1)
+		go func() {
+			defer close(out)
+			select {
+			case <-ctx.Done():
+			case out <- dto.PluginStatusEventResult{Snapshot: make([]dto.PluginStatusItemResult, 0)}:
+			}
+		}()
+		return out, nil
+	}
 	_, entries, err := pl.s.profileMgr.Load(gameID, profileName)
 	if err != nil {
 		return nil, err
 	}
-
-	spec, _ := plugins.SpecFor(gameID)
 
 	subpath := gc.DataSubpath
 	if subpath == "" {

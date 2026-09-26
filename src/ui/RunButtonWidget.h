@@ -4,13 +4,15 @@
 #include <QToolButton>
 #include <QComboBox>
 #include "GameInfo.h"
+#include "GrpcTypes.h"
 
 namespace gorganizer {
 
 class RunButtonWidget : public QWidget {
     Q_OBJECT
 public:
-    enum TargetType { TargetGame, TargetTool, TargetInstallTool };
+    enum TargetType { TargetGame, TargetTool, TargetInstallTool, TargetInstallModLoader, TargetRepairModLoader };
+    enum RunItemRole { TargetTypeRole = Qt::UserRole + 1 };
 
     struct Target {
         TargetType type = TargetGame;
@@ -28,6 +30,11 @@ public:
     // Disables FNV's Steam-launch row while TTW's VFS is active (mutex group conflict).
     void setTTWVfsActive(bool active);
 
+    // Shows the daemon-reported SMAPI state of the current game as run-target labels and install/repair targets.
+    void setModLoaderStatus(const GrpcModLoaderStatus& status);
+    // Forgets the SMAPI state so the combo shows no SMAPI-specific targets.
+    void clearModLoaderStatus();
+
     Target currentTarget() const;
 
     bool useToolEnabled() const;
@@ -39,6 +46,10 @@ signals:
 private:
     void rebuildCombo(const QString& preferredToolId);
     void syncRunLabel();
+    // Rebuilds the combo while keeping the selected target when it still exists.
+    void rebuildKeepingSelection();
+    // Reports whether a SMAPI status for the current game is known and in the given state.
+    bool modLoaderStateIs(GrpcModLoaderState state) const;
 
     GameInfo m_game;
     QComboBox* m_combo = nullptr;
@@ -46,6 +57,8 @@ private:
     bool m_fourGBPatched = false;
     bool m_ttwVfsActive = false;
     QString m_lastPreferredToolId;
+    GrpcModLoaderStatus m_modLoaderStatus;
+    bool m_hasModLoaderStatus = false;
 };
 
 }

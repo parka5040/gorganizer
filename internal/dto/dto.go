@@ -9,6 +9,31 @@ type GameInfo struct {
 	Synthetic        bool
 	LinkedFromGameID string
 	VFSActive        bool
+	Capabilities     *GameCapabilities
+}
+
+type ModLoaderKindResult int32
+
+const (
+	ModLoaderKindNone  ModLoaderKindResult = 0
+	ModLoaderKindSMAPI ModLoaderKindResult = 1
+)
+
+type InstallLayoutResult int32
+
+const (
+	InstallLayoutUnspecified   InstallLayoutResult = 0
+	InstallLayoutDataRoot      InstallLayoutResult = 1
+	InstallLayoutSMAPIManifest InstallLayoutResult = 2
+)
+
+type GameCapabilities struct {
+	Plugins              bool
+	Ini                  bool
+	Loot                 bool
+	ModLoader            ModLoaderKindResult
+	InstallLayout        InstallLayoutResult
+	ManifestDependencies bool
 }
 
 type ModInfoResult struct {
@@ -200,8 +225,9 @@ type InstallProgressResult struct {
 }
 
 type InstallEventResult struct {
-	GameID   string
-	Progress *InstallProgressResult
+	GameID    string
+	Progress  *InstallProgressResult
+	Completed *InstallCompletedResult
 }
 
 type FomodFileResult struct {

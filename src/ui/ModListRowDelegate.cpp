@@ -1,5 +1,6 @@
 #include "ModListRowDelegate.h"
 #include "ModListModel.h"
+#include "ModDependencyText.h"
 #include "ThemeManager.h"
 
 #include <QApplication>
@@ -10,6 +11,26 @@ namespace gorganizer {
 ModListRowDelegate::ModListRowDelegate(QObject* parent)
     : QStyledItemDelegate(parent)
 {
+}
+
+// Adds a mod row's SMAPI dependency or update indicator to its style option.
+void ModListRowDelegate::applyDependencyIcon(QStyleOptionViewItem& opt, const QModelIndex& index) const
+{
+    const int severity = index.data(ModListModel::DependencyIssueRole).toInt();
+    const bool update = !index.data(ModListModel::UpdateAvailableRole).toString().isEmpty();
+    if (severity <= DependencySeverityNone && !update)
+        return;
+    const QWidget* widget = opt.widget;
+    QStyle* style = widget ? widget->style() : QApplication::style();
+    QStyle::StandardPixmap pixmap = QStyle::SP_ArrowUp;
+    if (severity >= DependencySeverityError)
+        pixmap = QStyle::SP_MessageBoxCritical;
+    else if (severity == DependencySeverityWarning)
+        pixmap = QStyle::SP_MessageBoxWarning;
+    const int extent = style->pixelMetric(QStyle::PM_SmallIconSize, nullptr, widget);
+    opt.icon = style->standardIcon(pixmap, nullptr, widget);
+    opt.decorationSize = QSize(extent, extent);
+    opt.features |= QStyleOptionViewItem::HasDecoration;
 }
 
 // Resolves kind/conflict/tint styling from the current palette at paint time, then defers to the style.
@@ -44,6 +65,8 @@ void ModListRowDelegate::paint(QPainter* painter, const QStyleOptionViewItem& op
             else if (mark == "-")
                 opt.palette.setColor(QPalette::Text, pal.errorFg);
         }
+        if (index.column() == ModColName)
+            applyDependencyIcon(opt, index);
     }
 
     const QWidget* widget = option.widget;

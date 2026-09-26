@@ -4,12 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func TestKnownGames(t *testing.T) {
-	if len(KnownGames) != 10 {
-		t.Errorf("expected 10 known games, got %d", len(KnownGames))
+	if len(KnownGames) != 11 {
+		t.Errorf("expected 11 known games, got %d", len(KnownGames))
 	}
 
 	expectedIDs := map[uint32]string{
@@ -22,6 +23,7 @@ func TestKnownGames(t *testing.T) {
 		377160:  "fallout4",
 		1716740: "starfield",
 		2623190: "oblivionremastered",
+		413150:  "stardewvalley",
 	}
 
 	for appID, expectedID := range expectedIDs {
@@ -118,6 +120,85 @@ func TestParseAppManifestUsesMorrowindDataFiles(t *testing.T) {
 	}
 	if got == nil || got.DataPath != dataDir {
 		t.Fatalf("DataPath = %v, want %q", got, dataDir)
+	}
+}
+
+func TestParseAppManifestStardewOptionalMods(t *testing.T) {
+	nativeMarkers := []string{"Stardew Valley", "StardewValley"}
+	for _, tc := range []struct {
+		name      string
+		mods      string
+		markers   []string
+		wantFound bool
+	}{
+		{name: "absent mods accepted", markers: nativeMarkers, wantFound: true},
+		{name: "real mods directory accepted", mods: "dir", markers: nativeMarkers, wantFound: true},
+		{name: "regular mods file rejected", mods: "file", markers: nativeMarkers},
+		{name: "symlink mods rejected", mods: "symlink", markers: nativeMarkers},
+		{name: "windows depot decoy rejected", markers: []string{"Stardew Valley.exe"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			library := t.TempDir()
+			installDir := filepath.Join(library, "steamapps", "common", "Stardew Valley")
+			if err := os.MkdirAll(installDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			for _, marker := range tc.markers {
+				writeTestFile(t, filepath.Join(installDir, marker))
+			}
+			modsPath := filepath.Join(installDir, "Mods")
+			switch tc.mods {
+			case "dir":
+				if err := os.Mkdir(modsPath, 0755); err != nil {
+					t.Fatal(err)
+				}
+			case "file":
+				writeTestFile(t, modsPath)
+			case "symlink":
+				target := filepath.Join(library, "mods-target")
+				if err := os.Mkdir(target, 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, modsPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			manifest := filepath.Join(library, "steamapps", "appmanifest_413150.acf")
+			writeTestManifest(t, manifest, 413150, "Stardew Valley")
+
+			got, err := parseAppManifest(manifest, library)
+			if err != nil {
+				t.Fatalf("parseAppManifest: %v", err)
+			}
+			if tc.wantFound {
+				if got == nil {
+					t.Fatal("parseAppManifest returned nil for valid Stardew layout")
+				}
+				if got.DataPath != modsPath || !strings.HasSuffix(got.DataPath, "/Mods") {
+					t.Errorf("DataPath = %q, want %q", got.DataPath, modsPath)
+				}
+				return
+			}
+			if got != nil {
+				t.Fatalf("parseAppManifest returned %+v, want rejection", got)
+			}
+		})
+	}
+}
+
+func TestParseAppManifestRejectsBethesdaWithoutData(t *testing.T) {
+	library := t.TempDir()
+	installDir := filepath.Join(library, "steamapps", "common", "Skyrim Special Edition")
+	writeTestFile(t, filepath.Join(installDir, "SkyrimSE.exe"))
+	manifest := filepath.Join(library, "steamapps", "appmanifest_489830.acf")
+	writeTestManifest(t, manifest, 489830, "Skyrim Special Edition")
+
+	got, err := parseAppManifest(manifest, library)
+	if err != nil {
+		t.Fatalf("parseAppManifest: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("parseAppManifest returned %+v, want rejection", got)
 	}
 }
 

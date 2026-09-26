@@ -8,6 +8,8 @@ set(PROTO_HDRS ${PROTO_OUT_DIR}/gorganizer.pb.h)
 set(GRPC_SRCS ${PROTO_OUT_DIR}/gorganizer.grpc.pb.cc)
 set(GRPC_HDRS ${PROTO_OUT_DIR}/gorganizer.grpc.pb.h)
 
+# Protobuf and gRPC generators are dependencies so an upgrade regenerates the
+# code before stale gencode fails its PROTOBUF_VERSION check.
 add_custom_command(
     OUTPUT ${PROTO_SRCS} ${PROTO_HDRS} ${GRPC_SRCS} ${GRPC_HDRS}
     COMMAND ${PROTOC}
@@ -16,7 +18,7 @@ add_custom_command(
         --plugin=protoc-gen-grpc=${gRPC_CPP_PLUGIN}
         -I${PROTO_SRC_DIR}
         ${PROTO_FILE}
-    DEPENDS ${PROTO_FILE}
+    DEPENDS ${PROTO_FILE} ${PROTOC} ${gRPC_CPP_PLUGIN}
     COMMENT "Generating gRPC C++ sources from gorganizer.proto"
 )
 

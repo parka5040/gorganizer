@@ -31,6 +31,7 @@ func TestRecovery_PathKeyedSharedFNVAndTTW(t *testing.T) {
 		t.Fatalf("writing master: %v", err)
 	}
 
+	isolateDaemonState(t)
 	cfg := config.DefaultConfig()
 	cfg.Games["falloutnv"] = config.GameConfig{
 		Name: "Fallout: New Vegas", InstallPath: fnvInstall,
@@ -118,6 +119,7 @@ func TestRecovery_PathKeyedSingleGameUnaffected(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	isolateDaemonState(t)
 	cfg := config.DefaultConfig()
 	cfg.Games["skyrim"] = config.GameConfig{
 		Name: "Skyrim", InstallPath: skyrimInstall, DataSubpath: "Data", SteamAppID: 72850,
@@ -148,6 +150,7 @@ func TestRecovery_NoAmbiguityNoPending(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	isolateDaemonState(t)
 	cfg := config.DefaultConfig()
 	cfg.Games["falloutnv"] = config.GameConfig{
 		Name: "FNV", InstallPath: install, DataSubpath: "Data", SteamAppID: 22380,
@@ -177,6 +180,7 @@ func TestRootDeploymentProtectsManagerOwnedMarkers(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(install, "Data"), 0755); err != nil {
 		t.Fatal(err)
 	}
+	isolateDaemonState(t)
 	cfg := config.DefaultConfig()
 	cfg.Games["falloutnv"] = config.GameConfig{
 		Name: "FNV", InstallPath: install, DataSubpath: "Data", SteamAppID: 22380,
@@ -185,6 +189,7 @@ func TestRootDeploymentProtectsManagerOwnedMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer d.Shutdown()
 	manager, err := d.ensureRootDeploymentManager("falloutnv", cfg.Games["falloutnv"])
 	if err != nil {
 		t.Fatal(err)
@@ -213,6 +218,7 @@ func TestRecovery_SyntheticVFSMutexSurfacesError(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	isolateDaemonState(t)
 	cfg := config.DefaultConfig()
 	cfg.Games["falloutnv"] = config.GameConfig{
 		Name: "FNV", InstallPath: install, DataSubpath: "Data", SteamAppID: 22380,

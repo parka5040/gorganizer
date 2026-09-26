@@ -89,10 +89,9 @@ func main() {
 		sig := <-sigCh
 		slog.Info("received signal, shutting down", "signal", sig)
 
-		const watchdogTimeout = 45 * time.Second
-		watchdog := time.AfterFunc(watchdogTimeout, func() {
+		watchdog := time.AfterFunc(daemon.ShutdownWatchdogTimeout, func() {
 			slog.Error("shutdown watchdog fired — forcing exit",
-				"timeout", watchdogTimeout)
+				"timeout", daemon.ShutdownWatchdogTimeout)
 			hardExit(sock, 2)
 		})
 		defer watchdog.Stop()

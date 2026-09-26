@@ -395,17 +395,30 @@ func (s *gorganizerServer) StreamInstallEvents(req *pb.StreamInstallEventsReques
 		return grpcError(err)
 	}
 	for evt := range ch {
-		if evt.Progress == nil {
+		out := installEventToProto(evt)
+		if out == nil {
 			continue
-		}
-		out := &pb.InstallEvent{
-			Event: &pb.InstallEvent_InstallProgress{
-				InstallProgress: installProgressToProto(evt.Progress),
-			},
 		}
 		if err := stream.Send(out); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// installEventToProto maps a daemon install event to the wire oneof, or nil when it carries no payload.
+func installEventToProto(evt dto.InstallEventResult) *pb.InstallEvent {
+	switch {
+	case evt.Progress != nil:
+		return &pb.InstallEvent{Event: &pb.InstallEvent_InstallProgress{InstallProgress: installProgressToProto(evt.Progress)}}
+	case evt.Completed != nil:
+		return &pb.InstallEvent{Event: &pb.InstallEvent_InstallCompleted{InstallCompleted: &pb.InstallCompleted{
+			GameId:         evt.Completed.GameID,
+			ModName:        evt.Completed.ModName,
+			ArchiveRelPath: evt.Completed.ArchiveRelPath,
+			BatchId:        evt.Completed.BatchID,
+			BatchIds:       append([]string(nil), evt.Completed.BatchIDs...),
+		}}}
 	}
 	return nil
 }
@@ -608,7 +621,18 @@ func (s *gorganizerServer) Health(_ context.Context, _ *pb.HealthRequest) (*pb.R
 
 func (s *gorganizerServer) WatchStatus(_ *pb.WatchStatusRequest, stream pb.Gorganizer_WatchStatusServer) error {
 	ch := s.ctrl.WatchStatus()
-	for evt := range ch {
+	ctx := stream.Context()
+	for {
+		var evt dto.StatusEventResult
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case next, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			evt = next
+		}
 		pbEvt := &pb.StatusEvent{}
 		switch {
 		case evt.VFSStatus != nil:
@@ -641,7 +665,6 @@ func (s *gorganizerServer) WatchStatus(_ *pb.WatchStatusRequest, stream pb.Gorga
 			return err
 		}
 	}
-	return nil
 }
 
 func (s *gorganizerServer) SetPluginOrder(_ context.Context, req *pb.SetPluginOrderRequest) (*pb.SetPluginOrderResponse, error) {
@@ -727,10 +750,48 @@ func gamesToProto(games []dto.GameInfo) []*pb.Game {
 			GameId: g.GameID, Name: g.Name, SteamAppId: g.SteamAppID,
 			InstallPath: g.InstallPath, DataPath: g.DataPath,
 			Synthetic: g.Synthetic, LinkedFromGameId: g.LinkedFromGameID,
-			VfsActive: g.VFSActive,
+			VfsActive:    g.VFSActive,
+			Capabilities: capabilitiesToProto(g.Capabilities),
 		}
 	}
 	return result
+}
+
+// capabilitiesToProto maps daemon game capabilities to the wire message, keeping nil as unset.
+func capabilitiesToProto(c *dto.GameCapabilities) *pb.GameCapabilities {
+	if c == nil {
+		return nil
+	}
+	return &pb.GameCapabilities{
+		Plugins:              c.Plugins,
+		Ini:                  c.Ini,
+		Loot:                 c.Loot,
+		ModLoader:            modLoaderKindToProto(c.ModLoader),
+		InstallLayout:        installLayoutToProto(c.InstallLayout),
+		ManifestDependencies: c.ManifestDependencies,
+	}
+}
+
+// modLoaderKindToProto maps a DTO mod-loader kind to its proto enum value.
+func modLoaderKindToProto(k dto.ModLoaderKindResult) pb.ModLoaderKind {
+	switch k {
+	case dto.ModLoaderKindSMAPI:
+		return pb.ModLoaderKind_MOD_LOADER_KIND_SMAPI
+	default:
+		return pb.ModLoaderKind_MOD_LOADER_KIND_NONE
+	}
+}
+
+// installLayoutToProto maps a DTO install layout to its proto enum value, unknown values to UNSPECIFIED.
+func installLayoutToProto(l dto.InstallLayoutResult) pb.InstallLayout {
+	switch l {
+	case dto.InstallLayoutDataRoot:
+		return pb.InstallLayout_INSTALL_LAYOUT_DATA_ROOT
+	case dto.InstallLayoutSMAPIManifest:
+		return pb.InstallLayout_INSTALL_LAYOUT_SMAPI_MANIFEST
+	default:
+		return pb.InstallLayout_INSTALL_LAYOUT_UNSPECIFIED
+	}
 }
 
 func modToProto(m *dto.ModInfoResult) *pb.ModInfo {

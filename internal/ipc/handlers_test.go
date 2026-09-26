@@ -7,6 +7,7 @@ import (
 	"net"
 	"reflect"
 	"testing"
+	"time"
 
 	pb "github.com/parka/gorganizer/api/proto"
 	"github.com/parka/gorganizer/internal/daemon"
@@ -37,6 +38,8 @@ type fakeController struct {
 	TTWController
 	ExecutableController
 	TransferController
+	ModLoaderController
+	ModDependencyController
 
 	games             []dto.GameInfo
 	configureArgs     []any
@@ -74,6 +77,68 @@ type fakeController struct {
 	transferProgress  []dto.TransferProgress
 	transferSummary   dto.TransferSummary
 	transferErr       error
+	pluginEvents      []dto.PluginStatusEventResult
+	modLoaderStatus   dto.ModLoaderStatusResult
+	modLoaderErr      error
+	modLoaderArgs     []any
+	depReport         dto.ModDependencyReportResult
+	depFetch          []dto.DependencyFetchResult
+	depAcked          int
+	depErr            error
+	depArgs           []any
+	installEvents     []dto.InstallEventResult
+}
+
+// GetModDependencyReport records its arguments and returns the canned dependency report.
+func (f *fakeController) GetModDependencyReport(_ context.Context, gameID, profileName string, refreshRemote, forceRemote bool) (dto.ModDependencyReportResult, error) {
+	f.depArgs = []any{"report", gameID, profileName, refreshRemote, forceRemote}
+	return f.depReport, f.depErr
+}
+
+// FetchModDependencies records its arguments and returns the canned fetch results.
+func (f *fakeController) FetchModDependencies(_ context.Context, gameID, profileName string, uniqueIDs []string) ([]dto.DependencyFetchResult, error) {
+	f.depArgs = []any{"fetch", gameID, profileName, uniqueIDs}
+	return f.depFetch, f.depErr
+}
+
+// AckDependencyEnable records its arguments and returns the canned acknowledgement count.
+func (f *fakeController) AckDependencyEnable(_ context.Context, gameID, batchID string, uniqueIDs []string) (int, error) {
+	f.depArgs = []any{"ack", gameID, batchID, uniqueIDs}
+	return f.depAcked, f.depErr
+}
+
+// StreamInstallEvents replays the canned install events and closes the stream.
+func (f *fakeController) StreamInstallEvents(_ context.Context, _ string) (<-chan dto.InstallEventResult, error) {
+	ch := make(chan dto.InstallEventResult, len(f.installEvents))
+	for _, evt := range f.installEvents {
+		ch <- evt
+	}
+	close(ch)
+	return ch, nil
+}
+
+// GetModLoaderStatus records its arguments and returns the canned loader status.
+func (f *fakeController) GetModLoaderStatus(_ context.Context, gameID string, checkLatest bool) (dto.ModLoaderStatusResult, error) {
+	f.modLoaderArgs = []any{"status", gameID, checkLatest}
+	return f.modLoaderStatus, f.modLoaderErr
+}
+
+// InstallModLoader records its arguments and returns the canned loader status.
+func (f *fakeController) InstallModLoader(_ context.Context, gameID string, repairOnly bool) (dto.ModLoaderStatusResult, error) {
+	f.modLoaderArgs = []any{"install", gameID, repairOnly}
+	return f.modLoaderStatus, f.modLoaderErr
+}
+
+// UninstallModLoader records its arguments and returns the canned loader status.
+func (f *fakeController) UninstallModLoader(_ context.Context, gameID string) (dto.ModLoaderStatusResult, error) {
+	f.modLoaderArgs = []any{"uninstall", gameID}
+	return f.modLoaderStatus, f.modLoaderErr
+}
+
+// RollbackModLoader records its arguments and returns the canned loader status.
+func (f *fakeController) RollbackModLoader(_ context.Context, gameID string) (dto.ModLoaderStatusResult, error) {
+	f.modLoaderArgs = []any{"rollback", gameID}
+	return f.modLoaderStatus, f.modLoaderErr
 }
 
 func (f *fakeController) ListConfiguredGames() ([]dto.GameInfo, error) {
@@ -130,6 +195,15 @@ func (f *fakeController) ListArchives(gameID string) ([]dto.ArchiveRowResult, er
 func (f *fakeController) SetArchivesHiddenBulk(gameID string, hidden bool, scope dto.BulkHideScope) (int, error) {
 	f.bulkArgs = []any{gameID, hidden, scope}
 	return f.bulkAffected, nil
+}
+
+func (f *fakeController) StreamPluginStatus(_ context.Context, _, _ string) (<-chan dto.PluginStatusEventResult, error) {
+	out := make(chan dto.PluginStatusEventResult, len(f.pluginEvents))
+	for _, evt := range f.pluginEvents {
+		out <- evt
+	}
+	close(out)
+	return out, nil
 }
 
 func (f *fakeController) StartInstall(req dto.StartInstallRequest) (string, int, error) {
@@ -225,6 +299,25 @@ func TestListGamesFieldMapping(t *testing.T) {
 			InstallPath: "/games/FNV", DataPath: "/games/FNV/Data",
 			Synthetic: true, LinkedFromGameID: "falloutnv", VFSActive: false,
 		},
+		{
+			GameID: "stardewvalley", Name: "Stardew Valley", SteamAppID: 413150,
+			InstallPath: "/games/SDV", DataPath: "/games/SDV/Mods",
+			Capabilities: &dto.GameCapabilities{
+				Plugins: false, Ini: false, Loot: false,
+				ModLoader:            dto.ModLoaderKindSMAPI,
+				InstallLayout:        dto.InstallLayoutSMAPIManifest,
+				ManifestDependencies: true,
+			},
+		},
+		{
+			GameID: "skyrimse", Name: "Skyrim Special Edition", SteamAppID: 489830,
+			InstallPath: "/games/SSE", DataPath: "/games/SSE/Data",
+			Capabilities: &dto.GameCapabilities{
+				Plugins: true, Ini: true, Loot: true,
+				ModLoader:     dto.ModLoaderKindNone,
+				InstallLayout: dto.InstallLayoutDataRoot,
+			},
+		},
 	}}
 	client := newTestClient(t, fake)
 	resp, err := client.ListGames(t.Context(), &pb.ListGamesRequest{})
@@ -242,12 +335,36 @@ func TestListGamesFieldMapping(t *testing.T) {
 			InstallPath: "/games/FNV", DataPath: "/games/FNV/Data",
 			Synthetic: true, LinkedFromGameId: "falloutnv", VfsActive: false,
 		},
+		{
+			GameId: "stardewvalley", Name: "Stardew Valley", SteamAppId: 413150,
+			InstallPath: "/games/SDV", DataPath: "/games/SDV/Mods",
+			Capabilities: &pb.GameCapabilities{
+				Plugins: false, Ini: false, Loot: false,
+				ModLoader:            pb.ModLoaderKind_MOD_LOADER_KIND_SMAPI,
+				InstallLayout:        pb.InstallLayout_INSTALL_LAYOUT_SMAPI_MANIFEST,
+				ManifestDependencies: true,
+			},
+		},
+		{
+			GameId: "skyrimse", Name: "Skyrim Special Edition", SteamAppId: 489830,
+			InstallPath: "/games/SSE", DataPath: "/games/SSE/Data",
+			Capabilities: &pb.GameCapabilities{
+				Plugins: true, Ini: true, Loot: true,
+				ModLoader:     pb.ModLoaderKind_MOD_LOADER_KIND_NONE,
+				InstallLayout: pb.InstallLayout_INSTALL_LAYOUT_DATA_ROOT,
+			},
+		},
 	}
 	if len(resp.GetGames()) != len(want) {
 		t.Fatalf("got %d games, want %d", len(resp.GetGames()), len(want))
 	}
 	for i := range want {
 		mustEqualProto(t, resp.GetGames()[i], want[i])
+	}
+	for i := range 2 {
+		if resp.GetGames()[i].Capabilities != nil {
+			t.Errorf("game %d: capabilities = %v, want unset", i, resp.GetGames()[i].Capabilities)
+		}
 	}
 }
 
@@ -673,6 +790,34 @@ func TestWatchStatusStream(t *testing.T) {
 	}
 }
 
+// TestStreamPluginStatusEmptySnapshot locks that an empty non-nil snapshot reaches the client as one snapshot with zero plugins.
+func TestStreamPluginStatusEmptySnapshot(t *testing.T) {
+	fake := &fakeController{pluginEvents: []dto.PluginStatusEventResult{
+		{Snapshot: make([]dto.PluginStatusItemResult, 0)},
+	}}
+	client := newTestClient(t, fake)
+	stream, err := client.StreamPluginStatus(t.Context(), &pb.StreamPluginStatusRequest{
+		GameId: "stardewvalley", ProfileName: "Default",
+	})
+	if err != nil {
+		t.Fatalf("StreamPluginStatus: %v", err)
+	}
+	evt, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	snapshot := evt.GetSnapshot()
+	if snapshot == nil {
+		t.Fatalf("event = %v, want a snapshot", evt)
+	}
+	if len(snapshot.GetPlugins()) != 0 {
+		t.Errorf("snapshot plugins = %v, want none", snapshot.GetPlugins())
+	}
+	if _, err = stream.Recv(); !errors.Is(err, io.EOF) {
+		t.Errorf("final Recv err = %v, want io.EOF", err)
+	}
+}
+
 // TestExportInstanceStream locks the export request mapping plus progress/summary event conversion over the wire.
 func TestExportInstanceStream(t *testing.T) {
 	fake := &fakeController{
@@ -845,4 +990,200 @@ func TestImportInstanceErrorStatusOverWire(t *testing.T) {
 	if st.Message() != "transfer_collision:name=SkyUI" {
 		t.Errorf("message = %q", st.Message())
 	}
+}
+
+// TestModLoaderRPCMapping locks the request fields each mod-loader RPC forwards and the status field mapping.
+func TestModLoaderRPCMapping(t *testing.T) {
+	fake := &fakeController{modLoaderStatus: dto.ModLoaderStatusResult{
+		GameID: "stardewvalley", Kind: dto.ModLoaderKindSMAPI, State: dto.ModLoaderStateLauncherReverted,
+		Managed: true, InstalledVersion: "4.5.2", ActiveVersion: "4.5.2", PreviousVersion: "4.5.1",
+		LatestVersion: "4.6.0", UpdateAvailable: true, Busy: true, Detail: "StardewValley no longer starts StardewModdingAPI",
+	}}
+	client := newTestClient(t, fake)
+	want := &pb.ModLoaderStatus{
+		GameId: "stardewvalley", Kind: pb.ModLoaderKind_MOD_LOADER_KIND_SMAPI,
+		State: pb.ModLoaderState_MOD_LOADER_STATE_LAUNCHER_REVERTED, Managed: true,
+		InstalledVersion: "4.5.2", ActiveVersion: "4.5.2", PreviousVersion: "4.5.1",
+		LatestVersion: "4.6.0", UpdateAvailable: true, Busy: true,
+		Detail: "StardewValley no longer starts StardewModdingAPI",
+	}
+	for _, tc := range []struct {
+		name     string
+		call     func() (*pb.ModLoaderStatus, error)
+		wantArgs []any
+	}{
+		{"status", func() (*pb.ModLoaderStatus, error) {
+			return client.GetModLoaderStatus(t.Context(), &pb.ModLoaderRequest{GameId: "stardewvalley", CheckLatest: true, RepairOnly: true})
+		}, []any{"status", "stardewvalley", true}},
+		{"install", func() (*pb.ModLoaderStatus, error) {
+			return client.InstallModLoader(t.Context(), &pb.ModLoaderRequest{GameId: "stardewvalley", CheckLatest: true, RepairOnly: true})
+		}, []any{"install", "stardewvalley", true}},
+		{"uninstall", func() (*pb.ModLoaderStatus, error) {
+			return client.UninstallModLoader(t.Context(), &pb.ModLoaderRequest{GameId: "stardewvalley"})
+		}, []any{"uninstall", "stardewvalley"}},
+		{"rollback", func() (*pb.ModLoaderStatus, error) {
+			return client.RollbackModLoader(t.Context(), &pb.ModLoaderRequest{GameId: "stardewvalley"})
+		}, []any{"rollback", "stardewvalley"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := tc.call()
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if !reflect.DeepEqual(fake.modLoaderArgs, tc.wantArgs) {
+				t.Errorf("controller args = %v, want %v", fake.modLoaderArgs, tc.wantArgs)
+			}
+			mustEqualProto(t, resp, want)
+		})
+	}
+}
+
+// TestModLoaderRPCBusyError locks that a fence refusal reaches the client as a modloader_busy token.
+func TestModLoaderRPCBusyError(t *testing.T) {
+	fake := &fakeController{modLoaderErr: &dto.OperationBusyError{GameID: "stardewvalley", Operation: dto.BusyOperationMounted}}
+	client := newTestClient(t, fake)
+	_, err := client.InstallModLoader(t.Context(), &pb.ModLoaderRequest{GameId: "stardewvalley"})
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.FailedPrecondition || st.Message() != "modloader_busy:game=stardewvalley:operation=mounted" {
+		t.Fatalf("InstallModLoader error = %v, want FailedPrecondition modloader_busy", err)
+	}
+}
+
+// TestModDependencyReportMapping locks the request fields GetModDependencyReport forwards and every report field mapping.
+func TestModDependencyReportMapping(t *testing.T) {
+	fake := &fakeController{depReport: dto.ModDependencyReportResult{
+		GameID: "stardewvalley", ProfileName: "Default",
+		Components: []dto.ModComponentResult{{
+			Folder: "ContentPatcher", ProviderMod: "Content Patcher", UniqueID: "Pathoschild.ContentPatcher",
+			Name: "Content Patcher", Version: "2.0.0", Kind: dto.ModComponentCode, Bundled: true, Failed: true,
+			Issues: []dto.ModIssueResult{{
+				Kind: dto.ModIssueVersionTooLow, TargetID: "SMAPI", RequiredVersion: "4.1.0", FoundVersion: "4.0.0",
+				Providers: []string{"Base"}, Detail: "too old",
+			}},
+			UpdateVersion: "2.1.0", UpdateURL: "https://example.test/cp", NexusID: 1915, UpdateStale: true,
+		}},
+		Missing: []dto.MissingDependencyResult{{
+			UniqueID: "spacechase0.SpaceCore", MinimumVersion: "1.2.0", RequiredBy: []string{"A"}, DisabledProviders: []string{"B"},
+			Name: "SpaceCore", NexusID: 1348, URL: "https://www.nexusmods.com/stardewvalley/mods/1348", Resolvable: true, Stale: true,
+		}},
+		PendingEnables:   []dto.PendingEnableResult{{BatchID: "dep-1", ProfileName: "Default", ModName: "SpaceCore", UniqueID: "spacechase0.SpaceCore"}},
+		RootManifestMods: []string{"Broken"},
+		RemoteChecked:    true, RemoteError: "offline", LoaderVersion: "4.5.2", GameVersion: "1.6.15",
+		RecentFailures: []dto.DependencyRequestIssueResult{{
+			UniqueID: "Dep.Core", BatchID: "dep-2", State: "failed", Detail: "archive_mismatch: x",
+			UpdatedAt: time.Date(2026, 9, 25, 12, 30, 0, 0, time.FixedZone("EDT", -4*3600)),
+		}},
+	}}
+	client := newTestClient(t, fake)
+	resp, err := client.GetModDependencyReport(t.Context(), &pb.ModDependencyReportRequest{GameId: "stardewvalley", ProfileName: "Default", RefreshRemote: true, ForceRemote: true})
+	if err != nil {
+		t.Fatalf("GetModDependencyReport: %v", err)
+	}
+	if want := []any{"report", "stardewvalley", "Default", true, true}; !reflect.DeepEqual(fake.depArgs, want) {
+		t.Errorf("controller args = %v, want %v", fake.depArgs, want)
+	}
+	mustEqualProto(t, resp, &pb.ModDependencyReport{
+		GameId: "stardewvalley", ProfileName: "Default",
+		Components: []*pb.ModComponent{{
+			Folder: "ContentPatcher", ProviderMod: "Content Patcher", UniqueId: "Pathoschild.ContentPatcher",
+			Name: "Content Patcher", Version: "2.0.0", Kind: pb.ModComponentKind_MOD_COMPONENT_KIND_CODE, Bundled: true, Failed: true,
+			Issues: []*pb.ModIssue{{
+				Kind: pb.ModIssueKind_MOD_ISSUE_KIND_VERSION_TOO_LOW, TargetId: "SMAPI", RequiredVersion: "4.1.0", FoundVersion: "4.0.0",
+				Providers: []string{"Base"}, Detail: "too old",
+			}},
+			UpdateVersion: "2.1.0", UpdateUrl: "https://example.test/cp", NexusId: 1915, UpdateStale: true,
+		}},
+		Missing: []*pb.MissingDependency{{
+			UniqueId: "spacechase0.SpaceCore", MinimumVersion: "1.2.0", RequiredBy: []string{"A"}, DisabledProviders: []string{"B"},
+			Name: "SpaceCore", NexusId: 1348, Url: "https://www.nexusmods.com/stardewvalley/mods/1348", Resolvable: true, Stale: true,
+		}},
+		PendingEnables:   []*pb.PendingEnable{{BatchId: "dep-1", ProfileName: "Default", ModName: "SpaceCore", UniqueId: "spacechase0.SpaceCore"}},
+		RootManifestMods: []string{"Broken"},
+		RemoteChecked:    true, RemoteError: "offline", LoaderVersion: "4.5.2", GameVersion: "1.6.15",
+		RecentFailures: []*pb.DependencyRequestIssue{{
+			UniqueId: "Dep.Core", BatchId: "dep-2", State: "failed", Detail: "archive_mismatch: x", UpdatedAt: "2026-09-25T16:30:00Z",
+		}},
+	})
+}
+
+// TestFetchAndAckDependencyMapping locks the request and response mapping of FetchModDependencies and AckDependencyEnable.
+func TestFetchAndAckDependencyMapping(t *testing.T) {
+	fake := &fakeController{
+		depFetch: []dto.DependencyFetchResult{
+			{UniqueID: "a", Outcome: dto.FetchOutcomeQueued, DownloadID: "dl-1", BatchID: "dep-1"},
+			{UniqueID: "b", Outcome: dto.FetchOutcomeOpenURL, URL: "https://www.nexusmods.com/stardewvalley/mods/2?tab=files", Reason: "not_premium", BatchID: "dep-1"},
+			{UniqueID: "c", Outcome: dto.FetchOutcomeUnresolved, Reason: "no_nexus_page"},
+			{UniqueID: "d", Outcome: dto.FetchOutcomeAlreadyPresent, Reason: "provided: D"},
+		},
+		depAcked: 2,
+	}
+	client := newTestClient(t, fake)
+	resp, err := client.FetchModDependencies(t.Context(), &pb.FetchModDependenciesRequest{GameId: "stardewvalley", ProfileName: "Default", UniqueIds: []string{"a", "b", "c", "d"}})
+	if err != nil {
+		t.Fatalf("FetchModDependencies: %v", err)
+	}
+	if want := []any{"fetch", "stardewvalley", "Default", []string{"a", "b", "c", "d"}}; !reflect.DeepEqual(fake.depArgs, want) {
+		t.Errorf("controller args = %v, want %v", fake.depArgs, want)
+	}
+	mustEqualProto(t, resp, &pb.FetchModDependenciesResponse{Results: []*pb.DependencyFetchResult{
+		{UniqueId: "a", Outcome: pb.FetchOutcome_FETCH_OUTCOME_QUEUED, DownloadId: "dl-1", BatchId: "dep-1"},
+		{UniqueId: "b", Outcome: pb.FetchOutcome_FETCH_OUTCOME_OPEN_URL, Url: "https://www.nexusmods.com/stardewvalley/mods/2?tab=files", Reason: "not_premium", BatchId: "dep-1"},
+		{UniqueId: "c", Outcome: pb.FetchOutcome_FETCH_OUTCOME_UNRESOLVED, Reason: "no_nexus_page"},
+		{UniqueId: "d", Outcome: pb.FetchOutcome_FETCH_OUTCOME_ALREADY_PRESENT, Reason: "provided: D"},
+	}})
+	ack, err := client.AckDependencyEnable(t.Context(), &pb.AckDependencyEnableRequest{GameId: "stardewvalley", BatchId: "dep-1", UniqueIds: []string{"a"}})
+	if err != nil {
+		t.Fatalf("AckDependencyEnable: %v", err)
+	}
+	if want := []any{"ack", "stardewvalley", "dep-1", []string{"a"}}; !reflect.DeepEqual(fake.depArgs, want) {
+		t.Errorf("controller args = %v, want %v", fake.depArgs, want)
+	}
+	if ack.GetAcknowledged() != 2 {
+		t.Errorf("acknowledged = %d, want 2", ack.GetAcknowledged())
+	}
+}
+
+// TestModDependencyUnsupportedErrorOverWire locks the token a non-SMAPI game receives.
+func TestModDependencyUnsupportedErrorOverWire(t *testing.T) {
+	fake := &fakeController{depErr: &dto.ModDependenciesUnsupportedError{GameID: "skyrimse"}}
+	client := newTestClient(t, fake)
+	_, err := client.GetModDependencyReport(t.Context(), &pb.ModDependencyReportRequest{GameId: "skyrimse", ProfileName: "Default"})
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.InvalidArgument || st.Message() != "mod_dependencies_unsupported:game=skyrimse" {
+		t.Fatalf("GetModDependencyReport error = %v, want InvalidArgument mod_dependencies_unsupported", err)
+	}
+}
+
+// TestStreamInstallEventsMapsProgressAndCompleted locks the install event oneof mapping and that empty events are skipped.
+func TestStreamInstallEventsMapsProgressAndCompleted(t *testing.T) {
+	fake := &fakeController{installEvents: []dto.InstallEventResult{
+		{GameID: "stardewvalley", Progress: &dto.InstallProgressResult{InstallID: "inst-1", ModName: "A", Step: dto.InstallStepComplete, Pct: 100}},
+		{GameID: "stardewvalley"},
+		{GameID: "stardewvalley", Completed: &dto.InstallCompletedResult{GameID: "stardewvalley", ModName: "A", ArchiveRelPath: "1_A/a.zip", BatchID: "dep-1", BatchIDs: []string{"dep-1", "dep-2"}}},
+	}}
+	client := newTestClient(t, fake)
+	stream, err := client.StreamInstallEvents(t.Context(), &pb.StreamInstallEventsRequest{GameId: "stardewvalley"})
+	if err != nil {
+		t.Fatalf("StreamInstallEvents: %v", err)
+	}
+	var got []*pb.InstallEvent
+	for {
+		evt, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Recv: %v", err)
+		}
+		got = append(got, evt)
+	}
+	if len(got) != 2 {
+		t.Fatalf("received %d events, want 2: %v", len(got), got)
+	}
+	if got[0].GetInstallProgress().GetInstallId() != "inst-1" || got[0].GetInstallProgress().GetStep() != pb.InstallProgress_STEP_COMPLETE {
+		t.Errorf("first event = %v, want the progress event", got[0])
+	}
+	mustEqualProto(t, got[1], &pb.InstallEvent{Event: &pb.InstallEvent_InstallCompleted{InstallCompleted: &pb.InstallCompleted{
+		GameId: "stardewvalley", ModName: "A", ArchiveRelPath: "1_A/a.zip", BatchId: "dep-1", BatchIds: []string{"dep-1", "dep-2"},
+	}}})
 }

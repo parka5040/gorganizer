@@ -12,6 +12,10 @@
 #include "LaunchController.h"
 #include "FalloutPatchController.h"
 #include "GameSetupController.h"
+#include "ModLoaderController.h"
+#include "ModDependencyController.h"
+#include "ModDependencyText.h"
+#include "SmapiModsWidget.h"
 #include "SettingsDialog.h"
 #include "ModInstallDialog.h"
 #include "IniEditorDialog.h"
@@ -20,6 +24,7 @@
 #include "ImportDialog.h"
 #include "ThemeManager.h"
 #include "Dialogs.h"
+#include "InstallErrorText.h"
 
 #include <QToolBar>
 #include <QToolButton>
@@ -29,6 +34,11 @@
 #include <QFileDialog>
 #include <QVBoxLayout>
 #include <QActionGroup>
+#include <QAbstractButton>
+#include <QCloseEvent>
+#include <QInputDialog>
+#include <QMessageBox>
+#include <QPushButton>
 
 namespace gorganizer {
 
@@ -104,13 +114,15 @@ void MainWindow::setupUi()
     }
 
     auto* toolsMenu = menuBar()->addMenu("&Tools");
-    toolsMenu->addAction("INI &Editor...", this, &MainWindow::onOpenIniEditor);
+    m_iniEditorAction = toolsMenu->addAction("INI &Editor...", this, &MainWindow::onOpenIniEditor);
     toolsMenu->addAction("E&xternal Tools...", this, &MainWindow::onOpenExecutables);
     m_unmountAction = toolsMenu->addAction("&Unmount Mods (restore vanilla Data)");
     m_patch4GBAction = toolsMenu->addAction("Patch Fallout to &4GB");
     m_patch4GBAction->setVisible(false);
     m_installTtwAction = toolsMenu->addAction("Install Tale of Two &Wastelands...");
     m_installTtwAction->setVisible(false);
+    m_smapiMenu = toolsMenu->addMenu("S&MAPI");
+    m_smapiMenu->menuAction()->setVisible(false);
     toolsMenu->addSeparator();
     toolsMenu->addAction("&Settings...", this, &MainWindow::onOpenSettings);
 
@@ -171,13 +183,16 @@ void MainWindow::setupUi()
     m_pluginList->setGrpcClient(m_grpc);
     m_rightTabs->addTab(m_pluginList, "Plugins");
 
-    auto* dataPlaceholder = new QWidget;
-    auto* dpLayout = new QVBoxLayout(dataPlaceholder);
+    m_dataPlaceholder = new QWidget;
+    auto* dpLayout = new QVBoxLayout(m_dataPlaceholder);
     auto* dpLabel = new QLabel("Virtual data directory.\nShows the merged view of all enabled mods.\n\n(Coming soon)");
     dpLabel->setAlignment(Qt::AlignCenter);
     dpLabel->setObjectName("hintLabel");
     dpLayout->addWidget(dpLabel);
-    m_rightTabs->addTab(dataPlaceholder, "Data");
+    m_rightTabs->addTab(m_dataPlaceholder, "Data");
+
+    m_smapiMods = new SmapiModsWidget;
+    m_rightTabs->setTabVisible(m_rightTabs->addTab(m_smapiMods, "SMAPI"), false);
 
     m_downloadsLibrary = new DownloadsLibraryView(m_grpc);
     m_rightTabs->addTab(m_downloadsLibrary, "Downloads");
@@ -210,11 +225,14 @@ void MainWindow::createControllers()
     m_session = new SessionController(m_config, m_grpc, m_gameSelector, m_profileSelector,
                                       m_modList, m_pluginList, m_downloadsLibrary, m_runButton,
                                       m_applyButton, m_statusInfo, statusBar(), this);
-    m_launch = new LaunchController(m_config, m_grpc, m_session, m_runButton, statusBar(), this);
+    m_modLoader = new ModLoaderController(m_grpc, m_session, m_smapiMenu, statusBar(), this);
+    m_launch = new LaunchController(m_config, m_grpc, m_session, m_modLoader, m_runButton, statusBar(), this);
     m_falloutPatch = new FalloutPatchController(m_grpc, m_session, m_runButton, m_patch4GBAction,
                                                 statusBar(), this);
     m_gameSetup = new GameSetupController(m_config, m_grpc, m_session, m_modList,
                                           m_installTtwAction, statusBar(), this);
+    m_modDependencies = new ModDependencyController(m_grpc, m_session, m_modList, m_smapiMods,
+                                                    statusBar(), this);
 }
 
 // Wires widget signals to controllers, controller cross-links, and window-level daemon status handling.
@@ -254,6 +272,25 @@ void MainWindow::wireConnections()
             m_gameSetup, &GameSetupController::onActiveGameChanged);
     connect(m_session, &SessionController::activeGameChanged, this,
             [this](const GameInfo&) { updateTransferActionsEnabled(); });
+    connect(m_session, &SessionController::activeGameChanged,
+            this, &MainWindow::applyGameCapabilities);
+    connect(m_session, &SessionController::activeGameChanged,
+            m_modLoader, &ModLoaderController::onActiveGameChanged);
+    connect(m_session, &SessionController::activeGameChanged,
+            m_modDependencies, &ModDependencyController::onActiveGameChanged);
+    connect(m_session, &SessionController::profileChanged,
+            m_modDependencies, &ModDependencyController::onProfileChanged);
+    connect(m_modLoader, &ModLoaderController::modLoaderStatusChanged,
+            m_modDependencies, &ModDependencyController::onModLoaderStatusChanged);
+    connect(m_modLoader, &ModLoaderController::modLoaderStatusChanged, this,
+            [this](const QString& gameId, const GrpcModLoaderStatus& status) {
+                if (gameId != m_session->activeGame().shortName)
+                    return;
+                if (status.state == GrpcModLoaderStateUnspecified)
+                    m_runButton->clearModLoaderStatus();
+                else
+                    m_runButton->setModLoaderStatus(status);
+            });
     connect(m_grpc, &GrpcClient::connected, this, &MainWindow::updateTransferActionsEnabled);
     connect(m_grpc, &GrpcClient::disconnected, this, &MainWindow::updateTransferActionsEnabled);
     updateTransferActionsEnabled();
@@ -269,16 +306,8 @@ void MainWindow::wireConnections()
         statusBar()->showMessage("Daemon disconnected");
     });
 
-    connect(m_grpc, &GrpcClient::installCompleted, this, [this](const QString& name, int count) {
-        statusBar()->showMessage(QString("Installed \"%1\" (%2 files)").arg(name).arg(count), 5000);
-        if (m_session->activeGame().detected)
-            m_modList->loadForGame(m_session->activeGame(), m_session->currentProfile());
-    });
-    connect(m_grpc, &GrpcClient::installFailed, this, [this](const QString& err) {
-        if (err.contains("fomod_required"))
-            return;
-        statusBar()->showMessage(QString("Install failed: %1").arg(err), 5000);
-    });
+    connect(m_grpc, &GrpcClient::installRequestCompleted, this, &MainWindow::onInstallRequestCompleted);
+    connect(m_grpc, &GrpcClient::installRequestFailed, this, &MainWindow::onInstallRequestFailed);
 
     connect(m_grpc, &GrpcClient::daemonInfo, this, [this](const QString& info) {
         statusBar()->showMessage(info, 5000);
@@ -288,11 +317,64 @@ void MainWindow::wireConnections()
     });
 }
 
+void MainWindow::closeEvent(QCloseEvent* event)
+{
+    const QString loaderOperation = m_modLoader ? m_modLoader->interruptibleOperation() : QString();
+    QStringList paragraphs;
+    if (!loaderOperation.isEmpty()) {
+        const QString consequence = m_daemonOwned
+            ? QStringLiteral("Quitting gorganizer also stops the gorganizer daemon it started, which interrupts the "
+                             "operation. The daemon rolls an unfinished SMAPI change back the next time it starts.")
+            : QStringLiteral("The gorganizer daemon keeps running and finishes the operation or rolls it back, but "
+                             "gorganizer cannot report the result.");
+        paragraphs.append(QStringLiteral("%1 is still in progress.\n\n%2 The mods are not mounted again "
+                                         "automatically.").arg(loaderOperation, consequence));
+    }
+    if (m_pendingExternalInstall) {
+        const QString consequence = m_daemonOwned
+            ? QStringLiteral("Quitting gorganizer also stops the gorganizer daemon it started, which interrupts the "
+                             "install.")
+            : QStringLiteral("The gorganizer daemon keeps running and finishes the install, but gorganizer cannot "
+                             "report the result.");
+        paragraphs.append(QStringLiteral("Installing \"%1\" is still in progress.\n\n%2")
+                              .arg(m_pendingExternalInstall->name, consequence));
+    }
+    if (paragraphs.isEmpty()) {
+        QMainWindow::closeEvent(event);
+        return;
+    }
+    const QString title = loaderOperation.isEmpty() ? QStringLiteral("Mod Install Running")
+                                                    : QStringLiteral("SMAPI Operation Running");
+    const QString text = paragraphs.join(QStringLiteral("\n\n")) + QStringLiteral("\n\nQuit anyway?");
+    if (!dialogs::plainConfirm(this, title, text, QMessageBox::Warning, QMessageBox::No)) {
+        event->ignore();
+        return;
+    }
+    QMainWindow::closeEvent(event);
+}
+
 void MainWindow::onInstallMod()
 {
-    if (m_session->activeGame().shortName.isEmpty()) {
+    const GameInfo game = m_session->activeGame();
+    if (game.shortName.isEmpty()) {
         dialogs::warn(this, "No Game Selected", "Select a game first.");
         return;
+    }
+
+    const bool localInstall = usesLocalDataRootInstall(game);
+    if (!localInstall) {
+        if (!game.capabilitiesKnown) {
+            dialogs::info(this, "Install Mod", "Waiting for the gorganizer daemon — try again in a moment.");
+            return;
+        }
+        if (m_pendingExternalInstall) {
+            dialogs::info(this, "Install Mod", "Another mod install is still running. Try again when it finishes.");
+            return;
+        }
+        if (!m_grpc->isConnected()) {
+            dialogs::warn(this, "Install Mod", "The daemon must be running to install mods for this game.");
+            return;
+        }
     }
 
     QString path = QFileDialog::getOpenFileName(
@@ -302,11 +384,16 @@ void MainWindow::onInstallMod()
     if (path.isEmpty())
         return;
 
+    if (!localInstall) {
+        installThroughDaemonLayout(game.shortName, path);
+        return;
+    }
+
     QString modName = QFileInfo(path).completeBaseName();
-    QString modsDir = GameInfo::modsDirPathFor(m_session->activeGame().shortName);
+    QString modsDir = GameInfo::modsDirPathFor(game.shortName);
 
     ModInstallDialog dlg(path, modsDir, modName, this);
-    dlg.setDaemonContext(m_grpc, m_session->activeGame().shortName);
+    dlg.setDaemonContext(m_grpc, game.shortName);
     if (dlg.exec() == QDialog::Accepted) {
         statusBar()->showMessage(
             QString("Installed \"%1\" (%2 files)")
@@ -315,6 +402,136 @@ void MainWindow::onInstallMod()
             5000);
         m_modList->loadForGame(m_session->activeGame(), m_session->currentProfile());
     }
+}
+
+void MainWindow::installThroughDaemonLayout(const QString& gameId, const QString& path)
+{
+    const QString name = askModName("Install Mod", "Mod name:", QFileInfo(path).completeBaseName());
+    if (name.isEmpty())
+        return;
+    PendingExternalInstall request;
+    request.gameId = gameId;
+    request.path = path;
+    request.name = name;
+    request.mode = GrpcInstallAsNewMod;
+    startExternalInstall(request);
+}
+
+QString MainWindow::askModName(const QString& title, const QString& label, const QString& initial)
+{
+    QString name = initial;
+    for (;;) {
+        bool ok = false;
+        name = QInputDialog::getText(this, title, label, QLineEdit::Normal, name, &ok).trimmed();
+        if (!ok)
+            return QString();
+        const QString problem = modNameProblem(name);
+        if (problem.isEmpty())
+            return name;
+        dialogs::plainWarn(this, title, problem);
+    }
+}
+
+void MainWindow::startExternalInstall(const PendingExternalInstall& request)
+{
+    if (m_pendingExternalInstall) {
+        dialogs::info(this, "Install Mod", "Another mod install is still running. Try again when it finishes.");
+        return;
+    }
+    if (!m_grpc->isConnected()) {
+        dialogs::warn(this, "Install Mod", "The daemon must be running to install mods for this game.");
+        return;
+    }
+    PendingExternalInstall pending = request;
+    pending.requestId = m_grpc->startInstallExternal(request.gameId, request.path, request.mode, request.name);
+    m_pendingExternalInstall = pending;
+    statusBar()->showMessage(QString("Installing \"%1\"…").arg(request.name));
+}
+
+void MainWindow::onInstallRequestCompleted(quint64 requestId, const QString& modFolder, int fileCount)
+{
+    if (m_pendingExternalInstall && m_pendingExternalInstall->requestId == requestId)
+        m_pendingExternalInstall.reset();
+    statusBar()->showMessage(
+        QString("Installed \"%1\" (%2 files)").arg(modFolder, QString::number(fileCount)), 5000);
+    if (m_session->activeGame().detected)
+        m_modList->reloadMods();
+}
+
+void MainWindow::onInstallRequestFailed(quint64 requestId, const QString& error)
+{
+    if (m_pendingExternalInstall && m_pendingExternalInstall->requestId == requestId) {
+        const PendingExternalInstall request = *m_pendingExternalInstall;
+        m_pendingExternalInstall.reset();
+        onExternalInstallFailed(request, error);
+        return;
+    }
+    if (parseInstallError(error).token == QLatin1String("fomod_required"))
+        return;
+    statusBar()->showMessage(QString("Install failed: %1").arg(installErrorMessage(error)), 5000);
+}
+
+void MainWindow::onExternalInstallFailed(const PendingExternalInstall& request, const QString& error)
+{
+    const InstallError parsed = parseInstallError(error);
+    statusBar()->clearMessage();
+    if (parsed.token == QLatin1String("mod_collision")) {
+        QString existing = parsed.fields.value(QStringLiteral("name"));
+        if (existing.isEmpty())
+            existing = parsed.fields.value(QStringLiteral("existing")).section(QLatin1Char(','), 0, 0);
+        if (existing.isEmpty())
+            existing = request.name;
+        resolveExternalInstallCollision(request, existing);
+        return;
+    }
+    if (parsed.token == QLatin1String("invalid_target_mod") && request.mode == GrpcInstallAsNewMod) {
+        showInstallError(this, "Install Mod", error);
+        PendingExternalInstall retry = request;
+        retry.name = askModName("Install Mod", "Mod name:", request.name);
+        if (!retry.name.isEmpty())
+            startExternalInstall(retry);
+        return;
+    }
+    if (!parsed.token.isEmpty()) {
+        showInstallError(this, "Install Mod", error);
+        return;
+    }
+    statusBar()->showMessage(QString("Install failed: %1").arg(error), 5000);
+}
+
+void MainWindow::resolveExternalInstallCollision(const PendingExternalInstall& request,
+                                                 const QString& existingName)
+{
+    QMessageBox box(this);
+    box.setWindowTitle("Mod Already Exists");
+    box.setIcon(QMessageBox::Question);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(QString("A mod named \"%1\" is already installed.").arg(existingName));
+    box.setInformativeText(
+        "Merge into existing keeps every file already in that mod and adds this archive on top, so files "
+        "an update removed or renamed stay behind and can break it.\n\n"
+        "Rename… installs this archive as a separate mod, which is safer for updates.");
+    QAbstractButton* mergeBtn = box.addButton("Merge into existing (keeps old files)", QMessageBox::AcceptRole);
+    QAbstractButton* renameBtn = box.addButton("Rename…", QMessageBox::ActionRole);
+    box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(static_cast<QPushButton*>(renameBtn));
+    box.exec();
+
+    QAbstractButton* clicked = box.clickedButton();
+    PendingExternalInstall retry = request;
+    if (clicked == mergeBtn) {
+        retry.name = existingName;
+        retry.mode = GrpcInstallMergeIntoMod;
+        startExternalInstall(retry);
+        return;
+    }
+    if (clicked != renameBtn)
+        return;
+    retry.name = askModName("Rename Mod", "New mod name:", existingName);
+    if (retry.name.isEmpty())
+        return;
+    retry.mode = GrpcInstallAsNewMod;
+    startExternalInstall(retry);
 }
 
 void MainWindow::onOpenSettings()
@@ -362,8 +579,46 @@ void MainWindow::onOpenExecutables()
         dialogs::warn(this, "External Tools", "The daemon must be running.");
         return;
     }
-    ExecutablesDialog dlg(m_grpc, m_session->activeGame().shortName, m_session->currentProfile(), this);
+    const GameInfo& game = m_session->activeGame();
+    const bool lootAvailable = !game.capabilitiesKnown || game.capabilities.loot;
+    ExecutablesDialog dlg(m_grpc, game.shortName, m_session->currentProfile(), this, lootAvailable);
     dlg.exec();
+}
+
+void MainWindow::applyGameCapabilities(const GameInfo& game)
+{
+    const int dataIndex = m_rightTabs->indexOf(m_dataPlaceholder);
+    const int smapiIndex = m_rightTabs->indexOf(m_smapiMods);
+    if (dataIndex >= 0 && smapiIndex >= 0) {
+        const bool showSmapi = showsModDependencies(game);
+        const int current = m_rightTabs->currentIndex();
+        m_rightTabs->setTabVisible(showSmapi ? smapiIndex : dataIndex, true);
+        m_rightTabs->setTabVisible(showSmapi ? dataIndex : smapiIndex, false);
+        if (current == (showSmapi ? dataIndex : smapiIndex))
+            m_rightTabs->setCurrentIndex(showSmapi ? smapiIndex : dataIndex);
+    }
+
+    const int pluginsIndex = m_rightTabs->indexOf(m_pluginList);
+    if (pluginsIndex >= 0) {
+        const bool showPlugins = usesPlugins(game);
+        const bool wasCurrent = m_rightTabs->currentIndex() == pluginsIndex;
+        m_rightTabs->setTabVisible(pluginsIndex, showPlugins);
+        if (!showPlugins && wasCurrent) {
+            m_restorePluginsTab = true;
+            for (int i = 0; i < m_rightTabs->count(); ++i) {
+                if (m_rightTabs->isTabVisible(i)) {
+                    m_rightTabs->setCurrentIndex(i);
+                    break;
+                }
+            }
+        } else if (showPlugins && m_restorePluginsTab) {
+            m_restorePluginsTab = false;
+            m_rightTabs->setCurrentIndex(pluginsIndex);
+        }
+    }
+
+    if (m_iniEditorAction)
+        m_iniEditorAction->setVisible(!game.capabilitiesKnown || game.capabilities.ini);
 }
 
 // Enables Export/Import Mods only while the daemon is connected and a game is active.

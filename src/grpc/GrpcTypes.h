@@ -1,14 +1,14 @@
 #pragma once
 
+#include <QDateTime>
 #include <QMap>
 #include <QString>
 #include <QStringList>
 #include <cstdint>
 #include <vector>
+#include "GameInfo.h"
 
 namespace gorganizer {
-
-struct GameInfo;
 
 struct GrpcGame {
     QString gameId;
@@ -19,6 +19,8 @@ struct GrpcGame {
     bool synthetic = false;
     QString linkedFromGameId;
     bool vfsActive = false;
+    GameCapabilities capabilities;
+    bool capabilitiesKnown = false;
 };
 
 enum GrpcTTWBackend {
@@ -276,6 +278,151 @@ struct GrpcManagedToolStatus {
     QString updateAvailable;
 };
 
+enum GrpcModLoaderState {
+    GrpcModLoaderStateUnspecified = 0,
+    GrpcModLoaderStateNotInstalled = 1,
+    GrpcModLoaderStateOk = 2,
+    GrpcModLoaderStateLauncherReverted = 3,
+    GrpcModLoaderStateIncomplete = 4,
+    GrpcModLoaderStateUnsupportedBuild = 5,
+    GrpcModLoaderStateInterrupted = 6,
+};
+
+struct GrpcModLoaderStatus {
+    QString gameId;
+    ModLoaderKind kind = ModLoaderKind::None;
+    GrpcModLoaderState state = GrpcModLoaderStateUnspecified;
+    bool managed = false;
+    QString installedVersion;
+    QString activeVersion;
+    QString previousVersion;
+    QString latestVersion;
+    bool updateAvailable = false;
+    bool busy = false;
+    QString detail;
+};
+
+enum GrpcModIssueKind {
+    GrpcModIssueUnspecified = 0,
+    GrpcModIssueMissing = 1,
+    GrpcModIssueDisabled = 2,
+    GrpcModIssueVersionTooLow = 3,
+    GrpcModIssueDuplicateId = 4,
+    GrpcModIssueInvalidManifest = 5,
+    GrpcModIssueNeedsNewerLoader = 6,
+    GrpcModIssueNeedsNewerGame = 7,
+    GrpcModIssueCircular = 8,
+    GrpcModIssueFolderCollision = 9,
+    GrpcModIssueDependencyFailed = 10,
+};
+
+enum GrpcModComponentKind {
+    GrpcModComponentUnspecified = 0,
+    GrpcModComponentCode = 1,
+    GrpcModComponentContentPack = 2,
+    GrpcModComponentInvalid = 3,
+};
+
+enum GrpcFetchOutcome {
+    GrpcFetchOutcomeUnspecified = 0,
+    GrpcFetchOutcomeQueued = 1,
+    GrpcFetchOutcomeOpenUrl = 2,
+    GrpcFetchOutcomeUnresolved = 3,
+    GrpcFetchOutcomeAlreadyPresent = 4,
+};
+
+struct GrpcModIssue {
+    GrpcModIssueKind kind = GrpcModIssueUnspecified;
+    QString targetId;
+    QString requiredVersion;
+    QString foundVersion;
+    QStringList providers;
+    QString detail;
+};
+
+struct GrpcModComponent {
+    QString folder;
+    QString providerMod;
+    QString uniqueId;
+    QString name;
+    QString version;
+    GrpcModComponentKind kind = GrpcModComponentUnspecified;
+    bool bundled = false;
+    bool failed = false;
+    std::vector<GrpcModIssue> issues;
+    QString updateVersion;
+    QString updateUrl;
+    int nexusId = 0;
+    bool updateStale = false;
+};
+
+struct GrpcMissingDependency {
+    QString uniqueId;
+    QString minimumVersion;
+    QStringList requiredBy;
+    QStringList disabledProviders;
+    QString name;
+    int nexusId = 0;
+    QString url;
+    bool resolvable = false;
+    bool stale = false;
+};
+
+struct GrpcPendingEnable {
+    QString batchId;
+    QString profileName;
+    QString modName;
+    QString uniqueId;
+};
+
+struct GrpcDependencyRequestIssue {
+    QString uniqueId;
+    QString batchId;
+    QString state;
+    QString detail;
+    QDateTime updatedAt;
+};
+
+struct GrpcModDependencyReport {
+    QString gameId;
+    QString profileName;
+    std::vector<GrpcModComponent> components;
+    std::vector<GrpcMissingDependency> missing;
+    std::vector<GrpcPendingEnable> pendingEnables;
+    QStringList rootManifestMods;
+    bool remoteChecked = false;
+    QString remoteError;
+    QString loaderVersion;
+    QString gameVersion;
+    std::vector<GrpcDependencyRequestIssue> recentFailures;
+};
+
+struct GrpcDependencyFetchResult {
+    QString uniqueId;
+    GrpcFetchOutcome outcome = GrpcFetchOutcomeUnspecified;
+    QString downloadId;
+    QString url;
+    QString reason;
+    QString batchId;
+};
+
+struct GrpcInstallCompleted {
+    QString gameId;
+    QString modName;
+    QString archiveRelPath;
+    QString batchId;
+    QStringList batchIds;
+};
+
+enum GrpcStatusCode {
+    GrpcStatusOk = 0,
+    GrpcStatusCancelled = 1,
+    GrpcStatusUnknown = 2,
+    GrpcStatusDeadlineExceeded = 4,
+    GrpcStatusFailedPrecondition = 9,
+    GrpcStatusUnavailable = 14,
+};
+
 struct GrpcReinstallResult {
     int archivesReplayed = 0;
     int archivesSkipped = 0;
@@ -416,5 +563,8 @@ GameInfo toGameInfo(const GrpcGame& game);
 
 // Inverse of toGameInfo for the same field mapping.
 GrpcGame toGrpcGame(const GameInfo& info);
+
+// Reports whether an RPC that failed with this gRPC status code may still have run to completion on the daemon.
+bool grpcOutcomeUnknown(int code);
 
 }

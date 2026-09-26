@@ -32,68 +32,80 @@ type Daemon struct {
 	*PluginStatusService
 	*FNV4GBService
 	*TransferService
+	*ModLoaderService
+	*ModDependencyService
 }
 
 // New creates a Daemon from configuration with all subsystems initialized.
 func New(cfg *config.Config) (*Daemon, error) {
 	profileMgr := profile.NewManager(config.DataDir())
 	s := &session{
-		config:                cfg,
-		profileMgr:            profileMgr,
-		iniMgr:                inipkg.NewManager(profileMgr.ProfileDir),
-		mountMgrs:             make(map[string]*vfs.MountManager),
-		rootDeployMgrs:        make(map[string]*vfs.RootDeploymentManager),
-		mountStates:           make(map[string]mountState),
-		toolMgr:               tools.NewManager(cfg),
-		lootInstaller:         tools.NewLOOTInstaller(config.ToolsDir(), nil),
-		statusCh:              make(chan dto.StatusEventResult, 64),
-		coalescer:             newStatusCoalescer(),
-		coalescedCh:           make(chan dto.StatusEventResult, 16),
-		coalescerDone:         make(chan struct{}),
-		ingesterDone:          make(chan struct{}),
-		shutdownCh:            make(chan struct{}),
-		installedArchiveCache: make(map[string]map[string]archiveInstall),
-		launched:              make(map[int]*launchedGame),
-		steamLaunched:         make(map[string]bool),
-		execRuns:              make(map[string]*execRun),
-		installLocks:          make(map[string]*sync.Mutex),
-		recoveryReady:         make(chan struct{}),
-		pendingRecoveries:     make(map[string]*dto.RecoveryPendingResult),
-		rootPendingRecoveries: make(map[string]*dto.RecoveryPendingResult),
-		gamesAtPath:           make(map[string][]string),
+		config:                  cfg,
+		profileMgr:              profileMgr,
+		iniMgr:                  inipkg.NewManager(profileMgr.ProfileDir),
+		mountMgrs:               make(map[string]*vfs.MountManager),
+		rootDeployMgrs:          make(map[string]*vfs.RootDeploymentManager),
+		mountStates:             make(map[string]mountState),
+		toolMgr:                 tools.NewManager(cfg),
+		lootInstaller:           tools.NewLOOTInstaller(config.ToolsDir(), nil),
+		statusCh:                make(chan dto.StatusEventResult, 64),
+		statusDone:              make(chan struct{}),
+		startedAt:               time.Now(),
+		coalescer:               newStatusCoalescer(),
+		coalescedCh:             make(chan dto.StatusEventResult, 16),
+		coalescerDone:           make(chan struct{}),
+		ingesterDone:            make(chan struct{}),
+		shutdownCh:              make(chan struct{}),
+		installedArchiveCache:   make(map[string]map[string]archiveInstall),
+		launched:                make(map[int]*launchedGame),
+		steamLaunched:           make(map[string]bool),
+		execRuns:                make(map[string]*execRun),
+		installLocks:            make(map[string]*sync.Mutex),
+		profileLocks:            make(map[string]*sync.Mutex),
+		recoveryReady:           make(chan struct{}),
+		pendingRecoveries:       make(map[string]*dto.RecoveryPendingResult),
+		rootPendingRecoveries:   make(map[string]*dto.RecoveryPendingResult),
+		loaderPendingRecoveries: make(map[string]*dto.RecoveryPendingResult),
+		gamesAtPath:             make(map[string][]string),
+		nexusUsers:              nexusClientUserValidator{},
+		now:                     time.Now,
 	}
 	s.svc = services{
-		game:     &GameService{s: s},
-		mods:     &ModService{s: s},
-		archives: &ArchiveService{s: s},
-		install:  &InstallService{s: s},
-		vfs:      &VFSService{s: s},
-		launch:   &LaunchService{s: s},
-		execs:    &ExecutableService{s: s},
-		ttw:      &TTWService{s: s},
-		ini:      &IniService{s: s},
-		settings: &SettingsService{s: s},
-		plugins:  &PluginStatusService{s: s},
-		fnv4gb:   &FNV4GBService{s: s},
-		profiles: &ProfileService{s: s},
-		transfer: &TransferService{s: s},
+		game:      &GameService{s: s},
+		mods:      &ModService{s: s},
+		archives:  &ArchiveService{s: s},
+		install:   &InstallService{s: s},
+		vfs:       &VFSService{s: s},
+		launch:    &LaunchService{s: s},
+		execs:     &ExecutableService{s: s},
+		ttw:       &TTWService{s: s},
+		ini:       &IniService{s: s},
+		settings:  &SettingsService{s: s},
+		plugins:   &PluginStatusService{s: s},
+		fnv4gb:    &FNV4GBService{s: s},
+		profiles:  &ProfileService{s: s},
+		transfer:  &TransferService{s: s},
+		modLoader: newModLoaderService(s),
+		modDeps:   newModDependencyService(s),
 	}
 	d := &Daemon{
-		session:             s,
-		GameService:         s.svc.game,
-		ProfileService:      s.svc.profiles,
-		VFSService:          s.svc.vfs,
-		ModService:          s.svc.mods,
-		ArchiveService:      s.svc.archives,
-		InstallService:      s.svc.install,
-		LaunchService:       s.svc.launch,
-		SettingsService:     s.svc.settings,
-		IniService:          s.svc.ini,
-		ExecutableService:   s.svc.execs,
-		TTWService:          s.svc.ttw,
-		PluginStatusService: s.svc.plugins,
-		FNV4GBService:       s.svc.fnv4gb,
-		TransferService:     s.svc.transfer,
+		session:              s,
+		GameService:          s.svc.game,
+		ProfileService:       s.svc.profiles,
+		VFSService:           s.svc.vfs,
+		ModService:           s.svc.mods,
+		ArchiveService:       s.svc.archives,
+		InstallService:       s.svc.install,
+		LaunchService:        s.svc.launch,
+		SettingsService:      s.svc.settings,
+		IniService:           s.svc.ini,
+		ExecutableService:    s.svc.execs,
+		TTWService:           s.svc.ttw,
+		PluginStatusService:  s.svc.plugins,
+		FNV4GBService:        s.svc.fnv4gb,
+		TransferService:      s.svc.transfer,
+		ModLoaderService:     s.svc.modLoader,
+		ModDependencyService: s.svc.modDeps,
 	}
 	if status, statusErr := s.lootInstaller.Status(); statusErr == nil && status.Installed {
 		if syncErr := s.svc.execs.syncManagedLOOT(status); syncErr != nil {
@@ -109,11 +121,16 @@ func New(cfg *config.Config) (*Daemon, error) {
 	go d.runPreviewSweeper()
 
 	download.SetModsDirResolver(config.ModsDir)
+	d.recoverInterruptedReinstalls()
+	gameIDs := make([]string, 0, len(cfg.Games))
+	for gameID := range cfg.Games {
+		gameIDs = append(gameIDs, gameID)
+	}
+	recoveredLandings := d.svc.modDeps.recoverInterruptedRequests(gameIDs)
 
 	if cfg.NexusAPIKey != "" {
 		nexus := download.NewNexusClient(cfg.NexusAPIKey)
 		d.downloadMgr = download.NewManager(nexus, cfg, 3, d.managerHooks())
-		d.downloadMgr.SetPostInstallHook(d.ensureInModList)
 		d.downloadMgr.RehydrateLedger()
 	}
 
@@ -125,11 +142,17 @@ func New(cfg *config.Config) (*Daemon, error) {
 		}
 		d.ensureMountManager(gameID, gc)
 	}
+	d.svc.modDeps.resumeRecoveredLandings(recoveredLandings)
 
 	return d, nil
 }
 
-const shutdownTimeout = 30 * time.Second
+const (
+	shutdownBackgroundWait  = 3 * time.Second
+	ShutdownWatchdogTimeout = 45 * time.Second
+)
+
+var shutdownLaunchDeadline = 30 * time.Second
 
 // Run blocks until shutdown, then tears down all subsystems; stopIPC is invoked at the point the gRPC server must stop.
 func (d *Daemon) Run(stopIPC func()) error {
@@ -138,9 +161,7 @@ func (d *Daemon) Run(stopIPC func()) error {
 
 	<-d.shutdownCh
 
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	d.shutdownAll(ctx, stopIPC)
+	d.shutdownAll(stopIPC)
 	return nil
 }
 
@@ -179,20 +200,50 @@ func (d *Daemon) warmupAsync() {
 	d.mu.RUnlock()
 	for _, id := range gameIDs {
 		d.setReadinessStep("warming "+id, nil)
-		d.sweepOrphanStageDirs(id)
 		_ = d.installedArchiveMap(id)
 	}
 
 	d.setReadinessStep("ready", func(r *dto.ReadinessResult) { r.GamesWarmed = true })
-	select {
-	case d.statusCh <- dto.StatusEventResult{Info: "ready"}:
-	default:
+	d.publishGuarded(dto.StatusEventResult{Info: "ready"})
+}
+
+// shutdownAll refuses new work, halts the download queue, cancels loader operations and waits for them and for background installs within their bounds before abandoning them, waits for launched games until shutdownLaunchDeadline after it began, deactivates idle farms, then stops the IPC server, drops unleased preview extractions and closes the status stream.
+func (d *Daemon) shutdownAll(stopIPC func()) {
+	started := time.Now()
+	d.beginShutdown()
+	d.stopDownloadManager()
+	d.svc.modLoader.stopLoaderOps(d.svc.modLoader.opWaitTimeout)
+	if !d.background.stop(shutdownBackgroundWait) {
+		slog.Warn("background installs still running at shutdown; startup recovery resumes their dependency requests", "waited", shutdownBackgroundWait)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), started.Add(shutdownLaunchDeadline))
+	defer cancel()
+	d.waitForLaunchedExit(ctx)
+
+	d.deactivateIdleFarms()
+
+	if stopIPC != nil {
+		stopIPC()
+	}
+	d.previews.discardUnleased()
+
+	d.closeStatus()
+	<-d.ingesterDone
+	<-d.coalescerDone
+}
+
+// stopDownloadManager halts the download queue so no new download starts during shutdown; running downloads resume from the ledger at the next start.
+func (d *Daemon) stopDownloadManager() {
+	d.mu.RLock()
+	manager := d.downloadMgr
+	d.mu.RUnlock()
+	if manager != nil {
+		manager.Stop()
 	}
 }
 
-func (d *Daemon) shutdownAll(ctx context.Context, stopIPC func()) {
-	d.waitForLaunchedExit(ctx)
-
+// deactivateIdleFarms deactivates, under d.mu, every mounted farm and its root deployment that no launched game, tool or launch admission may still use.
+func (d *Daemon) deactivateIdleFarms() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -200,7 +251,7 @@ func (d *Daemon) shutdownAll(ctx context.Context, stopIPC func()) {
 		if !mm.IsMounted() {
 			continue
 		}
-		if d.mountBusy(gameID) {
+		if d.teardownBusyLocked(gameID) || d.sharedHeldLocked(gameID, dto.BusyOperationLaunch, dto.BusyOperationTool) {
 			slog.Warn("leaving VFS mounted on shutdown; a launch may still be using it — recovery will restore on next start",
 				"game", gameID)
 			continue
@@ -224,14 +275,6 @@ func (d *Daemon) shutdownAll(ctx context.Context, stopIPC func()) {
 			continue
 		}
 	}
-
-	if stopIPC != nil {
-		stopIPC()
-	}
-
-	close(d.statusCh)
-	<-d.ingesterDone
-	<-d.coalescerDone
 }
 
 // waitForLaunchedExit blocks until every registered Proton launch has exited or ctx is cancelled.

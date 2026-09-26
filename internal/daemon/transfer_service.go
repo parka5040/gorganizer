@@ -36,11 +36,19 @@ func (ts *TransferService) PreviewImport(gameID, archivePath string) (dto.Import
 	return transfer.Preview(gameID, archivePath)
 }
 
-// ImportInstance applies an archive under the collision policy, refusing overwrites of mounted state.
+// ImportInstance waits for startup recovery within ctx, then applies an archive under the collision policy, refusing overwrites of mounted state.
 func (ts *TransferService) ImportInstance(ctx context.Context, req dto.ImportRequest, emit func(dto.TransferProgress)) (dto.TransferSummary, error) {
+	if err := ts.s.awaitRecoveryCtx(ctx); err != nil {
+		return dto.TransferSummary{}, err
+	}
 	if err := ts.validGame(req.GameID); err != nil {
 		return dto.TransferSummary{}, err
 	}
+	release, err := ts.s.acquireShared(req.GameID, dto.BusyOperationImport)
+	if err != nil {
+		return dto.TransferSummary{}, err
+	}
+	defer release()
 	preview, err := transfer.Preview(req.GameID, req.ArchivePath)
 	if err != nil {
 		return dto.TransferSummary{}, err
@@ -57,6 +65,9 @@ func (ts *TransferService) ImportInstance(ctx context.Context, req dto.ImportReq
 		ProfileNames:       req.ProfileNames,
 		LockMod: func(name string) func() {
 			return ts.s.lockMods(req.GameID, name)
+		},
+		LockProfiles: func() func() {
+			return ts.s.lockProfiles(req.GameID)
 		},
 	}
 	summary, ierr := transfer.Import(ctx, opts, emit)

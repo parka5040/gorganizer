@@ -1,0 +1,53 @@
+[
+  {
+    "id": "Pathoschild.ContentPatcher",
+    "metadata": {
+      "id": [
+        "Pathoschild.ContentPatcher"
+      ],
+      "name": "Content Patcher",
+      "nexusID": 1915,
+      "curseForgeID": 309243,
+      "modDropID": 470174,
+      "gitHubRepo": "Pathoschild/StardewMods",
+      "main": {
+        "version": "2.9.1",
+        "url": "https://www.nexusmods.com/stardewvalley/mods/1915"
+      },
+      "compatibilityStatus": "Ok",
+      "compatibilitySummary": "use latest version."
+    },
+    "errors": []
+  },
+  {
+    "id": "spacechase0.SpaceCore",
+    "suggestedUpdate": {
+      "version": "1.28.4",
+      "url": "https://www.nexusmods.com/stardewvalley/mods/1348"
+    },
+    "metadata": {
+      "id": [
+        "spacechase0.SpaceCore"
+      ],
+      "name": "SpaceCore",
+      "nexusID": 1348,
+      "curseForgeID": 867152,
+      "modDropID": 136998,
+      "gitHubRepo": "spacechase0/StardewValleyMods",
+      "main": {
+        "version": "1.28.4",
+        "url": "https://www.nexusmods.com/stardewvalley/mods/1348"
+      },
+      "compatibilityStatus": "Ok",
+      "compatibilitySummary": "use latest version."
+    },
+    "errors": []
+  },
+  {
+    "id": "nonexistent.fake.mod",
+    "metadata": {
+      "id": []
+    },
+    "errors": []
+  }
+]

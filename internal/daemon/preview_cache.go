@@ -152,3 +152,21 @@ func (c *previewCache) sweep() {
 		os.RemoveAll(root)
 	}
 }
+
+// discardUnleased removes every cached extraction no install holds and marks the held ones for removal on their last release.
+func (c *previewCache) discardUnleased() {
+	c.mu.Lock()
+	var roots []string
+	for id, e := range c.entries {
+		if e.leases > 0 {
+			e.pendingEvict = true
+			continue
+		}
+		roots = append(roots, e.ExtractRoot)
+		delete(c.entries, id)
+	}
+	c.mu.Unlock()
+	for _, root := range roots {
+		os.RemoveAll(root)
+	}
+}

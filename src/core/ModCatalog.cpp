@@ -2,6 +2,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QSaveFile>
 #include <QTextStream>
 
 namespace gorganizer {
@@ -77,11 +78,13 @@ ModMetadata ModCatalog::readMetadata(const QString& yamlPath)
 void ModCatalog::patchMetadataField(const QString& yamlPath, const QString& key,
                                     const QString& value)
 {
-    QFile f(yamlPath);
-    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
-        return;
-    QString content = f.readAll();
-    f.close();
+    QString content;
+    {
+        QFile f(yamlPath);
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+            return;
+        content = f.readAll();
+    }
 
     QStringList lines = content.split('\n');
     QStringList kept;
@@ -112,10 +115,11 @@ void ModCatalog::patchMetadataField(const QString& yamlPath, const QString& key,
         else
             kept.append(newLine);
     }
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Text))
+    QSaveFile out(yamlPath);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Text))
         return;
-    f.write(kept.join('\n').toUtf8());
-    f.close();
+    out.write(kept.join('\n').toUtf8());
+    out.commit();
 }
 
 std::vector<ModMetadata> ModCatalog::scan(const QString& modsDir)

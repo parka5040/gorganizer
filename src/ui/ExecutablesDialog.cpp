@@ -1,5 +1,6 @@
 #include "ExecutablesDialog.h"
 #include "Dialogs.h"
+#include "InstallErrorText.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -19,7 +20,8 @@
 namespace gorganizer {
 
 ExecutablesDialog::ExecutablesDialog(GrpcClient* grpc, const QString& gameId,
-                                     const QString& profileName, QWidget* parent)
+                                     const QString& profileName, QWidget* parent,
+                                     bool lootAvailable)
     : QDialog(parent), m_grpc(grpc), m_gameId(gameId), m_profileName(profileName)
 {
     setWindowTitle("External Tools");
@@ -128,6 +130,12 @@ ExecutablesDialog::ExecutablesDialog(GrpcClient* grpc, const QString& gameId,
     formBtns->addWidget(m_removeBtn);
     formBtns->addWidget(m_saveBtn);
     rightCol->addLayout(formBtns);
+
+    if (!lootAvailable) {
+        installLootBtn->hide();
+        rollbackLootBtn->hide();
+        m_sortBtn->hide();
+    }
 
     auto* closeRow = new QHBoxLayout;
     closeRow->addStretch();
@@ -342,7 +350,7 @@ void ExecutablesDialog::onRun()
     bool ok = m_grpc->launchExecutable(m_gameId, m_editingId, m_profileName, pid, runId, err, false);
     m_runBtn->setEnabled(true);
     if (!ok) {
-        dialogs::warn(this, "Run tool", QString("Launch failed:\n\n%1").arg(err));
+        dialogs::plainWarn(this, "Run tool", QString("Launch failed:\n\n%1").arg(daemonErrorMessage(err)));
         return;
     }
     dialogs::info(this, "Run tool",
@@ -359,7 +367,8 @@ void ExecutablesDialog::onSortLOOT()
     const bool ok = m_grpc->launchExecutable(m_gameId, m_editingId, m_profileName,
                                               pid, runId, err, true);
     m_sortBtn->setEnabled(true);
-    if (!ok) dialogs::warn(this, "Sort with LOOT", QString("Launch failed:\n\n%1").arg(err));
+    if (!ok)
+        dialogs::plainWarn(this, "Sort with LOOT", QString("Launch failed:\n\n%1").arg(daemonErrorMessage(err)));
 }
 
 void ExecutablesDialog::onInstallLOOT()

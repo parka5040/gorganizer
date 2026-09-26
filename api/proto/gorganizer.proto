@@ -217,6 +217,50 @@ service Gorganizer {
   rpc ExportInstance(ExportInstanceRequest) returns (stream TransferEvent);
   rpc PreviewImport(PreviewImportRequest) returns (PreviewImportResponse);
   rpc ImportInstance(ImportInstanceRequest) returns (stream TransferEvent);
+
+  // --- Managed mod loader (SMAPI) ---
+  //
+  // GetModLoaderStatus inspects the game's loader install; check_latest also
+  // asks upstream for the newest stable release (network errors land in
+  // detail, never in the RPC error). InstallModLoader installs or updates to
+  // the latest verified release (repair_only reuses the active artifact
+  // without network access and never falls back to a download);
+  // UninstallModLoader restores the vanilla game;
+  // RollbackModLoader reinstalls the retained previous release. The three
+  // mutating RPCs hold the game's exclusive operation fence and are refused
+  // with modloader_busy:game=<id>:operation=<op>[:holder=<game>] while the
+  // game is mounted, running, or otherwise busy. Progress is reported on
+  // WatchStatus as "[smapi:<phase>] <detail>"; an admitted operation ends
+  // with a single "[smapi:done]" or "[smapi:failed]" line.
+  rpc GetModLoaderStatus(ModLoaderRequest) returns (ModLoaderStatus);
+  rpc InstallModLoader(ModLoaderRequest) returns (ModLoaderStatus);
+  rpc UninstallModLoader(ModLoaderRequest) returns (ModLoaderStatus);
+  rpc RollbackModLoader(ModLoaderRequest) returns (ModLoaderStatus);
+
+  // --- SMAPI mod dependencies ---
+  //
+  // GetModDependencyReport projects the profile's desired deployment (the
+  // game's own Mods folder, then the profile's enabled mods in modlist order,
+  // then Overwrite; folders reduced case-insensitively, last layer wins) and
+  // runs SMAPI's manifest and dependency checks over it. refresh_remote asks
+  // smapi.io for names, Nexus IDs and update suggestions (force_remote
+  // bypasses the metadata cache); a remote failure lands in remote_error and
+  // never fails the RPC. Games without a SMAPI-style loader are refused with
+  // mod_dependencies_unsupported:game=<id> (InvalidArgument).
+  //
+  // FetchModDependencies registers durable dependency requests for missing
+  // UniqueIDs (before any download is queued), queues the MAIN file for Nexus
+  // Premium accounts, or returns the Nexus files page to open otherwise. A
+  // matching download is installed when it lands (regardless of auto-install)
+  // and appended disabled; the daemon never enables it. The GUI enables the
+  // mods listed in ModDependencyReport.pending_enables through its normal
+  // GetModList + SetModList path, then calls AckDependencyEnable. Requests
+  // that failed or expired are listed in ModDependencyReport.recent_failures.
+  // Without a Nexus API key (or download manager) nothing is registered,
+  // because a browser download could never reach the daemon.
+  rpc GetModDependencyReport(ModDependencyReportRequest) returns (ModDependencyReport);
+  rpc FetchModDependencies(FetchModDependenciesRequest) returns (FetchModDependenciesResponse);
+  rpc AckDependencyEnable(AckDependencyEnableRequest) returns (AckDependencyEnableResponse);
 }
 
 // --- Game messages ---
@@ -238,6 +282,39 @@ message Game {
   // RunButtonWidget so the FNV row can be disabled while TTW is active
   // (and vice versa, for the same mutex group).
   bool vfs_active = 8;
+  // Daemon-derived feature set for this game (from internal/gamedef). Unset
+  // when talking to an older daemon; the GUI then shows every feature.
+  GameCapabilities capabilities = 9;
+}
+
+// ModLoaderKind names the managed mod loader a game uses. Values are frozen
+// (I-31) and mirrored by dto.ModLoaderKindResult.
+enum ModLoaderKind {
+  MOD_LOADER_KIND_NONE = 0;
+  MOD_LOADER_KIND_SMAPI = 1;
+}
+
+// InstallLayout names how archives are laid out into a mod folder. Values are
+// frozen (I-31) and mirrored by dto.InstallLayoutResult. UNSPECIFIED means the
+// daemon could not name the layout; the GUI must not treat it as DATA_ROOT.
+enum InstallLayout {
+  INSTALL_LAYOUT_UNSPECIFIED = 0;
+  INSTALL_LAYOUT_DATA_ROOT = 1;
+  INSTALL_LAYOUT_SMAPI_MANIFEST = 2;
+}
+
+// GameCapabilities tells the GUI which game-specific features apply.
+message GameCapabilities {
+  // The game has a plugin load order (esp/esm/esl).
+  bool plugins = 1;
+  // The game has managed INI files.
+  bool ini = 2;
+  // Managed LOOT can be installed for this game.
+  bool loot = 3;
+  ModLoaderKind mod_loader = 4;
+  InstallLayout install_layout = 5;
+  // Mods declare dependencies in their manifest (SMAPI manifest.json).
+  bool manifest_dependencies = 6;
 }
 
 message ListGamesRequest {}
@@ -726,7 +803,27 @@ message StreamInstallEventsRequest {
 message InstallEvent {
   oneof event {
     InstallProgress install_progress = 1;
+    // Refresh hint only (lossy): an install finished and its modlist
+    // registration succeeded (a new mod is appended disabled to every profile
+    // modlist; merge/replace installs update an existing mod). Clients reload
+    // authoritative state (GetModList, GetModDependencyReport) instead of
+    // trusting the event.
+    InstallCompleted install_completed = 2;
   }
+}
+
+// InstallCompleted is published after an install's modlist registration
+// succeeded, for GUI-started and daemon-started installs alike.
+message InstallCompleted {
+  string game_id = 1;
+  string mod_name = 2;
+  string archive_rel_path = 3;
+  // Set when the install satisfied a durable dependency request
+  // (FetchModDependencies); empty otherwise. When one install served several
+  // batches this is the first of batch_ids.
+  string batch_id = 4;
+  // Every dependency request batch the install satisfied (all profiles).
+  repeated string batch_ids = 5;
 }
 
 // --- Game launch messages ---
@@ -1383,4 +1480,237 @@ message TransferEvent {
     TransferProgress progress = 1;
     TransferSummary summary = 2;
   }
+}
+
+// --- Managed mod loader messages ---
+
+// ModLoaderState classifies a game's mod-loader install. Values are frozen
+// (I-31) and mirrored by dto.ModLoaderStateResult.
+enum ModLoaderState {
+  MOD_LOADER_STATE_UNSPECIFIED = 0;
+  MOD_LOADER_STATE_NOT_INSTALLED = 1;
+  MOD_LOADER_STATE_OK = 2;
+  // The game's launcher no longer starts the loader (typically after a Steam
+  // update or file verification); repair restores it.
+  MOD_LOADER_STATE_LAUNCHER_REVERTED = 3;
+  MOD_LOADER_STATE_INCOMPLETE = 4;
+  // The install is not the native Linux Steam build (e.g. Proton/Windows).
+  MOD_LOADER_STATE_UNSUPPORTED_BUILD = 5;
+  // A loader transaction was interrupted and must be recovered first.
+  MOD_LOADER_STATE_INTERRUPTED = 6;
+}
+
+message ModLoaderRequest {
+  string game_id = 1;
+  // GetModLoaderStatus only: also resolve the latest upstream release.
+  bool check_latest = 2;
+  // InstallModLoader only: reinstall the active artifact without downloading;
+  // fails with modloader_failed:reason=no_artifact when none is usable.
+  bool repair_only = 3;
+}
+
+message ModLoaderStatus {
+  string game_id = 1;
+  ModLoaderKind kind = 2;
+  ModLoaderState state = 3;
+  // The install matches gorganizer's committed install record.
+  bool managed = 4;
+  // Version from the install record (kept even when the files drifted).
+  string installed_version = 5;
+  // Retained artifact versions in the managed tools store.
+  string active_version = 6;
+  string previous_version = 7;
+  // Only set when check_latest was requested and the lookup succeeded.
+  string latest_version = 8;
+  bool update_available = 9;
+  // A mod-loader operation currently holds the game's exclusive fence.
+  bool busy = 10;
+  string detail = 11;
+}
+
+// --- SMAPI mod dependency messages ---
+
+// ModIssueKind classifies one problem SMAPI would report for a mod. Values
+// are frozen (I-31) and mapped explicitly from the daemon's analyzer kinds.
+enum ModIssueKind {
+  MOD_ISSUE_KIND_UNSPECIFIED = 0;
+  // A required dependency is not installed or not enabled anywhere.
+  MOD_ISSUE_KIND_MISSING = 1;
+  // A required dependency is installed but disabled (providers lists the
+  // disabled mods that would satisfy it once enabled).
+  MOD_ISSUE_KIND_DISABLED = 2;
+  MOD_ISSUE_KIND_VERSION_TOO_LOW = 3;
+  MOD_ISSUE_KIND_DUPLICATE_ID = 4;
+  MOD_ISSUE_KIND_INVALID_MANIFEST = 5;
+  MOD_ISSUE_KIND_NEEDS_NEWER_LOADER = 6;
+  MOD_ISSUE_KIND_NEEDS_NEWER_GAME = 7;
+  MOD_ISSUE_KIND_CIRCULAR = 8;
+  // Warning only: a shadowed provider of the same deployed folder carries a
+  // different UniqueID.
+  MOD_ISSUE_KIND_FOLDER_COLLISION = 9;
+  MOD_ISSUE_KIND_DEPENDENCY_FAILED = 10;
+}
+
+// ModComponentKind is the SMAPI manifest kind of a deployed mod folder.
+enum ModComponentKind {
+  MOD_COMPONENT_KIND_UNSPECIFIED = 0;
+  MOD_COMPONENT_KIND_CODE = 1;
+  MOD_COMPONENT_KIND_CONTENT_PACK = 2;
+  MOD_COMPONENT_KIND_INVALID = 3;
+}
+
+// FetchOutcome is what FetchModDependencies did for one requested UniqueID.
+enum FetchOutcome {
+  FETCH_OUTCOME_UNSPECIFIED = 0;
+  // The Nexus MAIN file was queued (Premium), or the request joined a
+  // download or install already in flight (reason in_flight / installing);
+  // download_id is set once known.
+  FETCH_OUTCOME_QUEUED = 1;
+  // Open url (the Nexus files page) and download with "Mod Manager
+  // Download"; with a Nexus API key configured the landing archive is
+  // installed automatically. Without a key (reason no_api_key) or download
+  // manager (downloads_unavailable) nothing is registered and the download
+  // must be installed manually.
+  FETCH_OUTCOME_OPEN_URL = 2;
+  // No download source is known; reason explains why.
+  FETCH_OUTCOME_UNRESOLVED = 3;
+  // The ID is not missing (already provided, or installed but disabled).
+  FETCH_OUTCOME_ALREADY_PRESENT = 4;
+}
+
+message ModIssue {
+  ModIssueKind kind = 1;
+  string target_id = 2;
+  string required_version = 3;
+  string found_version = 4;
+  repeated string providers = 5;
+  string detail = 6;
+}
+
+message ModComponent {
+  // Deployed folder under Mods/ (slash-separated).
+  string folder = 1;
+  // Mod providing the winning manifest; "" = the game's own Mods folder.
+  string provider_mod = 2;
+  string unique_id = 3;
+  string name = 4;
+  string version = 5;
+  ModComponentKind kind = 6;
+  // Installed by the mod loader itself (e.g. SMAPI.ConsoleCommands).
+  bool bundled = 7;
+  // SMAPI would skip this mod.
+  bool failed = 8;
+  repeated ModIssue issues = 9;
+  // smapi.io update suggestion newer than version, when known.
+  string update_version = 10;
+  string update_url = 11;
+  int32 nexus_id = 12;
+  // The remote metadata came from an expired cache entry.
+  bool update_stale = 13;
+}
+
+message MissingDependency {
+  string unique_id = 1;
+  string minimum_version = 2;
+  repeated string required_by = 3;
+  repeated string disabled_providers = 4;
+  // smapi.io metadata, when known.
+  string name = 5;
+  int32 nexus_id = 6;
+  string url = 7;
+  // A Nexus mod page is known, so FetchModDependencies can act on it.
+  bool resolvable = 8;
+  bool stale = 9;
+}
+
+// DependencyRequestIssue is a FetchModDependencies request of this profile
+// that failed or expired within the last seven days.
+message DependencyRequestIssue {
+  string unique_id = 1;
+  string batch_id = 2;
+  // "failed" or "expired".
+  string state = 3;
+  // Machine-readable code, optionally followed by ": " and a human detail:
+  // archive_mismatch, download_failed, download_lost, install_failed,
+  // install_interrupted (failed); the browser-fallback reason (expired).
+  string detail = 4;
+  // RFC3339 UTC time of the last state change.
+  string updated_at = 5;
+}
+
+// PendingEnable is a dependency mod the daemon installed (and appended
+// disabled) for a FetchModDependencies batch of this profile.
+message PendingEnable {
+  string batch_id = 1;
+  string profile_name = 2;
+  string mod_name = 3;
+  string unique_id = 4;
+}
+
+message ModDependencyReportRequest {
+  string game_id = 1;
+  string profile_name = 2;
+  bool refresh_remote = 3;
+  bool force_remote = 4;
+}
+
+message ModDependencyReport {
+  string game_id = 1;
+  string profile_name = 2;
+  repeated ModComponent components = 3;
+  repeated MissingDependency missing = 4;
+  repeated PendingEnable pending_enables = 5;
+  // Mods with a manifest.json directly in their root: not deployable
+  // ("manifest.json at mod root; reinstall").
+  repeated string root_manifest_mods = 6;
+  // A smapi.io lookup ran and succeeded for this report.
+  bool remote_checked = 7;
+  string remote_error = 8;
+  string loader_version = 9;
+  string game_version = 10;
+  // Failed or expired dependency requests of this profile from the last
+  // seven days, newest first (capped).
+  repeated DependencyRequestIssue recent_failures = 11;
+}
+
+message FetchModDependenciesRequest {
+  string game_id = 1;
+  string profile_name = 2;
+  repeated string unique_ids = 3;
+}
+
+message DependencyFetchResult {
+  string unique_id = 1;
+  FetchOutcome outcome = 2;
+  string download_id = 3;
+  string url = 4;
+  // Machine-readable code, optionally followed by ": " and a human detail:
+  // provided, disabled, pending_enable (ALREADY_PRESENT; pending_enable names
+  // an installed dependency awaiting the GUI's enable); in_flight, installing
+  // (QUEUED); not_missing, no_nexus_page, lookup_failed, bundled (UNRESOLVED;
+  // bundled = shipped with the mod loader, repair the loader instead);
+  // no_api_key, downloads_unavailable, premium_check_failed, not_premium,
+  // file_list_failed, ambiguous_main_file, no_main_file,
+  // premium_file_mismatch, queue_failed (OPEN_URL).
+  string reason = 5;
+  // Durable request batch the entry belongs to (QUEUED, OPEN_URL except
+  // no_api_key / downloads_unavailable, and ALREADY_PRESENT with reason
+  // pending_enable).
+  string batch_id = 6;
+}
+
+message FetchModDependenciesResponse {
+  repeated DependencyFetchResult results = 1;
+}
+
+message AckDependencyEnableRequest {
+  string game_id = 1;
+  string batch_id = 2;
+  // Empty = every pending enable of the batch.
+  repeated string unique_ids = 3;
+}
+
+message AckDependencyEnableResponse {
+  // Number of pending enables marked done by this call.
+  int32 acknowledged = 1;
 }

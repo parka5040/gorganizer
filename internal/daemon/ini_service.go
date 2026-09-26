@@ -72,15 +72,24 @@ func (in *IniService) SetProfileIniEnabled(gameID, profileName string, enabled b
 	if _, ok := in.s.config.Games[gameID]; !ok {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
+	if err := in.saveCustomIniFlag(gameID, profileName, enabled); err != nil {
+		return nil, err
+	}
+	return in.GetProfileIniStatus(gameID, profileName)
+}
+
+// saveCustomIniFlag rewrites a profile's custom-INI flag under the game's profile lock.
+func (in *IniService) saveCustomIniFlag(gameID, profileName string, enabled bool) error {
+	defer in.s.lockProfiles(gameID)()
 	p, entries, err := in.s.profileMgr.Load(gameID, profileName)
 	if err != nil {
-		return nil, fmt.Errorf("loading profile: %w", err)
+		return fmt.Errorf("loading profile: %w", err)
 	}
 	p.UseCustomIni = enabled
 	if err := in.s.profileMgr.Save(p, entries); err != nil {
-		return nil, fmt.Errorf("saving profile: %w", err)
+		return fmt.Errorf("saving profile: %w", err)
 	}
-	return in.GetProfileIniStatus(gameID, profileName)
+	return nil
 }
 
 // ListIniTweaks returns the named INI presets for the game paired with their applied state.
