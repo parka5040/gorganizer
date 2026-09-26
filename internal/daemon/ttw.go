@@ -251,7 +251,10 @@ func (tt *TTWService) CheckTTWPrereqsInternal(backend TTWBackend) (TTWPrereqStat
 		st.DiskSpaceRequired = minTTWFreeBytes
 	}
 
-	if mm, ok := tt.s.mountMgrs["falloutnv"]; ok {
+	tt.s.mu.RLock()
+	mm, ok := tt.s.mountMgrs["falloutnv"]
+	tt.s.mu.RUnlock()
+	if ok {
 		st.FNVVanilla = !mm.IsMounted()
 	} else {
 		st.FNVVanilla = true
@@ -508,7 +511,9 @@ func (tt *TTWService) checkTTWDiskBytes() (int64, error) {
 
 // CheckFNVNotMounted returns an error while FNV's VFS is active, blocking TTW installer launches.
 func (tt *TTWService) CheckFNVNotMounted() error {
+	tt.s.mu.RLock()
 	mm, ok := tt.s.mountMgrs["falloutnv"]
+	tt.s.mu.RUnlock()
 	if !ok {
 		return nil
 	}
@@ -854,7 +859,7 @@ func (tt *TTWService) launchWineTTW(
 	rwPaths := []string{dest, fnv.InstallPath, fo3.InstallPath}
 	ext, err := tt.s.toolMgr.LaunchExternal(
 		"falloutnv", &fnv, info.InstallerExe,
-		nil, nil, tt.s.config.PreferredProton, true, rwPaths,
+		nil, nil, tt.s.preferredProton(), true, rwPaths,
 	)
 	if err != nil {
 		return nil, err
@@ -1265,7 +1270,7 @@ func (tt *TTWService) BootstrapFNVPrefix() error {
 	cmd := filepath.Join(prefixPath, "drive_c", "windows", "system32", "cmd.exe")
 	ext, err := tt.s.toolMgr.LaunchExternal(
 		"falloutnv", &fnv, cmd, []string{"/c", "exit"},
-		nil, tt.s.config.PreferredProton, true, []string{prefixPath},
+		nil, tt.s.preferredProton(), true, []string{prefixPath},
 	)
 	if err != nil {
 		var prefixMissing *tools.ErrPrefixMissing

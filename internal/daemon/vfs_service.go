@@ -520,7 +520,7 @@ func (s *session) applyRootDeployment(gameID string, gc config.GameConfig, profi
 }
 
 func (vs *VFSService) GetConflicts(gameID, profileName string) ([]dto.FileConflictResult, error) {
-	gc, ok := vs.s.config.Games[gameID]
+	gc, ok := vs.s.gameConfigSnapshot(gameID)
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}

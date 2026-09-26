@@ -250,7 +250,7 @@ func (s *session) rootDeploymentInUse(gameIDs []string) bool {
 	return false
 }
 
-// recoveryPendingFor returns the pending recovery record for gameID, or nil.
+// recoveryPendingFor returns the pending recovery record for gameID, or nil; the caller holds s.mu for reading or writing.
 func (s *session) recoveryPendingFor(gameID string) *dto.RecoveryPendingResult {
 	s.pendingRecoveriesMu.Lock()
 	if pending := s.loaderPendingRecoveries[gameID]; pending != nil {
@@ -275,7 +275,7 @@ func (s *session) recoveryPendingFor(gameID string) *dto.RecoveryPendingResult {
 	return s.pendingRecoveries[resolved]
 }
 
-// findMutexConflict returns the gameID of the currently-mounted sibling in gameID's mutex group, or "".
+// findMutexConflict returns the gameID of the currently-mounted sibling in gameID's mutex group, or ""; the caller holds s.mu for reading or writing.
 func (s *session) findMutexConflict(gameID string) string {
 	group := mutexGroupOf(gameID)
 	if group == "" {

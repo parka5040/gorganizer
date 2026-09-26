@@ -526,7 +526,7 @@ func (md *ModService) RegisterManualInstall(gameID, modName, archiveRelPath stri
 
 // manualInstallDir validates a manual-install registration request and returns the existing mod folder.
 func (md *ModService) manualInstallDir(gameID, modName string) (string, error) {
-	if _, ok := md.s.config.Games[gameID]; !ok {
+	if !md.s.gameConfigured(gameID) {
 		return "", fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	if modName == "" {
@@ -583,7 +583,7 @@ func (md *ModService) registerModFolder(gameID, modName, modDir, archiveRelPath 
 }
 
 func (md *ModService) ListOverwriteFiles(gameID string) ([]dto.OverwriteEntryResult, string, error) {
-	if _, ok := md.s.config.Games[gameID]; !ok {
+	if !md.s.gameConfigured(gameID) {
 		return nil, "", fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	owDir := filepath.Join(config.ModsDir(gameID), profile.OverwriteModName)
@@ -620,7 +620,7 @@ func (md *ModService) ListOverwriteFiles(gameID string) ([]dto.OverwriteEntryRes
 
 // ExtractOverwriteToMod graduates a subset of loose files from Overwrite.
 func (md *ModService) ExtractOverwriteToMod(gameID, modName string, files []string, keep bool) (int, error) {
-	if _, ok := md.s.config.Games[gameID]; !ok {
+	if !md.s.gameConfigured(gameID) {
 		return 0, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	if modName == "" {

@@ -46,7 +46,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 		mountMgrs:               make(map[string]*vfs.MountManager),
 		rootDeployMgrs:          make(map[string]*vfs.RootDeploymentManager),
 		mountStates:             make(map[string]mountState),
-		toolMgr:                 tools.NewManager(cfg),
+		toolMgr:                 tools.NewManager(),
 		lootInstaller:           tools.NewLOOTInstaller(config.ToolsDir(), nil),
 		statusCh:                make(chan dto.StatusEventResult, 64),
 		statusDone:              make(chan struct{}),
@@ -130,10 +130,11 @@ func New(cfg *config.Config) (*Daemon, error) {
 
 	if cfg.NexusAPIKey != "" {
 		nexus := download.NewNexusClient(cfg.NexusAPIKey)
-		d.downloadMgr = download.NewManager(nexus, cfg, 3, d.managerHooks())
-		d.downloadMgr.RehydrateLedger()
+		d.downloadMgr = download.NewManager(nexus, 3, d.managerHooks())
+		d.downloadMgr.RehydrateLedger(gameIDs)
 	}
 
+	d.mu.Lock()
 	for gameID := range cfg.Games {
 		gc, err := cfg.EffectiveGameConfig(gameID)
 		if err != nil {
@@ -142,6 +143,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 		}
 		d.ensureMountManager(gameID, gc)
 	}
+	d.mu.Unlock()
 	d.svc.modDeps.resumeRecoveredLandings(recoveredLandings)
 
 	return d, nil

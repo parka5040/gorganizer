@@ -79,9 +79,7 @@ func cloneStringMap(in map[string]string) map[string]string {
 
 // ListExecutables returns the registered executables for a game.
 func (es *ExecutableService) ListExecutables(gameID string) ([]dto.ExecutableSpec, error) {
-	es.s.mu.RLock()
-	gc, ok := es.s.config.Games[gameID]
-	es.s.mu.RUnlock()
+	gc, ok := es.s.gameConfigSnapshot(gameID)
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
@@ -305,9 +303,7 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 	}
 	defer releaseFence()
 
-	es.s.mu.RLock()
-	gc, ok := es.s.config.Games[gameID]
-	es.s.mu.RUnlock()
+	gc, ok := es.s.gameConfigSnapshot(gameID)
 	if !ok {
 		return 0, "", fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
@@ -334,7 +330,7 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 
 	eff := gc
 	if gc.LinkedFromGameID != "" {
-		e2, err := es.s.config.EffectiveGameConfig(gameID)
+		e2, err := es.s.effectiveGameConfigSnapshot(gameID)
 		if err != nil {
 			return 0, "", err
 		}
@@ -367,7 +363,9 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 		}
 	}
 
+	es.s.mu.Lock()
 	mm := es.s.ensureMountManager(gameID, eff)
+	es.s.mu.Unlock()
 	if outputPolicy == tools.OutputExclusiveSourceEdit && mm.IsMounted() {
 		return 0, "", errors.New("exclusive source-edit tools require the game VFS to be unmounted")
 	}
@@ -603,7 +601,7 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 	default:
 		handle, err = es.s.toolMgr.LaunchExternalWithOptions(tools.ExternalLaunchOpts{
 			PrefixGameID: gameID, GameCfg: &eff, ExePath: expand(resolvedExePath), Args: args,
-			ExtraEnv: extraEnv, PreferredProton: es.s.config.PreferredProton,
+			ExtraEnv: extraEnv, PreferredProton: es.s.preferredProton(),
 			SanitizeEnv: exe.SanitizeEnv, RWPaths: rwPaths, WorkingDir: workDir,
 			PrefixAppID: exe.PrefixAppID, ROPaths: roPaths, PrefixReserved: prefixReserved,
 		})

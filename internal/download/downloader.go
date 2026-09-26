@@ -51,7 +51,6 @@ type Download struct {
 type Manager struct {
 	nexus      URLResolver
 	httpClient *http.Client
-	config     *config.Config
 	mu         sync.RWMutex
 	active     map[string]*Download
 	queued     []*Download
@@ -81,14 +80,13 @@ type DownloadSnapshot struct {
 }
 
 // NewManager creates a download Manager; caller must Stop() on shutdown.
-func NewManager(nexus URLResolver, cfg *config.Config, maxConcurrent int, hooks ManagerHooks) *Manager {
+func NewManager(nexus URLResolver, maxConcurrent int, hooks ManagerHooks) *Manager {
 	if maxConcurrent < 1 {
 		maxConcurrent = 3
 	}
 	m := &Manager{
 		nexus:      nexus,
 		httpClient: httpx.DownloadClient(),
-		config:     cfg,
 		active:     make(map[string]*Download),
 		hooks:      hooks,
 		maxConcur:  maxConcurrent,
@@ -165,7 +163,7 @@ func (m *Manager) StartDownloadForGame(uri, overrideGameID string) (id string, q
 }
 
 // RetryDownload restarts a failed/cancelled download, resuming from .part if present.
-func (m *Manager) RetryDownload(id string) (queuedAhead int, err error) {
+func (m *Manager) RetryDownload(id string, gameIDs []string) (queuedAhead int, err error) {
 	m.mu.Lock()
 	if dl, ok := m.active[id]; ok {
 		_ = dl
@@ -180,7 +178,7 @@ func (m *Manager) RetryDownload(id string) (queuedAhead int, err error) {
 	}
 	m.mu.Unlock()
 
-	for gameID := range m.config.Games {
+	for _, gameID := range gameIDs {
 		entries, err := LoadLedger(gameID)
 		if err != nil {
 			continue
@@ -228,7 +226,7 @@ func (m *Manager) RetryDownload(id string) (queuedAhead int, err error) {
 }
 
 // CancelDownload aborts an active download or de-queues a pending one.
-func (m *Manager) CancelDownload(id string) error {
+func (m *Manager) CancelDownload(id string, gameIDs []string) error {
 	m.mu.Lock()
 	if dl, ok := m.active[id]; ok {
 		if dl.cancel != nil {
@@ -256,7 +254,7 @@ func (m *Manager) CancelDownload(id string) error {
 	}
 	m.mu.Unlock()
 
-	for gameID := range m.config.Games {
+	for _, gameID := range gameIDs {
 		entries, _ := LoadLedger(gameID)
 		for _, e := range entries {
 			if e.ID == id {
@@ -320,8 +318,8 @@ func (m *Manager) ActiveDownloadIDByNXM(uri string) string {
 }
 
 // RehydrateLedger re-enqueues non-terminal ledger entries on daemon startup.
-func (m *Manager) RehydrateLedger() {
-	for gameID := range m.config.Games {
+func (m *Manager) RehydrateLedger(gameIDs []string) {
+	for _, gameID := range gameIDs {
 		entries, err := LoadLedger(gameID)
 		if err != nil {
 			slog.Warn("could not load ledger", "game", gameID, "err", err)

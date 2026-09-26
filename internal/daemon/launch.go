@@ -134,7 +134,8 @@ func (ls *LaunchService) LaunchGame(gameID string, useTool bool, profileName str
 		} else if verr != nil {
 			slog.Warn("could not verify script extender manifest", "err", verr)
 		}
-		handle, err := ls.s.toolMgr.LaunchGame(gameID, true, &gc, ls.s.config.PreferredProton)
+		preferred := ls.s.preferredProton()
+		handle, err := ls.s.toolMgr.LaunchGame(gameID, true, &gc, preferred)
 		if err != nil {
 			return 0, fmt.Errorf("launching via script extender: %w", err)
 		}
@@ -209,7 +210,7 @@ func (ls *LaunchService) admitLaunch(gameID string) (config.GameConfig, *vfs.Mou
 		}
 		gc = eff
 	}
-	return gc, ls.s.ensureMountManager(gameID, gc), release, nil
+	return cloneGameConfig(gc), ls.s.ensureMountManager(gameID, gc), release, nil
 }
 
 // refuseDirtyRunningFarm returns a GameRunningError while a tracked launch or tool, a game process, or a fresh Steam launch may still read gameID's farm, so pending changes are never skipped silently before a launch.
@@ -298,11 +299,13 @@ func (ls *LaunchService) writePluginsTxt(gameID string, gc config.GameConfig, pr
 
 // GetPreferredProton returns the global Proton preference or "" for auto-pick.
 func (ls *LaunchService) GetPreferredProton() (string, error) {
-	return ls.s.config.PreferredProton, nil
+	return ls.s.preferredProton(), nil
 }
 
 // SetPreferredProton stores a global Proton path override; empty clears it.
 func (ls *LaunchService) SetPreferredProton(path string) error {
+	ls.s.mu.Lock()
+	defer ls.s.mu.Unlock()
 	ls.s.config.PreferredProton = path
 	return ls.s.config.Save()
 }

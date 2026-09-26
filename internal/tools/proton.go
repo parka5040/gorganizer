@@ -27,12 +27,11 @@ type ProtonVersion struct {
 const loaderExeSizeCap = 500 * 1024
 
 type Manager struct {
-	config      *config.Config
 	prefixLocks sync.Map
 }
 
-func NewManager(cfg *config.Config) *Manager {
-	return &Manager{config: cfg}
+func NewManager() *Manager {
+	return &Manager{}
 }
 
 // DetectProton scans steamapps/common/Proton*/proton for available versions.
