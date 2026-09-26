@@ -114,7 +114,7 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 	if err != nil {
 		return outcome, fmt.Errorf("resolving %q: %w", dataPath, err)
 	}
-	backupPath := resolved + ".orig"
+	backupPath := resolved + farmBackupSuffix
 
 	mount, err := DetectFuseMount(resolved)
 	if err != nil {
@@ -269,7 +269,7 @@ func RestoreFromBackup(dataPath string) error {
 	if err != nil {
 		return fmt.Errorf("resolving %q: %w", dataPath, err)
 	}
-	backupPath := resolved + ".orig"
+	backupPath := resolved + farmBackupSuffix
 	if _, err := os.Stat(backupPath); err != nil {
 		return fmt.Errorf("RestoreFromBackup: no backup at %s: %w", backupPath, err)
 	}

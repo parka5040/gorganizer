@@ -11,6 +11,7 @@ type GameDefinition struct {
 	ParentGameID      string
 	Requires          []string
 	NxmSlug           string
+	DataDirOptional   bool
 }
 
 // NxmSlugForID returns the Nexus slug for a game id, or "".

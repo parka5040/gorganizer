@@ -78,7 +78,11 @@ public:
     // Auto-swap unmounts the conflicting game in the same mutex group (FNV/TTW).
     void mountVfsWithSwap(const QString& gameId, const QString& profileName);
     void unmountVfs(const QString& gameId);
+    // Queues a maintenance unmount with the long mount deadline on the unary worker and returns the id maintenanceUnmountFinished carries.
+    quint64 unmountVfsForMaintenance(const QString& gameId);
     void getVfsStatus(const QString& gameId);
+    // Queues a VFS status query on the unary worker and returns the id vfsStatusQueried or vfsStatusQueryFailed carries.
+    quint64 queryVfsStatus(const QString& gameId);
     void rebuildVfs(const QString& gameId);
     // Destructive recovery; only call after user confirms via recovery-pending modal.
     void restoreFromBackup(const QString& gameId);
@@ -145,13 +149,14 @@ public:
     bool previewInstall(const QString& gameId, const QString& archiveRelPath,
                         GrpcPreviewInstallResult& out, QString& errorOut);
     bool discardPreview(const QString& previewId, QString& errorOut);
-    void startInstall(const QString& gameId, const QString& archiveRelPath,
-                      GrpcInstallMode mode, const QString& targetMod,
-                      const QString& previewId,
-                      const std::vector<GrpcFomodFile>& fomodSelectedFiles);
-    // Drag-drop entry: installs from an archive not in the Downloads index.
-    void startInstallExternal(const QString& gameId, const QString& externalArchivePath,
-                              GrpcInstallMode mode, const QString& targetMod);
+    // Queues an install on the install RPC worker and returns the id its installRequest* signals carry.
+    quint64 startInstall(const QString& gameId, const QString& archiveRelPath,
+                         GrpcInstallMode mode, const QString& targetMod,
+                         const QString& previewId,
+                         const std::vector<GrpcFomodFile>& fomodSelectedFiles);
+    // Queues an install from an archive outside the Downloads index and returns its request id.
+    quint64 startInstallExternal(const QString& gameId, const QString& externalArchivePath,
+                                 GrpcInstallMode mode, const QString& targetMod);
     // Synchronous StartInstall for modal flows.
     bool startInstallSync(const QString& gameId, const QString& archiveRelPath,
                           const QString& externalArchivePath,
@@ -174,6 +179,30 @@ public:
     // Cancels the in-flight export/import stream; the transfer then reports transferFailed.
     void cancelTransfer();
     bool transferActive() const { return m_transferActive; }
+
+    // Queues a mod-loader status query and returns the id its modLoaderStatus* signals carry; latest-release checks run on the mod-loader status worker, others on the unary worker.
+    quint64 getModLoaderStatus(const QString& gameId, bool checkLatest);
+    // Queues a mod-loader status query without a latest-release check on the mod-loader status worker and returns the id its modLoaderStatus* signals carry.
+    quint64 pollModLoaderStatus(const QString& gameId);
+    // Queues a mod-loader install, or a repair from the retained release, and returns the id modLoaderOperationFinished carries.
+    quint64 installModLoader(const QString& gameId, bool repairOnly);
+    // Queues a mod-loader uninstall and returns the id modLoaderOperationFinished carries.
+    quint64 uninstallModLoader(const QString& gameId);
+    // Queues a rollback to the retained previous mod-loader release and returns the id modLoaderOperationFinished carries.
+    quint64 rollbackModLoader(const QString& gameId);
+
+    // Queues GetModList on the unary worker and returns the id its modListRequest* signals carry.
+    quint64 getModListTracked(const QString& gameId, const QString& profileName);
+    // Queues SetModList on the unary worker behind earlier mod-list saves and returns the id its modListSave* signals carry, reporting failures only through modListSaveFailed.
+    quint64 setModListTracked(const QString& gameId, const QString& profileName,
+                              const std::vector<GrpcModListEntry>& entries);
+    // Queues a SMAPI dependency report, on the dependency worker when smapi.io is consulted, and returns the id its modDependencyReport* signals carry.
+    quint64 getModDependencyReport(const QString& gameId, const QString& profileName,
+                                   bool refreshRemote, bool forceRemote);
+    // Queues a dependency fetch on the dependency worker and returns the id modDependenciesFetched or modDependencyFetchFailed carries.
+    quint64 fetchModDependencies(const QString& gameId, const QString& profileName, const QStringList& uniqueIds);
+    // Queues a pending-enable acknowledgement on the unary worker and returns the id its dependencyEnableAck* signals carry.
+    quint64 ackDependencyEnable(const QString& gameId, const QString& batchId, const QStringList& uniqueIds);
 
     bool getGameSettings(const QString& gameId, GrpcGameSettings& settingsOut, QString& errorOut);
     bool setGameSettings(const QString& gameId, bool autoInstall, GrpcGameSettings& settingsOut, QString& errorOut);
@@ -221,6 +250,8 @@ public:
 signals:
     void connected();
     void disconnected();
+    // Reports that disconnectFromDaemon stopped every worker, so no queued request will be answered any more.
+    void workersStopped();
     void connectionError(const QString& error);
 
     void gamesListed(const std::vector<GrpcGame>& games);
@@ -240,6 +271,9 @@ signals:
     void vfsMounted(const GrpcVFSStatus& status);
     void vfsUnmounted();
     void vfsStatusReceived(const GrpcVFSStatus& status);
+    void vfsStatusQueried(quint64 requestId, const GrpcVFSStatus& status);
+    void vfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void maintenanceUnmountFinished(quint64 requestId, const QString& gameId, bool ok, int grpcCode, const QString& error);
     void vfsRebuilt();
 
     void conflictsReceived(const std::vector<GrpcFileConflict>& conflicts);
@@ -247,9 +281,8 @@ signals:
     void gameLaunched(int pid);
     void gameLaunchFailed(const QString& error);
 
-    void installStarted(const QString& installId);
-    void installCompleted(const QString& modFolder, int fileCount);
-    void installFailed(const QString& error);
+    void installRequestCompleted(quint64 requestId, const QString& modFolder, int fileCount);
+    void installRequestFailed(quint64 requestId, const QString& error);
 
     void downloadStarted(const QString& downloadId, int queuedAhead);
     void downloadCancelled(const QString& downloadId);
@@ -275,6 +308,32 @@ signals:
     void transferCompleted(const GrpcTransferSummary& summary);
     void transferFailed(const QString& error);
 
+    void modLoaderStatusReceived(quint64 requestId, const QString& gameId, const GrpcModLoaderStatus& status);
+    void modLoaderStatusFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void modLoaderOperationFinished(quint64 requestId, const QString& gameId, const QString& operation,
+                                    bool ok, int grpcCode, const GrpcModLoaderStatus& status, const QString& error);
+
+    void modListRequestReceived(quint64 requestId, const QString& gameId, const QString& profileName,
+                                const std::vector<GrpcModListEntry>& entries);
+    void modListRequestFailed(quint64 requestId, const QString& gameId, const QString& profileName,
+                              const QString& error);
+    void modListSaved(quint64 requestId, const QString& gameId, const QString& profileName);
+    void modListSaveFailed(quint64 requestId, const QString& gameId, const QString& profileName,
+                           const QString& error);
+    void modDependencyReportReceived(quint64 requestId, const GrpcModDependencyReport& report);
+    void modDependencyReportFailed(quint64 requestId, const QString& gameId, const QString& profileName,
+                                   const QString& error);
+    void modDependenciesFetched(quint64 requestId, const QString& gameId, const QString& profileName,
+                                const std::vector<GrpcDependencyFetchResult>& results);
+    void modDependencyFetchFailed(quint64 requestId, const QString& gameId, const QString& profileName,
+                                  const QString& error);
+    void dependencyEnableAcknowledged(quint64 requestId, const QString& gameId, const QString& batchId,
+                                      int acknowledged);
+    void dependencyEnableAckFailed(quint64 requestId, const QString& gameId, const QString& batchId,
+                                   const QString& error);
+    // Reports that a mod finished installing for the subscribed game, as a refresh hint.
+    void installCompletedHintReceived(const GrpcInstallCompleted& event);
+
     void rpcError(const QString& method, const QString& error);
 
 private slots:
@@ -294,6 +353,10 @@ private:
         RoleInstall,
         RolePluginStatus,
         RoleTransfer,
+        RoleInstallRpc,
+        RoleDependencyRpc,
+        RoleModLoaderRpc,
+        RoleModLoaderStatus,
         RoleCount,
     };
 
@@ -306,10 +369,19 @@ private:
         {nullptr, nullptr, "install-stream"},
         {nullptr, nullptr, "plugin-status-stream"},
         {nullptr, nullptr, "transfer-stream"},
+        {nullptr, nullptr, "install-rpc"},
+        {nullptr, nullptr, "dependency-rpc"},
+        {nullptr, nullptr, "modloader-rpc"},
+        {nullptr, nullptr, "modloader-status"},
     }};
     QTimer* m_connectionTimer = nullptr;
     bool m_connected = false;
     bool m_transferActive = false;
+    quint64 m_nextInstallRequestId = 0;
+    quint64 m_nextModLoaderRequestId = 0;
+    quint64 m_nextModListRequestId = 0;
+    quint64 m_nextDependencyRequestId = 0;
+    quint64 m_nextVfsRequestId = 0;
     QString m_subscribedGame;
 
     GrpcWorker* unaryWorker() const { return m_workers[RoleUnary].worker; }
@@ -318,9 +390,22 @@ private:
     GrpcWorker* installWorker() const { return m_workers[RoleInstall].worker; }
     GrpcWorker* pluginStatusWorker() const { return m_workers[RolePluginStatus].worker; }
     GrpcWorker* transferWorker() const { return m_workers[RoleTransfer].worker; }
+    GrpcWorker* installRpcWorker() const { return m_workers[RoleInstallRpc].worker; }
+    GrpcWorker* dependencyRpcWorker() const { return m_workers[RoleDependencyRpc].worker; }
+    GrpcWorker* modLoaderRpcWorker() const { return m_workers[RoleModLoaderRpc].worker; }
+    GrpcWorker* modLoaderStatusWorker() const { return m_workers[RoleModLoaderStatus].worker; }
 
     std::string socketTarget() const;
     void connectWorkerSignals(GrpcWorker* worker);
+    quint64 postInstall(const QString& gameId, const QString& archiveRelPath,
+                        const QString& externalArchivePath, GrpcInstallMode mode,
+                        const QString& targetMod, const QString& previewId,
+                        const std::vector<GrpcFomodFile>& fomodSelectedFiles);
+
+    template <typename Method, typename... Args>
+    quint64 postModLoaderOperation(const QString& gameId, const QString& operation, Method method, Args... args);
+    // Assigns a request id and queues a mod-loader status query on worker, failing asynchronously when there is none.
+    quint64 postModLoaderStatus(GrpcWorker* worker, const QString& gameId, bool checkLatest);
 
     template <typename Method, typename... Args>
     void postTo(GrpcWorker* worker, Method method, Args... args);

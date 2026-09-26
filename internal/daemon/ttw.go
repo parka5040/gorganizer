@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/dto"
 	"github.com/parka/gorganizer/internal/game"
@@ -645,8 +646,11 @@ func (tt *TTWService) CreateBlankTTWMod(modName string) (string, error) {
 	return dest, nil
 }
 
-// LaunchTTWInstallerInternal dispatches to the backend-specific runner.
+// LaunchTTWInstallerInternal dispatches to the backend-specific runner, refusing once shutdown began.
 func (tt *TTWService) LaunchTTWInstallerInternal(info TTWInstallerInfo, dataModName string) (*TTWInstallHandle, error) {
+	if err := tt.s.refuseWhenShuttingDown("ttw_install"); err != nil {
+		return nil, err
+	}
 	if err := tt.CheckFNVNotMounted(); err != nil {
 		return nil, err
 	}
@@ -917,10 +921,7 @@ func (tt *TTWService) streamTTWPipes(id string, stdout, stderr io.Reader) {
 			}
 			lastLine = line
 			lastEmit = now
-			select {
-			case tt.s.statusCh <- dto.StatusEventResult{Info: fmt.Sprintf("[%s:%s] %s", id, stream, line)}:
-			default:
-			}
+			tt.s.publishGuarded(dto.StatusEventResult{Info: fmt.Sprintf("[%s:%s] %s", id, stream, line)})
 		}
 		for {
 			n, err := r.Read(buf)
@@ -948,11 +949,7 @@ func (tt *TTWService) streamTTWPipes(id string, stdout, stderr io.Reader) {
 }
 
 func (tt *TTWService) emitTTWInfo(id, kind, msg string) {
-	line := fmt.Sprintf("[%s:%s] %s", id, kind, msg)
-	select {
-	case tt.s.statusCh <- dto.StatusEventResult{Info: line}:
-	default:
-	}
+	tt.s.publishGuarded(dto.StatusEventResult{Info: fmt.Sprintf("[%s:%s] %s", id, kind, msg)})
 }
 
 // runTTWHeartbeat emits an elapsed-time tick event every 5 seconds while the install runs.
@@ -1050,7 +1047,7 @@ func (tt *TTWService) finalizeTTWInstall(
 	}
 	markerPath := filepath.Join(fnv.InstallPath, game.TTWMarkerFilename)
 	if data, err := json.MarshalIndent(marker, "", "  "); err == nil {
-		if werr := os.WriteFile(markerPath, data, 0o644); werr != nil {
+		if werr := atomicfile.WriteFile(markerPath, data, 0o644); werr != nil {
 			slog.Warn("could not write TTW marker file", "path", markerPath, "err", werr)
 		}
 	}
@@ -1063,14 +1060,20 @@ func (tt *TTWService) finalizeTTWInstall(
 // ensureTTWModEnabled enables the TTW data mod in every TTW profile's mod list.
 func (tt *TTWService) ensureTTWModEnabled(modName string) {
 	tt.s.invalidateInstalledArchiveCache("ttw")
+	defer tt.s.lockProfiles("ttw")()
 	profiles, err := tt.s.profileMgr.List("ttw")
-	if err != nil || len(profiles) == 0 {
+	if err != nil {
+		slog.Warn("could not list TTW profiles to enable the TTW mod", "mod", modName, "err", err)
+		return
+	}
+	if len(profiles) == 0 {
 		profiles = []*profile.Profile{{Name: "Default", GameID: "ttw"}}
 	}
 	for _, p := range profiles {
-		_, entries, err := tt.s.profileMgr.Load("ttw", p.Name)
+		loaded, entries, err := tt.s.profileMgr.Load("ttw", p.Name)
 		if err != nil {
-			entries = nil
+			slog.Warn("skipping TTW profile with an unreadable modlist", "profile", p.Name, "mod", modName, "err", err)
+			continue
 		}
 		updated := entries[:0]
 		seen := false
@@ -1084,7 +1087,7 @@ func (tt *TTWService) ensureTTWModEnabled(modName string) {
 		if !seen {
 			updated = append(updated, mod.ModListEntry{Name: modName, Enabled: true})
 		}
-		if err := tt.s.profileMgr.Save(p, updated); err != nil {
+		if err := tt.s.profileMgr.Save(loaded, updated); err != nil {
 			slog.Warn("could not enable TTW mod in modlist.txt",
 				"profile", p.Name, "mod", modName, "err", err)
 		}
@@ -1293,8 +1296,11 @@ func manualWineboot(prefixPath string) error {
 	return nil
 }
 
-// InstallTTWPrereqs starts installing TTW's Windows prerequisites into FNV's prefix and returns the run ID.
+// InstallTTWPrereqs starts installing TTW's Windows prerequisites into FNV's prefix and returns the run ID, refusing once shutdown began.
 func (tt *TTWService) InstallTTWPrereqs() (string, error) {
+	if err := tt.s.refuseWhenShuttingDown("ttw_prereqs"); err != nil {
+		return "", err
+	}
 	tt.s.mu.RLock()
 	fnv, ok := tt.s.config.Games["falloutnv"]
 	tt.s.mu.RUnlock()

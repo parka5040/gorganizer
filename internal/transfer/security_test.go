@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/parka/gorganizer/internal/config"
+	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/dto"
 )
 
@@ -134,6 +135,33 @@ func TestImportRejectsPathTraversal(t *testing.T) {
 				if e.Name() != "Downloads" {
 					t.Errorf("unexpected entry %q landed in ModsDir", e.Name())
 				}
+			}
+		})
+	}
+}
+
+// TestImportRejectsReservedModFolderNames locks that a manifest naming a hidden or reserved mod folder fails the whole import before anything is written.
+func TestImportRejectsReservedModFolderNames(t *testing.T) {
+	for _, folder := range []string{".gorganizer-dependency-requests.json", ".gorganizer-import-x", "Overwrite", "downloads", "a/b", ".."} {
+		t.Run(folder, func(t *testing.T) {
+			root := t.TempDir()
+			setRoot(t, root)
+			m := craftedManifest()
+			m.Mods = append(m.Mods, ModEntry{Folder: folder, Name: folder, FileCount: 1, TotalBytes: 4})
+			archive := writeArchiveFile(t, buildTarBytes(t, m, []tarEntry{
+				{&tar.Header{Name: "mods/M/a.esp", Typeflag: tar.TypeReg, Mode: 0644, Size: 4}, []byte("good")},
+			}))
+			if _, err := Preview(testGame, archive); err == nil {
+				t.Fatal("Preview accepted a reserved mod folder name")
+			}
+			_, err := Import(context.Background(), ImportOptions{GameID: testGame, ArchivePath: archive, Policy: dto.PolicyOverwrite}, nil)
+			var invalid *download.InvalidTargetModError
+			if !errors.As(err, &invalid) || invalid.Name != folder {
+				t.Fatalf("err = %v, want InvalidTargetModError for %q", err, folder)
+			}
+			if _, statErr := os.Stat(config.ModsDir(testGame)); !os.IsNotExist(statErr) {
+				entries, _ := os.ReadDir(config.ModsDir(testGame))
+				t.Fatalf("the refused import wrote into ModsDir: %v", entries)
 			}
 		})
 	}

@@ -8,6 +8,7 @@
 #include "PluginListModel.h"
 
 class QDropEvent;
+class QLabel;
 
 namespace gorganizer {
 
@@ -38,6 +39,8 @@ public:
 
     void setGrpcClient(GrpcClient* grpc);
     void setActiveProfile(const QString& profileName);
+    // Enables or disables plugin handling; while unsupported the widget holds no game and never subscribes.
+    void setSupported(bool supported);
 
 private slots:
     void onHeaderClicked(int column);
@@ -51,9 +54,11 @@ private:
     LoadOrderTreeView* m_view;
     PluginListModel* m_model;
     QWidget* m_placeholder;
+    QLabel* m_placeholderLabel;
     GameInfo m_game;
     QString m_activeProfile;
     GrpcClient* m_grpc = nullptr;
+    bool m_supported = true;
 
     int m_sortColumn = PluginColIndex;
     Qt::SortOrder m_sortOrder = Qt::AscendingOrder;

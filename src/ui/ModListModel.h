@@ -13,6 +13,13 @@ enum ModColumn { ModColPriority = 0, ModColConflicts = 1, ModColName = 2, ModCol
 
 enum ModRowKind { RowKindMod = 0, RowKindSeparator = 1, RowKindOverwrite = 2 };
 
+struct ModDependencySummary {
+    int severity = 0;
+    QString tooltip;
+    QString updateVersion;
+    QString updateUrl;
+};
+
 struct ModListRow {
     ModRowKind kind = RowKindMod;
     int modIndex = -1;
@@ -40,6 +47,10 @@ public:
         PriorityRole,
         ConflictMarkRole,
         TintRole,
+        DependencyIssueRole,
+        DependencyTooltipRole,
+        UpdateAvailableRole,
+        UpdateUrlRole,
     };
 
     enum Tint { TintNone = 0, TintLosesToSelection = 1, TintBeatsSelection = 2 };
@@ -76,9 +87,15 @@ public:
     void applySelectionTints(int selectedRow, const QSet<QString>& losers, const QSet<QString>& winners);
     void clearTints();
     void setCategoryAt(int row, const QString& category);
+    // Replaces the per-mod SMAPI dependency and update summaries, keyed by mod folder; an empty map clears them.
+    void setDependencySummaries(const QHash<QString, ModDependencySummary>& summaries);
+    // Allows or forbids checkbox toggles and drag-and-drop on every row.
+    void setEditable(bool editable);
 
 private:
     std::vector<ModListRow> m_rows;
+    QHash<QString, ModDependencySummary> m_dependencySummaries;
+    bool m_editable = true;
 
     void assignPriorities();
     void permuteRows(const std::vector<int>& newOrder);

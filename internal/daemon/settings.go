@@ -42,6 +42,7 @@ func (se *SettingsService) SetGameSettings(gameID string, autoInstall bool) (*dt
 	return &dto.GameSettingsResult{GameID: gameID, AutoInstall: s.AutoInstall}, nil
 }
 
+// SetNexusAPIKey validates and stores a Nexus API key and replaces the download manager, refusing once shutdown began.
 func (se *SettingsService) SetNexusAPIKey(ctx context.Context, apiKey string) (*dto.NexusAPIKeyResult, error) {
 	nexus := download.NewNexusClient(apiKey)
 	if err := nexus.ValidateAPIKey(ctx); err != nil {
@@ -54,8 +55,12 @@ func (se *SettingsService) SetNexusAPIKey(ctx context.Context, apiKey string) (*
 
 	se.s.mu.Lock()
 	defer se.s.mu.Unlock()
+	if err := se.s.refuseWhenShuttingDown("set_nexus_api_key"); err != nil {
+		return nil, err
+	}
 
 	se.s.config.NexusAPIKey = apiKey
+	se.s.invalidateNexusPremiumCache()
 	if err := se.s.config.Save(); err != nil {
 		return nil, fmt.Errorf("saving config: %w", err)
 	}
@@ -64,7 +69,6 @@ func (se *SettingsService) SetNexusAPIKey(ctx context.Context, apiKey string) (*
 		se.s.downloadMgr.Stop()
 	}
 	se.s.downloadMgr = download.NewManager(nexus, se.s.config, 3, se.s.svc.archives.managerHooks())
-	se.s.downloadMgr.SetPostInstallHook(se.s.svc.mods.ensureInModList)
 	se.s.downloadMgr.RehydrateLedger()
 
 	slog.Info("nexus API key set and validated")

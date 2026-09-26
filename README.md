@@ -1,19 +1,35 @@
 # Gorganizer
 
-Native Linux mod organizer for Bethesda games. A Go gRPC daemon
-(`gorganizerd`) backs a Qt6 GUI; on activation, it merges your enabled mods
-into the game's `Data/` folder via a hardlink farm. Built as a Linux-native
+Native Linux mod organizer for Bethesda games and Stardew Valley. A Go gRPC
+daemon (`gorganizerd`) backs a Qt6 GUI; on activation, it merges your enabled
+mods into the game's `Data/` folder (or Stardew Valley's `Mods/` folder) via a
+hardlink farm. Built as a Linux-native
 alternative to Mod Organizer 2 — no Wine, no Protontricks for the manager
 itself.
 
 **Status:** early. Targets Bethesda games: Skyrim SE, Skyrim, Fallout New
 Vegas, Fallout 3, Fallout 4, Starfield, Oblivion, Oblivion Remastered,
-Morrowind, and Tale of Two Wastelands (TTW).
+Morrowind, and Tale of Two Wastelands (TTW) — plus Stardew Valley with SMAPI.
 
 Oblivion Remastered uses its nested `OblivionRemastered/Content/Dev/ObvData/Data`
 directory, with OBSE64 and PAK/Win64/root-file mods handled alongside classic
 ESP/ESM mods. Put game-root files under a mod's `.gorganizer-root/` directory;
 Gorganizer deploys them as recoverable profile-scoped symlinks.
+
+Stardew Valley (the native Linux Steam version) is managed through SMAPI.
+**Tools → SMAPI** installs or updates SMAPI from its official GitHub release:
+the download is checked against GitHub's published SHA-256, SMAPI's own Linux
+installer runs against a private copy of the game, and the verified result is
+applied with automatic rollback if anything goes wrong. If a Steam update
+restores the game's original launcher, **Repair SMAPI** puts SMAPI back without
+downloading anything; **Uninstall** restores the game's original files. SMAPI
+mod folders are kept intact when you install an archive, and the **SMAPI** tab
+lists every mod's dependencies and available updates (looked up on smapi.io).
+**Fetch missing** downloads required mods — directly with Nexus Premium,
+otherwise by opening each mod's Nexus page for "Mod Manager Download" — and
+enables them once installed. Files mods create while you play (such as
+`config.json`) are kept in Overwrite. The Windows/Proton build and GOG copies of
+Stardew Valley are not supported.
 
 The External Tools dialog can install/update the official Windows portable
 LOOT release, open it through the selected game's Proton prefix, or run an

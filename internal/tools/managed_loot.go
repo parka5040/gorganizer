@@ -2,8 +2,6 @@ package tools
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,9 +15,9 @@ import (
 	"time"
 
 	"github.com/bodgit/sevenzip"
-	"github.com/google/uuid"
 
 	"github.com/parka/gorganizer/internal/atomicfile"
+	"github.com/parka/gorganizer/internal/ghrelease"
 )
 
 const lootManifestSchema = 1
@@ -82,24 +80,6 @@ type lootVersionManifest struct {
 	License       string    `json:"license"`
 }
 
-type lootCurrentManifest struct {
-	SchemaVersion   int    `json:"schema_version"`
-	ActiveVersion   string `json:"active_version"`
-	PreviousVersion string `json:"previous_version,omitempty"`
-}
-
-type githubRelease struct {
-	TagName    string `json:"tag_name"`
-	Draft      bool   `json:"draft"`
-	Prerelease bool   `json:"prerelease"`
-	Assets     []struct {
-		ID                 int64  `json:"id"`
-		Name               string `json:"name"`
-		BrowserDownloadURL string `json:"browser_download_url"`
-		Digest             string `json:"digest"`
-	} `json:"assets"`
-}
-
 type LOOTInstaller struct {
 	Root       string
 	HTTPClient *http.Client
@@ -122,49 +102,17 @@ func NewLOOTInstaller(root string, client *http.Client) *LOOTInstaller {
 
 // LatestRelease resolves the newest stable official win64 portable archive.
 func (i *LOOTInstaller) LatestRelease(ctx context.Context) (LOOTRelease, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, i.APIURL, nil)
+	release, err := (&ghrelease.Fetcher{HTTP: i.HTTPClient}).Latest(ctx, i.source())
+	if errors.Is(err, ghrelease.ErrNoMatchingAsset) {
+		return LOOTRelease{}, errors.New("latest LOOT release has no win64 portable .7z asset")
+	}
 	if err != nil {
 		return LOOTRelease{}, err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("User-Agent", "gorganizer-managed-loot")
-	resp, err := i.HTTPClient.Do(req)
-	if err != nil {
-		return LOOTRelease{}, fmt.Errorf("fetching LOOT release metadata: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return LOOTRelease{}, fmt.Errorf("fetching LOOT release metadata: HTTP %s", resp.Status)
-	}
-	if resp.ContentLength > 512<<20 {
-		return LOOTRelease{}, fmt.Errorf("LOOT release metadata is unexpectedly large: %d bytes", resp.ContentLength)
-	}
-	var release githubRelease
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&release); err != nil {
-		return LOOTRelease{}, fmt.Errorf("decoding LOOT release metadata: %w", err)
-	}
-	if release.Draft || release.Prerelease {
-		return LOOTRelease{}, errors.New("latest LOOT release is not stable")
-	}
-	for _, asset := range release.Assets {
-		match := lootPortableName.FindStringSubmatch(asset.Name)
-		if len(match) != 2 {
-			continue
-		}
-		digest := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(asset.Digest)), "sha256:")
-		if len(digest) != sha256.Size*2 {
-			return LOOTRelease{}, fmt.Errorf("LOOT asset %q has no published SHA-256 digest", asset.Name)
-		}
-		if _, err := hex.DecodeString(digest); err != nil {
-			return LOOTRelease{}, fmt.Errorf("LOOT asset %q has an invalid SHA-256 digest: %w", asset.Name, err)
-		}
-		return LOOTRelease{
-			Tag: release.TagName, Version: match[1], AssetID: asset.ID, AssetName: asset.Name,
-			URL: asset.BrowserDownloadURL, SHA256: digest,
-		}, nil
-	}
-	return LOOTRelease{}, errors.New("latest LOOT release has no win64 portable .7z asset")
+	return LOOTRelease{
+		Tag: release.Tag, Version: release.Version, AssetID: release.AssetID, AssetName: release.AssetName,
+		URL: release.URL, SHA256: release.SHA256,
+	}, nil
 }
 
 // InstallLatest downloads, verifies, stages, and activates the latest stable release.
@@ -180,25 +128,30 @@ func (i *LOOTInstaller) InstallLatest(ctx context.Context) (ManagedToolStatus, e
 func (i *LOOTInstaller) Install(ctx context.Context, release LOOTRelease) (ManagedToolStatus, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if release.Version == "" || release.URL == "" || len(release.SHA256) != sha256.Size*2 {
+	if release.Version == "" || release.URL == "" || len(release.SHA256) != 64 {
 		return ManagedToolStatus{}, errors.New("incomplete LOOT release metadata")
 	}
 	assetMatch := lootPortableName.FindStringSubmatch(release.AssetName)
 	if len(assetMatch) != 2 || assetMatch[1] != release.Version {
 		return ManagedToolStatus{}, errors.New("LOOT release asset name and version are inconsistent")
 	}
-	lootRoot := filepath.Join(i.Root, "loot")
-	if err := os.MkdirAll(lootRoot, 0755); err != nil {
-		return ManagedToolStatus{}, fmt.Errorf("creating LOOT tools directory: %w", err)
+	source := i.source()
+	sharedRelease := ghrelease.Release{
+		Tag: release.Tag, Version: release.Version, AssetID: release.AssetID, AssetName: release.AssetName,
+		URL: release.URL, SHA256: release.SHA256,
 	}
-	stage := filepath.Join(lootRoot, ".stage-"+uuid.NewString())
-	if err := os.Mkdir(stage, 0700); err != nil {
-		return ManagedToolStatus{}, fmt.Errorf("creating LOOT staging directory: %w", err)
+	if err := ghrelease.ValidateRelease(source, sharedRelease); err != nil {
+		return ManagedToolStatus{}, err
 	}
-	defer os.RemoveAll(stage)
+	store := i.store()
+	stage, cleanup, err := store.NewStage()
+	if err != nil {
+		return ManagedToolStatus{}, err
+	}
+	defer cleanup()
 
 	archive := filepath.Join(stage, release.AssetName)
-	if err := i.downloadAndVerify(ctx, release, archive); err != nil {
+	if err := (&ghrelease.Fetcher{HTTP: i.HTTPClient}).Download(ctx, source, sharedRelease, archive); err != nil {
 		return ManagedToolStatus{}, err
 	}
 	extracted := filepath.Join(stage, "extracted")
@@ -225,64 +178,44 @@ func (i *LOOTInstaller) Install(ctx context.Context, release LOOTRelease) (Manag
 	if err := atomicfile.WriteFile(filepath.Join(extracted, "gorganizer-manifest.json"), manifestBytes, 0644); err != nil {
 		return ManagedToolStatus{}, err
 	}
-
-	versionDir := filepath.Join(lootRoot, release.Version)
-	if _, err := os.Stat(versionDir); errors.Is(err, os.ErrNotExist) {
-		if err := os.Rename(extracted, versionDir); err != nil {
-			return ManagedToolStatus{}, fmt.Errorf("activating LOOT version directory: %w", err)
-		}
-	} else if err != nil {
+	if err := store.Install(release.Version, extracted, false); err != nil {
 		return ManagedToolStatus{}, err
 	}
-	current, _ := i.readCurrent()
-	next := lootCurrentManifest{SchemaVersion: lootManifestSchema, ActiveVersion: release.Version}
-	if current.ActiveVersion != "" && current.ActiveVersion != release.Version {
-		next.PreviousVersion = current.ActiveVersion
-	} else {
-		next.PreviousVersion = current.PreviousVersion
-	}
-	if err := i.writeCurrent(next); err != nil {
+	if _, err := store.Activate(release.Version); err != nil {
 		return ManagedToolStatus{}, err
 	}
-	i.pruneVersions(next)
-	return i.Status()
+	return i.status(store)
 }
 
 // Rollback atomically reactivates the retained previous version.
 func (i *LOOTInstaller) Rollback() (ManagedToolStatus, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	current, err := i.readCurrent()
-	if err != nil {
+	store := i.store()
+	if _, err := store.Rollback(); err != nil {
 		return ManagedToolStatus{}, err
 	}
-	if current.PreviousVersion == "" {
-		return ManagedToolStatus{}, errors.New("LOOT has no previous version to roll back to")
-	}
-	if _, err := os.Stat(filepath.Join(i.Root, "loot", current.PreviousVersion)); err != nil {
-		return ManagedToolStatus{}, fmt.Errorf("previous LOOT version is unavailable: %w", err)
-	}
-	next := lootCurrentManifest{
-		SchemaVersion: lootManifestSchema, ActiveVersion: current.PreviousVersion,
-		PreviousVersion: current.ActiveVersion,
-	}
-	if err := i.writeCurrent(next); err != nil {
-		return ManagedToolStatus{}, err
-	}
-	return i.Status()
+	return i.status(store)
 }
 
 // Status reads the active installation without making a network request.
 func (i *LOOTInstaller) Status() (ManagedToolStatus, error) {
-	current, err := i.readCurrent()
+	return i.status(i.store())
+}
+
+func (i *LOOTInstaller) status(store *ghrelease.Store) (ManagedToolStatus, error) {
+	current, err := store.ReadCurrent()
 	if errors.Is(err, os.ErrNotExist) {
 		return ManagedToolStatus{ID: "loot"}, nil
 	}
 	if err != nil {
 		return ManagedToolStatus{}, err
 	}
-	manifestPath := filepath.Join(i.Root, "loot", current.ActiveVersion, "gorganizer-manifest.json")
-	data, err := os.ReadFile(manifestPath)
+	activeDir, err := store.VersionDir(current.ActiveVersion)
+	if err != nil {
+		return ManagedToolStatus{}, err
+	}
+	data, err := os.ReadFile(filepath.Join(activeDir, "gorganizer-manifest.json"))
 	if err != nil {
 		return ManagedToolStatus{}, fmt.Errorf("reading active LOOT manifest: %w", err)
 	}
@@ -290,7 +223,7 @@ func (i *LOOTInstaller) Status() (ManagedToolStatus, error) {
 	if err := json.Unmarshal(data, &manifest); err != nil || manifest.SchemaVersion != lootManifestSchema {
 		return ManagedToolStatus{}, errors.New("active LOOT manifest is invalid or unsupported")
 	}
-	exe := filepath.Join(i.Root, "loot", current.ActiveVersion, manifest.ExecutableRel)
+	exe := filepath.Join(activeDir, manifest.ExecutableRel)
 	if info, err := os.Stat(exe); err != nil || info.IsDir() {
 		return ManagedToolStatus{}, errors.New("active LOOT executable is missing")
 	}
@@ -300,78 +233,14 @@ func (i *LOOTInstaller) Status() (ManagedToolStatus, error) {
 	}, nil
 }
 
-func (i *LOOTInstaller) downloadAndVerify(ctx context.Context, release LOOTRelease, destination string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, release.URL, nil)
-	if err != nil {
-		return err
+func (i *LOOTInstaller) source() ghrelease.Source {
+	return ghrelease.Source{
+		APIURL: i.APIURL, AssetPattern: lootPortableName, UserAgent: "gorganizer-managed-loot", Label: "LOOT",
 	}
-	req.Header.Set("User-Agent", "gorganizer-managed-loot")
-	resp, err := i.HTTPClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("downloading LOOT: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("downloading LOOT: HTTP %s", resp.Status)
-	}
-	if resp.ContentLength > 512<<20 {
-		return fmt.Errorf("LOOT archive is unexpectedly large: %d bytes", resp.ContentLength)
-	}
-	f, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return err
-	}
-	hash := sha256.New()
-	_, copyErr := io.Copy(io.MultiWriter(f, hash), io.LimitReader(resp.Body, 512<<20))
-	closeErr := f.Close()
-	if copyErr != nil {
-		return fmt.Errorf("downloading LOOT: %w", copyErr)
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	actual := hex.EncodeToString(hash.Sum(nil))
-	if !strings.EqualFold(actual, release.SHA256) {
-		return fmt.Errorf("LOOT SHA-256 mismatch: expected %s, got %s", release.SHA256, actual)
-	}
-	return nil
 }
 
-func (i *LOOTInstaller) readCurrent() (lootCurrentManifest, error) {
-	data, err := os.ReadFile(filepath.Join(i.Root, "loot", "current.json"))
-	if err != nil {
-		return lootCurrentManifest{}, err
-	}
-	var current lootCurrentManifest
-	if err := json.Unmarshal(data, &current); err != nil {
-		return lootCurrentManifest{}, err
-	}
-	if current.SchemaVersion != lootManifestSchema || current.ActiveVersion == "" {
-		return lootCurrentManifest{}, errors.New("LOOT current manifest is invalid or unsupported")
-	}
-	return current, nil
-}
-
-func (i *LOOTInstaller) writeCurrent(current lootCurrentManifest) error {
-	data, err := json.MarshalIndent(current, "", "  ")
-	if err != nil {
-		return err
-	}
-	return atomicfile.WriteFile(filepath.Join(i.Root, "loot", "current.json"), data, 0644)
-}
-
-func (i *LOOTInstaller) pruneVersions(current lootCurrentManifest) {
-	root := filepath.Join(i.Root, "loot")
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == current.ActiveVersion || entry.Name() == current.PreviousVersion || strings.HasPrefix(entry.Name(), ".stage-") {
-			continue
-		}
-		_ = os.RemoveAll(filepath.Join(root, entry.Name()))
-	}
+func (i *LOOTInstaller) store() *ghrelease.Store {
+	return &ghrelease.Store{Root: filepath.Join(i.Root, "loot"), Label: "LOOT"}
 }
 
 func findLOOTExecutable(root string) (string, error) {

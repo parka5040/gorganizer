@@ -14,7 +14,6 @@ static QString keyForArchive(const QString& archiveRelPath) { return archiveRelP
 DownloadsModel::DownloadsModel(QObject* parent)
     : QAbstractTableModel(parent)
 {
-    // Foreground colors come from the theme; repaint them on theme change.
     connect(ThemeManager::instance(), &ThemeManager::themeChanged, this, [this](const Palette&) {
         if (!m_rows.empty())
             emit dataChanged(index(0, 0), index(static_cast<int>(m_rows.size()) - 1, ColCount - 1),

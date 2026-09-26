@@ -48,18 +48,15 @@ type Download struct {
 	cancel context.CancelFunc
 }
 
-type PostInstallHook func(gameID, modName string)
-
 type Manager struct {
-	nexus       URLResolver
-	httpClient  *http.Client
-	config      *config.Config
-	mu          sync.RWMutex
-	active      map[string]*Download
-	queued      []*Download
-	hooks       ManagerHooks
-	postInstall PostInstallHook
-	maxConcur   int
+	nexus      URLResolver
+	httpClient *http.Client
+	config     *config.Config
+	mu         sync.RWMutex
+	active     map[string]*Download
+	queued     []*Download
+	hooks      ManagerHooks
+	maxConcur  int
 
 	queuePump chan struct{}
 	stop      chan struct{}
@@ -100,12 +97,6 @@ func NewManager(nexus URLResolver, cfg *config.Config, maxConcurrent int, hooks 
 	}
 	go m.runQueuePump()
 	return m
-}
-
-func (m *Manager) SetPostInstallHook(hook PostInstallHook) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.postInstall = hook
 }
 
 // Stop halts the queue pump; active downloads keep running.

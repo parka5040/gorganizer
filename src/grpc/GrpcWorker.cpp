@@ -31,6 +31,77 @@ private:
     grpc::ClientContext*& m_slot;
 };
 
+ModLoaderKind modLoaderKindFromProto(gorganizer::v1::ModLoaderKind k)
+{
+    switch (k) {
+    case gorganizer::v1::MOD_LOADER_KIND_SMAPI:
+        return ModLoaderKind::Smapi;
+    default:
+        return ModLoaderKind::None;
+    }
+}
+
+InstallLayout installLayoutFromProto(gorganizer::v1::InstallLayout l)
+{
+    switch (l) {
+    case gorganizer::v1::INSTALL_LAYOUT_DATA_ROOT:
+        return InstallLayout::DataRoot;
+    case gorganizer::v1::INSTALL_LAYOUT_SMAPI_MANIFEST:
+        return InstallLayout::SmapiManifest;
+    default:
+        return InstallLayout::Unspecified;
+    }
+}
+
+GameCapabilities capabilitiesFromProto(const gorganizer::v1::GameCapabilities& c)
+{
+    GameCapabilities out;
+    out.plugins = c.plugins();
+    out.ini = c.ini();
+    out.loot = c.loot();
+    out.modLoader = modLoaderKindFromProto(c.mod_loader());
+    out.installLayout = installLayoutFromProto(c.install_layout());
+    out.manifestDependencies = c.manifest_dependencies();
+    return out;
+}
+
+GrpcModLoaderState modLoaderStateFromProto(gorganizer::v1::ModLoaderState s)
+{
+    switch (s) {
+    case gorganizer::v1::MOD_LOADER_STATE_NOT_INSTALLED:
+        return GrpcModLoaderStateNotInstalled;
+    case gorganizer::v1::MOD_LOADER_STATE_OK:
+        return GrpcModLoaderStateOk;
+    case gorganizer::v1::MOD_LOADER_STATE_LAUNCHER_REVERTED:
+        return GrpcModLoaderStateLauncherReverted;
+    case gorganizer::v1::MOD_LOADER_STATE_INCOMPLETE:
+        return GrpcModLoaderStateIncomplete;
+    case gorganizer::v1::MOD_LOADER_STATE_UNSUPPORTED_BUILD:
+        return GrpcModLoaderStateUnsupportedBuild;
+    case gorganizer::v1::MOD_LOADER_STATE_INTERRUPTED:
+        return GrpcModLoaderStateInterrupted;
+    default:
+        return GrpcModLoaderStateUnspecified;
+    }
+}
+
+GrpcModLoaderStatus modLoaderStatusFromProto(const gorganizer::v1::ModLoaderStatus& s)
+{
+    GrpcModLoaderStatus out;
+    out.gameId = QString::fromStdString(s.game_id());
+    out.kind = modLoaderKindFromProto(s.kind());
+    out.state = modLoaderStateFromProto(s.state());
+    out.managed = s.managed();
+    out.installedVersion = QString::fromStdString(s.installed_version());
+    out.activeVersion = QString::fromStdString(s.active_version());
+    out.previousVersion = QString::fromStdString(s.previous_version());
+    out.latestVersion = QString::fromStdString(s.latest_version());
+    out.updateAvailable = s.update_available();
+    out.busy = s.busy();
+    out.detail = QString::fromStdString(s.detail());
+    return out;
+}
+
 GrpcPluginStatus pluginStatusFromProto(const gorganizer::v1::PluginStatusItem& p)
 {
     GrpcPluginStatus out;
@@ -49,6 +120,173 @@ GrpcPluginStatus pluginStatusFromProto(const gorganizer::v1::PluginStatusItem& p
         issue.softModUrl = QString::fromStdString(iss.soft_mod_url());
         out.issues.push_back(std::move(issue));
     }
+    return out;
+}
+
+QStringList stringListFromProto(const google::protobuf::RepeatedPtrField<std::string>& values)
+{
+    QStringList out;
+    out.reserve(values.size());
+    for (const auto& v : values)
+        out.append(QString::fromStdString(v));
+    return out;
+}
+
+GrpcModIssueKind modIssueKindFromProto(gorganizer::v1::ModIssueKind k)
+{
+    switch (k) {
+    case gorganizer::v1::MOD_ISSUE_KIND_MISSING:
+        return GrpcModIssueMissing;
+    case gorganizer::v1::MOD_ISSUE_KIND_DISABLED:
+        return GrpcModIssueDisabled;
+    case gorganizer::v1::MOD_ISSUE_KIND_VERSION_TOO_LOW:
+        return GrpcModIssueVersionTooLow;
+    case gorganizer::v1::MOD_ISSUE_KIND_DUPLICATE_ID:
+        return GrpcModIssueDuplicateId;
+    case gorganizer::v1::MOD_ISSUE_KIND_INVALID_MANIFEST:
+        return GrpcModIssueInvalidManifest;
+    case gorganizer::v1::MOD_ISSUE_KIND_NEEDS_NEWER_LOADER:
+        return GrpcModIssueNeedsNewerLoader;
+    case gorganizer::v1::MOD_ISSUE_KIND_NEEDS_NEWER_GAME:
+        return GrpcModIssueNeedsNewerGame;
+    case gorganizer::v1::MOD_ISSUE_KIND_CIRCULAR:
+        return GrpcModIssueCircular;
+    case gorganizer::v1::MOD_ISSUE_KIND_FOLDER_COLLISION:
+        return GrpcModIssueFolderCollision;
+    case gorganizer::v1::MOD_ISSUE_KIND_DEPENDENCY_FAILED:
+        return GrpcModIssueDependencyFailed;
+    default:
+        return GrpcModIssueUnspecified;
+    }
+}
+
+GrpcModComponentKind modComponentKindFromProto(gorganizer::v1::ModComponentKind k)
+{
+    switch (k) {
+    case gorganizer::v1::MOD_COMPONENT_KIND_CODE:
+        return GrpcModComponentCode;
+    case gorganizer::v1::MOD_COMPONENT_KIND_CONTENT_PACK:
+        return GrpcModComponentContentPack;
+    case gorganizer::v1::MOD_COMPONENT_KIND_INVALID:
+        return GrpcModComponentInvalid;
+    default:
+        return GrpcModComponentUnspecified;
+    }
+}
+
+GrpcFetchOutcome fetchOutcomeFromProto(gorganizer::v1::FetchOutcome o)
+{
+    switch (o) {
+    case gorganizer::v1::FETCH_OUTCOME_QUEUED:
+        return GrpcFetchOutcomeQueued;
+    case gorganizer::v1::FETCH_OUTCOME_OPEN_URL:
+        return GrpcFetchOutcomeOpenUrl;
+    case gorganizer::v1::FETCH_OUTCOME_UNRESOLVED:
+        return GrpcFetchOutcomeUnresolved;
+    case gorganizer::v1::FETCH_OUTCOME_ALREADY_PRESENT:
+        return GrpcFetchOutcomeAlreadyPresent;
+    default:
+        return GrpcFetchOutcomeUnspecified;
+    }
+}
+
+GrpcModComponent modComponentFromProto(const gorganizer::v1::ModComponent& c)
+{
+    GrpcModComponent out;
+    out.folder = QString::fromStdString(c.folder());
+    out.providerMod = QString::fromStdString(c.provider_mod());
+    out.uniqueId = QString::fromStdString(c.unique_id());
+    out.name = QString::fromStdString(c.name());
+    out.version = QString::fromStdString(c.version());
+    out.kind = modComponentKindFromProto(c.kind());
+    out.bundled = c.bundled();
+    out.failed = c.failed();
+    for (const auto& i : c.issues()) {
+        GrpcModIssue issue;
+        issue.kind = modIssueKindFromProto(i.kind());
+        issue.targetId = QString::fromStdString(i.target_id());
+        issue.requiredVersion = QString::fromStdString(i.required_version());
+        issue.foundVersion = QString::fromStdString(i.found_version());
+        issue.providers = stringListFromProto(i.providers());
+        issue.detail = QString::fromStdString(i.detail());
+        out.issues.push_back(std::move(issue));
+    }
+    out.updateVersion = QString::fromStdString(c.update_version());
+    out.updateUrl = QString::fromStdString(c.update_url());
+    out.nexusId = c.nexus_id();
+    out.updateStale = c.update_stale();
+    return out;
+}
+
+GrpcModDependencyReport modDependencyReportFromProto(const gorganizer::v1::ModDependencyReport& r)
+{
+    GrpcModDependencyReport out;
+    out.gameId = QString::fromStdString(r.game_id());
+    out.profileName = QString::fromStdString(r.profile_name());
+    out.components.reserve(r.components_size());
+    for (const auto& c : r.components())
+        out.components.push_back(modComponentFromProto(c));
+    out.missing.reserve(r.missing_size());
+    for (const auto& m : r.missing()) {
+        GrpcMissingDependency dep;
+        dep.uniqueId = QString::fromStdString(m.unique_id());
+        dep.minimumVersion = QString::fromStdString(m.minimum_version());
+        dep.requiredBy = stringListFromProto(m.required_by());
+        dep.disabledProviders = stringListFromProto(m.disabled_providers());
+        dep.name = QString::fromStdString(m.name());
+        dep.nexusId = m.nexus_id();
+        dep.url = QString::fromStdString(m.url());
+        dep.resolvable = m.resolvable();
+        dep.stale = m.stale();
+        out.missing.push_back(std::move(dep));
+    }
+    out.pendingEnables.reserve(r.pending_enables_size());
+    for (const auto& p : r.pending_enables()) {
+        out.pendingEnables.push_back(GrpcPendingEnable{
+            QString::fromStdString(p.batch_id()),
+            QString::fromStdString(p.profile_name()),
+            QString::fromStdString(p.mod_name()),
+            QString::fromStdString(p.unique_id()),
+        });
+    }
+    out.rootManifestMods = stringListFromProto(r.root_manifest_mods());
+    out.remoteChecked = r.remote_checked();
+    out.remoteError = QString::fromStdString(r.remote_error());
+    out.loaderVersion = QString::fromStdString(r.loader_version());
+    out.gameVersion = QString::fromStdString(r.game_version());
+    out.recentFailures.reserve(r.recent_failures_size());
+    for (const auto& f : r.recent_failures()) {
+        GrpcDependencyRequestIssue issue;
+        issue.uniqueId = QString::fromStdString(f.unique_id());
+        issue.batchId = QString::fromStdString(f.batch_id());
+        issue.state = QString::fromStdString(f.state());
+        issue.detail = QString::fromStdString(f.detail());
+        issue.updatedAt = QDateTime::fromString(QString::fromStdString(f.updated_at()), Qt::ISODate);
+        out.recentFailures.push_back(std::move(issue));
+    }
+    return out;
+}
+
+GrpcDependencyFetchResult dependencyFetchResultFromProto(const gorganizer::v1::DependencyFetchResult& r)
+{
+    GrpcDependencyFetchResult out;
+    out.uniqueId = QString::fromStdString(r.unique_id());
+    out.outcome = fetchOutcomeFromProto(r.outcome());
+    out.downloadId = QString::fromStdString(r.download_id());
+    out.url = QString::fromStdString(r.url());
+    out.reason = QString::fromStdString(r.reason());
+    out.batchId = QString::fromStdString(r.batch_id());
+    return out;
+}
+
+GrpcInstallCompleted installCompletedFromProto(const gorganizer::v1::InstallCompleted& c)
+{
+    GrpcInstallCompleted out;
+    out.gameId = QString::fromStdString(c.game_id());
+    out.modName = QString::fromStdString(c.mod_name());
+    out.archiveRelPath = QString::fromStdString(c.archive_rel_path());
+    out.batchId = QString::fromStdString(c.batch_id());
+    out.batchIds = stringListFromProto(c.batch_ids());
     return out;
 }
 }
@@ -109,6 +347,22 @@ grpc::Status GrpcWorker::runStream(std::unique_ptr<grpc::ClientReader<Ev>> (Stub
     return reader->Finish();
 }
 
+template <typename Method>
+void GrpcWorker::runModLoaderOperation(quint64 requestId, const QString& gameId, const QString& operation,
+                                       Method method, const gorganizer::v1::ModLoaderRequest& req,
+                                       std::chrono::milliseconds deadline)
+{
+    gorganizer::v1::ModLoaderStatus resp;
+    auto status = invoke(method, req, resp, deadline);
+    if (!status.ok()) {
+        emit modLoaderOperationFinished(requestId, gameId, operation, false, static_cast<int>(status.error_code()),
+                                        GrpcModLoaderStatus{}, QString::fromStdString(status.error_message()));
+        return;
+    }
+    emit modLoaderOperationFinished(requestId, gameId, operation, true, GrpcStatusOk,
+                                    modLoaderStatusFromProto(resp), QString());
+}
+
 template <typename Req>
 void GrpcWorker::runTransferStream(std::unique_ptr<grpc::ClientReader<gorganizer::v1::TransferEvent>> (Stub::*method)(grpc::ClientContext*, const Req&),
                                    const Req& req)
@@ -141,7 +395,7 @@ void GrpcWorker::runTransferStream(std::unique_ptr<grpc::ClientReader<gorganizer
 
 GrpcGame GrpcWorker::gameFromProto(const gorganizer::v1::Game& g)
 {
-    return {
+    GrpcGame out{
         .gameId = QString::fromStdString(g.game_id()),
         .name = QString::fromStdString(g.name()),
         .steamAppId = g.steam_app_id(),
@@ -151,6 +405,11 @@ GrpcGame GrpcWorker::gameFromProto(const gorganizer::v1::Game& g)
         .linkedFromGameId = QString::fromStdString(g.linked_from_game_id()),
         .vfsActive = g.vfs_active(),
     };
+    if (g.has_capabilities()) {
+        out.capabilities = capabilitiesFromProto(g.capabilities());
+        out.capabilitiesKnown = true;
+    }
+    return out;
 }
 
 GrpcModInfo GrpcWorker::modFromProto(const gorganizer::v1::ModInfo& m)
@@ -445,6 +704,21 @@ void GrpcWorker::doUnmountVfs(const QString& gameId)
     emit vfsUnmounted();
 }
 
+void GrpcWorker::doUnmountVfsForMaintenance(quint64 requestId, const QString& gameId)
+{
+    gorganizer::v1::UnmountVFSRequest req;
+    req.set_game_id(gameId.toStdString());
+    gorganizer::v1::UnmountVFSResponse resp;
+    auto status = invoke(&Stub::UnmountVFS, req, resp, std::chrono::minutes(10));
+    if (!status.ok()) {
+        emit maintenanceUnmountFinished(requestId, gameId, false, static_cast<int>(status.error_code()),
+                                        QString::fromStdString(status.error_message()));
+        return;
+    }
+    emit vfsUnmounted();
+    emit maintenanceUnmountFinished(requestId, gameId, true, GrpcStatusOk, QString());
+}
+
 void GrpcWorker::doRestoreFromBackup(const QString& gameId)
 {
     gorganizer::v1::RestoreFromBackupRequest req;
@@ -461,6 +735,23 @@ void GrpcWorker::doGetVfsStatus(const QString& gameId)
     gorganizer::v1::VFSStatus resp;
     if (!call("GetVFSStatus", &Stub::GetVFSStatus, req, resp)) return;
     emit vfsStatusReceived(vfsStatusFromProto(resp));
+}
+
+void GrpcWorker::doQueryVfsStatus(quint64 requestId, const QString& gameId)
+{
+    gorganizer::v1::GetVFSStatusRequest req;
+    req.set_game_id(gameId.toStdString());
+    gorganizer::v1::VFSStatus resp;
+    auto status = invoke(&Stub::GetVFSStatus, req, resp);
+    if (!status.ok()) {
+        emit vfsStatusQueryFailed(requestId, gameId, QString::fromStdString(status.error_message()));
+        return;
+    }
+    GrpcVFSStatus out = vfsStatusFromProto(resp);
+    if (out.gameId.isEmpty())
+        out.gameId = gameId;
+    emit vfsStatusReceived(out);
+    emit vfsStatusQueried(requestId, out);
 }
 
 void GrpcWorker::doRebuildVfs(const QString& gameId)
@@ -523,7 +814,8 @@ void GrpcWorker::doRetryDownload(const QString& downloadId)
     emit downloadRetried(downloadId, resp.queued_ahead());
 }
 
-void GrpcWorker::doStartInstall(const QString& gameId, const QString& archiveRelPath,
+void GrpcWorker::doStartInstall(quint64 requestId, const QString& gameId,
+                                 const QString& archiveRelPath,
                                  const QString& externalArchivePath, int mode,
                                  const QString& targetMod, const QString& previewId,
                                  const std::vector<GrpcFomodFile>& fomodSelectedFiles)
@@ -545,10 +837,10 @@ void GrpcWorker::doStartInstall(const QString& gameId, const QString& archiveRel
     gorganizer::v1::StartInstallResponse resp;
     auto status = invoke(&Stub::StartInstall, req, resp, std::chrono::minutes(10));
     if (!status.ok()) {
-        emit installFailed(QString::fromStdString(status.error_message()));
+        emit installRequestFailed(requestId, QString::fromStdString(status.error_message()));
         return;
     }
-    emit installCompleted(QString::fromStdString(resp.mod_folder()), resp.file_count());
+    emit installRequestCompleted(requestId, QString::fromStdString(resp.mod_folder()), resp.file_count());
 }
 
 void GrpcWorker::doSetNexusAPIKey(const QString& apiKey)
@@ -640,6 +932,9 @@ void GrpcWorker::doStreamInstallEvents(const QString& gameId)
         case gorganizer::v1::InstallEvent::kInstallProgress:
             emit installProgressEvent(installProgressFromProto(event.install_progress()));
             break;
+        case gorganizer::v1::InstallEvent::kInstallCompleted:
+            emit installCompletedHintReceived(installCompletedFromProto(event.install_completed()));
+            break;
         default:
             break;
         }
@@ -703,6 +998,150 @@ void GrpcWorker::doStreamPluginStatus(const QString& gameId, const QString& prof
             break;
         }
     });
+}
+
+// Queries the game's mod-loader status, allowing the longer network deadline when the latest release is resolved too.
+void GrpcWorker::doGetModLoaderStatus(quint64 requestId, const QString& gameId, bool checkLatest)
+{
+    gorganizer::v1::ModLoaderRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_check_latest(checkLatest);
+    gorganizer::v1::ModLoaderStatus resp;
+    const std::chrono::milliseconds deadline = checkLatest ? std::chrono::seconds(60) : std::chrono::seconds(30);
+    auto status = invoke(&Stub::GetModLoaderStatus, req, resp, deadline);
+    if (!status.ok()) {
+        emit modLoaderStatusFailed(requestId, gameId, QString::fromStdString(status.error_message()));
+        return;
+    }
+    emit modLoaderStatusReceived(requestId, gameId, modLoaderStatusFromProto(resp));
+}
+
+void GrpcWorker::doInstallModLoader(quint64 requestId, const QString& gameId, bool repairOnly)
+{
+    gorganizer::v1::ModLoaderRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_repair_only(repairOnly);
+    runModLoaderOperation(requestId, gameId, repairOnly ? QStringLiteral("repair") : QStringLiteral("install"),
+                          &Stub::InstallModLoader, req, std::chrono::minutes(20));
+}
+
+void GrpcWorker::doUninstallModLoader(quint64 requestId, const QString& gameId)
+{
+    gorganizer::v1::ModLoaderRequest req;
+    req.set_game_id(gameId.toStdString());
+    runModLoaderOperation(requestId, gameId, QStringLiteral("uninstall"),
+                          &Stub::UninstallModLoader, req, std::chrono::minutes(5));
+}
+
+void GrpcWorker::doRollbackModLoader(quint64 requestId, const QString& gameId)
+{
+    gorganizer::v1::ModLoaderRequest req;
+    req.set_game_id(gameId.toStdString());
+    runModLoaderOperation(requestId, gameId, QStringLiteral("rollback"),
+                          &Stub::RollbackModLoader, req, std::chrono::minutes(20));
+}
+
+// Reads a profile's modlist for a caller that correlates the answer by request id.
+void GrpcWorker::doGetModListRequest(quint64 requestId, const QString& gameId, const QString& profileName)
+{
+    gorganizer::v1::GetModListRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_profile_name(profileName.toStdString());
+    gorganizer::v1::ModListResponse resp;
+    auto status = invoke(&Stub::GetModList, req, resp);
+    if (!status.ok()) {
+        emit modListRequestFailed(requestId, gameId, profileName, QString::fromStdString(status.error_message()));
+        return;
+    }
+    std::vector<GrpcModListEntry> entries;
+    entries.reserve(resp.entries_size());
+    for (const auto& e : resp.entries()) entries.push_back(modListEntryFromProto(e));
+    emit modListRequestReceived(requestId, gameId, profileName, entries);
+}
+
+// Persists a modlist and reports the outcome only through the request-id signals, never the generic rpcError.
+void GrpcWorker::doSetModListRequest(quint64 requestId, const QString& gameId, const QString& profileName,
+                                     const std::vector<GrpcModListEntry>& entries)
+{
+    gorganizer::v1::SetModListRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_profile_name(profileName.toStdString());
+    for (const auto& e : entries) {
+        auto* entry = req.add_entries();
+        entry->set_mod_name(e.modName.toStdString());
+        entry->set_enabled(e.enabled);
+        entry->set_priority(e.priority);
+    }
+    gorganizer::v1::SetModListResponse resp;
+    auto status = invoke(&Stub::SetModList, req, resp);
+    if (!status.ok()) {
+        emit modListSaveFailed(requestId, gameId, profileName, QString::fromStdString(status.error_message()));
+        return;
+    }
+    emit modListUpdated();
+    emit modListSaved(requestId, gameId, profileName);
+}
+
+// Requests a SMAPI dependency report, allowing a longer deadline when smapi.io is consulted.
+void GrpcWorker::doGetModDependencyReport(quint64 requestId, const QString& gameId, const QString& profileName,
+                                          bool refreshRemote, bool forceRemote)
+{
+    gorganizer::v1::ModDependencyReportRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_profile_name(profileName.toStdString());
+    req.set_refresh_remote(refreshRemote || forceRemote);
+    req.set_force_remote(forceRemote);
+    gorganizer::v1::ModDependencyReport resp;
+    const std::chrono::milliseconds deadline =
+        (refreshRemote || forceRemote) ? std::chrono::seconds(90) : std::chrono::seconds(30);
+    auto status = invoke(&Stub::GetModDependencyReport, req, resp, deadline);
+    if (!status.ok()) {
+        emit modDependencyReportFailed(requestId, gameId, profileName,
+                                       QString::fromStdString(status.error_message()));
+        return;
+    }
+    emit modDependencyReportReceived(requestId, modDependencyReportFromProto(resp));
+}
+
+// Registers dependency requests for the given UniqueIDs and reports each ID's outcome.
+void GrpcWorker::doFetchModDependencies(quint64 requestId, const QString& gameId, const QString& profileName,
+                                        const QStringList& uniqueIds)
+{
+    gorganizer::v1::FetchModDependenciesRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_profile_name(profileName.toStdString());
+    for (const auto& id : uniqueIds)
+        req.add_unique_ids(id.toStdString());
+    gorganizer::v1::FetchModDependenciesResponse resp;
+    auto status = invoke(&Stub::FetchModDependencies, req, resp, std::chrono::seconds(120));
+    if (!status.ok()) {
+        emit modDependencyFetchFailed(requestId, gameId, profileName,
+                                      QString::fromStdString(status.error_message()));
+        return;
+    }
+    std::vector<GrpcDependencyFetchResult> results;
+    results.reserve(resp.results_size());
+    for (const auto& r : resp.results())
+        results.push_back(dependencyFetchResultFromProto(r));
+    emit modDependenciesFetched(requestId, gameId, profileName, results);
+}
+
+// Marks a batch's pending dependency enables done after the GUI enabled them.
+void GrpcWorker::doAckDependencyEnable(quint64 requestId, const QString& gameId, const QString& batchId,
+                                       const QStringList& uniqueIds)
+{
+    gorganizer::v1::AckDependencyEnableRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_batch_id(batchId.toStdString());
+    for (const auto& id : uniqueIds)
+        req.add_unique_ids(id.toStdString());
+    gorganizer::v1::AckDependencyEnableResponse resp;
+    auto status = invoke(&Stub::AckDependencyEnable, req, resp, std::chrono::seconds(15));
+    if (!status.ok()) {
+        emit dependencyEnableAckFailed(requestId, gameId, batchId, QString::fromStdString(status.error_message()));
+        return;
+    }
+    emit dependencyEnableAcknowledged(requestId, gameId, batchId, resp.acknowledged());
 }
 
 }

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/parka/gorganizer/internal/fsutil"
@@ -46,6 +47,7 @@ type InstallRequest struct {
 	FomodSelectedFiles []FomodFile
 	ProgressSink       ProgressSink
 	InstallID          string
+	Layout             LayoutPlanner
 }
 
 type InstallResult struct {
@@ -72,8 +74,11 @@ const (
 	StageFailed     InstallStage = 5
 )
 
-// Install is the canonical install path: extract, optionally apply FOMOD selection, stage, rename, write metadata.
+// Install is the canonical install path: extract, optionally apply FOMOD selection or a layout plan, stage, rename, write metadata.
 func Install(req InstallRequest) (*InstallResult, error) {
+	if req.Layout != nil && len(req.FomodSelectedFiles) > 0 {
+		return nil, ErrFomodNotSupportedForLayout
+	}
 	if req.InstallID == "" {
 		req.InstallID = "inst-" + uuid.NewString()
 	}
@@ -114,14 +119,33 @@ func Install(req InstallRequest) (*InstallResult, error) {
 			os.RemoveAll(tmp)
 			return nil, fmt.Errorf("extracting: %w", err)
 		}
-		ExpandNestedFomods(tmp)
+		if req.Layout == nil {
+			ExpandNestedFomods(tmp)
+		}
 	}
 	if extractTmp != "" {
 		defer os.RemoveAll(extractTmp)
 	}
 
-	if len(req.FomodSelectedFiles) == 0 && HasFomodInstaller(extractRoot) {
+	if req.Layout == nil && len(req.FomodSelectedFiles) == 0 && HasFomodInstaller(extractRoot) {
 		return nil, &installFomodMarker{Path: req.ArchivePath}
+	}
+
+	var planned []PlannedCopy
+	if req.Layout != nil {
+		copies, err := req.Layout.Plan(extractRoot)
+		if err != nil {
+			emit(InstallProgress{Step: StageFailed, Error: err.Error()})
+			return nil, fmt.Errorf("planning archive layout: %w", err)
+		}
+		if req.Mode == ModeMergeIntoMod {
+			copies, err = alignPlannedWithExisting(finalDir, copies)
+			if err != nil {
+				emit(InstallProgress{Step: StageFailed, Error: err.Error()})
+				return nil, err
+			}
+		}
+		planned = copies
 	}
 
 	stageDir, err := os.MkdirTemp(modsDir, ".stage-")
@@ -138,9 +162,12 @@ func Install(req InstallRequest) (*InstallResult, error) {
 	emit(InstallProgress{Step: StageCopying, Pct: 0})
 
 	var written []string
-	if len(req.FomodSelectedFiles) > 0 {
+	switch {
+	case len(req.FomodSelectedFiles) > 0:
 		written, err = copyFomodSelection(req.GameID, extractRoot, stageDir, req.FomodSelectedFiles, req.InstallID, req.ProgressSink)
-	} else {
+	case req.Layout != nil:
+		written, err = copyPlanned(extractRoot, stageDir, planned, req.InstallID, req.ProgressSink)
+	default:
 		written, err = copyFlatten(req.GameID, extractRoot, stageDir, req.InstallID, req.ProgressSink)
 	}
 	if err != nil {
@@ -405,6 +432,55 @@ func mergeTree(src, dst string) error {
 		_, err = io.Copy(out, in)
 		return err
 	})
+}
+
+var reservedModFolderNames = []string{"Overwrite", "Downloads"}
+
+// ValidateTargetModName rejects a mod folder name that is unsafe, hidden, or reserved.
+func ValidateTargetModName(name string) error {
+	if err := fsutil.ValidateName(name); err != nil {
+		return &InvalidTargetModError{Name: name, Reason: err.Error()}
+	}
+	if strings.HasPrefix(name, ".") {
+		return &InvalidTargetModError{Name: name, Reason: "name must not start with a dot"}
+	}
+	for _, reserved := range reservedModFolderNames {
+		if strings.EqualFold(name, reserved) {
+			return &InvalidTargetModError{Name: name, Reason: "name is reserved"}
+		}
+	}
+	return nil
+}
+
+// NormalizeDerivedModName turns a folder name derived from archive metadata into a valid, non-reserved mod folder name.
+func NormalizeDerivedModName(name string) string {
+	name = strings.TrimSpace(strings.TrimLeftFunc(name, func(r rune) bool { return r == '.' || unicode.IsSpace(r) }))
+	for _, reserved := range reservedModFolderNames {
+		if strings.EqualFold(name, reserved) {
+			name += "_"
+		}
+	}
+	if ValidateTargetModName(name) != nil {
+		return "Mod"
+	}
+	return name
+}
+
+// ValidateMergeTarget requires a valid mod folder name that names an existing, non-symlinked directory under modsDir.
+func ValidateMergeTarget(modsDir, name string) error {
+	if err := ValidateTargetModName(name); err != nil {
+		return err
+	}
+	info, err := os.Lstat(filepath.Join(modsDir, name))
+	switch {
+	case err != nil:
+		return &InvalidTargetModError{Name: name, Reason: "merge target is not an existing mod folder"}
+	case info.Mode()&os.ModeSymlink != 0:
+		return &InvalidTargetModError{Name: name, Reason: "merge target is a symlink"}
+	case !info.IsDir():
+		return &InvalidTargetModError{Name: name, Reason: "merge target is not a directory"}
+	}
+	return nil
 }
 
 var modsDirResolver func(gameID string) string

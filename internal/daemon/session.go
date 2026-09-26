@@ -5,7 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"log/slog"
 
@@ -13,6 +16,7 @@ import (
 	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/dto"
 	"github.com/parka/gorganizer/internal/game"
+	"github.com/parka/gorganizer/internal/gamedef"
 	inipkg "github.com/parka/gorganizer/internal/ini"
 	"github.com/parka/gorganizer/internal/plugins"
 	"github.com/parka/gorganizer/internal/profile"
@@ -31,30 +35,47 @@ type session struct {
 	toolMgr        *tools.Manager
 	lootInstaller  *tools.LOOTInstaller
 
-	launched      map[int]*launchedGame
-	steamLaunched map[string]bool
-	launchedMu    sync.Mutex
+	launched        map[int]*launchedGame
+	steamLaunched   map[string]bool
+	steamLaunchedAt map[string]time.Time
+	launchedMu      sync.Mutex
+	procScan        func(dir string) (bool, error)
 
 	execRuns     map[string]*execRun
 	execRunsMu   sync.Mutex
 	execLaunchMu sync.Mutex
 
-	pendingRecoveries     map[string]*dto.RecoveryPendingResult
-	rootPendingRecoveries map[string]*dto.RecoveryPendingResult
-	gamesAtPath           map[string][]string
-	pendingRecoveriesMu   sync.Mutex
+	pendingRecoveries       map[string]*dto.RecoveryPendingResult
+	rootPendingRecoveries   map[string]*dto.RecoveryPendingResult
+	loaderPendingRecoveries map[string]*dto.RecoveryPendingResult
+	gamesAtPath             map[string][]string
+	pendingRecoveriesMu     sync.Mutex
+
+	fenceMu        sync.Mutex
+	fenceExclusive map[string]fenceHolder
+	fenceShared    map[string]map[fenceHolder]int
 
 	installLocks   map[string]*sync.Mutex
 	installLocksMu sync.Mutex
 
+	profileLocks   map[string]*sync.Mutex
+	profileLocksMu sync.Mutex
+
+	reinstallFault func(step string) error
+	launchFault    func(step string) error
+	steamOpener    func(url string) (int, error)
+
 	activeGameID   string
 	activeGameIDMu sync.RWMutex
 
-	statusCh      chan dto.StatusEventResult
-	coalescer     *statusCoalescer
-	coalescedCh   chan dto.StatusEventResult
-	coalescerDone chan struct{}
-	ingesterDone  chan struct{}
+	statusCh       chan dto.StatusEventResult
+	statusClosedMu sync.Mutex
+	statusClosed   bool
+	statusDone     chan struct{}
+	coalescer      *statusCoalescer
+	coalescedCh    chan dto.StatusEventResult
+	coalescerDone  chan struct{}
+	ingesterDone   chan struct{}
 
 	archiveBus *streamBus[dto.ArchiveEventResult]
 	installBus *streamBus[dto.InstallEventResult]
@@ -63,7 +84,15 @@ type session struct {
 
 	shutdownCh   chan struct{}
 	shutdownOnce sync.Once
+	shuttingDown atomic.Bool
+	startedAt    time.Time
+	background   backgroundWork
 	mu           sync.RWMutex
+
+	nexusPremiumMu    sync.Mutex
+	nexusPremiumCache nexusPremiumCache
+	nexusUsers        nexusUserValidator
+	now               func() time.Time
 
 	installedArchiveCache   map[string]map[string]archiveInstall
 	installedArchiveCacheMu sync.RWMutex
@@ -84,20 +113,22 @@ type session struct {
 }
 
 type services struct {
-	game     *GameService
-	mods     *ModService
-	archives *ArchiveService
-	install  *InstallService
-	vfs      *VFSService
-	launch   *LaunchService
-	execs    *ExecutableService
-	ttw      *TTWService
-	ini      *IniService
-	settings *SettingsService
-	plugins  *PluginStatusService
-	fnv4gb   *FNV4GBService
-	profiles *ProfileService
-	transfer *TransferService
+	game      *GameService
+	mods      *ModService
+	archives  *ArchiveService
+	install   *InstallService
+	vfs       *VFSService
+	launch    *LaunchService
+	execs     *ExecutableService
+	ttw       *TTWService
+	ini       *IniService
+	settings  *SettingsService
+	plugins   *PluginStatusService
+	fnv4gb    *FNV4GBService
+	profiles  *ProfileService
+	transfer  *TransferService
+	modLoader *ModLoaderService
+	modDeps   *ModDependencyService
 }
 
 type GameService struct{ s *session }
@@ -151,21 +182,10 @@ func (s *session) ensureMountManager(gameID string, gc config.GameConfig) *vfs.M
 	if mm, ok := s.mountMgrs[gameID]; ok {
 		return mm
 	}
-	installPath := gc.InstallPath
+	installPath := s.mountInstallPath(gc)
 	subpath := gc.DataSubpath
 	if subpath == "" {
 		subpath = "Data"
-	}
-	if gc.LinkedFromGameID != "" {
-		if parent, ok := s.config.Games[gc.LinkedFromGameID]; ok && parent.InstallPath != "" {
-			installPath = parent.InstallPath
-			if subpath == "" {
-				subpath = parent.DataSubpath
-				if subpath == "" {
-					subpath = "Data"
-				}
-			}
-		}
 	}
 	mm := vfs.NewMountManager(
 		filepath.Join(installPath, subpath),
@@ -174,6 +194,16 @@ func (s *session) ensureMountManager(gameID string, gc config.GameConfig) *vfs.M
 	)
 	s.mountMgrs[gameID] = mm
 	return mm
+}
+
+// mountInstallPath returns the install path a mount manager uses for gc, preferring a configured linked parent's install path.
+func (s *session) mountInstallPath(gc config.GameConfig) string {
+	if gc.LinkedFromGameID != "" {
+		if parent, ok := s.config.Games[gc.LinkedFromGameID]; ok && parent.InstallPath != "" {
+			return parent.InstallPath
+		}
+	}
+	return gc.InstallPath
 }
 
 func (s *session) ensureRootDeploymentManager(gameID string, gc config.GameConfig) (*vfs.RootDeploymentManager, error) {
@@ -204,6 +234,7 @@ func (s *session) ensureRootDeploymentManager(gameID string, gc config.GameConfi
 	if managerGameID == "morrowind" {
 		protected = append(protected, "Morrowind.ini")
 	}
+	protected = append(protected, loaderProtectedRootPaths(managerGameID)...)
 	manager, err := vfs.NewRootDeploymentManager(vfs.RootDeploymentConfig{
 		GameRoot: gc.InstallPath, GameID: managerGameID, ProtectedPaths: protected,
 	})
@@ -213,6 +244,15 @@ func (s *session) ensureRootDeploymentManager(gameID string, gc config.GameConfi
 	s.rootDeployMgrs[gameID] = manager
 	s.rootDeployMgrs[managerGameID] = manager
 	return manager, nil
+}
+
+// loaderProtectedRootPaths returns the game-root paths owned by gameID's managed mod loader, which no mod may deploy over.
+func loaderProtectedRootPaths(gameID string) []string {
+	def, ok := gamedef.ByID(gameID)
+	if !ok || def.ModLoader == nil {
+		return nil
+	}
+	return append([]string(nil), def.ModLoader.ProtectedRootPaths...)
 }
 
 // installLock returns the per-mod-folder mutex serializing writes to that mod.
@@ -253,26 +293,74 @@ func (s *session) lockMods(gameID string, names ...string) func() {
 	}
 }
 
-// setSteamLaunched records/clears that a game is running via an untracked Steam launch.
+// lockProfiles locks the per-game profile mutation mutex and returns its unlock function.
+func (s *session) lockProfiles(gameID string) func() {
+	s.profileLocksMu.Lock()
+	if s.profileLocks == nil {
+		s.profileLocks = make(map[string]*sync.Mutex)
+	}
+	m, ok := s.profileLocks[gameID]
+	if !ok {
+		m = &sync.Mutex{}
+		s.profileLocks[gameID] = m
+	}
+	s.profileLocksMu.Unlock()
+	m.Lock()
+	return m.Unlock
+}
+
+// setSteamLaunched records, with its time, or clears that a game is running via an untracked Steam launch.
 func (s *session) setSteamLaunched(gameID string, active bool) {
+	now := s.clock()
 	s.launchedMu.Lock()
 	defer s.launchedMu.Unlock()
+	if s.steamLaunchedAt == nil {
+		s.steamLaunchedAt = make(map[string]time.Time)
+	}
 	if active {
 		s.steamLaunched[gameID] = true
+		s.steamLaunchedAt[gameID] = now
 	} else {
 		delete(s.steamLaunched, gameID)
+		delete(s.steamLaunchedAt, gameID)
 	}
 }
 
-// mountBusy reports whether a game's farm may still have a live reader.
-func (s *session) mountBusy(gameID string) bool {
-	s.launchedMu.Lock()
-	if s.steamLaunched[gameID] {
-		s.launchedMu.Unlock()
+// applyBusy reports, for a caller that holds no daemon lock, whether pending changes cannot be applied to gameID's farm now.
+func (s *session) applyBusy(gameID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.applyBusyLocked(gameID)
+}
+
+// applyBusyLocked reports whether a tracked launch or tool run, a game process or Steam launch on gameID's install, or a Steam launch flag younger than steamLaunchGrace forbids re-materializing its farm, clearing older flags once no such process exists; the caller holds s.mu.
+func (s *session) applyBusyLocked(gameID string) bool {
+	if s.trackedMountBusy(gameID) {
 		return true
 	}
-	s.launchedMu.Unlock()
-	return s.trackedMountBusy(gameID)
+	_, running := s.gameProcessRunningLocked(gameID)
+	return running
+}
+
+// teardownBusyLocked reports whether gameID's farm may still have a reader and must not be torn down: a tracked launch or tool run, any Steam-launch flag on its install however old, or a game process or Steam launch there; it never clears a flag, and the caller holds s.mu.
+func (s *session) teardownBusyLocked(gameID string) bool {
+	if s.trackedMountBusy(gameID) {
+		return true
+	}
+	key := s.fenceKeyLocked(gameID)
+	games := s.gamesOnFenceKeyLocked(gameID, key)
+	if flagged, _ := s.steamLaunchesAmong(games); len(flagged) > 0 {
+		return true
+	}
+	if !filepath.IsAbs(key) {
+		return false
+	}
+	running, err := s.processRunningIn(key, s.steamAppIDsLocked(games))
+	if err != nil {
+		slog.Warn("scanning processes before a farm teardown failed; trusting the launch flags", "game", gameID, "path", key, "err", err)
+		return false
+	}
+	return running
 }
 
 func (s *session) trackedMountBusy(gameID string) bool {
@@ -331,7 +419,7 @@ func (s *session) installedArchiveMap(gameID string) map[string]archiveInstall {
 		return out
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == "Downloads" {
+		if !entry.IsDir() || entry.Name() == "Downloads" || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		modDir := filepath.Join(modsDir, entry.Name())
@@ -367,6 +455,7 @@ func (s *session) runStatusIngest() {
 	s.coalescer.Close()
 }
 
+// runStatusDrain forwards coalesced status events to the watchers, blocking while the stream is open and dropping events nobody reads once it closed.
 func (s *session) runStatusDrain() {
 	defer close(s.coalescerDone)
 	defer close(s.coalescedCh)
@@ -375,23 +464,50 @@ func (s *session) runStatusDrain() {
 		if !ok {
 			return
 		}
-		s.coalescedCh <- evt
+		select {
+		case s.coalescedCh <- evt:
+		case <-s.statusDone:
+			select {
+			case s.coalescedCh <- evt:
+			default:
+			}
+		}
 	}
 }
 
-// emitInfo publishes a status Info line (best-effort, non-blocking).
+// emitInfo publishes a status Info line without blocking, dropping it once shutdown closed the status stream.
 func (s *session) emitInfo(msg string) {
-	select {
-	case s.statusCh <- dto.StatusEventResult{Info: msg}:
-	default:
-	}
+	s.publishGuarded(dto.StatusEventResult{Info: msg})
 }
 
-// publishStatus is a non-blocking send to the daemon's status channel.
-func (s *session) publishStatus(evt dto.StatusEventResult) {
+// publishGuarded sends a status event without blocking, dropping it once shutdown closed the status stream.
+func (s *session) publishGuarded(evt dto.StatusEventResult) {
+	s.statusClosedMu.Lock()
+	defer s.statusClosedMu.Unlock()
+	if s.statusClosed {
+		return
+	}
 	select {
 	case s.statusCh <- evt:
 	default:
-		slog.Debug("status channel full, dropping plugin-status event")
 	}
+}
+
+// closeStatus closes the status stream once no guarded publish is in flight, so later guarded publishes are dropped.
+func (s *session) closeStatus() {
+	s.statusClosedMu.Lock()
+	defer s.statusClosedMu.Unlock()
+	if s.statusClosed {
+		return
+	}
+	s.statusClosed = true
+	close(s.statusCh)
+	if s.statusDone != nil {
+		close(s.statusDone)
+	}
+}
+
+// publishStatus sends a status event without blocking, dropping it once shutdown closed the status stream.
+func (s *session) publishStatus(evt dto.StatusEventResult) {
+	s.publishGuarded(evt)
 }

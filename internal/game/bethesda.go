@@ -1,7 +1,9 @@
 package game
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -31,6 +33,7 @@ func knownGamesFromRegistry() []GameDefinition {
 			ParentGameID:      d.ParentGameID,
 			Requires:          append([]string(nil), d.Requires...),
 			NxmSlug:           d.NxmSlug,
+			DataDirOptional:   d.DataDirOptional,
 		})
 	}
 	return out
@@ -272,7 +275,19 @@ func parseAppManifest(acfPath, libraryFolder string) (*DetectedGame, error) {
 // validateInstallLayout rejects incomplete or incorrectly rooted installs.
 func validateInstallLayout(installPath string, def GameDefinition) (string, bool) {
 	dataPath := filepath.Join(installPath, filepath.FromSlash(def.DataSubpath))
-	if !fsutil.DirExists(dataPath) {
+	dataPathMissing := false
+	if def.DataDirOptional {
+		info, err := os.Lstat(dataPath)
+		if err == nil {
+			if !info.IsDir() {
+				return "", false
+			}
+		} else if errors.Is(err, fs.ErrNotExist) {
+			dataPathMissing = true
+		} else {
+			return "", false
+		}
+	} else if !fsutil.DirExists(dataPath) {
 		return "", false
 	}
 
@@ -290,10 +305,12 @@ func validateInstallLayout(installPath string, def GameDefinition) (string, bool
 		}
 	}
 
-	for _, rel := range def.RequiredDataFiles {
-		info, err := os.Stat(filepath.Join(dataPath, filepath.FromSlash(rel)))
-		if err != nil || !info.Mode().IsRegular() {
-			return "", false
+	if !dataPathMissing {
+		for _, rel := range def.RequiredDataFiles {
+			info, err := os.Stat(filepath.Join(dataPath, filepath.FromSlash(rel)))
+			if err != nil || !info.Mode().IsRegular() {
+				return "", false
+			}
 		}
 	}
 	return dataPath, true

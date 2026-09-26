@@ -19,7 +19,7 @@ class ExecutablesDialog : public QDialog {
     Q_OBJECT
 public:
     ExecutablesDialog(GrpcClient* grpc, const QString& gameId, const QString& profileName,
-                      QWidget* parent = nullptr);
+                      QWidget* parent = nullptr, bool lootAvailable = true);
 
 private slots:
     void onSelectionChanged();

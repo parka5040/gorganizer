@@ -26,6 +26,20 @@ void richWarn(QWidget* parent, const QString& title, const QString& text)
     box.exec();
 }
 
+void plainWarn(QWidget* parent, const QString& title, const QString& text)
+{
+    QMessageBox box(QMessageBox::Warning, title, text, QMessageBox::Ok, parent);
+    box.setTextFormat(Qt::PlainText);
+    box.exec();
+}
+
+void plainInfo(QWidget* parent, const QString& title, const QString& text)
+{
+    QMessageBox box(QMessageBox::Information, title, text, QMessageBox::Ok, parent);
+    box.setTextFormat(Qt::PlainText);
+    box.exec();
+}
+
 bool confirm(QWidget* parent, const QString& title, const QString& text,
              QMessageBox::StandardButton defaultButton,
              QMessageBox::StandardButton acceptButton,
@@ -50,6 +64,29 @@ bool confirmDestructive(QWidget* parent, const QString& title, const QString& te
     QMessageBox box(parent);
     box.setWindowTitle(title);
     box.setIcon(QMessageBox::Warning);
+    box.setText(text);
+    auto* acceptBtn = box.addButton(acceptLabel, QMessageBox::DestructiveRole);
+    box.addButton(rejectLabel, QMessageBox::RejectRole);
+    box.exec();
+    return box.clickedButton() == acceptBtn;
+}
+
+bool plainConfirm(QWidget* parent, const QString& title, const QString& text,
+                  QMessageBox::Icon icon, QMessageBox::StandardButton defaultButton)
+{
+    QMessageBox box(icon, title, text, QMessageBox::Yes | QMessageBox::No, parent);
+    box.setTextFormat(Qt::PlainText);
+    box.setDefaultButton(defaultButton);
+    return box.exec() == QMessageBox::Yes;
+}
+
+bool plainConfirmDestructive(QWidget* parent, const QString& title, const QString& text,
+                             const QString& acceptLabel, const QString& rejectLabel)
+{
+    QMessageBox box(parent);
+    box.setWindowTitle(title);
+    box.setIcon(QMessageBox::Warning);
+    box.setTextFormat(Qt::PlainText);
     box.setText(text);
     auto* acceptBtn = box.addButton(acceptLabel, QMessageBox::DestructiveRole);
     box.addButton(rejectLabel, QMessageBox::RejectRole);

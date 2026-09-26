@@ -286,15 +286,24 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 	if err := es.s.awaitRecovery(); err != nil {
 		return 0, "", err
 	}
-	if pending := es.s.recoveryPendingFor(gameID); pending != nil {
+	es.s.mu.RLock()
+	pending := es.s.recoveryPendingFor(gameID)
+	conflict := es.s.findMutexConflict(gameID)
+	es.s.mu.RUnlock()
+	if pending != nil {
 		return 0, "", fmt.Errorf("recovery pending for %s: %s", gameID, pending.Reason)
 	}
-	if conflict := es.s.findMutexConflict(gameID); conflict != "" {
+	if conflict != "" {
 		return 0, "", &VFSMutexError{GameID: gameID, Conflicting: conflict, Group: mutexGroupOf(gameID)}
 	}
-	if es.s.mountBusy(gameID) {
+	if es.s.applyBusy(gameID) {
 		return 0, "", fmt.Errorf("cannot launch a tool while %s or another managed tool is running", gameID)
 	}
+	releaseFence, fenceErr := es.s.acquireShared(gameID, dto.BusyOperationTool)
+	if fenceErr != nil {
+		return 0, "", fenceErr
+	}
+	defer releaseFence()
 
 	es.s.mu.RLock()
 	gc, ok := es.s.config.Games[gameID]
@@ -368,15 +377,13 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 				return 0, "", fmt.Errorf("mounting VFS for tool: %w", err)
 			}
 		}
-		if mm.IsMounted() && mm.IsDirty() && !es.s.mountBusy(gameID) {
+		if mm.IsMounted() && mm.IsDirty() && !es.s.applyBusy(gameID) {
 			if err := es.s.svc.vfs.RebuildVFS(gameID); err != nil {
 				return 0, "", fmt.Errorf("applying pending mod changes before tool launch: %w", err)
 			}
 		}
-		if mm.IsMounted() {
-			if err := es.s.applyRootDeployment(gameID, eff, profileName); err != nil {
-				return 0, "", fmt.Errorf("applying game-root deployment before tool launch: %w", err)
-			}
+		if err := es.s.applyMountedRootDeployment(gameID, eff, profileName, mm); err != nil {
+			return 0, "", fmt.Errorf("applying game-root deployment before tool launch: %w", err)
 		}
 	}
 
@@ -393,7 +400,10 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 		if err := os.MkdirAll(captureRoot, 0755); err != nil {
 			return 0, "", fmt.Errorf("creating capture mod %q: %w", exe.CaptureOutputToMod, err)
 		}
-		es.s.svc.mods.ensureInModList(gameID, exe.CaptureOutputToMod)
+		if err := es.s.svc.mods.ensureInModList(gameID, exe.CaptureOutputToMod); err != nil {
+			slog.Warn("registering capture mod failed", "game", gameID, "mod", exe.CaptureOutputToMod, "err", err)
+			return 0, "", fmt.Errorf("registering capture mod %q: %w", exe.CaptureOutputToMod, err)
+		}
 	}
 
 	if outputPolicy == tools.OutputNamedMod && mm.IsMounted() && !captureIsOverwrite {

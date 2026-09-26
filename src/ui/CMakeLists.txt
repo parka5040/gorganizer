@@ -2,6 +2,8 @@ add_library(gorganizer_ui STATIC
     MainWindow.cpp
     SessionController.cpp
     LaunchController.cpp
+    ModLoaderController.cpp
+    ModLoaderProgressDialog.cpp
     FalloutPatchController.cpp
     GameSetupController.cpp
     SetupWizard.cpp
@@ -32,6 +34,12 @@ add_library(gorganizer_ui STATIC
     ImportDialog.cpp
     ThemeManager.cpp
     Dialogs.cpp
+    InstallErrorText.cpp
+    ModDependencyText.cpp
+    ModDependencyController.cpp
+    DependencyFetchDialog.cpp
+    SmapiComponentModel.cpp
+    SmapiModsWidget.cpp
 )
 target_include_directories(gorganizer_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(gorganizer_ui PUBLIC

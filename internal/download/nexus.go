@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 )
 
 var ErrInvalidKey = errors.New("invalid API key")
+
+const redactedAPIKey = "<redacted>"
 
 type URLResolver interface {
 	ResolveDownloadURL(link *NXMLink) (string, error)
@@ -47,6 +50,14 @@ type NexusFileDetails struct {
 	SizeKB       int64  `json:"size_kb"`
 	FileName     string `json:"file_name"`
 	Description  string `json:"description,omitempty"`
+	IsPrimary    bool   `json:"is_primary"`
+}
+
+type NexusUser struct {
+	UserID      int    `json:"user_id"`
+	Name        string `json:"name"`
+	IsPremium   bool   `json:"is_premium"`
+	IsSupporter bool   `json:"is_supporter"`
 }
 
 type NexusClient struct {
@@ -64,10 +75,53 @@ func NewNexusClient(apiKey string) *NexusClient {
 	return &NexusClient{
 		apiKey:            apiKey,
 		baseURL:           "https://api.nexusmods.com",
-		httpClient:        httpx.APIClient(),
+		httpClient:        nexusHTTPClient(),
 		rlDailyRemaining:  -1,
 		rlHourlyRemaining: -1,
 	}
+}
+
+// nexusHTTPClient returns the shared API client with host-changing redirects refused.
+func nexusHTTPClient() *http.Client {
+	client := httpx.APIClient()
+	client.CheckRedirect = refuseCrossHostRedirect(client.CheckRedirect)
+	return client
+}
+
+// refuseCrossHostRedirect wraps next so any redirect away from the original request host fails before it is sent.
+func refuseCrossHostRedirect(next func(*http.Request, []*http.Request) error) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+			return ErrCrossHostRedirect
+		}
+		if next == nil {
+			return nil
+		}
+		return next(req, via)
+	}
+}
+
+// redactKey replaces every occurrence of the API key in s with a placeholder.
+func (c *NexusClient) redactKey(s string) string {
+	if c.apiKey == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, c.apiKey, redactedAPIKey)
+}
+
+// readErrorBody reads at most limit bytes of body and returns them with the API key redacted, dropping any key prefix cut off at the limit.
+func (c *NexusClient) readErrorBody(body io.Reader, limit int64) string {
+	data, _ := io.ReadAll(io.LimitReader(body, limit+1))
+	if int64(len(data)) <= limit {
+		return c.redactKey(string(data))
+	}
+	snippet := c.redactKey(string(data[:limit]))
+	for n := len(c.apiKey) - 1; n > 0; n-- {
+		if strings.HasSuffix(snippet, c.apiKey[:n]) {
+			return snippet[:len(snippet)-n]
+		}
+	}
+	return snippet
 }
 
 // captureRateLimit reads the X-RL-* headers Nexus emits on every response.
@@ -128,7 +182,7 @@ func (c *NexusClient) ResolveDownloadURL(link *NXMLink) (string, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("nexus download_link API returned %d: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("nexus download_link API returned %d: %s", resp.StatusCode, c.redactKey(string(body)))
 	}
 
 	var links []struct {
@@ -161,7 +215,7 @@ func (c *NexusClient) GetModInfo(gameSlug string, modID int) (*NexusModInfo, err
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("nexus mods API returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("nexus mods API returned %d: %s", resp.StatusCode, c.redactKey(string(body)))
 	}
 
 	var info NexusModInfo
@@ -190,7 +244,7 @@ func (c *NexusClient) GetFileDetails(gameSlug string, modID, fileID int) (*Nexus
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("nexus file details API returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("nexus file details API returned %d: %s", resp.StatusCode, c.redactKey(string(body)))
 	}
 
 	var details NexusFileDetails
@@ -202,9 +256,14 @@ func (c *NexusClient) GetFileDetails(gameSlug string, modID, fileID int) (*Nexus
 
 // ListModFiles returns all files for a mod.
 func (c *NexusClient) ListModFiles(gameSlug string, modID int) (*NexusFileList, error) {
+	return c.ListModFilesContext(context.Background(), gameSlug, modID)
+}
+
+// ListModFilesContext returns all files for a mod, abandoning the request when ctx ends.
+func (c *NexusClient) ListModFilesContext(ctx context.Context, gameSlug string, modID int) (*NexusFileList, error) {
 	endpoint := fmt.Sprintf("%s/v1/games/%s/mods/%d/files.json",
 		c.baseURL, gameSlug, modID)
-	req, err := http.NewRequest("GET", endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +276,7 @@ func (c *NexusClient) ListModFiles(gameSlug string, modID int) (*NexusFileList, 
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("nexus files API returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("nexus files API returned %d: %s", resp.StatusCode, c.redactKey(string(body)))
 	}
 	var list NexusFileList
 	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
@@ -243,7 +302,7 @@ func (c *NexusClient) ResolveDownloadURLByID(gameSlug string, modID, fileID int)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("nexus download_link returned %d: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("nexus download_link returned %d: %s", resp.StatusCode, c.redactKey(string(body)))
 	}
 	var links []struct {
 		URI string `json:"URI"`
@@ -279,8 +338,39 @@ func (c *NexusClient) ValidateAPIKey(ctx context.Context) error {
 		return ErrInvalidKey
 	default:
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("validation failed: HTTP %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("validation failed: HTTP %d: %s", resp.StatusCode, c.redactKey(string(body)))
 	}
+}
+
+// ValidateUser returns the Nexus account associated with the configured API key.
+func (c *NexusClient) ValidateUser(ctx context.Context) (*NexusUser, error) {
+	endpoint := fmt.Sprintf("%s/v1/users/validate.json", c.baseURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating Nexus user validation request: %w", err)
+	}
+	c.setHeaders(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("Nexus user validation request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	c.captureRateLimit(resp.Header)
+
+	switch resp.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return nil, ErrInvalidKey
+	case http.StatusOK:
+	default:
+		return nil, fmt.Errorf("Nexus user validation failed: HTTP %d: %s", resp.StatusCode, c.readErrorBody(resp.Body, 1024))
+	}
+
+	var user NexusUser
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&user); err != nil {
+		return nil, fmt.Errorf("decoding Nexus user validation response: %w", err)
+	}
+	return &user, nil
 }
 
 type V3ModFile struct {
@@ -333,7 +423,7 @@ func (c *NexusClient) GetModFile(ctx context.Context, gameDomain, gameScopedID s
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("nexus v3 mod-file returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("nexus v3 mod-file returned %d: %s", resp.StatusCode, c.redactKey(string(body)))
 	}
 	var env struct {
 		Data V3ModFile `json:"data"`
@@ -362,7 +452,7 @@ func (c *NexusClient) GetModFileDependencyRanges(ctx context.Context, globalFile
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("nexus v3 dep-ranges returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("nexus v3 dep-ranges returned %d: %s", resp.StatusCode, c.redactKey(string(body)))
 	}
 	var out V3DepRangesResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {

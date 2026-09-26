@@ -16,6 +16,8 @@ GameInfo toGameInfo(const GrpcGame& game)
     info.synthetic = game.synthetic;
     info.linkedFromShortName = game.linkedFromGameId;
     info.vfsActive = game.vfsActive;
+    info.capabilities = game.capabilities;
+    info.capabilitiesKnown = game.capabilitiesKnown;
     return info;
 }
 
@@ -30,7 +32,15 @@ GrpcGame toGrpcGame(const GameInfo& info)
     game.synthetic = info.synthetic;
     game.linkedFromGameId = info.linkedFromShortName;
     game.vfsActive = info.vfsActive;
+    game.capabilities = info.capabilities;
+    game.capabilitiesKnown = info.capabilitiesKnown;
     return game;
+}
+
+bool grpcOutcomeUnknown(int code)
+{
+    return code == GrpcStatusCancelled || code == GrpcStatusUnknown || code == GrpcStatusDeadlineExceeded
+        || code == GrpcStatusUnavailable;
 }
 
 }

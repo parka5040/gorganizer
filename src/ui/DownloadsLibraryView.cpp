@@ -4,6 +4,7 @@
 #include "ModInstallDialog.h"
 #include "ThemeManager.h"
 #include "Dialogs.h"
+#include "InstallErrorText.h"
 
 #include <QVBoxLayout>
 #include <QHeaderView>
@@ -93,7 +94,6 @@ DownloadsLibraryView::DownloadsLibraryView(GrpcClient* grpc, QWidget* parent)
     m_view->setSortingEnabled(true);
     m_view->setUniformRowHeights(true);
 
-    // The status delegate paints from the live theme palette; repaint on change.
     connect(ThemeManager::instance(), &ThemeManager::themeChanged, this,
             [this](const Palette&) {
                 if (m_view)
@@ -355,7 +355,7 @@ void DownloadsLibraryView::onDoubleClicked(const QModelIndex& idx)
                                           QString(), GrpcInstallMergeIntoMod,
                                           existingFolder, QString(), {},
                                           modFolder, fileCount, err)) {
-                dialogs::warn(this, "Merge Failed", err);
+                showInstallError(this, "Merge Failed", err);
                 return;
             }
             emit modInstalledFromDownload();
@@ -385,7 +385,8 @@ void DownloadsLibraryView::actionInstall(const GrpcArchiveRow& row, bool forceNe
     if (!m_grpc->startInstallSync(m_game.shortName, row.archiveRelPath, QString(),
                                   mode, target, QString(), {},
                                   modFolder, fileCount, err)) {
-        if (err.contains("fomod_required")) {
+        if (parseInstallError(err).token == QLatin1String("fomod_required")
+            && usesLocalDataRootInstall(m_game)) {
             QString modsDir = GameInfo::modsDirPathFor(m_game.shortName);
             QString archiveAbs = modsDir + "/Downloads/" + row.archiveRelPath;
             QString defaultModName = row.modName.isEmpty()
@@ -402,7 +403,7 @@ void DownloadsLibraryView::actionInstall(const GrpcArchiveRow& row, bool forceNe
             reloadFromDaemon();
             return;
         }
-        dialogs::warn(this, "Install Failed", err);
+        showInstallError(this, "Install Failed", err);
         return;
     }
     emit modInstalledFromDownload();
@@ -423,18 +424,25 @@ void DownloadsLibraryView::actionMergeInto(const GrpcArchiveRow& row)
     if (candidates.isEmpty())
         candidates.append("<type a mod folder name>");
 
-    bool ok = false;
-    QString target = QInputDialog::getItem(this, "Merge Into Existing Mod",
-        "Target mod folder:", candidates, 0, true, &ok);
-    if (!ok || target.isEmpty())
-        return;
+    QString target;
+    for (;;) {
+        bool ok = false;
+        target = QInputDialog::getItem(this, "Merge Into Existing Mod",
+            "Target mod folder:", candidates, 0, true, &ok).trimmed();
+        if (!ok)
+            return;
+        const QString problem = modNameProblem(target);
+        if (problem.isEmpty())
+            break;
+        dialogs::plainWarn(this, "Merge Into Existing Mod", problem);
+    }
 
     QString modFolder, err;
     int fileCount = 0;
     if (!m_grpc->startInstallSync(m_game.shortName, row.archiveRelPath, QString(),
                                   GrpcInstallMergeIntoMod, target, QString(), {},
                                   modFolder, fileCount, err)) {
-        dialogs::warn(this, "Merge Failed", err);
+        showInstallError(this, "Merge Failed", err);
         return;
     }
     emit modInstalledFromDownload();

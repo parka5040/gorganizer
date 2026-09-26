@@ -127,10 +127,10 @@ PluginListWidget::PluginListWidget(QWidget* parent)
 
     m_placeholder = new QWidget;
     auto* placeholderLayout = new QVBoxLayout(m_placeholder);
-    auto* placeholderLabel = new QLabel("No game selected.");
-    placeholderLabel->setAlignment(Qt::AlignCenter);
-    placeholderLabel->setObjectName("hintLabel");
-    placeholderLayout->addWidget(placeholderLabel);
+    m_placeholderLabel = new QLabel("No game selected.");
+    m_placeholderLabel->setAlignment(Qt::AlignCenter);
+    m_placeholderLabel->setObjectName("hintLabel");
+    placeholderLayout->addWidget(m_placeholderLabel);
     layout->addWidget(m_placeholder);
 
     m_view->hide();
@@ -174,6 +174,11 @@ void PluginListWidget::setModsDir(const QString& modsDir)
 
 void PluginListWidget::loadForGame(const GameInfo& game)
 {
+    if (!m_supported) {
+        m_game = GameInfo{};
+        m_model->clear();
+        return;
+    }
     m_game = game;
     m_model->clear();
     m_sortColumn = PluginColIndex;
@@ -193,6 +198,8 @@ void PluginListWidget::loadForGame(const GameInfo& game)
 
 void PluginListWidget::refresh()
 {
+    if (!m_supported)
+        return;
     if (m_game.detected)
         loadForGame(m_game);
     resubscribeStream();
@@ -209,12 +216,16 @@ void PluginListWidget::setGrpcClient(GrpcClient* grpc)
     if (!m_grpc) return;
     connect(m_grpc, &GrpcClient::pluginStatusSnapshot,
             this, [this](const std::vector<GrpcPluginStatus>& plugins) {
+                if (!m_supported)
+                    return;
                 m_model->applySnapshot(plugins, m_game.shortName);
                 m_view->setVisible(!plugins.empty());
                 m_placeholder->setVisible(plugins.empty());
             });
     connect(m_grpc, &GrpcClient::pluginStatusUpdate,
             this, [this](const GrpcPluginStatus& plugin) {
+                if (!m_supported)
+                    return;
                 m_model->applyUpdate(plugin);
             });
     resubscribeStream();
@@ -224,14 +235,36 @@ void PluginListWidget::setActiveProfile(const QString& profileName)
 {
     if (m_activeProfile == profileName) return;
     m_activeProfile = profileName;
+    if (!m_supported)
+        return;
     m_model->clear();
     m_view->hide();
     m_placeholder->show();
     resubscribeStream();
 }
 
+void PluginListWidget::setSupported(bool supported)
+{
+    if (m_supported == supported)
+        return;
+    m_supported = supported;
+    m_model->clear();
+    m_view->hide();
+    m_placeholder->show();
+    if (!supported) {
+        if (m_grpc)
+            m_grpc->unsubscribePluginStatus();
+        m_game = GameInfo{};
+        m_placeholderLabel->setText("This game does not use plugins.");
+        return;
+    }
+    m_placeholderLabel->setText("No game selected.");
+    resubscribeStream();
+}
+
 void PluginListWidget::resubscribeStream()
 {
+    if (!m_supported) return;
     if (!m_grpc) return;
     if (!m_game.detected || m_activeProfile.isEmpty()) {
         m_grpc->unsubscribePluginStatus();
@@ -242,7 +275,7 @@ void PluginListWidget::resubscribeStream()
 
 void PluginListWidget::persistLoadoutToDaemon()
 {
-    if (!m_grpc || !m_game.detected || m_activeProfile.isEmpty())
+    if (!m_supported || !m_grpc || !m_game.detected || m_activeProfile.isEmpty())
         return;
     const auto loadout = m_model->orderedLoadout();
     QString err;

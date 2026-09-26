@@ -23,6 +23,16 @@ add_compile_definitions(GORGANIZER_VERSION="${GORGANIZER_VERSION}")
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
 find_package(PkgConfig REQUIRED)
+# pkg_check_modules caches its results and never re-queries pkg-config.
+# A system upgrade that drops a library can leave the link line pointing
+# at a deleted file. Clearing these cached entries forces a fresh query on
+# every configure.
+get_cmake_property(_pkg_cache_vars CACHE_VARIABLES)
+foreach(_pkg_var IN LISTS _pkg_cache_vars)
+    if(_pkg_var MATCHES "^(__pkg_config_checked|pkgcfg_lib)_(PROTOBUF|GRPC)(_|$)")
+        unset(${_pkg_var} CACHE)
+    endif()
+endforeach()
 pkg_check_modules(PROTOBUF REQUIRED IMPORTED_TARGET protobuf)
 pkg_check_modules(GRPC REQUIRED IMPORTED_TARGET grpc++)
 find_program(PROTOC protoc REQUIRED)

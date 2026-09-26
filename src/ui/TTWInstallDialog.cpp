@@ -1,5 +1,6 @@
 #include "TTWInstallDialog.h"
 #include "Dialogs.h"
+#include "InstallErrorText.h"
 
 #include <QApplication>
 #include <QButtonGroup>
@@ -507,7 +508,7 @@ void TTWInstallDialog::onConfigure()
 
     QString modDir, err;
     if (!m_grpc->createBlankTTWMod(m_modName, modDir, err)) {
-        if (err.contains("mod_collision", Qt::CaseInsensitive)) {
+        if (parseInstallError(err).token == QLatin1String("mod_collision")) {
             if (!dialogs::confirm(this, "Replace existing TTW mod?",
                 QString("A mod folder named %1 already exists. Replace it?").arg(m_modName),
                 QMessageBox::No)) return;

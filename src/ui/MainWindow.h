@@ -4,8 +4,11 @@
 #include <QTabWidget>
 #include <QLabel>
 #include <QActionGroup>
+#include <optional>
 #include "AppConfig.h"
+#include "GrpcTypes.h"
 
+class QCloseEvent;
 class QToolButton;
 
 namespace gorganizer {
@@ -23,11 +26,21 @@ class SessionController;
 class LaunchController;
 class FalloutPatchController;
 class GameSetupController;
+class ModLoaderController;
+class ModDependencyController;
+class SmapiModsWidget;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(AppConfig& config, GrpcClient* grpc, QWidget* parent = nullptr);
+
+    // Records whether this gorganizer started the daemon, which then stops when gorganizer quits.
+    void setDaemonOwned(bool owned) { m_daemonOwned = owned; }
+
+protected:
+    // Asks before closing while a SMAPI operation or an asynchronous mod install that quitting could interrupt is still running.
+    void closeEvent(QCloseEvent* event) override;
 
 private slots:
     void onInstallMod();
@@ -36,13 +49,37 @@ private slots:
     void onOpenExecutables();
     void onExportMods();
     void onImportMods();
+    // Clears the matching pending install and rescans the mod list once no menu or dialog opened from it is running.
+    void onInstallRequestCompleted(quint64 requestId, const QString& modFolder, int fileCount);
+    // Resolves the matching pending install's failure, or reports any other asynchronous install failure.
+    void onInstallRequestFailed(quint64 requestId, const QString& error);
 
 private:
+    struct PendingExternalInstall {
+        quint64 requestId = 0;
+        QString gameId;
+        QString path;
+        QString name;
+        GrpcInstallMode mode = GrpcInstallAsNewMod;
+    };
+
     void setupUi();
     void createControllers();
     void wireConnections();
     void updateTransferActionsEnabled();
     void refreshAfterImport();
+    // Shows or hides game-specific tabs and actions from the active game's daemon capabilities.
+    void applyGameCapabilities(const GameInfo& game);
+    // Installs an archive for a manifest-layout game through the daemon, asking only for the mod name.
+    void installThroughDaemonLayout(const QString& gameId, const QString& path);
+    // Asks for a mod name until it passes local validation, returning an empty string on cancel.
+    QString askModName(const QString& title, const QString& label, const QString& initial);
+    // Issues an asynchronous external-archive install and records it as pending under its request id.
+    void startExternalInstall(const PendingExternalInstall& request);
+    // Reports or resolves a failed pending external install.
+    void onExternalInstallFailed(const PendingExternalInstall& request, const QString& error);
+    // Offers merge, rename, or cancel when a pending install hit an existing mod folder.
+    void resolveExternalInstallCollision(const PendingExternalInstall& request, const QString& existingName);
 
     AppConfig& m_config;
     GrpcClient* m_grpc;
@@ -52,6 +89,8 @@ private:
     DownloadsLibraryView* m_downloadsLibrary = nullptr;
     ActivityLogPanel* m_activityLog = nullptr;
     QTabWidget* m_rightTabs = nullptr;
+    QWidget* m_dataPlaceholder = nullptr;
+    SmapiModsWidget* m_smapiMods = nullptr;
     RunButtonWidget* m_runButton = nullptr;
     ProfileSelectorWidget* m_profileSelector = nullptr;
     ConnectionIndicator* m_connectionIndicator = nullptr;
@@ -62,6 +101,8 @@ private:
     LaunchController* m_launch = nullptr;
     FalloutPatchController* m_falloutPatch = nullptr;
     GameSetupController* m_gameSetup = nullptr;
+    ModLoaderController* m_modLoader = nullptr;
+    ModDependencyController* m_modDependencies = nullptr;
 
     QActionGroup* m_themeActions = nullptr;
     QActionGroup* m_appearanceActions = nullptr;
@@ -71,6 +112,12 @@ private:
     QAction* m_unmountAction = nullptr;
     QAction* m_patch4GBAction = nullptr;
     QAction* m_installTtwAction = nullptr;
+    QAction* m_iniEditorAction = nullptr;
+    QMenu* m_smapiMenu = nullptr;
+
+    std::optional<PendingExternalInstall> m_pendingExternalInstall;
+    bool m_restorePluginsTab = false;
+    bool m_daemonOwned = false;
 };
 
 }

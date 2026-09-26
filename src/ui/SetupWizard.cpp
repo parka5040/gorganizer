@@ -153,7 +153,7 @@ QWizardPage* SetupWizard::createSteamDetectionPage()
         QString start = QDir::homePath();
         QString path = QFileDialog::getOpenFileName(
             this, "Select a game executable", start,
-            "Windows executables (*.exe);;All files (*)");
+            "All files (*);;Windows executables (*.exe)");
         if (path.isEmpty())
             return;
 
@@ -163,7 +163,8 @@ QWizardPage* SetupWizard::createSteamDetectionPage()
                 "That file doesn't match any known Bethesda game. "
                 "Expected one of: Morrowind.exe, Oblivion.exe, TESV.exe, SkyrimSE.exe, "
                 "Fallout3.exe, FalloutNV.exe, Fallout4.exe, Starfield.exe, OblivionRemastered.exe, "
-                "OblivionRemastered-Win64-Shipping.exe.");
+                "OblivionRemastered-Win64-Shipping.exe. "
+                "Stardew Valley is detected automatically from your Steam library.");
             return;
         }
 

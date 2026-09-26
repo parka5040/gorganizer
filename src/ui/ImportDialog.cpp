@@ -1,6 +1,7 @@
 #include "ImportDialog.h"
 #include "Dialogs.h"
 #include "GrpcClient.h"
+#include "InstallErrorText.h"
 #include "ThemeManager.h"
 
 #include <QApplication>
@@ -437,16 +438,17 @@ void ImportDialog::onTransferFailed(const QString& error)
 // Maps the daemon's machine-readable transfer errors to user-facing text.
 QString ImportDialog::friendlyTransferError(const QString& error)
 {
-    if (error.startsWith("transfer_game_mismatch"))
+    const QString token = parseInstallError(error).token;
+    if (token == QLatin1String("transfer_game_mismatch"))
         return QString("This archive was exported from a different game and cannot be "
                        "imported here.\n\n(%1)").arg(error);
-    if (error.startsWith("transfer_schema"))
+    if (token == QLatin1String("transfer_schema"))
         return QString("This archive uses an export format this version of gorganizer "
                        "does not understand.\n\n(%1)").arg(error);
-    if (error.startsWith("transfer_overwrite_mounted"))
+    if (token == QLatin1String("transfer_overwrite_mounted"))
         return QString("A mod cannot be overwritten while the game's mod view is mounted. "
                        "Unmount mods first, or choose Rename/Skip.\n\n(%1)").arg(error);
-    if (error.startsWith("transfer_collision"))
+    if (token == QLatin1String("transfer_collision"))
         return QString("An item in the archive already exists in this instance and the "
                        "chosen policy aborts on collisions.\n\n(%1)").arg(error);
     return error;

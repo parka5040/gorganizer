@@ -9,6 +9,7 @@ import (
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/daemon"
 	"github.com/parka/gorganizer/internal/download"
+	"github.com/parka/gorganizer/internal/smapi"
 	"github.com/parka/gorganizer/internal/tools"
 	"github.com/parka/gorganizer/internal/transfer"
 	"github.com/parka/gorganizer/internal/vfs"
@@ -74,6 +75,12 @@ func TestMapErrorTypedErrors(t *testing.T) {
 			&daemon.ModCollisionError{Name: "SkyUI"},
 			codes.AlreadyExists,
 			"mod_collision:name=SkyUI:existing=",
+		},
+		{
+			"layout_unsupported",
+			&download.LayoutUnsupportedError{GameID: "stardewvalley", Layout: "smapi_manifest"},
+			codes.FailedPrecondition,
+			"layout_unsupported:game=stardewvalley:layout=smapi_manifest",
 		},
 		{
 			"unsafe_path",
@@ -158,6 +165,90 @@ func TestMapErrorTypedErrors(t *testing.T) {
 			&daemon.ErrFNV4GBNotAppliedForTTW{InstallPath: "/games/FNV"},
 			codes.FailedPrecondition,
 			"fnv4gb_not_applied_for_ttw:install_path=/games/FNV",
+		},
+		{
+			"not_a_mod_pointer",
+			&smapi.NotAModError{Reason: smapi.ReasonFolderCollision, Detail: "Mod,mod"},
+			codes.FailedPrecondition,
+			"not_a_mod:reason=folder_collision:detail=Mod%2Cmod",
+		},
+		{
+			"not_a_mod_value",
+			smapi.NotAModError{Reason: smapi.ReasonNoManifest},
+			codes.FailedPrecondition,
+			"not_a_mod:reason=no_manifest:detail=",
+		},
+		{
+			"not_a_mod_wrapped",
+			fmt.Errorf("replaying source archive %q: %w", "Downloads/x.zip", fmt.Errorf("planning archive layout: %w", smapi.NotAModError{Reason: smapi.ReasonLoaderInstaller})),
+			codes.FailedPrecondition,
+			"not_a_mod:reason=loader_installer:detail=",
+		},
+		{
+			"fomod_unsupported",
+			download.ErrFomodNotSupportedForLayout,
+			codes.InvalidArgument,
+			"fomod_unsupported:layout=manifest",
+		},
+		{
+			"fomod_unsupported_wrapped",
+			fmt.Errorf("replaying: %w", download.ErrFomodNotSupportedForLayout),
+			codes.InvalidArgument,
+			"fomod_unsupported:layout=manifest",
+		},
+		{
+			"manifest_layout_invalid",
+			&download.ManifestLayoutError{Mod: "Content Patcher", Reason: "root_manifest"},
+			codes.FailedPrecondition,
+			"manifest_layout_invalid:mod=Content%20Patcher:reason=root_manifest",
+		},
+		{
+			"reinstall_source_missing",
+			&download.ReinstallSourceMissingError{Mod: "SkyUI", Path: "Downloads/SkyUI.7z"},
+			codes.FailedPrecondition,
+			"reinstall_source_missing:mod=SkyUI:path=Downloads%2FSkyUI.7z",
+		},
+		{
+			"mod_registration_failed",
+			&download.ModRegistrationError{Mod: "Sky:UI=2", Err: &daemon.UnsafePathError{Field: "profile_name"}},
+			codes.Internal,
+			"mod_registration_failed:mod=Sky%3AUI%3D2",
+		},
+		{
+			"reinstall_source_missing_external",
+			&download.ReinstallSourceMissingError{Mod: "My Mod", Path: "/home/user/mods:old/a=b.zip"},
+			codes.FailedPrecondition,
+			"reinstall_source_missing:mod=My%20Mod:path=%2Fhome%2Fuser%2Fmods%3Aold%2Fa%3Db.zip",
+		},
+		{
+			"mod_mounted",
+			fmt.Errorf("reinstall: %w", &download.ModMountedError{Mod: "Sky:UI=2"}),
+			codes.FailedPrecondition,
+			"mod_mounted:mod=Sky%3AUI%3D2",
+		},
+		{
+			"fomod_reinstall_unsupported",
+			&download.FomodReinstallUnsupportedError{Mod: "Big Mod/fomod"},
+			codes.InvalidArgument,
+			"fomod_reinstall_unsupported:mod=Big%20Mod%2Ffomod",
+		},
+		{
+			"not_a_mod_duplicate_ids",
+			smapi.NotAModError{Reason: smapi.ReasonDuplicateIDs, Detail: "author.modx,x:y=z"},
+			codes.FailedPrecondition,
+			"not_a_mod:reason=duplicate_ids:detail=author.modx%2Cx%3Ay%3Dz",
+		},
+		{
+			"invalid_target_mod",
+			&download.InvalidTargetModError{Name: "..", Reason: "name must not be a relative path element"},
+			codes.InvalidArgument,
+			"invalid_target_mod:name=..",
+		},
+		{
+			"invalid_target_mod_escaped",
+			fmt.Errorf("install: %w", &download.InvalidTargetModError{Name: "a/b:c", Reason: "name must not contain a path separator"}),
+			codes.InvalidArgument,
+			"invalid_target_mod:name=a%2Fb%3Ac",
 		},
 	}
 	for _, tc := range cases {

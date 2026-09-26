@@ -1,12 +1,15 @@
 package daemon
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"testing"
 
+	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/gamedef"
 )
 
@@ -162,5 +165,148 @@ func TestNestedScriptExtenderManifestUsesInstallRootRelativePaths(t *testing.T) 
 	}
 	if !reflect.DeepEqual(drifted, []string{"OblivionRemastered/Binaries/Win64/obse64_1_512_105.dll"}) {
 		t.Fatalf("drifted = %v", drifted)
+	}
+}
+
+// TestScriptExtenderMainFileOptions pins the I-32 Steam-build selection policy handed to download.SelectMainFile.
+func TestScriptExtenderMainFileOptions(t *testing.T) {
+	tests := []struct {
+		name   string
+		needle string
+		want   download.MainFileOptions
+	}{
+		{
+			name:   "without runtime needle",
+			needle: "",
+			want: download.MainFileOptions{
+				RejectMentions: []string{"gog"},
+				PreferMentions: []string{"steam"},
+			},
+		},
+		{
+			name:   "with runtime needle",
+			needle: "1.6.1170",
+			want: download.MainFileOptions{
+				RejectMentions:      []string{"gog"},
+				PreferMentions:      []string{"steam"},
+				RequireVersionAnyOf: []string{"1.6.1170"},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_ = t.TempDir()
+			got := scriptExtenderMainFileOptions(tc.needle)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("scriptExtenderMainFileOptions(%q) = %#v, want %#v", tc.needle, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestScriptExtenderPolicySelectsSteamBuild verifies the daemon policy rejects GOG, filters runtimes, and picks the newest Steam file.
+func TestScriptExtenderPolicySelectsSteamBuild(t *testing.T) {
+	files := []download.NexusFileDetails{
+		{FileID: 90, Name: "Steam/GOG 1.6.1170", CategoryName: "MAIN"},
+		{FileID: 80, Name: "Steam build 1.6.640", CategoryName: "MAIN"},
+		{FileID: 70, Name: "Universal build 1.6.1170", CategoryName: "MAIN"},
+		{FileID: 30, Name: "Steam build", FileName: "se_1_6_1170.7z", CategoryName: "MAIN"},
+		{FileID: 40, Name: "Steam update", Description: "runtime 1-6-1170", CategoryName: "MAIN"},
+	}
+	got, err := download.SelectMainFile(files, scriptExtenderMainFileOptions("1.6.1170"))
+	if err != nil {
+		t.Fatalf("SelectMainFile() error = %v", err)
+	}
+	if got.FileID != 40 {
+		t.Fatalf("SelectMainFile() file ID = %d, want 40", got.FileID)
+	}
+}
+
+// TestScriptExtenderSelectError verifies selection failures keep the legacy no-Steam-build message.
+func TestScriptExtenderSelectError(t *testing.T) {
+	const legacy = "no Steam-compatible MAIN-category file found for SKSE64 (only GOG builds available?)"
+	tests := []struct {
+		name       string
+		err        error
+		wantMsg    string
+		wantUnwrap error
+	}{
+		{name: "no main file", err: download.ErrNoMainFile, wantMsg: legacy},
+		{name: "wrapped no main file", err: fmt.Errorf("outer: %w", download.ErrNoMainFile), wantMsg: legacy},
+		{
+			name:       "other selection error",
+			err:        download.ErrAmbiguousMainFile,
+			wantMsg:    "selecting SKSE64 file: " + download.ErrAmbiguousMainFile.Error(),
+			wantUnwrap: download.ErrAmbiguousMainFile,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_ = t.TempDir()
+			got := scriptExtenderSelectError("SKSE64", tc.err)
+			if got == nil || got.Error() != tc.wantMsg {
+				t.Fatalf("scriptExtenderSelectError() = %v, want %q", got, tc.wantMsg)
+			}
+			if tc.wantUnwrap != nil && !errors.Is(got, tc.wantUnwrap) {
+				t.Fatalf("scriptExtenderSelectError() = %v, want errors.Is(_, %v)", got, tc.wantUnwrap)
+			}
+		})
+	}
+}
+
+// TestScriptExtenderArchiveName verifies Nexus-supplied file names cannot escape the download directory.
+func TestScriptExtenderArchiveName(t *testing.T) {
+	def := gamedef.ScriptExtenderSource{Name: "SKSE64"}
+	const fallback = "SKSE64-77.archive"
+	tests := []struct {
+		name     string
+		fileName string
+		want     string
+	}{
+		{name: "parent traversal", fileName: "../../evil.7z", want: "evil.7z"},
+		{name: "absolute path", fileName: "/abs/x.7z", want: "x.7z"},
+		{name: "parent only", fileName: "..", want: fallback},
+		{name: "current directory", fileName: ".", want: fallback},
+		{name: "root only", fileName: "/", want: fallback},
+		{name: "empty", fileName: "", want: fallback},
+		{name: "normal", fileName: "skse64_2_02_06.7z", want: "skse64_2_02_06.7z"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			destDir := t.TempDir()
+			got := scriptExtenderArchiveName(def, &download.NexusFileDetails{FileID: 77, FileName: tc.fileName})
+			if got != tc.want {
+				t.Fatalf("scriptExtenderArchiveName(%q) = %q, want %q", tc.fileName, got, tc.want)
+			}
+			if dir := filepath.Dir(filepath.Join(destDir, got)); dir != destDir {
+				t.Fatalf("archive path parent = %q, want %q", dir, destDir)
+			}
+		})
+	}
+}
+
+// TestScriptExtenderManifestIsReplacedAtomically locks the manifest's bytes and mode across a rewrite with no temporary file left in the game root.
+func TestScriptExtenderManifestIsReplacedAtomically(t *testing.T) {
+	root := t.TempDir()
+	for _, extender := range []string{"skse64 2.2.5", "skse64 2.2.6"} {
+		manifest := seInstallManifest{GameID: "skyrimse", ExtenderName: extender, Entries: []seManifestEntry{{RelPath: "skse64_loader.exe", Size: 3, SHA256: "abc"}}}
+		if err := saveScriptExtenderManifest(root, manifest); err != nil {
+			t.Fatalf("saveScriptExtenderManifest(%s): %v", extender, err)
+		}
+	}
+	info, err := os.Stat(filepath.Join(root, seManifestFilename))
+	if err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatalf("manifest = %v, %v; want mode 0644", info, err)
+	}
+	loaded, err := loadScriptExtenderManifest(root)
+	if err != nil || loaded.ExtenderName != "skse64 2.2.6" || len(loaded.Entries) != 1 || loaded.Entries[0].RelPath != "skse64_loader.exe" {
+		t.Fatalf("loaded manifest = %+v, %v; want the second write", loaded, err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("game root holds %v after two manifest writes, want only the manifest", entries)
 	}
 }

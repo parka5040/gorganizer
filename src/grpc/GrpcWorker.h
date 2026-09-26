@@ -42,7 +42,11 @@ public slots:
     void doMountVfs(const QString& gameId, const QString& profileName);
     void doMountVfsWithSwap(const QString& gameId, const QString& profileName);
     void doUnmountVfs(const QString& gameId);
+    // Unmounts gameId for a maintenance flow with the long mount deadline and reports the outcome under requestId.
+    void doUnmountVfsForMaintenance(quint64 requestId, const QString& gameId);
     void doGetVfsStatus(const QString& gameId);
+    // Reads gameId's VFS status and reports it, or the failure, under requestId.
+    void doQueryVfsStatus(quint64 requestId, const QString& gameId);
     void doRebuildVfs(const QString& gameId);
     void doRestoreFromBackup(const QString& gameId);
 
@@ -54,7 +58,7 @@ public slots:
     void doCancelDownload(const QString& downloadId);
     void doRetryDownload(const QString& downloadId);
 
-    void doStartInstall(const QString& gameId, const QString& archiveRelPath,
+    void doStartInstall(quint64 requestId, const QString& gameId, const QString& archiveRelPath,
                         const QString& externalArchivePath, int mode,
                         const QString& targetMod, const QString& previewId,
                         const std::vector<GrpcFomodFile>& fomodSelectedFiles);
@@ -75,6 +79,21 @@ public slots:
                           int policy, const QMap<QString, int>& modPolicyOverrides,
                           const QStringList& modFolders, const QStringList& profileNames);
 
+    void doGetModLoaderStatus(quint64 requestId, const QString& gameId, bool checkLatest);
+    void doInstallModLoader(quint64 requestId, const QString& gameId, bool repairOnly);
+    void doUninstallModLoader(quint64 requestId, const QString& gameId);
+    void doRollbackModLoader(quint64 requestId, const QString& gameId);
+
+    void doGetModListRequest(quint64 requestId, const QString& gameId, const QString& profileName);
+    void doSetModListRequest(quint64 requestId, const QString& gameId, const QString& profileName,
+                             const std::vector<GrpcModListEntry>& entries);
+    void doGetModDependencyReport(quint64 requestId, const QString& gameId, const QString& profileName,
+                                  bool refreshRemote, bool forceRemote);
+    void doFetchModDependencies(quint64 requestId, const QString& gameId, const QString& profileName,
+                                const QStringList& uniqueIds);
+    void doAckDependencyEnable(quint64 requestId, const QString& gameId, const QString& batchId,
+                               const QStringList& uniqueIds);
+
 signals:
     void gamesListed(const std::vector<GrpcGame>& games);
     void gamesDetected(const std::vector<GrpcGame>& games);
@@ -89,6 +108,9 @@ signals:
     void vfsMounted(const GrpcVFSStatus& status);
     void vfsUnmounted();
     void vfsStatusReceived(const GrpcVFSStatus& status);
+    void vfsStatusQueried(quint64 requestId, const GrpcVFSStatus& status);
+    void vfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void maintenanceUnmountFinished(quint64 requestId, const QString& gameId, bool ok, int grpcCode, const QString& error);
     void vfsRebuilt();
     void conflictsReceived(const std::vector<GrpcFileConflict>& conflicts);
     void gameLaunched(int pid);
@@ -97,9 +119,8 @@ signals:
     void downloadStarted(const QString& downloadId, int queuedAhead);
     void downloadCancelled(const QString& downloadId);
     void downloadRetried(const QString& downloadId, int queuedAhead);
-    void installStarted(const QString& installId);
-    void installCompleted(const QString& modFolder, int fileCount);
-    void installFailed(const QString& error);
+    void installRequestCompleted(quint64 requestId, const QString& modFolder, int fileCount);
+    void installRequestFailed(quint64 requestId, const QString& error);
 
     void nexusAPIKeySet(bool valid, const QString& errorMessage);
 
@@ -119,6 +140,31 @@ signals:
     void transferProgress(const GrpcTransferProgress& progress);
     void transferCompleted(const GrpcTransferSummary& summary);
     void transferFailed(const QString& error);
+
+    void modLoaderStatusReceived(quint64 requestId, const QString& gameId, const GrpcModLoaderStatus& status);
+    void modLoaderStatusFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void modLoaderOperationFinished(quint64 requestId, const QString& gameId, const QString& operation,
+                                    bool ok, int grpcCode, const GrpcModLoaderStatus& status, const QString& error);
+
+    void modListRequestReceived(quint64 requestId, const QString& gameId, const QString& profileName,
+                                const std::vector<GrpcModListEntry>& entries);
+    void modListRequestFailed(quint64 requestId, const QString& gameId, const QString& profileName,
+                              const QString& error);
+    void modListSaved(quint64 requestId, const QString& gameId, const QString& profileName);
+    void modListSaveFailed(quint64 requestId, const QString& gameId, const QString& profileName,
+                           const QString& error);
+    void modDependencyReportReceived(quint64 requestId, const GrpcModDependencyReport& report);
+    void modDependencyReportFailed(quint64 requestId, const QString& gameId, const QString& profileName,
+                                   const QString& error);
+    void modDependenciesFetched(quint64 requestId, const QString& gameId, const QString& profileName,
+                                const std::vector<GrpcDependencyFetchResult>& results);
+    void modDependencyFetchFailed(quint64 requestId, const QString& gameId, const QString& profileName,
+                                  const QString& error);
+    void dependencyEnableAcknowledged(quint64 requestId, const QString& gameId, const QString& batchId,
+                                      int acknowledged);
+    void dependencyEnableAckFailed(quint64 requestId, const QString& gameId, const QString& batchId,
+                                   const QString& error);
+    void installCompletedHintReceived(const GrpcInstallCompleted& event);
 
     void rpcError(const QString& method, const QString& error);
 
@@ -143,6 +189,11 @@ private:
     template <typename Req, typename Ev, typename Dispatch>
     grpc::Status runStream(std::unique_ptr<grpc::ClientReader<Ev>> (Stub::*method)(grpc::ClientContext*, const Req&),
                            const Req& req, Dispatch dispatch);
+
+    template <typename Method>
+    void runModLoaderOperation(quint64 requestId, const QString& gameId, const QString& operation,
+                               Method method, const gorganizer::v1::ModLoaderRequest& req,
+                               std::chrono::milliseconds deadline);
 
     template <typename Req>
     void runTransferStream(std::unique_ptr<grpc::ClientReader<gorganizer::v1::TransferEvent>> (Stub::*method)(grpc::ClientContext*, const Req&),

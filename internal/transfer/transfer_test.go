@@ -3,10 +3,12 @@ package transfer
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/parka/gorganizer/internal/config"
@@ -281,5 +283,45 @@ func TestExportMissingModFails(t *testing.T) {
 	}, nil)
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("err = %v, want not-exist", err)
+	}
+}
+
+// TestExportExcludesModsDirStateFiles verifies daemon state files and hidden folders in ModsDir, such as dependency requests, are refused as explicit mods and never exported.
+func TestExportExcludesModsDirStateFiles(t *testing.T) {
+	setRoot(t, t.TempDir())
+	buildInstance(t)
+	modsDir := config.ModsDir(testGame)
+	writeFileT(t, filepath.Join(modsDir, ".gorganizer-dependency-requests.json"), `{"schema_version":1,"batches":[]}`)
+	writeFileT(t, filepath.Join(modsDir, ".gorganizer-hidden-state", "state.json"), `{}`)
+	for _, name := range []string{".gorganizer-dependency-requests.json", ".gorganizer-hidden-state", ".gorganizer-game.yaml"} {
+		_, err := Export(context.Background(), ExportOptions{GameID: testGame, OutputPath: filepath.Join(t.TempDir(), "one.tar.zst"), ModFolders: []string{name}}, nil)
+		if err == nil || !strings.Contains(err.Error(), "invalid mod folder") {
+			t.Errorf("Export(ModFolders=[%s]) error = %v, want an invalid mod folder refusal", name, err)
+		}
+	}
+	writeFileT(t, filepath.Join(modsDir, "plain-file"), "not a mod")
+	if _, err := Export(context.Background(), ExportOptions{GameID: testGame, OutputPath: filepath.Join(t.TempDir(), "file.tar.zst"), ModFolders: []string{"plain-file"}}, nil); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Export(ModFolders=[plain-file]) error = %v, want ErrNotExist", err)
+	}
+	archive := filepath.Join(t.TempDir(), "instance.tar.zst")
+	if _, err := Export(context.Background(), ExportOptions{GameID: testGame, OutputPath: archive, IncludeOverwrite: true, IncludeGameSettings: true}, nil); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	tr, closeArchive, err := openArchiveReader(archive)
+	if err != nil {
+		t.Fatalf("openArchiveReader: %v", err)
+	}
+	defer closeArchive()
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("reading archive: %v", err)
+		}
+		if strings.Contains(hdr.Name, "dependency-requests") || strings.Contains(hdr.Name, "hidden-state") || strings.Contains(hdr.Name, "plain-file") {
+			t.Errorf("export contains %s", hdr.Name)
+		}
 	}
 }

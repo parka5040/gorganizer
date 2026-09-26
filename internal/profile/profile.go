@@ -160,10 +160,14 @@ func (pm *Manager) List(gameID string) ([]*Profile, error) {
 		profilePath := filepath.Join(dir, entry.Name(), "profile.json")
 		data, err := os.ReadFile(profilePath)
 		if err != nil {
+			if !strings.HasPrefix(entry.Name(), ".") {
+				slog.Warn("skipping profile with an unreadable profile.json", "game", gameID, "profile", entry.Name(), "err", err)
+			}
 			continue
 		}
 		var p Profile
 		if err := json.Unmarshal(data, &p); err != nil {
+			slog.Warn("skipping profile with a corrupt profile.json", "game", gameID, "profile", entry.Name(), "err", err)
 			continue
 		}
 		profiles = append(profiles, &p)

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -194,10 +195,10 @@ func resolveExportMods(gameID string, requested []string) ([]string, error) {
 	}
 	var out []string
 	for _, folder := range requested {
-		if folder == "" || folder == profile.OverwriteModName || filepath.Base(folder) != folder {
+		if folder == "" || folder == profile.OverwriteModName || filepath.Base(folder) != folder || strings.HasPrefix(folder, ".") {
 			return nil, fmt.Errorf("invalid mod folder %q", folder)
 		}
-		if !modFolderExists(gameID, folder) {
+		if info, err := os.Stat(filepath.Join(config.ModsDir(gameID), folder)); err != nil || !info.IsDir() {
 			return nil, fmt.Errorf("mod folder %q: %w", folder, os.ErrNotExist)
 		}
 		out = append(out, folder)

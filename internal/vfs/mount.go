@@ -32,7 +32,7 @@ type MountManager struct {
 func NewMountManager(gameDataPath string, overwriteRoot string, gameID string) *MountManager {
 	return &MountManager{
 		gameDataPath:  gameDataPath,
-		backupSuffix:  ".orig",
+		backupSuffix:  farmBackupSuffix,
 		overwriteRoot: overwriteRoot,
 		gameID:        gameID,
 	}

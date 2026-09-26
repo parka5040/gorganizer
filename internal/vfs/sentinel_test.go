@@ -131,3 +131,71 @@ func TestSentinel_RemoveIdempotent(t *testing.T) {
 		t.Errorf("second RemoveSentinel: %v", err)
 	}
 }
+
+// TestSentinelWriteIsAtomicAndItsTempNeverCaptured locks that the sentinel is replaced whole with mode 0644 and a torn temporary copy is never captured into Overwrite.
+func TestSentinelWriteIsAtomicAndItsTempNeverCaptured(t *testing.T) {
+	base := t.TempDir()
+	dataPath := filepath.Join(base, "Data")
+	if err := os.MkdirAll(dataPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	backup := writeBackupDir(t, base)
+	for _, profile := range []string{"First", "Second"} {
+		if err := WriteSentinel(dataPath, &Sentinel{SchemaVersion: 1, Magic: SentinelMagic, GameID: "skyrimse", ProfileName: profile, BackupPath: backup}); err != nil {
+			t.Fatalf("WriteSentinel(%s): %v", profile, err)
+		}
+	}
+	got, err := ReadSentinel(dataPath)
+	if err != nil || got.ProfileName != "Second" {
+		t.Fatalf("ReadSentinel = %+v, %v; want the second write", got, err)
+	}
+	info, err := os.Stat(filepath.Join(dataPath, SentinelFilename))
+	if err != nil || info.Mode().Perm() != 0644 {
+		t.Fatalf("sentinel mode = %v, %v; want 0644", info, err)
+	}
+	entries, err := os.ReadDir(dataPath)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("Data holds %v after two sentinel writes, want only the sentinel", entries)
+	}
+
+	torn := filepath.Join(dataPath, ".tmp-"+SentinelFilename+"-123")
+	if err := os.WriteFile(torn, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	userWrite := filepath.Join(dataPath, "user.ini")
+	if err := os.WriteFile(userWrite, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	overwrite := filepath.Join(base, "Overwrite")
+	moved, err := CaptureNewFiles(dataPath, overwrite)
+	if err != nil || moved != 1 {
+		t.Fatalf("CaptureNewFiles = %d, %v; want only the user write", moved, err)
+	}
+	if _, err := os.Stat(filepath.Join(overwrite, filepath.Base(torn))); !os.IsNotExist(err) {
+		t.Errorf("a torn sentinel temp was captured into Overwrite: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(overwrite, "user.ini")); err != nil {
+		t.Errorf("the user write was not captured: %v", err)
+	}
+}
+
+// TestFarmSiblingSuffixesNameEveryLifecycleSibling locks the exported sibling suffixes the daemon hands to the mod-loader farm check.
+func TestFarmSiblingSuffixesNameEveryLifecycleSibling(t *testing.T) {
+	dataPath := filepath.Join(t.TempDir(), "Data")
+	want := map[string]bool{
+		activatingIntentPath(dataPath):                         true,
+		applyingIntentPath(dataPath):                           true,
+		stagingDirPath(dataPath):                               true,
+		oldFarmPath(dataPath):                                  true,
+		NewMountManager(dataPath, "", "skyrimse").BackupPath(): true,
+	}
+	got := FarmSiblingSuffixes()
+	if len(got) != len(want) {
+		t.Fatalf("FarmSiblingSuffixes = %v, want %d suffixes", got, len(want))
+	}
+	for _, suffix := range got {
+		if !want[dataPath+suffix] {
+			t.Errorf("suffix %q names no farm lifecycle sibling", suffix)
+		}
+	}
+}
