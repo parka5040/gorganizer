@@ -155,7 +155,7 @@ func (ls *LaunchService) InstallScriptExtender(gameID string) (string, error) {
 			return "", fmt.Errorf("fetching %s from GitHub: %w", def.Name, err)
 		}
 	} else {
-		archivePath, versionLabel, err = fetchLatestFromNexus(ls.s.config.NexusAPIKey, def, tmpDir, runtimeNeedle)
+		archivePath, versionLabel, err = fetchLatestFromNexus(ls.s.nexusAPIKey(), def, tmpDir, runtimeNeedle)
 		if err != nil {
 			return "", err
 		}

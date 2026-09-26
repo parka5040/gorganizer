@@ -87,13 +87,20 @@ func (ar *ArchiveService) autoInstallAfterDownload(gameID, archivePath string, s
 
 // StartDownload enqueues a new download from an NXM URI.
 func (ar *ArchiveService) StartDownload(nxmURI string) (string, int, error) {
-	if ar.s.downloadMgr == nil {
+	manager := ar.s.downloadStateSnapshot().manager
+	if manager == nil {
 		const msg = "NXM ignored: no Nexus API key set — open Settings to add one"
 		ar.s.publishGuarded(dto.StatusEventResult{Error: msg})
 		return "", 0, fmt.Errorf("download manager not initialized (set nexus_api_key in config)")
 	}
 	override := ar.resolveActiveGameOverride(nxmURI)
-	return ar.s.downloadMgr.StartDownloadForGame(nxmURI, override)
+	manager = ar.s.downloadStateSnapshot().manager
+	if manager == nil {
+		const msg = "NXM ignored: no Nexus API key set — open Settings to add one"
+		ar.s.publishGuarded(dto.StatusEventResult{Error: msg})
+		return "", 0, fmt.Errorf("download manager not initialized (set nexus_api_key in config)")
+	}
+	return manager.StartDownloadForGame(nxmURI, override)
 }
 
 // resolveActiveGameOverride decides whether an inbound NXM should be routed to the active game.
@@ -128,24 +135,27 @@ func (ar *ArchiveService) resolveActiveGameOverride(nxmURI string) string {
 }
 
 func (ar *ArchiveService) CancelDownload(id string) error {
-	if ar.s.downloadMgr == nil {
+	state := ar.s.downloadStateSnapshot()
+	if state.manager == nil {
 		return &download.DownloadNotFoundError{ID: id}
 	}
-	return ar.s.downloadMgr.CancelDownload(id)
+	return state.manager.CancelDownload(id, state.gameIDs)
 }
 
 func (ar *ArchiveService) RetryDownload(id string) (int, error) {
-	if ar.s.downloadMgr == nil {
+	state := ar.s.downloadStateSnapshot()
+	if state.manager == nil {
 		return 0, fmt.Errorf("download manager not initialized")
 	}
-	return ar.s.downloadMgr.RetryDownload(id)
+	return state.manager.RetryDownload(id, state.gameIDs)
 }
 
 // ListArchives returns the per-game Downloads view.
 func (ar *ArchiveService) ListArchives(gameID string) ([]dto.ArchiveRowResult, error) {
-	if _, ok := ar.s.config.Games[gameID]; !ok {
+	if !ar.s.gameConfigured(gameID) {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
+	manager := ar.s.downloadStateSnapshot().manager
 	idx, err := download.LoadIndex(gameID)
 	if err != nil {
 		return nil, err
@@ -190,9 +200,9 @@ func (ar *ArchiveService) ListArchives(gameID string) ([]dto.ArchiveRowResult, e
 			row.Status = dto.DownloadStatusInstalled
 			row.InstalledModFolder = installRec.Folder
 			row.Merged = installRec.Merged
-		case !fileExists && ar.s.downloadMgr != nil:
+		case !fileExists && manager != nil:
 			row.Status = dto.DownloadStatusDownloading
-			row.DownloadID = ar.s.downloadMgr.ActiveDownloadIDByArchive(absArchive)
+			row.DownloadID = manager.ActiveDownloadIDByArchive(absArchive)
 		case fileExists && e.Uninstalled:
 			row.Status = dto.DownloadStatusUninstalled
 		case fileExists:
@@ -200,8 +210,8 @@ func (ar *ArchiveService) ListArchives(gameID string) ([]dto.ArchiveRowResult, e
 		default:
 			row.Status = dto.DownloadStatusUnknown
 		}
-		if row.DownloadID == "" && ar.s.downloadMgr != nil {
-			row.DownloadID = ar.s.downloadMgr.ActiveDownloadIDByArchive(absArchive)
+		if row.DownloadID == "" && manager != nil {
+			row.DownloadID = manager.ActiveDownloadIDByArchive(absArchive)
 		}
 		rows = append(rows, row)
 	}
@@ -257,7 +267,7 @@ func ledgerToDownloadStatus(ls download.LedgerStatus) dto.DownloadStatus {
 
 // RemoveArchive deletes an archive, its sidecar, and the index entry.
 func (ar *ArchiveService) RemoveArchive(gameID, archiveRelPath string) error {
-	if _, ok := ar.s.config.Games[gameID]; !ok {
+	if !ar.s.gameConfigured(gameID) {
 		return fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	downloadsDir := config.DownloadsDir(gameID)
@@ -279,7 +289,7 @@ func (ar *ArchiveService) RemoveArchive(gameID, archiveRelPath string) error {
 }
 
 func (ar *ArchiveService) SetArchiveHidden(gameID, archiveRelPath string, hidden bool) error {
-	if _, ok := ar.s.config.Games[gameID]; !ok {
+	if !ar.s.gameConfigured(gameID) {
 		return fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	if err := download.SetHidden(gameID, archiveRelPath, hidden); err != nil {
@@ -292,7 +302,7 @@ func (ar *ArchiveService) SetArchiveHidden(gameID, archiveRelPath string, hidden
 }
 
 func (ar *ArchiveService) SetArchivesHiddenBulk(gameID string, hidden bool, scope dto.BulkHideScope) (int, error) {
-	if _, ok := ar.s.config.Games[gameID]; !ok {
+	if !ar.s.gameConfigured(gameID) {
 		return 0, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	installedBy := ar.s.installedArchiveMap(gameID)
@@ -325,12 +335,11 @@ func (ar *ArchiveService) SetArchivesHiddenBulk(gameID string, hidden bool, scop
 }
 
 func (ar *ArchiveService) RefreshArchiveMetadata(gameID, archiveRelPath string) (*dto.ArchiveRowResult, error) {
-	gc, ok := ar.s.config.Games[gameID]
-	if !ok {
+	if !ar.s.gameConfigured(gameID) {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
-	_ = gc
-	if ar.s.config.NexusAPIKey == "" {
+	key := ar.s.nexusAPIKey()
+	if key == "" {
 		return nil, fmt.Errorf("nexus API key required — paste one in Tools → Settings")
 	}
 	downloadsDir := config.DownloadsDir(gameID)
@@ -345,7 +354,7 @@ func (ar *ArchiveService) RefreshArchiveMetadata(gameID, archiveRelPath string) 
 	if err != nil || sc == nil || sc.ModID == 0 || sc.GameDomain == "" {
 		return nil, fmt.Errorf("sidecar missing the Nexus ids needed to refresh — cannot refresh")
 	}
-	nx := download.NewNexusClient(ar.s.config.NexusAPIKey)
+	nx := newNexusDownloadClient(key)
 	info, err := nx.GetModInfo(sc.GameDomain, sc.ModID)
 	if err != nil {
 		return nil, fmt.Errorf("fetching mod info: %w", err)
@@ -446,7 +455,7 @@ func (ar *ArchiveService) buildArchiveRow(gameID, archiveRelPath string) (*dto.A
 
 // StreamArchiveEvents subscribes the caller to per-game archive stream events.
 func (ar *ArchiveService) StreamArchiveEvents(ctx context.Context, gameID string) (<-chan dto.ArchiveEventResult, error) {
-	if _, ok := ar.s.config.Games[gameID]; !ok {
+	if !ar.s.gameConfigured(gameID) {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	ch, _ := ar.s.archiveBus.Subscribe(ctx, gameID)

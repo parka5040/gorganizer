@@ -177,7 +177,7 @@ type launchedGame struct {
 	done   <-chan struct{}
 }
 
-// ensureMountManager creates a MountManager for a game if one doesn't exist.
+// ensureMountManager creates a MountManager for a game if one does not exist; the caller holds s.mu for writing.
 func (s *session) ensureMountManager(gameID string, gc config.GameConfig) *vfs.MountManager {
 	if mm, ok := s.mountMgrs[gameID]; ok {
 		return mm
@@ -196,7 +196,7 @@ func (s *session) ensureMountManager(gameID string, gc config.GameConfig) *vfs.M
 	return mm
 }
 
-// mountInstallPath returns the install path a mount manager uses for gc, preferring a configured linked parent's install path.
+// mountInstallPath returns the install path a mount manager uses for gc, preferring a configured linked parent's install path; the caller holds s.mu for reading or writing.
 func (s *session) mountInstallPath(gc config.GameConfig) string {
 	if gc.LinkedFromGameID != "" {
 		if parent, ok := s.config.Games[gc.LinkedFromGameID]; ok && parent.InstallPath != "" {
@@ -206,6 +206,7 @@ func (s *session) mountInstallPath(gc config.GameConfig) string {
 	return gc.InstallPath
 }
 
+// ensureRootDeploymentManager creates or shares a game-root deployment manager for gameID; the caller holds s.mu for writing.
 func (s *session) ensureRootDeploymentManager(gameID string, gc config.GameConfig) (*vfs.RootDeploymentManager, error) {
 	if manager, ok := s.rootDeployMgrs[gameID]; ok {
 		return manager, nil

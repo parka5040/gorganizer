@@ -410,7 +410,7 @@ func TestPremiumDependencyDownloadInstallsThroughTheDownloadManager(t *testing.T
 		_, _ = w.Write(archive)
 	}))
 	t.Cleanup(cdn.Close)
-	manager := download.NewManager(fakeDepResolver{cdnURL: cdn.URL + "/DepCore.zip"}, d.config, 1, d.svc.archives.managerHooks())
+	manager := download.NewManager(fakeDepResolver{cdnURL: cdn.URL + "/DepCore.zip"}, 1, d.svc.archives.managerHooks())
 	t.Cleanup(manager.Stop)
 	d.svc.modDeps.downloads = nil
 	d.mu.Lock()

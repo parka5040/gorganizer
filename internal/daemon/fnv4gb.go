@@ -74,11 +74,12 @@ func (fv *FNV4GBService) Install4GBPatcher(gameID string) (dto.FNV4GBInstallResu
 	if !known || !g.Supports4GBPatch {
 		return zero, fmt.Errorf("the 4GB patcher only applies to Fallout: New Vegas (got %q)", gameID)
 	}
-	gc, err := fv.s.config.EffectiveGameConfig(gameID)
+	gc, err := fv.s.effectiveGameConfigSnapshot(gameID)
 	if err != nil {
 		return zero, err
 	}
-	if fv.s.config.NexusAPIKey == "" {
+	apiKey := fv.s.nexusAPIKey()
+	if apiKey == "" {
 		return zero, fnv4gbErrAPIKeyMissing
 	}
 	if g.ScriptExtenderSource == nil || g.ScriptExtenderSource.LoaderExe == "" {
@@ -95,7 +96,7 @@ func (fv *FNV4GBService) Install4GBPatcher(gameID string) (dto.FNV4GBInstallResu
 	}
 	defer os.RemoveAll(tmpDir)
 
-	nx := download.NewNexusClient(fv.s.config.NexusAPIKey)
+	nx := download.NewNexusClient(apiKey)
 
 	details, err := nx.GetFileDetails(fnv4gbGameSlug, fnv4gbModID, fnv4gbFileID)
 	if err != nil {
@@ -160,7 +161,7 @@ func (fv *FNV4GBService) Install4GBPatcher(gameID string) (dto.FNV4GBInstallResu
 
 // Get4GBPatchStatus reports whether the game's FalloutNV.exe has been 4GB-patched by Gorganizer.
 func (fv *FNV4GBService) Get4GBPatchStatus(gameID string) (bool, error) {
-	gc, err := fv.s.config.EffectiveGameConfig(gameID)
+	gc, err := fv.s.effectiveGameConfigSnapshot(gameID)
 	if err != nil {
 		return false, nil
 	}
@@ -172,7 +173,7 @@ func (fv *FNV4GBService) Apply4GBPatch(gameID, patcherExePath string) (string, e
 	if g, known := gamedef.ByID(gameID); !known || !g.Supports4GBPatch {
 		return "", fmt.Errorf("the 4GB patcher only applies to Fallout: New Vegas (got %q)", gameID)
 	}
-	gc, err := fv.s.config.EffectiveGameConfig(gameID)
+	gc, err := fv.s.effectiveGameConfigSnapshot(gameID)
 	if err != nil {
 		return "", err
 	}

@@ -16,7 +16,7 @@ import (
 
 // SetPluginOrder persists a user-set plugin load order for a profile.
 func (pl *PluginStatusService) SetPluginOrder(gameID, profileName string, filenames []string) error {
-	if _, ok := pl.s.config.Games[gameID]; !ok {
+	if !pl.s.gameConfigured(gameID) {
 		return fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	return pl.s.profileMgr.SavePluginOrder(gameID, profileName, filenames)
@@ -24,7 +24,7 @@ func (pl *PluginStatusService) SetPluginOrder(gameID, profileName string, filena
 
 // SetPluginLoadout persists a profile's complete ordered activation state.
 func (pl *PluginStatusService) SetPluginLoadout(gameID, profileName string, entries []dto.PluginLoadoutEntryResult) error {
-	if _, ok := pl.s.config.Games[gameID]; !ok {
+	if !pl.s.gameConfigured(gameID) {
 		return fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	loadout := make([]profile.PluginLoadoutEntry, 0, len(entries))
@@ -39,7 +39,7 @@ func (pl *PluginStatusService) SetPluginLoadout(gameID, profileName string, entr
 
 // StreamPluginStatus returns a channel that delivers one plugin status snapshot for the game's profile.
 func (pl *PluginStatusService) StreamPluginStatus(ctx context.Context, gameID, profileName string) (<-chan dto.PluginStatusEventResult, error) {
-	gc, ok := pl.s.config.Games[gameID]
+	gc, ok := pl.s.gameConfigSnapshot(gameID)
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
@@ -302,15 +302,16 @@ func (pl *PluginStatusService) pluginHeaderCacheLazy() *plugins.HeaderCache {
 }
 
 func (pl *PluginStatusService) softDepFetcherLazy() *plugins.SoftDepFetcher {
+	apiKey := pl.s.nexusAPIKey()
 	pl.s.softDepFetcherMu.Lock()
 	defer pl.s.softDepFetcherMu.Unlock()
 	if pl.s.softDepFetcher != nil {
 		return pl.s.softDepFetcher
 	}
-	if pl.s.config.NexusAPIKey == "" {
+	if apiKey == "" {
 		return nil
 	}
-	client := download.NewNexusClient(pl.s.config.NexusAPIKey)
+	client := download.NewNexusClient(apiKey)
 	adapter := &nexusV3Adapter{client: client}
 	cacheDir := filepath.Join(config.CacheDir(), "nexus")
 	pl.s.softDepFetcher = plugins.NewSoftDepFetcher(adapter, cacheDir)

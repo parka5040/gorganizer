@@ -107,12 +107,12 @@ func (tt *TTWService) TranslateWinePath(gameID, unixPath string) (string, error)
 	if tt.s.toolMgr == nil {
 		return "", nil
 	}
-	gc, ok := tt.s.config.Games[gameID]
+	gc, ok := tt.s.gameConfigSnapshot(gameID)
 	if !ok {
 		return "", nil
 	}
 	if gc.LinkedFromGameID != "" {
-		eff, err := tt.s.config.EffectiveGameConfig(gameID)
+		eff, err := tt.s.effectiveGameConfigSnapshot(gameID)
 		if err == nil {
 			gc = eff
 		}

@@ -161,20 +161,14 @@ func (md *ModDependencyService) webClient(def *gamedef.ModLoaderSpec) *smapi.Cli
 
 // nexusAccess reads the Nexus API key and the download manager under the session lock and releases it.
 func (md *ModDependencyService) nexusAccess() (string, dependencyDownloader) {
-	md.s.mu.RLock()
-	key := ""
-	if md.s.config != nil {
-		key = md.s.config.NexusAPIKey
-	}
-	manager := md.s.downloadMgr
-	md.s.mu.RUnlock()
+	state := md.s.downloadStateSnapshot()
 	if md.downloads != nil {
-		return key, md.downloads()
+		return state.key, md.downloads()
 	}
-	if manager == nil {
-		return key, nil
+	if state.manager == nil {
+		return state.key, nil
 	}
-	return key, manager
+	return state.key, state.manager
 }
 
 // projectSMAPI waits for startup recovery within ctx, then builds the analyzer input of profileName's desired deployment: the vanilla deploy folder, the enabled mods in modlist order, then Overwrite.

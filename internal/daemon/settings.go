@@ -21,7 +21,7 @@ func (se *SettingsService) SetActiveGame(gameID string) error {
 
 // GetGameSettings returns the per-game settings (auto_install toggle).
 func (se *SettingsService) GetGameSettings(gameID string) (*dto.GameSettingsResult, error) {
-	if _, ok := se.s.config.Games[gameID]; !ok {
+	if !se.s.gameConfigured(gameID) {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	s, err := config.LoadGameSettings(gameID)
@@ -32,7 +32,7 @@ func (se *SettingsService) GetGameSettings(gameID string) (*dto.GameSettingsResu
 }
 
 func (se *SettingsService) SetGameSettings(gameID string, autoInstall bool) (*dto.GameSettingsResult, error) {
-	if _, ok := se.s.config.Games[gameID]; !ok {
+	if !se.s.gameConfigured(gameID) {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	s := config.GameSettings{AutoInstall: autoInstall}
@@ -44,7 +44,7 @@ func (se *SettingsService) SetGameSettings(gameID string, autoInstall bool) (*dt
 
 // SetNexusAPIKey validates and stores a Nexus API key and replaces the download manager, refusing once shutdown began.
 func (se *SettingsService) SetNexusAPIKey(ctx context.Context, apiKey string) (*dto.NexusAPIKeyResult, error) {
-	nexus := download.NewNexusClient(apiKey)
+	nexus := newNexusDownloadClient(apiKey)
 	if err := nexus.ValidateAPIKey(ctx); err != nil {
 		slog.Warn("nexus API key validation failed", "err", err)
 		if errors.Is(err, download.ErrInvalidKey) {
@@ -68,8 +68,8 @@ func (se *SettingsService) SetNexusAPIKey(ctx context.Context, apiKey string) (*
 	if se.s.downloadMgr != nil {
 		se.s.downloadMgr.Stop()
 	}
-	se.s.downloadMgr = download.NewManager(nexus, se.s.config, 3, se.s.svc.archives.managerHooks())
-	se.s.downloadMgr.RehydrateLedger()
+	se.s.downloadMgr = download.NewManager(nexus, 3, se.s.svc.archives.managerHooks())
+	se.s.downloadMgr.RehydrateLedger(se.s.downloadStateSnapshotLocked().gameIDs)
 
 	slog.Info("nexus API key set and validated")
 	return &dto.NexusAPIKeyResult{Valid: true}, nil

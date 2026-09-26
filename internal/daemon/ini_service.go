@@ -12,7 +12,7 @@ import (
 
 // ListProfileIniFiles seeds the profile's ini directory from the game's current Documents INIs on first call.
 func (in *IniService) ListProfileIniFiles(gameID, profileName string) (*dto.ProfileIniListResult, error) {
-	gc, err := in.s.config.EffectiveGameConfig(gameID)
+	gc, err := in.s.effectiveGameConfigSnapshot(gameID)
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +50,7 @@ func (in *IniService) ListProfileIniFiles(gameID, profileName string) (*dto.Prof
 }
 
 func (in *IniService) SaveProfileIniFile(gameID, profileName, filename, content string) error {
-	if _, ok := in.s.config.Games[gameID]; !ok {
+	if !in.s.gameConfigured(gameID) {
 		return fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	if err := in.s.iniMgr.Write(gameID, profileName, filename, content); err != nil {
@@ -58,7 +58,7 @@ func (in *IniService) SaveProfileIniFile(gameID, profileName, filename, content 
 	}
 	p, _, err := in.s.profileMgr.Load(gameID, profileName)
 	if err == nil && p.UseCustomIni {
-		gc, gcErr := in.s.config.EffectiveGameConfig(gameID)
+		gc, gcErr := in.s.effectiveGameConfigSnapshot(gameID)
 		if gcErr == nil {
 			if _, pushErr := in.s.iniMgr.PushToDocuments(gameID, profileName, gc.SteamAppID); pushErr != nil {
 				slog.Warn("pushing INI after save failed", "err", pushErr)
@@ -69,7 +69,7 @@ func (in *IniService) SaveProfileIniFile(gameID, profileName, filename, content 
 }
 
 func (in *IniService) SetProfileIniEnabled(gameID, profileName string, enabled bool) (*dto.ProfileIniStatusResult, error) {
-	if _, ok := in.s.config.Games[gameID]; !ok {
+	if !in.s.gameConfigured(gameID) {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	if err := in.saveCustomIniFlag(gameID, profileName, enabled); err != nil {
@@ -94,7 +94,7 @@ func (in *IniService) saveCustomIniFlag(gameID, profileName string, enabled bool
 
 // ListIniTweaks returns the named INI presets for the game paired with their applied state.
 func (in *IniService) ListIniTweaks(gameID, profileName string) ([]dto.IniTweakStateResult, error) {
-	if _, ok := in.s.config.Games[gameID]; !ok {
+	if !in.s.gameConfigured(gameID) {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	states, err := in.s.iniMgr.ListTweaks(gameID, profileName)
@@ -116,7 +116,7 @@ func (in *IniService) ListIniTweaks(gameID, profileName string) ([]dto.IniTweakS
 
 // SetIniTweak toggles an INI preset on or off in the profile's Custom.ini.
 func (in *IniService) SetIniTweak(gameID, profileName, tweakID string, enabled bool) (*dto.IniTweakStateResult, error) {
-	if _, ok := in.s.config.Games[gameID]; !ok {
+	if !in.s.gameConfigured(gameID) {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	state, err := in.s.iniMgr.SetTweak(gameID, profileName, tweakID, enabled)
@@ -125,7 +125,7 @@ func (in *IniService) SetIniTweak(gameID, profileName, tweakID string, enabled b
 	}
 	p, _, perr := in.s.profileMgr.Load(gameID, profileName)
 	if perr == nil && p.UseCustomIni {
-		gc, gcErr := in.s.config.EffectiveGameConfig(gameID)
+		gc, gcErr := in.s.effectiveGameConfigSnapshot(gameID)
 		if gcErr == nil {
 			if _, err := in.s.iniMgr.PushToDocuments(gameID, profileName, gc.SteamAppID); err != nil {
 				slog.Warn("pushing INI after tweak toggle failed", "err", err)
@@ -142,7 +142,7 @@ func (in *IniService) SetIniTweak(gameID, profileName, tweakID string, enabled b
 }
 
 func (in *IniService) GetProfileIniStatus(gameID, profileName string) (*dto.ProfileIniStatusResult, error) {
-	gc, err := in.s.config.EffectiveGameConfig(gameID)
+	gc, err := in.s.effectiveGameConfigSnapshot(gameID)
 	if err != nil {
 		return nil, err
 	}
