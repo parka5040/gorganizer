@@ -846,6 +846,21 @@ void GrpcClient::shutdownDaemon()
     post(&GrpcWorker::doShutdownDaemon);
 }
 
+bool GrpcClient::getShutdownPlanSync(int timeoutMs, std::vector<GrpcShutdownPlanItem>& items, QString& errorOut)
+{
+    gorganizer::v1::GetShutdownPlanRequest req;
+    gorganizer::v1::ShutdownPlan resp;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::GetShutdownPlan, req, resp,
+                              std::chrono::milliseconds(timeoutMs)), errorOut)) return false;
+    items.clear();
+    for (const auto& item : resp.items()) {
+        items.push_back({QString::fromStdString(item.game_id()),
+                         QString::fromStdString(item.profile_name()),
+                         item.will_unmount(), QString::fromStdString(item.retained_reason())});
+    }
+    return true;
+}
+
 bool GrpcClient::shutdownDaemonSync(int rpcTimeoutMs, int pollTimeoutMs, QString& errorOut)
 {
     if (!m_syncStub) { errorOut = "not connected"; return false; }

@@ -187,6 +187,7 @@ type LifecycleController interface {
 	Shutdown()
 	WatchStatus() <-chan dto.StatusEventResult
 	Health() dto.ReadinessResult
+	GetShutdownPlan() []dto.ShutdownPlanItem
 }
 
 var (

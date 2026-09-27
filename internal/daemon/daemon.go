@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -207,6 +209,84 @@ func (d *Daemon) Health() dto.ReadinessResult {
 	return d.readiness
 }
 
+// GetShutdownPlan reports which mounted games shutdown would leave active without changing daemon state.
+func (d *Daemon) GetShutdownPlan() []dto.ShutdownPlanItem {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	gameIDs := make([]string, 0, len(d.mountMgrs))
+	for gameID, mm := range d.mountMgrs {
+		if mm.IsMounted() {
+			gameIDs = append(gameIDs, gameID)
+		}
+	}
+	sort.Strings(gameIDs)
+	items := make([]dto.ShutdownPlanItem, 0, len(gameIDs))
+	for _, gameID := range gameIDs {
+		reason := d.shutdownRetentionReasonLocked(gameID)
+		items = append(items, dto.ShutdownPlanItem{
+			GameID: gameID, ProfileName: d.mountStates[gameID].profileName,
+			WillUnmount: reason == "", RetainedReason: reason,
+		})
+	}
+	return items
+}
+
+// shutdownRetentionReasonLocked reports why shutdown keeps a mounted game's farm; the caller holds s.mu.
+func (d *Daemon) shutdownRetentionReasonLocked(gameID string) string {
+	if d.deferredForLocked(gameID, "shutdown") != nil {
+		return "recovery_deferred"
+	}
+	key := d.fenceKeyLocked(gameID)
+	if d.exclusiveHeld(key) {
+		return "busy"
+	}
+	d.launchedMu.Lock()
+	for _, launch := range d.launched {
+		if launch.gameID == gameID {
+			d.launchedMu.Unlock()
+			return "game_running"
+		}
+	}
+	d.launchedMu.Unlock()
+	d.execRunsMu.Lock()
+	for _, run := range d.execRuns {
+		if run.gameID == gameID {
+			d.execRunsMu.Unlock()
+			return "tool_running"
+		}
+	}
+	d.execRunsMu.Unlock()
+
+	games := d.gamesOnFenceKeyLocked(gameID, key)
+	flagged, launchedAt := d.steamLaunchesAmong(games)
+	if filepath.IsAbs(key) {
+		running, err := d.processRunningIn(key, d.steamAppIDsLocked(games))
+		if err == nil && running {
+			return "game_running"
+		}
+	}
+	for _, id := range flagged {
+		age := d.clock().Sub(launchedAt[id])
+		if age >= 0 && age < steamLaunchGrace {
+			return "launch_recent"
+		}
+	}
+	if len(flagged) > 0 {
+		return "game_running"
+	}
+	if d.sharedHeldLocked(gameID, dto.BusyOperationLaunch) {
+		return "launch_recent"
+	}
+	if d.sharedHeldLocked(gameID, dto.BusyOperationTool, dto.BusyOperationScriptExtender) {
+		return "tool_running"
+	}
+	if change, _ := d.steamStateForLocked(gameID); change == vfs.StorefrontBusy {
+		return "steam_busy"
+	}
+	return ""
+}
+
 func (s *session) setReadinessStep(step string, mutate func(*dto.ReadinessResult)) {
 	s.readinessMu.Lock()
 	s.readiness.LastInitStep = step
@@ -287,10 +367,9 @@ func (d *Daemon) deactivateIdleFarms() {
 		if !mm.IsMounted() {
 			continue
 		}
-		if d.deferredForLocked(gameID, "shutdown") != nil || d.exclusiveHeld(d.fenceKeyLocked(gameID)) ||
-			d.teardownBusyLocked(gameID) || d.sharedHeldLocked(gameID, dto.BusyOperationLaunch, dto.BusyOperationTool) {
-			slog.Warn("leaving VFS mounted on shutdown; a launch may still be using it — recovery will restore on next start",
-				"game", gameID)
+		if reason := d.shutdownRetentionReasonLocked(gameID); reason != "" {
+			slog.Warn("leaving VFS mounted on shutdown; recovery will restore on next start",
+				"game", gameID, "reason", reason)
 			continue
 		}
 		_, capture, err := d.steamCaptureLocked(gameID, mm.DataPath())

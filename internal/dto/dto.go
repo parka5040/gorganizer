@@ -107,6 +107,13 @@ type VFSStatusResult struct {
 	PreservedBatches []PreservedBatchResult
 }
 
+type ShutdownPlanItem struct {
+	GameID         string
+	ProfileName    string
+	WillUnmount    bool
+	RetainedReason string
+}
+
 type FileConflictResult struct {
 	VirtualPath string
 	WinningMod  string
