@@ -40,6 +40,9 @@ service Gorganizer {
   // Profile management
   rpc ListProfiles(ListProfilesRequest) returns (ListProfilesResponse);
   rpc CreateProfile(CreateProfileRequest) returns (Profile);
+  // CopyProfile creates a new profile with everything the source profile
+  // holds: mod choices and order, plugin load order, separators and INIs.
+  rpc CopyProfile(CopyProfileRequest) returns (Profile);
   rpc DeleteProfile(DeleteProfileRequest) returns (DeleteProfileResponse);
   rpc GetModList(GetModListRequest) returns (ModListResponse);
   rpc SetModList(SetModListRequest) returns (SetModListResponse);
@@ -474,6 +477,12 @@ message ListProfilesResponse {
 message CreateProfileRequest {
   string game_id = 1;
   string name = 2;
+}
+
+message CopyProfileRequest {
+  string game_id = 1;
+  string source_name = 2;
+  string name = 3;
 }
 
 message DeleteProfileRequest {
