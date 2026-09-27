@@ -1,6 +1,7 @@
 #include <QApplication>
 #include <QStyleFactory>
 #include <QStyleHints>
+#include <QtGlobal>
 #include <QProcess>
 #include <QFileInfo>
 #include <QDir>
@@ -80,6 +81,7 @@ int main(int argc, char* argv[])
     gorganizer::AppConfig config;
     gorganizer::ThemeManager::applyMode(config.appearanceMode(), config.preferredStyle());
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     QObject::connect(QGuiApplication::styleHints(),
                      &QStyleHints::colorSchemeChanged, &app,
                      [&config](Qt::ColorScheme) {
@@ -87,6 +89,7 @@ int main(int argc, char* argv[])
                              gorganizer::ThemeManager::applyMode(
                                  "system", config.preferredStyle());
                      });
+#endif
 
     QString wizardApiKey;
     if (config.isFirstBoot()) {

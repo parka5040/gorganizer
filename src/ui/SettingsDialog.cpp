@@ -13,6 +13,7 @@
 #include <QComboBox>
 #include <QCheckBox>
 #include <QProcess>
+#include <QTimer>
 #include <QFileInfo>
 #include <QFile>
 #include <QDir>
@@ -93,12 +94,12 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
 
     auto* nxmRow = new QHBoxLayout;
     auto* testNxmBtn = new QPushButton("Test NXM Handler");
-    auto* reregNxmBtn = new QPushButton("Re-register");
+    m_reregNxmBtn = new QPushButton("Re-register");
     nxmRow->addWidget(testNxmBtn);
-    nxmRow->addWidget(reregNxmBtn);
+    nxmRow->addWidget(m_reregNxmBtn);
     nxmRow->addStretch();
     connect(testNxmBtn, &QPushButton::clicked, this, &SettingsDialog::onTestNxm);
-    connect(reregNxmBtn, &QPushButton::clicked, this, &SettingsDialog::onReregisterNxm);
+    connect(m_reregNxmBtn, &QPushButton::clicked, this, &SettingsDialog::onReregisterNxm);
     form->addRow("Nexus NXM Handler:", nxmRow);
 
     m_nxmStatus = new QLabel;
@@ -294,24 +295,56 @@ void SettingsDialog::onTestNxm()
 
 void SettingsDialog::onReregisterNxm()
 {
+    if (m_nxmRegisterProcess)
+        return;
+
     const QString script = findGorganizerScript();
     if (script.isEmpty()) {
         m_nxmStatus->setText(QString("<span style='color:%1;'>Cannot find gorganizer.sh next to the frontend binary.</span>").arg(errHex()));
         return;
     }
 
-    QProcess p;
-    p.start(script, {"--register-nxm"});
-    if (!p.waitForFinished(15000)) {
+    auto* process = new QProcess(this);
+    m_nxmRegisterProcess = process;
+    m_reregNxmBtn->setEnabled(false);
+    connect(process, &QProcess::finished, this,
+            [this, process](int exitCode, QProcess::ExitStatus exitStatus) {
+                if (m_nxmRegisterProcess != process)
+                    return;
+                m_nxmRegisterProcess = nullptr;
+                m_reregNxmBtn->setEnabled(true);
+                if (exitStatus != QProcess::NormalExit || exitCode != 0) {
+                    m_nxmStatus->setText(QString("<span style='color:%1;'>Re-registration failed: %2</span>")
+                                             .arg(errHex(), QString::fromUtf8(process->readAllStandardError()).toHtmlEscaped()));
+                } else {
+                    m_nxmStatus->setText(QString("<span style='color:%1;'>&#10003; Nexus download links are enabled. Use &quot;Test NXM Handler&quot; to check.</span>").arg(okHex()));
+                }
+                process->deleteLater();
+            });
+    connect(process, &QProcess::errorOccurred, this,
+            [this, process](QProcess::ProcessError) {
+                if (m_nxmRegisterProcess != process)
+                    return;
+                m_nxmRegisterProcess = nullptr;
+                m_reregNxmBtn->setEnabled(true);
+                QString detail = QString::fromUtf8(process->readAllStandardError());
+                if (detail.isEmpty())
+                    detail = process->errorString();
+                m_nxmStatus->setText(QString("<span style='color:%1;'>Re-registration failed: %2</span>")
+                                         .arg(errHex(), detail.toHtmlEscaped()));
+                process->kill();
+                process->deleteLater();
+            });
+    QTimer::singleShot(15000, process, [this, process] {
+        if (m_nxmRegisterProcess != process)
+            return;
+        m_nxmRegisterProcess = nullptr;
+        process->kill();
+        m_reregNxmBtn->setEnabled(true);
         m_nxmStatus->setText(QString("<span style='color:%1;'>Re-registration timed out.</span>").arg(errHex()));
-        return;
-    }
-    if (p.exitStatus() != QProcess::NormalExit || p.exitCode() != 0) {
-        m_nxmStatus->setText(QString("<span style='color:%1;'>Re-registration failed: %2</span>")
-                                 .arg(errHex(), QString::fromUtf8(p.readAllStandardError()).toHtmlEscaped()));
-        return;
-    }
-    m_nxmStatus->setText(QString("<span style='color:%1;'>&#10003; Re-registered. Run 'Test NXM Handler' to verify.</span>").arg(okHex()));
+        process->deleteLater();
+    });
+    process->start(script, {"register"});
 }
 
 void SettingsDialog::populateThemeCombo()

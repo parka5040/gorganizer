@@ -7,6 +7,7 @@ class QLabel;
 class QPushButton;
 class QComboBox;
 class QCheckBox;
+class QProcess;
 
 namespace gorganizer {
 
@@ -42,6 +43,8 @@ private:
     QComboBox* m_protonCombo = nullptr;
     QLabel* m_protonStatus = nullptr;
     QLabel* m_nxmStatus = nullptr;
+    QPushButton* m_reregNxmBtn = nullptr;
+    QProcess* m_nxmRegisterProcess = nullptr;
     QComboBox* m_themeCombo = nullptr;
     QCheckBox* m_collapseViewsCheck = nullptr;
 };

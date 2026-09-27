@@ -1259,7 +1259,7 @@ case "${1:-}" in
     update)
         shift; cmd_update "$@"
         ;;
-    register)
+    register|--register-nxm)
         shift; cmd_register "$@"
         ;;
     unregister)

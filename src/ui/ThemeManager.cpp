@@ -343,11 +343,23 @@ QString ThemeManager::canonicalThemeName(const QString& name)
     return themeByName(name).name;
 }
 
+#if QT_VERSION < QT_VERSION_CHECK(6, 5, 0)
+static bool nativePrefersDark()
+{
+    static const QPalette nativePalette = QGuiApplication::palette();
+    return nativePalette.window().color().lightness() < 128;
+}
+#endif
+
 bool ThemeManager::systemPrefersDark()
 {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     if (auto* hints = QGuiApplication::styleHints())
         return hints->colorScheme() == Qt::ColorScheme::Dark;
     return false;
+#else
+    return nativePrefersDark();
+#endif
 }
 
 const Palette& ThemeManager::currentPalette()
@@ -369,13 +381,18 @@ void ThemeManager::apply(const QString& mode, const QString& themeName)
 {
     if (s_applying)
         return;
+#if QT_VERSION < QT_VERSION_CHECK(6, 5, 0)
+    const bool nativeDark = nativePrefersDark();
+#endif
     s_applying = true;
 
     s_currentMode = mode.isEmpty() ? QStringLiteral("system") : mode;
     const Theme& t = themeByName(themeName);
 
     bool isDark;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     auto* hints = QGuiApplication::styleHints();
+#endif
     if (s_currentMode == "light") {
         isDark = false;
 #if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
@@ -393,7 +410,11 @@ void ThemeManager::apply(const QString& mode, const QString& themeName)
         if (hints)
             hints->setColorScheme(Qt::ColorScheme::Unknown);
 #endif
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
         isDark = hints && hints->colorScheme() == Qt::ColorScheme::Dark;
+#else
+        isDark = nativeDark;
+#endif
     }
 
     s_current = isDark ? t.dark : t.light;
