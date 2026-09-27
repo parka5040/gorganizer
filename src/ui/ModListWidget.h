@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QHash>
+#include <QPointer>
 #include <QWidget>
 #include <QTreeView>
 #include "GameInfo.h"
@@ -15,6 +16,7 @@ class QCheckBox;
 class QLabel;
 class QMenu;
 class QPushButton;
+class QProgressDialog;
 class QTimer;
 
 namespace gorganizer {
@@ -113,6 +115,14 @@ private slots:
     void onModListSaveFailed(quint64 requestId);
     // Resumes a deferred profile read once every queued save has completed.
     void onModListSavesDrained();
+    void onModReinstalled(quint64 requestId, const QString& gameId, const QString& modName,
+                          const GrpcReinstallResult& result);
+    void onModUninstalled(quint64 requestId, const QString& gameId, const QString& modName,
+                          const QStringList& flaggedArchives);
+    void onModRenamed(quint64 requestId, const QString& gameId, const QString& oldName, const QString& newName);
+    void onModActionFailed(quint64 requestId, const QString& gameId, const QString& modName,
+                           const QString& method, const QString& error);
+    void onModActionWorkersStopped();
 
 private:
     friend class ModListTreeView;
@@ -169,6 +179,40 @@ private:
     // Ends one interaction level, running a deferred reload and announcing the end once none remain.
     void endInteraction();
     void showContextMenu(const QPoint& pos);
+    enum class ModActionKind { Reinstall, Uninstall, Rename };
+    struct ModAction {
+        ModActionKind kind;
+        ActionContext context;
+        QString folder;
+        QString name;
+        QString newName;
+        quint64 requestId = 0;
+        bool forced = false;
+        bool submittedWhileConnected = false;
+    };
+    struct BulkReinstall {
+        ActionContext context;
+        QStringList folders;
+        QStringList names;
+        QStringList errors;
+        QStringList notices;
+        QPointer<QProgressDialog> progress;
+        int next = 0;
+        int total = 0;
+        int completed = 0;
+        int failed = 0;
+        bool stopRequested = false;
+    };
+    bool refuseModAction() const;
+    void startModAction(ModAction action);
+    void startBulkReinstall(const ActionContext& context, const QStringList& folders, const QStringList& names);
+    void startNextBulkReinstall();
+    void finishBulkReinstall();
+    void showBulkSummary(const BulkReinstall& bulk);
+    void showPendingBulkSummaries();
+    void finishModAction(bool changed);
+    bool matchesModAction(quint64 requestId, const QString& gameId, const QString& modName,
+                          ModActionKind kind) const;
     // Adds the SMAPI dependency actions for one mod folder to its context menu.
     void addDependencyActions(QMenu& menu, const QString& folder);
     void restorePriorityOrder();
@@ -234,6 +278,10 @@ private:
     quint64 m_scanAdoptionSerial = 0;
     quint64 m_scanAdoptionId = 0;
     bool m_reloadPending = false;
+    bool m_modActionInProgress = false;
+    std::optional<ModAction> m_modAction;
+    std::optional<BulkReinstall> m_bulkReinstall;
+    std::vector<BulkReinstall> m_pendingBulkSummaries;
     std::optional<GrpcModDependencyReport> m_dependencyReport;
     bool m_profileAdopted = false;
     QHash<QString, bool> m_profileFlags;

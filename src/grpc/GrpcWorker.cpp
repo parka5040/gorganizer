@@ -1210,6 +1210,60 @@ void GrpcWorker::doSetModListRequest(quint64 requestId, const QString& gameId, c
     emit modListSaved(requestId, gameId, profileName);
 }
 
+void GrpcWorker::doReinstallMod(quint64 requestId, const QString& gameId, const QString& modName)
+{
+    gorganizer::v1::ReinstallModRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_mod_name(modName.toStdString());
+    gorganizer::v1::ReinstallModResponse resp;
+    const auto status = invoke(&Stub::ReinstallMod, req, resp, std::chrono::minutes(30));
+    if (!status.ok()) {
+        emit modActionFailed(requestId, gameId, modName, QStringLiteral("ReinstallMod"),
+                             QString::fromStdString(status.error_message()));
+        return;
+    }
+    GrpcReinstallResult result;
+    result.archivesReplayed = resp.archives_replayed();
+    result.archivesSkipped = resp.archives_skipped();
+    result.fileCount = resp.file_count();
+    emit modReinstalled(requestId, gameId, modName, result);
+}
+
+void GrpcWorker::doUninstallMod(quint64 requestId, const QString& gameId, const QString& modName, bool force)
+{
+    gorganizer::v1::UninstallModRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_mod_name(modName.toStdString());
+    req.set_force(force);
+    gorganizer::v1::UninstallModResponse resp;
+    const auto status = invoke(&Stub::UninstallMod, req, resp, std::chrono::minutes(10));
+    if (!status.ok()) {
+        emit modActionFailed(requestId, gameId, modName, QStringLiteral("UninstallMod"),
+                             QString::fromStdString(status.error_message()));
+        return;
+    }
+    QStringList flaggedArchives;
+    for (const auto& archive : resp.archives_flagged_uninstalled())
+        flaggedArchives.append(QString::fromStdString(archive));
+    emit modUninstalled(requestId, gameId, modName, flaggedArchives);
+}
+
+void GrpcWorker::doRenameMod(quint64 requestId, const QString& gameId, const QString& oldName, const QString& newName)
+{
+    gorganizer::v1::RenameModRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_old_name(oldName.toStdString());
+    req.set_new_name(newName.toStdString());
+    gorganizer::v1::RenameModResponse resp;
+    const auto status = invoke(&Stub::RenameMod, req, resp, std::chrono::minutes(10));
+    if (!status.ok()) {
+        emit modActionFailed(requestId, gameId, oldName, QStringLiteral("RenameMod"),
+                             QString::fromStdString(status.error_message()));
+        return;
+    }
+    emit modRenamed(requestId, gameId, oldName, newName);
+}
+
 // Requests a SMAPI dependency report, allowing a longer deadline when smapi.io is consulted.
 void GrpcWorker::doGetModDependencyReport(quint64 requestId, const QString& gameId, const QString& profileName,
                                           bool refreshRemote, bool forceRemote)

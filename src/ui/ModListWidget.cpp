@@ -25,6 +25,9 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QMessageBox>
+#include <QMainWindow>
+#include <QProgressDialog>
+#include <QStatusBar>
 #include <QMetaObject>
 #include <QPointer>
 #include <QSet>
@@ -56,6 +59,28 @@ static QString formatHexIndex(quint64 v)
 static constexpr quint64 kTrueIndexStep = 0x10;
 static constexpr int kProfileListRetries = 5;
 static constexpr int kProfileListRetryBaseMs = 1000;
+
+static QString modActionError(const QString& error, bool submittedWhileConnected)
+{
+    if (!submittedWhileConnected && error == QLatin1String("not connected"))
+        return error;
+    if (submittedWhileConnected && error.isEmpty())
+        return QStringLiteral("deadline exceeded");
+    const QString token = parseInstallError(error).token;
+    if (!token.isEmpty() && token != QLatin1String("unavailable")
+        && token != QLatin1String("cancelled") && token != QLatin1String("timeout"))
+        return error;
+    if (error.contains(QLatin1String("deadline exceeded"), Qt::CaseInsensitive)
+        || error.contains(QLatin1String("not connected"), Qt::CaseInsensitive)
+        || error.contains(QLatin1String("socket"), Qt::CaseInsensitive)
+        || error.contains(QLatin1String("connection"), Qt::CaseInsensitive)
+        || error.contains(QLatin1String("transport"), Qt::CaseInsensitive)
+        || error.contains(QLatin1String("channel"), Qt::CaseInsensitive)
+        || error.contains(QLatin1String("unavailable"), Qt::CaseInsensitive)
+        || error.contains(QLatin1String("cancelled"), Qt::CaseInsensitive))
+        return QStringLiteral("deadline exceeded");
+    return error;
+}
 
 // Reports whether two catalog scans would produce the same rows in the same order.
 static bool sameRows(const std::vector<ModMetadata>& a, const std::vector<ModMetadata>& b)
@@ -284,6 +309,11 @@ ModListWidget::ModListWidget(GrpcClient* grpc, QWidget* parent)
     connect(m_saveQueue, &ModListSaveQueue::saveFailed, this, &ModListWidget::onModListSaveFailed);
     connect(m_saveQueue, &ModListSaveQueue::drained, this, &ModListWidget::onModListSavesDrained);
     connect(m_grpc, &GrpcClient::connected, this, &ModListWidget::requestProfileModList);
+    connect(m_grpc, &GrpcClient::modReinstalled, this, &ModListWidget::onModReinstalled);
+    connect(m_grpc, &GrpcClient::modUninstalled, this, &ModListWidget::onModUninstalled);
+    connect(m_grpc, &GrpcClient::modRenamed, this, &ModListWidget::onModRenamed);
+    connect(m_grpc, &GrpcClient::modActionFailed, this, &ModListWidget::onModActionFailed);
+    connect(m_grpc, &GrpcClient::workersStopped, this, &ModListWidget::onModActionWorkersStopped);
 
     layout->addWidget(m_view);
 
@@ -325,6 +355,12 @@ void ModListWidget::loadForGame(const GameInfo& game, const QString& profileName
     const QString gameId = game.detected ? game.shortName : QString();
     const QString newProfile = game.detected ? profileName : QString();
     const QString modsDir = game.detected ? GameInfo::modsDirPathFor(gameId) : QString();
+    if (m_bulkReinstall && m_bulkReinstall->progress) {
+        const bool active = m_bulkReinstall->context.gameId == gameId
+            && m_bulkReinstall->context.profileName == newProfile
+            && m_bulkReinstall->context.modsDir == modsDir;
+        m_bulkReinstall->progress->setVisible(active);
+    }
     if (gameId == m_gameId && newProfile == m_profileName && modsDir == m_modsDir && isInteracting()) {
         m_reloadPending = true;
         return;
@@ -373,6 +409,8 @@ void ModListWidget::loadForGame(const GameInfo& game, const QString& profileName
     m_view->show();
 
     scanModsFolder();
+    if (!m_pendingBulkSummaries.empty())
+        QTimer::singleShot(0, this, &ModListWidget::showPendingBulkSummaries);
 }
 
 void ModListWidget::scanModsFolder()
@@ -935,7 +973,8 @@ void ModListWidget::dropProfileAdoption()
 
 bool ModListWidget::editsBlocked() const
 {
-    return !m_gameId.isEmpty() && (m_scanFirstPending || (!m_profileName.isEmpty() && !m_profileAdopted));
+    return m_modActionInProgress || (!m_gameId.isEmpty()
+        && (m_scanFirstPending || (!m_profileName.isEmpty() && !m_profileAdopted)));
 }
 
 void ModListWidget::updateEditLock()
@@ -944,7 +983,20 @@ void ModListWidget::updateEditLock()
     const bool failed = blocked && m_profileLoadFailed;
     m_model->setEditable(!blocked);
     m_addSeparatorBtn->setEnabled(!blocked);
-    if (m_scanFirstPending && !m_gameId.isEmpty()) {
+    m_visualCheck->setEnabled(!m_modActionInProgress && !m_collapsedSeparatorView);
+    if (m_modActionInProgress && m_modAction) {
+        const ModAction& action = *m_modAction;
+        if (!matchesContext(action.context)) {
+            m_profileStateLabel->setText(QStringLiteral("Finishing another mod change…"));
+        } else if (action.kind == ModActionKind::Reinstall) {
+            m_profileStateLabel->setText(QStringLiteral("Reinstalling \"%1\"…").arg(action.name));
+        } else if (action.kind == ModActionKind::Uninstall) {
+            m_profileStateLabel->setText(QStringLiteral("Uninstalling \"%1\"…").arg(action.name));
+        } else {
+            m_profileStateLabel->setText(QStringLiteral("Renaming \"%1\"…").arg(action.name));
+        }
+        m_profileStateLabel->setToolTip(QString());
+    } else if (m_scanFirstPending && !m_gameId.isEmpty()) {
         m_profileStateLabel->setText(QStringLiteral("Refreshing mods…"));
         m_profileStateLabel->setToolTip(QString());
     } else if (failed) {
@@ -965,7 +1017,7 @@ void ModListWidget::updateEditLock()
                                                        "daemon."));
     }
     m_profileStateLabel->setVisible(blocked || m_restoringSavedProfile || m_savedProfileRestored);
-    m_profileRetryButton->setVisible(failed && !m_scanFirstPending);
+    m_profileRetryButton->setVisible(failed && !m_scanFirstPending && !m_modActionInProgress);
 }
 
 void ModListWidget::onProfileModListReceived(quint64 requestId, const QString& gameId, const QString& profileName,
@@ -1088,6 +1140,8 @@ void ModListWidget::applyEnabledFlags(const QStringList& folders, bool enabled)
 
 void ModListWidget::setSelectedModsEnabled(const ActionContext& context, const QStringList& folders, bool enabled)
 {
+    if (editsBlocked())
+        return;
     for (const QString& folder : folders) {
         const int index = availableModIndex(context, folder);
         if (index < 0)
@@ -1098,8 +1152,6 @@ void ModListWidget::setSelectedModsEnabled(const ActionContext& context, const Q
             return;
         }
     }
-    if (editsBlocked())
-        return;
     for (const QString& folder : folders) {
         const int index = availableModIndex(context, folder);
         if (index < 0)
@@ -1343,7 +1395,8 @@ void ModListWidget::onItemDoubleClicked(const QModelIndex& index)
         return;
     }
 
-    if (index.column() != ModColCategory || r.kind != RowKindMod || modIndexForFolder(r.folder) < 0)
+    if (editsBlocked() || index.column() != ModColCategory || r.kind != RowKindMod
+        || modIndexForFolder(r.folder) < 0)
         return;
     const QString folder = r.folder;
 
@@ -1373,6 +1426,293 @@ void ModListWidget::onContextMenu(const QPoint& pos)
     beginInteraction();
     showContextMenu(pos);
     endInteraction();
+}
+
+bool ModListWidget::refuseModAction() const
+{
+    if (!m_modActionInProgress)
+        return false;
+    if (auto* mainWindow = qobject_cast<QMainWindow*>(window()))
+        mainWindow->statusBar()->showMessage(QStringLiteral("Wait for the current change to finish."), 5000);
+    return true;
+}
+
+void ModListWidget::startModAction(ModAction action)
+{
+    if (!m_bulkReinstall && refuseModAction())
+        return;
+    action.submittedWhileConnected = m_grpc->isConnected();
+    if (action.kind == ModActionKind::Reinstall)
+        action.requestId = m_grpc->reinstallModAsync(action.context.gameId, action.folder);
+    else if (action.kind == ModActionKind::Uninstall)
+        action.requestId = m_grpc->uninstallModAsync(action.context.gameId, action.folder, false);
+    else
+        action.requestId = m_grpc->renameModAsync(action.context.gameId, action.folder, action.newName);
+    m_modAction = std::move(action);
+    m_modActionInProgress = true;
+    updateEditLock();
+}
+
+void ModListWidget::startBulkReinstall(const ActionContext& context, const QStringList& folders,
+                                       const QStringList& names)
+{
+    if (refuseModAction())
+        return;
+    m_bulkReinstall.emplace();
+    m_bulkReinstall->context = context;
+    m_bulkReinstall->folders = folders;
+    m_bulkReinstall->names = names;
+    m_bulkReinstall->total = folders.size();
+    auto* progress = new QProgressDialog(this);
+    progress->setWindowTitle(QStringLiteral("Reinstall Mods"));
+    progress->setLabelText(QStringLiteral("Reinstalling 1 of %1…").arg(folders.size()));
+    progress->setCancelButtonText(QStringLiteral("Stop after this mod"));
+    progress->setRange(0, folders.size());
+    progress->setValue(0);
+    progress->setMinimumDuration(0);
+    progress->setAutoClose(false);
+    progress->setAutoReset(false);
+    progress->setWindowModality(Qt::NonModal);
+    connect(progress, &QProgressDialog::canceled, this, [this] {
+        if (!m_bulkReinstall)
+            return;
+        m_bulkReinstall->stopRequested = true;
+        m_bulkReinstall->folders.resize(m_bulkReinstall->next);
+        QTimer::singleShot(0, this, [this] {
+            if (!m_bulkReinstall || !m_modAction || !matchesContext(m_bulkReinstall->context)
+                || !m_bulkReinstall->progress)
+                return;
+            m_bulkReinstall->progress->setCancelButton(nullptr);
+            m_bulkReinstall->progress->show();
+        });
+    });
+    m_bulkReinstall->progress = progress;
+    m_modActionInProgress = true;
+    progress->show();
+    startNextBulkReinstall();
+}
+
+void ModListWidget::startNextBulkReinstall()
+{
+    if (!m_bulkReinstall)
+        return;
+    auto& bulk = *m_bulkReinstall;
+    while (bulk.next < bulk.folders.size()) {
+        const int index = bulk.next++;
+        const QString& folder = bulk.folders[index];
+        const QString path = bulk.context.modsDir + QLatin1Char('/') + folder;
+        const QFileInfo dir(path);
+        if (!dir.isDir() || dir.isSymLink()) {
+            ++bulk.failed;
+            bulk.errors.append(QStringLiteral("• %1: This mod is no longer available.").arg(bulk.names[index]));
+            if (bulk.progress)
+                bulk.progress->setValue(bulk.next);
+            continue;
+        }
+        if (bulk.progress) {
+            bulk.progress->setLabelText(QStringLiteral("Reinstalling %1 of %2…")
+                                            .arg(bulk.next).arg(bulk.total));
+        }
+        startModAction(ModAction{ModActionKind::Reinstall, bulk.context, folder, bulk.names[index]});
+        return;
+    }
+    finishBulkReinstall();
+}
+
+void ModListWidget::finishBulkReinstall()
+{
+    if (!m_bulkReinstall)
+        return;
+    BulkReinstall bulk = *m_bulkReinstall;
+    m_bulkReinstall.reset();
+    m_modAction.reset();
+    m_modActionInProgress = false;
+    if (bulk.progress) {
+        bulk.progress->hide();
+        bulk.progress->deleteLater();
+        bulk.progress = nullptr;
+    }
+    updateEditLock();
+    if (!matchesContext(bulk.context)) {
+        m_pendingBulkSummaries.push_back(bulk);
+        return;
+    }
+    if (bulk.completed > 0) {
+        reloadMods();
+        emit modsEdited();
+    }
+    showBulkSummary(bulk);
+}
+
+void ModListWidget::showPendingBulkSummaries()
+{
+    for (;;) {
+        const auto it = std::find_if(m_pendingBulkSummaries.begin(), m_pendingBulkSummaries.end(),
+            [this](const BulkReinstall& bulk) { return matchesContext(bulk.context); });
+        if (it == m_pendingBulkSummaries.end())
+            return;
+        const BulkReinstall bulk = *it;
+        m_pendingBulkSummaries.erase(it);
+        if (bulk.completed > 0)
+            emit modsEdited();
+        showBulkSummary(bulk);
+    }
+}
+
+void ModListWidget::showBulkSummary(const BulkReinstall& bulk)
+{
+    QString summary = QStringLiteral("Reinstalled %1 mods; %2 failed.")
+                          .arg(bulk.completed).arg(bulk.failed);
+    if (bulk.stopRequested)
+        summary += QStringLiteral("\nStopped. %1 mods were not attempted.").arg(bulk.total - bulk.next);
+    if (bulk.failed > 0 || !bulk.notices.isEmpty()) {
+        QMessageBox box(this);
+        box.setIcon(bulk.failed > 0 ? QMessageBox::Warning : QMessageBox::Information);
+        const QString title = bulk.failed > 0 ? QStringLiteral("Bulk Reinstall — Partial")
+            : QStringLiteral("Bulk Reinstall Complete");
+        box.setWindowTitle(title);
+        box.setTextFormat(Qt::PlainText);
+        box.setText(summary);
+        if (!bulk.notices.isEmpty())
+            box.setInformativeText(QStringLiteral("Some source archives were missing. Show details for each mod."));
+        box.setStandardButtons(QMessageBox::Ok);
+        attachErrorDetails(&box, title, QStringLiteral("reinstall these mods"),
+                           (bulk.errors + bulk.notices).join(QLatin1Char('\n')));
+        box.exec();
+    } else {
+        dialogs::info(this, QStringLiteral("Bulk Reinstall Complete"), summary);
+    }
+}
+
+bool ModListWidget::matchesModAction(quint64 requestId, const QString& gameId, const QString& modName,
+                                     ModActionKind kind) const
+{
+    return m_modAction && m_modAction->requestId == requestId && m_modAction->context.gameId == gameId
+        && m_modAction->folder == modName && m_modAction->kind == kind;
+}
+
+void ModListWidget::finishModAction(bool changed)
+{
+    const ActionContext context = m_modAction->context;
+    m_modAction.reset();
+    if (m_bulkReinstall) {
+        if (m_bulkReinstall->progress)
+            m_bulkReinstall->progress->setValue(m_bulkReinstall->next);
+        startNextBulkReinstall();
+        return;
+    }
+    m_modActionInProgress = false;
+    updateEditLock();
+    if (changed && matchesContext(context)) {
+        reloadMods();
+        emit modsEdited();
+    }
+}
+
+void ModListWidget::onModReinstalled(quint64 requestId, const QString& gameId, const QString& modName,
+                                     const GrpcReinstallResult& result)
+{
+    if (!matchesModAction(requestId, gameId, modName, ModActionKind::Reinstall))
+        return;
+    const bool current = matchesContext(m_modAction->context);
+    if (m_bulkReinstall) {
+        ++m_bulkReinstall->completed;
+        if (result.archivesSkipped > 0) {
+            m_bulkReinstall->notices.append(QStringLiteral("• %1: Replayed %2, skipped %3 missing archives. "
+                                                            "%4 files total.")
+                .arg(m_modAction->name).arg(result.archivesReplayed)
+                .arg(result.archivesSkipped).arg(result.fileCount));
+        }
+        finishModAction(true);
+        return;
+    }
+    finishModAction(true);
+    if (current && result.archivesSkipped > 0) {
+        dialogs::info(this, QStringLiteral("Reinstall Complete"),
+                      QStringLiteral("Replayed %1, skipped %2 (missing archive). %3 files total.")
+                          .arg(result.archivesReplayed).arg(result.archivesSkipped).arg(result.fileCount));
+    }
+}
+
+void ModListWidget::onModUninstalled(quint64 requestId, const QString& gameId, const QString& modName,
+                                     const QStringList& flaggedArchives)
+{
+    if (!matchesModAction(requestId, gameId, modName, ModActionKind::Uninstall))
+        return;
+    Q_UNUSED(flaggedArchives);
+    finishModAction(true);
+}
+
+void ModListWidget::onModRenamed(quint64 requestId, const QString& gameId, const QString& oldName,
+                                 const QString& newName)
+{
+    if (!matchesModAction(requestId, gameId, oldName, ModActionKind::Rename)
+        || m_modAction->newName != newName)
+        return;
+    finishModAction(true);
+}
+
+void ModListWidget::onModActionFailed(quint64 requestId, const QString& gameId, const QString& modName,
+                                      const QString& method, const QString& error)
+{
+    if (!m_modAction || requestId != m_modAction->requestId || gameId != m_modAction->context.gameId
+        || modName != m_modAction->folder)
+        return;
+    const ModAction action = *m_modAction;
+    const QString expected = action.kind == ModActionKind::Reinstall ? QStringLiteral("ReinstallMod")
+        : action.kind == ModActionKind::Uninstall ? QStringLiteral("UninstallMod") : QStringLiteral("RenameMod");
+    if (method != expected)
+        return;
+    const bool current = matchesContext(action.context);
+    const InstallError inUse = parseInstallError(error);
+    if (action.kind == ModActionKind::Uninstall && !action.forced && current
+        && inUse.token == QLatin1String("mod_in_use")) {
+        m_modAction->requestId = 0;
+        const QString profiles = inUse.fields.value(QStringLiteral("profiles"));
+        if (dialogs::confirm(this, QStringLiteral("Mod In Use"),
+            QStringLiteral("\"%1\" is enabled in profile(s): %2\n\n"
+                           "Uninstall anyway? The mod will also be removed from "
+                           "those profiles' mod lists.").arg(action.name, profiles))) {
+            if (matchesContext(action.context) && availableModIndex(action.context, action.folder) >= 0) {
+                m_modAction->forced = true;
+                m_modAction->submittedWhileConnected = m_grpc->isConnected();
+                m_modAction->requestId = m_grpc->uninstallModAsync(gameId, modName, true);
+                return;
+            }
+        }
+        finishModAction(false);
+        return;
+    }
+    const QString displayError = modActionError(error, action.submittedWhileConnected);
+    if (m_bulkReinstall) {
+        ++m_bulkReinstall->failed;
+        m_bulkReinstall->errors.append(QStringLiteral("• %1: %2\n%3")
+            .arg(action.name, errorSummary(QStringLiteral("reinstall this mod"), displayError, true), error));
+        finishModAction(false);
+        return;
+    }
+    finishModAction(false);
+    if (!current)
+        return;
+    const QString title = action.kind == ModActionKind::Reinstall ? QStringLiteral("Reinstall Failed")
+        : action.kind == ModActionKind::Uninstall ? QStringLiteral("Uninstall Failed")
+        : QStringLiteral("Rename Failed");
+    const QString operation = action.kind == ModActionKind::Reinstall ? QStringLiteral("reinstall this mod")
+        : action.kind == ModActionKind::Uninstall ? QStringLiteral("uninstall this mod")
+        : QStringLiteral("rename this mod");
+    presentError(this, title, operation, displayError, true, error);
+}
+
+void ModListWidget::onModActionWorkersStopped()
+{
+    if (!m_modAction || m_modAction->requestId == 0)
+        return;
+    const ModAction action = *m_modAction;
+    const QString method = action.kind == ModActionKind::Reinstall ? QStringLiteral("ReinstallMod")
+        : action.kind == ModActionKind::Uninstall ? QStringLiteral("UninstallMod") : QStringLiteral("RenameMod");
+    onModActionFailed(action.requestId, action.context.gameId, action.folder, method,
+                      action.submittedWhileConnected ? QStringLiteral("deadline exceeded")
+                          : QStringLiteral("not connected"));
 }
 
 void ModListWidget::showContextMenu(const QPoint& pos)
@@ -1483,43 +1823,16 @@ void ModListWidget::showContextMenu(const QPoint& pos)
             bulkReinstall->setToolTip("One or more selected mods have no source archives.");
         connect(bulkReinstall, &QAction::triggered, this,
                 [this, context, selectedFolders, selectedNames]() {
+            if (refuseModAction())
+                return;
             if (!dialogs::confirm(this, "Reinstall Mods",
                 QString("Reinstall %1 mods by replaying their source archives?\n\n"
                         "Each mod is rebuilt from its archives and replaced only if every archive installs.")
                     .arg(selectedFolders.size())))
                 return;
-            for (const QString& folder : selectedFolders) {
-                if (availableModIndex(context, folder) < 0)
-                    return;
-            }
-            int ok = 0, failed = 0;
-            QStringList errors;
-            for (int i = 0; i < selectedFolders.size(); ++i) {
-                if (availableModIndex(context, selectedFolders[i]) < 0)
-                    return;
-                GrpcReinstallResult res;
-                QString err;
-                const bool installed = m_grpc->reinstallMod(context.gameId, selectedFolders[i], res, err);
-                if (!matchesContext(context)) {
-                    availableModIndex(context, selectedFolders[i]);
-                    return;
-                }
-                if (!installed) {
-                    failed++;
-                    errors.append(QString("• %1: %2").arg(selectedNames[i], err));
-                } else {
-                    ok++;
-                }
-            }
-            reloadMods();
-            emit modsEdited();
-            if (failed > 0) {
-                presentError(this, "Bulk Reinstall — Partial", "reinstall these mods",
-                             QString("Reinstalled %1, failed %2:\n%3").arg(ok).arg(failed).arg(errors.join("\n")), true);
-            } else {
-                dialogs::info(this, "Bulk Reinstall Complete",
-                    QString("Reinstalled %1 mods.").arg(ok));
-            }
+            if (!matchesContext(context) || refuseModAction())
+                return;
+            startBulkReinstall(context, selectedFolders, selectedNames);
         });
         menu.exec(m_view->viewport()->mapToGlobal(pos));
         return;
@@ -1579,32 +1892,17 @@ void ModListWidget::showContextMenu(const QPoint& pos)
             reinstall->setToolTip(
                 QString("Replays %1 archive(s) in install order.").arg(meta.sourceArchives.size()));
             connect(reinstall, &QAction::triggered, this, [this, context, meta] {
+                if (refuseModAction())
+                    return;
                 if (!dialogs::confirm(this, "Reinstall Mod",
                     QString("Reinstall \"%1\" by replaying %2 archive(s)?\n\n"
                             "The mod is rebuilt from its archives in the order they were installed "
                             "and replaced only if every archive installs.")
                         .arg(meta.name).arg(meta.sourceArchives.size())))
                     return;
-                if (availableModIndex(context, meta.folder) < 0)
+                if (refuseModAction() || availableModIndex(context, meta.folder) < 0)
                     return;
-                GrpcReinstallResult res;
-                QString err;
-                const bool installed = m_grpc->reinstallMod(context.gameId, meta.folder, res, err);
-                if (!matchesContext(context)) {
-                    availableModIndex(context, meta.folder);
-                    return;
-                }
-                if (!installed) {
-                    presentError(this, "Reinstall Failed", "reinstall this mod", err, true);
-                    return;
-                }
-                reloadMods();
-                emit modsEdited();
-                if (res.archivesSkipped > 0) {
-                    dialogs::info(this, "Reinstall Complete",
-                        QString("Replayed %1, skipped %2 (missing archive). %3 files total.")
-                            .arg(res.archivesReplayed).arg(res.archivesSkipped).arg(res.fileCount));
-                }
+                startModAction(ModAction{ModActionKind::Reinstall, context, meta.folder, meta.name});
             });
         } else {
             reinstall->setToolTip("No source archives recorded for this mod.");
@@ -1614,65 +1912,30 @@ void ModListWidget::showContextMenu(const QPoint& pos)
     menu.addSeparator();
 
     menu.addAction("Rename Mod...", [this, context, meta] {
+        if (refuseModAction())
+            return;
         bool ok = false;
         QString newName = QInputDialog::getText(this, "Rename Mod",
             "New name (also becomes the folder name on disk):",
             QLineEdit::Normal, meta.folder, &ok);
         if (!ok || newName.isEmpty() || newName == meta.folder) return;
-        if (availableModIndex(context, meta.folder) < 0)
+        if (refuseModAction() || availableModIndex(context, meta.folder) < 0)
             return;
-        QString err;
-        const bool renamed = m_grpc->renameMod(context.gameId, meta.folder, newName, err);
-        if (!matchesContext(context)) {
-            availableModIndex(context, meta.folder);
-            return;
-        }
-        if (!renamed) {
-            presentError(this, "Rename Failed", "rename this mod", err, true);
-            return;
-        }
-        reloadMods();
-        emit modsEdited();
+        startModAction(ModAction{ModActionKind::Rename, context, meta.folder, meta.name, newName});
     });
 
     menu.addAction("Uninstall Mod", [this, context, meta] {
+        if (refuseModAction())
+            return;
         if (!dialogs::confirm(this, "Uninstall Mod",
             QString("Uninstall \"%1\"?\n\n"
                     "The mod folder will be removed and its archive will be "
                     "marked Uninstalled in the Downloads tab (the archive "
                     "itself is kept so you can reinstall later).")
                 .arg(meta.name))) return;
-        if (availableModIndex(context, meta.folder) < 0)
+        if (refuseModAction() || availableModIndex(context, meta.folder) < 0)
             return;
-
-        std::vector<QString> flagged;
-        QString err;
-        bool ok = m_grpc->uninstallMod(context.gameId, meta.folder, false, flagged, err);
-        if (!matchesContext(context)) {
-            availableModIndex(context, meta.folder);
-            return;
-        }
-        const InstallError inUse = parseInstallError(err);
-        if (!ok && inUse.token == QLatin1String("mod_in_use")) {
-            const QString profiles = inUse.fields.value(QStringLiteral("profiles"));
-            if (!dialogs::confirm(this, "Mod In Use",
-                QString("\"%1\" is enabled in profile(s): %2\n\n"
-                        "Uninstall anyway? The mod will also be removed from "
-                        "those profiles' mod lists.").arg(meta.name, profiles))) return;
-            if (availableModIndex(context, meta.folder) < 0)
-                return;
-            ok = m_grpc->uninstallMod(context.gameId, meta.folder, true, flagged, err);
-            if (!matchesContext(context)) {
-                availableModIndex(context, meta.folder);
-                return;
-            }
-        }
-        if (!ok) {
-            presentError(this, "Uninstall Failed", "uninstall this mod", err, true);
-            return;
-        }
-        reloadMods();
-        emit modsEdited();
+        startModAction(ModAction{ModActionKind::Uninstall, context, meta.folder, meta.name});
     });
 
     menu.exec(m_view->viewport()->mapToGlobal(pos));
@@ -1719,7 +1982,7 @@ void ModListWidget::restorePriorityOrder()
 
 void ModListWidget::updateModPageUrl(const ActionContext& context, const QString& folder, const QString& url)
 {
-    if (availableModIndex(context, folder) < 0)
+    if (m_modActionInProgress || availableModIndex(context, folder) < 0)
         return;
     QFile file(metadataPathForFolder(folder));
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
@@ -1761,6 +2024,8 @@ struct VisualKey {
 
 void ModListWidget::onVisualToggled(bool on)
 {
+    if (m_modActionInProgress)
+        return;
     m_visualMode = on;
     if (isInteracting())
         m_reloadPending = true;
@@ -1790,7 +2055,7 @@ void ModListWidget::applyCollapsedSeparatorView(bool on)
         if (!wasVisual)
             persistSeparators();
     } else {
-        m_visualCheck->setEnabled(true);
+        m_visualCheck->setEnabled(!m_modActionInProgress);
     }
 }
 
@@ -2093,13 +2358,13 @@ void ModListWidget::createSeparatorAt(const ActionContext& context, ModRowKind a
 
 void ModListWidget::renameSeparator(const ActionContext& context, const QString& oldName)
 {
-    if (availableSeparatorIndex(context, oldName) < 0)
+    if (editsBlocked() || availableSeparatorIndex(context, oldName) < 0)
         return;
     bool ok = false;
     QString newName = QInputDialog::getText(m_view, "Rename Separator",
         "New name:", QLineEdit::Normal, oldName, &ok);
     newName = newName.trimmed();
-    if (!ok || newName.isEmpty() || newName == oldName) return;
+    if (!ok || newName.isEmpty() || newName == oldName || editsBlocked()) return;
     const int index = availableSeparatorIndex(context, oldName);
     if (index < 0)
         return;
@@ -2125,7 +2390,7 @@ void ModListWidget::renameSeparator(const ActionContext& context, const QString&
 
 void ModListWidget::removeSeparator(const ActionContext& context, const QString& name)
 {
-    if (availableSeparatorIndex(context, name) < 0)
+    if (editsBlocked() || availableSeparatorIndex(context, name) < 0)
         return;
     for (auto& meta : m_mods) {
         if (meta.separator == name) {
@@ -2144,6 +2409,8 @@ void ModListWidget::removeSeparator(const ActionContext& context, const QString&
 
 void ModListWidget::toggleCollapseAt(const ActionContext& context, const QString& name)
 {
+    if (editsBlocked())
+        return;
     const int index = availableSeparatorIndex(context, name);
     if (index < 0)
         return;
@@ -2185,6 +2452,8 @@ void ModListWidget::moveSeparatorTo(const ActionContext& context, const QString&
 void ModListWidget::setCategoryForFolder(const ActionContext& context, const QString& folder,
                                          const QString& category)
 {
+    if (m_modActionInProgress)
+        return;
     const int index = availableModIndex(context, folder);
     if (index < 0)
         return;
@@ -2199,6 +2468,8 @@ void ModListWidget::setCategoryForFolder(const ActionContext& context, const QSt
 // Builds the right-click menu for the pinned Overwrite row.
 void ModListWidget::onOverwriteContextMenu(const ActionContext& context, const QPoint& globalPos)
 {
+    if (refuseModAction())
+        return;
     QMenu menu;
 
     std::vector<GrpcOverwriteEntry> files;
@@ -2241,13 +2512,13 @@ void ModListWidget::onOverwriteContextMenu(const ActionContext& context, const Q
 
 void ModListWidget::extractOverwriteAll(const ActionContext& context)
 {
-    if (!matchesContext(context))
+    if (refuseModAction() || !matchesContext(context))
         return;
     bool ok = false;
     QString name = QInputDialog::getText(this, "Extract Overwrite",
         "New mod name (empty list will extract every file in Overwrite):",
         QLineEdit::Normal, "Overwrite Snapshot", &ok);
-    if (!ok || name.trimmed().isEmpty() || !matchesContext(context))
+    if (!ok || name.trimmed().isEmpty() || !matchesContext(context) || refuseModAction())
         return;
     int count = 0;
     QString err;
@@ -2266,7 +2537,7 @@ void ModListWidget::extractOverwriteAll(const ActionContext& context)
 // Pops a multi-select picker so the user can graduate a subset of Overwrite into a named mod folder.
 void ModListWidget::extractOverwriteSelected(const ActionContext& context)
 {
-    if (!matchesContext(context))
+    if (refuseModAction() || !matchesContext(context))
         return;
     std::vector<GrpcOverwriteEntry> files;
     QString owDir, err;
@@ -2334,7 +2605,7 @@ void ModListWidget::extractOverwriteSelected(const ActionContext& context)
     connect(btns, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
     connect(btns, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
 
-    if (dlg.exec() != QDialog::Accepted || !matchesContext(context))
+    if (dlg.exec() != QDialog::Accepted || !matchesContext(context) || refuseModAction())
         return;
 
     QStringList chosen;
