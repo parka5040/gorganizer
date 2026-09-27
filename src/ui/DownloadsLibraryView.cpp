@@ -356,6 +356,11 @@ void DownloadsLibraryView::onDoubleClicked(const QModelIndex& idx)
                                           QString(), GrpcInstallMergeIntoMod,
                                           existingFolder, QString(), {},
                                           modFolder, fileCount, err)) {
+                if (parseInstallError(err).token == QLatin1String("fomod_required")
+                    && usesLocalDataRootInstall(m_game)) {
+                    showFomodInstallDialog(row, GrpcInstallMergeIntoMod, existingFolder);
+                    return;
+                }
                 showInstallError(this, "Merge Failed", err);
                 return;
             }
@@ -388,24 +393,31 @@ void DownloadsLibraryView::actionInstall(const GrpcArchiveRow& row, bool forceNe
                                   modFolder, fileCount, err)) {
         if (parseInstallError(err).token == QLatin1String("fomod_required")
             && usesLocalDataRootInstall(m_game)) {
-            QString defaultModName = row.modName.isEmpty()
-                ? QFileInfo(row.fileArchiveName).completeBaseName()
-                : row.modName;
-            ModInstallDialog dlg(m_game.shortName, defaultModName, m_grpc,
-                                 ModInstallDialog::ArchiveSource::fromLibrary(row.archiveRelPath), this);
-            connect(&dlg, &ModInstallDialog::fomodWizardOpened,
-                    this, &DownloadsLibraryView::fomodWizardOpened);
-            connect(&dlg, &ModInstallDialog::fomodWizardClosed,
-                    this, &DownloadsLibraryView::fomodWizardClosed);
-            if (dlg.exec() == QDialog::Accepted)
-                emit modInstalledFromDownload();
-            reloadFromDaemon();
+            showFomodInstallDialog(row, mode, target);
             return;
         }
         showInstallError(this, "Install Failed", err);
         return;
     }
     emit modInstalledFromDownload();
+    reloadFromDaemon();
+}
+
+void DownloadsLibraryView::showFomodInstallDialog(const GrpcArchiveRow& row,
+                                                  GrpcInstallMode mode, const QString& target)
+{
+    QString defaultModName = row.modName.isEmpty()
+        ? QFileInfo(row.fileArchiveName).completeBaseName()
+        : row.modName;
+    ModInstallDialog dlg(m_game.shortName, defaultModName, m_grpc,
+                         ModInstallDialog::ArchiveSource::fromLibrary(row.archiveRelPath),
+                         this, {mode, target});
+    connect(&dlg, &ModInstallDialog::fomodWizardOpened,
+            this, &DownloadsLibraryView::fomodWizardOpened);
+    connect(&dlg, &ModInstallDialog::fomodWizardClosed,
+            this, &DownloadsLibraryView::fomodWizardClosed);
+    if (dlg.exec() == QDialog::Accepted)
+        emit modInstalledFromDownload();
     reloadFromDaemon();
 }
 
@@ -441,6 +453,11 @@ void DownloadsLibraryView::actionMergeInto(const GrpcArchiveRow& row)
     if (!m_grpc->startInstallSync(m_game.shortName, row.archiveRelPath, QString(),
                                   GrpcInstallMergeIntoMod, target, QString(), {},
                                   modFolder, fileCount, err)) {
+        if (parseInstallError(err).token == QLatin1String("fomod_required")
+            && usesLocalDataRootInstall(m_game)) {
+            showFomodInstallDialog(row, GrpcInstallMergeIntoMod, target);
+            return;
+        }
         showInstallError(this, "Merge Failed", err);
         return;
     }

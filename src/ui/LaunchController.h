@@ -42,7 +42,7 @@ private slots:
     void onActiveGameChanged(const GameInfo& game);
 
 private:
-    // Enables Run only while no launch is pending and no SMAPI operation runs for the active game.
+    // Enables Run only when connected, idle, and no SMAPI operation runs for the active game.
     void updateRunEnabled();
     // Explains a launch refused because SMAPI is unusable and offers to install or repair it.
     void offerModLoaderFix(const QString& gameId, const QString& reason);

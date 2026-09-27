@@ -24,14 +24,17 @@ enum RootRole { RootPathRole = Qt::UserRole + 1 };
 }
 
 ModInstallDialog::ModInstallDialog(const QString& gameId, const QString& modName,
-                                   GrpcClient* grpc, ArchiveSource source, QWidget* parent)
+                                   GrpcClient* grpc, ArchiveSource source, QWidget* parent,
+                                   InstallTarget target)
     : QDialog(parent)
     , m_gameId(gameId)
     , m_modName(modName)
     , m_grpc(grpc)
     , m_source(std::move(source))
+    , m_target(std::move(target))
 {
-    setWindowTitle("Install Mod: " + modName);
+    setWindowTitle(m_target.mode == GrpcInstallMergeIntoMod
+        ? "Update Mod: " + m_target.targetMod : "Install Mod: " + modName);
     setMinimumSize(500, 400);
     resize(600, 500);
 
@@ -246,12 +249,14 @@ void ModInstallDialog::beginInstall(bool fomodConfirmed,
     m_treeWidget->hide();
     m_progressBar->show();
     m_statusLabel->setText(QString("Installing %1… please wait").arg(m_modName));
+    const QString targetMod = m_target.mode == GrpcInstallMergeIntoMod
+        ? m_target.targetMod : m_modName;
     if (m_source.archiveRelPath.isEmpty()) {
         m_installRequestId = m_grpc->startInstallExternal(m_gameId, m_source.externalArchivePath,
-            GrpcInstallAsNewMod, m_modName, fomodConfirmed, selectedRoot, m_previewId, files);
+            m_target.mode, targetMod, fomodConfirmed, selectedRoot, m_previewId, files);
     } else {
         m_installRequestId = m_grpc->startInstall(m_gameId, m_source.archiveRelPath,
-            GrpcInstallAsNewMod, m_modName, m_previewId, files, fomodConfirmed, selectedRoot);
+            m_target.mode, targetMod, m_previewId, files, fomodConfirmed, selectedRoot);
     }
 }
 
