@@ -15,6 +15,7 @@
 #include "ThemeManager.h"
 #include <QEventLoop>
 #include <QMessageBox>
+#include <QStatusBar>
 #include <cstdio>
 #include <cstring>
 #include <unistd.h>
@@ -132,7 +133,27 @@ int main(int argc, char* argv[])
     gorganizer::GrpcClient grpcClient;
     grpcClient.connectToDaemon();
 
+    QString wizardKeyMessage;
+    QStatusBar* wizardStatusBar = nullptr;
+    bool wizardKeyAnswered = false;
     if (!wizardApiKey.isEmpty()) {
+        auto reportWizardKeyResult = [&wizardKeyAnswered, &wizardKeyMessage, &wizardStatusBar](bool saved) {
+            if (wizardKeyAnswered)
+                return;
+            wizardKeyAnswered = true;
+            wizardKeyMessage = saved
+                ? "Nexus key saved."
+                : "Couldn't save your Nexus key. Open Tools → Settings to try again.";
+            if (wizardStatusBar)
+                wizardStatusBar->showMessage(wizardKeyMessage, 10000);
+        };
+        QObject::connect(&grpcClient, &gorganizer::GrpcClient::nexusAPIKeySet, &app,
+            [reportWizardKeyResult](bool valid, const QString&) { reportWizardKeyResult(valid); });
+        QObject::connect(&grpcClient, &gorganizer::GrpcClient::rpcError, &app,
+            [reportWizardKeyResult](const QString& method, const QString&) {
+                if (method == "SetNexusAPIKey")
+                    reportWizardKeyResult(false);
+            });
         QObject::connect(&grpcClient, &gorganizer::GrpcClient::connected, &grpcClient,
             [&grpcClient, wizardApiKey] { grpcClient.setNexusAPIKey(wizardApiKey); },
             Qt::SingleShotConnection);
@@ -183,6 +204,9 @@ int main(int argc, char* argv[])
     gorganizer::MainWindow mainWindow(config, &grpcClient);
     mainWindow.setDaemonOwned(daemonOwned);
     mainWindow.show();
+    wizardStatusBar = mainWindow.statusBar();
+    if (wizardKeyAnswered)
+        wizardStatusBar->showMessage(wizardKeyMessage, 10000);
 
     for (int i = 1; i < argc; ++i) {
         QString arg = QString::fromUtf8(argv[i]);

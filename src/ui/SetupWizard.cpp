@@ -19,47 +19,8 @@
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <QEventLoop>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QFile>
 #include <QDir>
 #include <QSysInfo>
-
-namespace {
-
-// Persists the API key to the daemon's config.json directly (wizard runs before daemon spawn).
-bool saveNexusApiKeyToConfig(const QString& apiKey)
-{
-    QString configDir = QString::fromUtf8(qgetenv("XDG_CONFIG_HOME"));
-    if (configDir.isEmpty())
-        configDir = QDir::homePath() + "/.config";
-    configDir += "/gorganizer";
-    QDir().mkpath(configDir);
-
-    QString path = configDir + "/config.json";
-    QJsonObject root;
-    QFile f(path);
-    if (f.exists() && f.open(QIODevice::ReadOnly)) {
-        auto doc = QJsonDocument::fromJson(f.readAll());
-        if (doc.isObject())
-            root = doc.object();
-        f.close();
-    }
-    root.insert("nexus_api_key", apiKey);
-    if (!root.contains("games"))
-        root.insert("games", QJsonObject{});
-    if (!root.contains("log_level"))
-        root.insert("log_level", "info");
-
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        return false;
-    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-    f.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-    f.close();
-    return true;
-}
-
-}
 
 namespace gorganizer {
 
@@ -87,8 +48,6 @@ SetupWizard::SetupWizard(AppConfig& config, QWidget* parent)
 
 void SetupWizard::accept()
 {
-    m_config.markSetupComplete();
-
     std::vector<QString> shortNames;
     for (const auto& g : m_selectedGames)
         shortNames.push_back(g.shortName);
@@ -97,9 +56,7 @@ void SetupWizard::accept()
     if (!m_selectedGames.empty())
         m_config.setActiveGameShortName(m_selectedGames.front().shortName);
 
-    if (m_apiKeyValid && !m_validatedApiKey.isEmpty())
-        saveNexusApiKeyToConfig(m_validatedApiKey);
-
+    m_config.markSetupComplete();
     QWizard::accept();
 }
 
@@ -308,8 +265,8 @@ QWizardPage* SetupWizard::createApiKeyPage()
     auto* layout = new QVBoxLayout(page);
 
     auto* help = new QLabel(
-        "Paste your Nexus Mods personal API key below. The key is saved to the "
-        "daemon's config and used to authenticate NXM downloads.\n\n"
+        "Paste your Nexus Mods personal API key below. It will be saved when "
+        "Gorganizer finishes starting and used for Nexus Mods downloads.\n\n"
         "You can skip this step and paste the key later in Tools → Settings.");
     help->setWordWrap(true);
     layout->addWidget(help);
@@ -328,7 +285,7 @@ QWizardPage* SetupWizard::createApiKeyPage()
     layout->addLayout(form);
 
     auto* btnRow = new QHBoxLayout;
-    m_apiKeyValidateBtn = new QPushButton("Validate && Save");
+    m_apiKeyValidateBtn = new QPushButton("Validate Key");
     btnRow->addWidget(m_apiKeyValidateBtn);
     btnRow->addStretch();
     layout->addLayout(btnRow);
@@ -380,7 +337,7 @@ void SetupWizard::validateApiKey(const QString& key)
         m_apiKeyValid = true;
         m_validatedApiKey = key;
         m_apiKeyStatus->setText(
-            QString("<b style='color:%1;'>Validated — the key will be saved on finish.</b>").arg(okHex()));
+            QString("<b style='color:%1;'>Key validated. It will be saved when Gorganizer finishes starting.</b>").arg(okHex()));
     } else if (status == 401 || status == 403) {
         m_apiKeyValid = false;
         m_validatedApiKey.clear();
@@ -474,7 +431,7 @@ QWizardPage* SetupWizard::createFinishPage()
     connect(this, &QWizard::currentIdChanged, this, [this](int id) {
         if (id != 5) return;
         QString apiKeyMsg = m_apiKeyValid
-            ? "Nexus API key saved."
+            ? "Your Nexus key will be saved when Gorganizer finishes starting."
             : "No Nexus API key set — you can paste one in Tools → Settings later.";
         m_summaryLabel->setText(
             QString("Setup complete. Managing %1 game(s).\n\n%2\n\n"
@@ -482,7 +439,8 @@ QWizardPage* SetupWizard::createFinishPage()
                     "directly from the main window: pick the extender in the Run "
                     "dropdown and the first click downloads + installs it. Next "
                     "click runs the game through it.\n\n"
-                    "Drop archives into the Downloads tab or double-click to install mods.")
+                    "Use \"Install Mod…\" and choose a downloaded archive to install it. "
+                    "Then tick the mod to enable it.")
                 .arg(m_selectedGames.size())
                 .arg(apiKeyMsg));
     });
