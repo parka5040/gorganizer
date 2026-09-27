@@ -116,6 +116,18 @@ private slots:
 private:
     friend class ModListTreeView;
     void scanModsFolder();
+    struct ActionContext {
+        QString gameId;
+        QString profileName;
+        QString modsDir;
+    };
+    ActionContext actionContext() const;
+    bool matchesContext(const ActionContext& context) const;
+    int modIndexForFolder(const QString& folder) const;
+    int separatorIndexForName(const QString& name) const;
+    int availableModIndex(const ActionContext& context, const QString& folder);
+    int availableSeparatorIndex(const ActionContext& context, const QString& name);
+    QString metadataPathForFolder(const QString& folder) const;
     // Builds the SetModList entries of a checkbox toggle in the profile's load order.
     std::vector<GrpcModListEntry> toggleEntries() const;
     // Rescans the mod catalog without re-reading separators.
@@ -138,6 +150,7 @@ private:
     void updateEditLock();
     // Sets the in-memory and shown enabled flag of the named mod folders without persisting anything.
     void applyEnabledFlags(const QStringList& folders, bool enabled);
+    void setSelectedModsEnabled(const ActionContext& context, const QStringList& folders, bool enabled);
     // Rebuilds the rows from m_mods in the current sort, keeping cached conflict counts, and re-requests conflicts.
     void refreshView();
     void beginInteraction();
@@ -147,20 +160,19 @@ private:
     // Adds the SMAPI dependency actions for one mod folder to its context menu.
     void addDependencyActions(QMenu& menu, const QString& folder);
     void restorePriorityOrder();
-    void setCategoryForRow(int modIdx, const QString& category);
-    // Sets or clears the mod_page key in metadata.yaml; empty url removes the key.
-    void updateModPageUrl(int row, const QString& url);
+    void setCategoryForFolder(const ActionContext& context, const QString& folder, const QString& category);
+    void updateModPageUrl(const ActionContext& context, const QString& folder, const QString& url);
 
     void onVisualToggled(bool on);
     void rebuildView();
     void applyOverwriteSpan();
     QHash<QString, std::vector<int>> hiddenModsBySeparator() const;
     void persistRowOrder();
-    void createSeparatorAt(int visualRow);
-    void renameSeparator(int row);
-    void removeSeparator(int row);
-    void toggleCollapseAt(int row);
-    void moveSeparatorTo(int row, bool toTop);
+    void createSeparatorAt(const ActionContext& context, ModRowKind anchorKind, const QString& anchorName);
+    void renameSeparator(const ActionContext& context, const QString& name);
+    void removeSeparator(const ActionContext& context, const QString& name);
+    void toggleCollapseAt(const ActionContext& context, const QString& name);
+    void moveSeparatorTo(const ActionContext& context, const QString& name, bool toTop);
     void persistSeparators();
     void onAddSeparatorClicked();
     void groupByCategory();
@@ -168,9 +180,9 @@ private:
     void updateConflictTints();
     void showConflictDetailsForMod(const QString& modName);
 
-    void onOverwriteContextMenu(const QPoint& globalPos);
-    void extractOverwriteAll();
-    void extractOverwriteSelected();
+    void onOverwriteContextMenu(const ActionContext& context, const QPoint& globalPos);
+    void extractOverwriteAll(const ActionContext& context);
+    void extractOverwriteSelected(const ActionContext& context);
 
     GrpcClient* m_grpc;
     ModListSaveQueue* m_saveQueue;
