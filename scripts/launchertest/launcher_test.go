@@ -48,6 +48,55 @@ if [ "${@: -1}" = "$FAKE_INTERRUPT_TARGET" ]; then
 fi
 `
 
+const fakeMigrationCtl = `#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$SHIM_LOG"
+case "$1" in
+    migrate-data)
+        case "$2" in
+            --status)
+                if [ "${FAKE_STATUS_FAIL:-}" = yes ]; then
+                    printf 'Cannot check the move.\n' >&2
+                    exit 1
+                fi
+                printf '%s\n' "${FAKE_STATUS:-none}"
+                ;;
+            --resume)
+                if [ "${FAKE_RESUME_FAIL:-}" = yes ]; then
+                    printf 'Could not finish moving your mods.\n' >&2
+                    exit 1
+                fi
+                ;;
+            --from)
+                if [ "${FAKE_VERIFY_IMPORT:-}" = yes ]; then
+                    printf 'argc=%s\n' "$#" >> "$SHIM_LOG"
+                fi
+                case "$*" in
+                    *--dry-run*--count*) if [ "${FAKE_SOURCES:-[]}" = "[]" ]; then echo 0; else echo 1; fi ;;
+                    *--dry-run*) printf '{"sources":%s}\n' "${FAKE_SOURCES:-[]}" ;;
+                    *--yes*)
+                        case "${FAKE_MOVE_FAIL:-}" in
+                            yes)
+                                printf '  Cannot move yet: Unmount the mods first.\n'
+                                exit 2
+                                ;;
+                            error)
+                                printf 'Could not move your mods: The folder changed.\n' >&2
+                                exit 1
+                                ;;
+                        esac
+                        ;;
+                    *) printf 'Move your mods? [y/N] ' ;;
+                esac
+                ;;
+        esac
+        ;;
+    session)
+        printf 'root=%s\nqt=%s\n' "${GORGANIZER_ROOT-<unset>}" "$QT_LOGGING_RULES" >> "$SHIM_LOG"
+        ;;
+esac
+`
+
 type fixture struct {
 	root  string
 	shims string
@@ -124,7 +173,12 @@ func (f *fixture) run(t *testing.T, command string, settings ...string) (string,
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", "-c", ". \"$1\"; "+command, "bash", filepath.Join(f.root, "gorganizer.sh"))
 	cmd.Dir = f.root
-	cmd.Env = append(os.Environ(),
+	for _, setting := range os.Environ() {
+		if !strings.HasPrefix(setting, "GORGANIZER_ROOT=") {
+			cmd.Env = append(cmd.Env, setting)
+		}
+	}
+	cmd.Env = append(cmd.Env,
 		"GORGANIZER_SH_SOURCE_ONLY=1",
 		"PATH="+f.shims+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FAKE_MAKE_LOG="+f.log,
@@ -159,18 +213,169 @@ func (f *fixture) assertInstalledOld(t *testing.T) {
 	}
 }
 
+// installMigrationShim records migration and session calls in an isolated fixture.
+func (f *fixture) installMigrationShim(t *testing.T) string {
+	t.Helper()
+	writeFixtureFile(t, filepath.Join(f.root, "gorganizerctl"), []byte(fakeMigrationCtl), 0o755)
+	writeFixtureFile(t, filepath.Join(f.shims, "notify-send"), []byte("#!/bin/sh\nprintf '%s\\n' \"$2\" >> \"$SHIM_NOTIFICATIONS\"\n"), 0o755)
+	return filepath.Join(f.root, "supervisor-args")
+}
+
 // TestLaunchExecsSupervisor verifies the launcher forwards paths and GUI arguments to the session supervisor.
 func TestLaunchExecsSupervisor(t *testing.T) {
 	f := newFixture(t)
-	logPath := filepath.Join(f.root, "supervisor-args")
-	writeFixtureFile(t, filepath.Join(f.root, "gorganizerctl"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SHIM_LOG\"\nprintf 'root=%s\\nqt=%s\\n' \"$GORGANIZER_ROOT\" \"$QT_LOGGING_RULES\" >> \"$SHIM_LOG\"\n"), 0o755)
+	logPath := f.installMigrationShim(t)
 	output, err := f.run(t, `cmd_launch 'nxm://example/mod?id=1' 'with spaces'`, "SHIM_LOG="+logPath, "QT_LOGGING_RULES=")
 	if err != nil || output != "" {
 		t.Fatalf("launch = %v: %s", err, output)
 	}
-	want := strings.Join([]string{"session", "--daemon", filepath.Join(f.root, "gorganizerd"), "--gui", filepath.Join(f.root, "build/src/gorganizer"), "--", "nxm://example/mod?id=1", "with spaces", "root=" + f.root, "qt=qt.dbus.*=false;qt.qpa.systemtray.*=false;qt.qpa.theme.dbus.*=false;qt.qpa.theme.debug=false", ""}, "\n")
+	want := strings.Join([]string{"migrate-data --status", "migrate-data --from " + f.root + " --dry-run --count", "session --daemon " + filepath.Join(f.root, "gorganizerd") + " --gui " + filepath.Join(f.root, "build/src/gorganizer") + " -- nxm://example/mod?id=1 with spaces", "root=<unset>", "qt=qt.dbus.*=false;qt.qpa.systemtray.*=false;qt.qpa.theme.dbus.*=false;qt.qpa.theme.debug=false", ""}, "\n")
 	if got := string(readFixtureFile(t, logPath)); got != want {
 		t.Fatalf("supervisor arguments = %q, want %q", got, want)
+	}
+}
+
+// TestLaunchWithoutOldFoldersUsesXDG checks a clean checkout never sets the root override.
+func TestLaunchWithoutOldFoldersUsesXDG(t *testing.T) {
+	f := newFixture(t)
+	logPath := f.installMigrationShim(t)
+	output, err := f.run(t, "cmd_launch", "SHIM_LOG="+logPath)
+	if err != nil || output != "" {
+		t.Fatalf("launch = %v: %s", err, output)
+	}
+	calls := string(readFixtureFile(t, logPath))
+	if !strings.Contains(calls, "migrate-data --status\n") || !strings.Contains(calls, "migrate-data --from "+f.root+" --dry-run --count\n") || !strings.Contains(calls, "root=<unset>\n") || strings.Contains(calls, " --yes") {
+		t.Fatalf("clean launch calls = %q", calls)
+	}
+}
+
+// TestLaunchMigratesOldFoldersFirst checks that migration precedes the session without setting a root override.
+func TestLaunchMigratesOldFoldersFirst(t *testing.T) {
+	f := newFixture(t)
+	logPath := f.installMigrationShim(t)
+	writeFixtureFile(t, filepath.Join(f.root, "SkyrimSE_Mods", "mod.esp"), []byte("mod"), 0o600)
+	settings := []string{"SHIM_LOG=" + logPath, "SHIM_NOTIFICATIONS=" + filepath.Join(f.root, "notifications"), "FAKE_SOURCES=[\"" + filepath.Join(f.root, "SkyrimSE_Mods") + "\"]"}
+	output, err := f.run(t, "cmd_launch", settings...)
+	if err != nil {
+		t.Fatalf("launch = %v: %s", err, output)
+	}
+	calls := string(readFixtureFile(t, logPath))
+	if !(strings.Index(calls, " --dry-run --count") < strings.Index(calls, " --yes") && strings.Index(calls, " --yes") < strings.Index(calls, "session --daemon")) || !strings.Contains(calls, "root=<unset>\n") {
+		t.Fatalf("migration order or root = %q", calls)
+	}
+	notifications := string(readFixtureFile(t, filepath.Join(f.root, "notifications")))
+	if !strings.Contains(notifications, "Moving your mods to your personal data folder. This happens once.") || !strings.Contains(notifications, "Your mods are now in ~/.local/share/gorganizer.") {
+		t.Fatalf("migration notifications = %q", notifications)
+	}
+}
+
+// TestLaunchBlockedMigrationFallsBackForThisSession checks a refused move keeps the old folders available.
+func TestLaunchBlockedMigrationFallsBackForThisSession(t *testing.T) {
+	f := newFixture(t)
+	logPath := f.installMigrationShim(t)
+	old := filepath.Join(f.root, "SkyrimSE_Mods", "mod.esp")
+	writeFixtureFile(t, old, []byte("mod"), 0o600)
+	settings := []string{"SHIM_LOG=" + logPath, "SHIM_NOTIFICATIONS=" + filepath.Join(f.root, "notifications"), "FAKE_SOURCES=[\"" + filepath.Join(f.root, "SkyrimSE_Mods") + "\"]", "FAKE_MOVE_FAIL=yes"}
+	output, err := f.run(t, "cmd_launch", settings...)
+	if err != nil {
+		t.Fatalf("launch = %v: %s", err, output)
+	}
+	if calls := string(readFixtureFile(t, logPath)); !strings.Contains(calls, "migrate-data --from "+f.root+" --yes\nsession ") || !strings.Contains(calls, "root="+f.root+"\n") {
+		t.Fatalf("fallback calls = %q", calls)
+	}
+	if !strings.Contains(output, "Unmount the mods first. It will try again next time.") || !strings.Contains(string(readFixtureFile(t, filepath.Join(f.root, "notifications"))), "Unmount the mods first. It will try again next time.") {
+		t.Fatalf("blocker not reported: %q", output)
+	}
+	if got := string(readFixtureFile(t, old)); got != "mod" {
+		t.Fatalf("old mod changed: %q", got)
+	}
+}
+
+// TestLaunchFailedMigrationFallsBackForThisSession checks an unexpected move failure retains the old mod root.
+func TestLaunchFailedMigrationFallsBackForThisSession(t *testing.T) {
+	f := newFixture(t)
+	logPath := f.installMigrationShim(t)
+	writeFixtureFile(t, filepath.Join(f.root, "SkyrimSE_Mods", "mod.esp"), []byte("mod"), 0o600)
+	settings := []string{"SHIM_LOG=" + logPath, "SHIM_NOTIFICATIONS=" + filepath.Join(f.root, "notifications"), "FAKE_SOURCES=[\"" + filepath.Join(f.root, "SkyrimSE_Mods") + "\"]", "FAKE_MOVE_FAIL=error"}
+	output, err := f.run(t, "cmd_launch", settings...)
+	if err != nil || !strings.Contains(output, "The folder changed. It will try again next time.") {
+		t.Fatalf("failed migration = %v: %q", err, output)
+	}
+	if calls := string(readFixtureFile(t, logPath)); !strings.Contains(calls, "root="+f.root+"\n") {
+		t.Fatalf("fallback calls = %q", calls)
+	}
+}
+
+// TestLaunchResumesPendingMigration checks the journal resumes before any new move or session.
+func TestLaunchResumesPendingMigration(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fail    bool
+		started bool
+	}{
+		{"resumed", false, true},
+		{"resume failed", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			logPath := f.installMigrationShim(t)
+			settings := []string{"SHIM_LOG=" + logPath, "SHIM_NOTIFICATIONS=" + filepath.Join(f.root, "notifications"), "FAKE_STATUS=pending"}
+			if tc.fail {
+				settings = append(settings, "FAKE_RESUME_FAIL=yes")
+			}
+			output, err := f.run(t, "cmd_launch", settings...)
+			calls := string(readFixtureFile(t, logPath))
+			if (err == nil) != tc.started || !strings.HasPrefix(calls, "migrate-data --status\nmigrate-data --resume\n") || strings.Contains(calls, "session ") != tc.started {
+				t.Fatalf("resume = %v, calls = %q, output = %q", err, calls, output)
+			}
+			if tc.fail && (!strings.Contains(output, "Could not finish moving your mods.") || !strings.Contains(string(readFixtureFile(t, filepath.Join(f.root, "notifications"))), "Could not finish moving your mods.")) {
+				t.Fatalf("resume failure was not shown: %q", output)
+			}
+		})
+	}
+}
+
+// TestLaunchStatusFailureStopsBeforeSession checks a failed journal check prevents startup.
+func TestLaunchStatusFailureStopsBeforeSession(t *testing.T) {
+	f := newFixture(t)
+	logPath := f.installMigrationShim(t)
+	output, err := f.run(t, "cmd_launch", "SHIM_LOG="+logPath, "SHIM_NOTIFICATIONS="+filepath.Join(f.root, "notifications"), "FAKE_STATUS_FAIL=yes")
+	if err == nil || !strings.Contains(output, "Cannot check the move.") || !strings.Contains(output, "Could not check whether your mods need moving.") {
+		t.Fatalf("failed status = %v: %q", err, output)
+	}
+	if calls := string(readFixtureFile(t, logPath)); calls != "migrate-data --status\n" {
+		t.Fatalf("started after failed status: %q", calls)
+	}
+}
+
+// TestExplicitRootOverrideIsKept checks developer overrides bypass migration and reach the session unchanged.
+func TestExplicitRootOverrideIsKept(t *testing.T) {
+	for _, root := range []string{"", "custom root"} {
+		t.Run("root="+root, func(t *testing.T) {
+			f := newFixture(t)
+			logPath := f.installMigrationShim(t)
+			output, err := f.run(t, "cmd_launch", "SHIM_LOG="+logPath, "GORGANIZER_ROOT="+root)
+			if err != nil || output != "" {
+				t.Fatalf("launch = %v: %s", err, output)
+			}
+			if calls := string(readFixtureFile(t, logPath)); strings.Contains(calls, "migrate-data") || !strings.Contains(calls, "root="+root+"\n") {
+				t.Fatalf("override calls = %q", calls)
+			}
+		})
+	}
+}
+
+// TestImportDelegatesToMigrateData checks import forwards the supplied path without setting a root override.
+func TestImportDelegatesToMigrateData(t *testing.T) {
+	f := newFixture(t)
+	logPath := f.installMigrationShim(t)
+	from := filepath.Join(f.root, "old checkout")
+	output, err := f.run(t, `cmd_import --from "$FAKE_FROM"`, "SHIM_LOG="+logPath, "FAKE_FROM="+from, "FAKE_VERIFY_IMPORT=yes")
+	if err != nil || !strings.Contains(output, "Move your mods? [y/N]") {
+		t.Fatalf("import = %v: %q", err, output)
+	}
+	if calls := string(readFixtureFile(t, logPath)); calls != "migrate-data --from "+from+"\nargc=3\n" {
+		t.Fatalf("import calls = %q", calls)
 	}
 }
 

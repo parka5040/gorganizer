@@ -24,7 +24,7 @@
 #   register              (Re-)install desktop file + icon + nxm:// handler.
 #   unregister            Reverse `register`.
 #   nxm <URI>             One-shot: forward an nxm:// URL to the running daemon.
-#   import [--from PATH]  Migrate legacy *_Mods/ folders into this clone.
+#   import --from PATH    Move old *_Mods/ folders to the personal data folder.
 #   uninstall [--purge]   After closing Gorganizer and restoring games, unregister
 #                         and delete build artifacts. User data is preserved.
 #                         --purge additionally removes config, profiles,
@@ -76,24 +76,6 @@ NXM_DESKTOP_FILE="$APPS_DIR/gorganizer-nxm.desktop"
 MIMEAPPS="${XDG_CONFIG_HOME:-$HOME/.config}/mimeapps.list"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gorganizer"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/gorganizer"
-BOOTSTRAP_SENTINEL="$CONFIG_DIR/.bootstrapped"
-
-# Legacy *_Mods directory names. Keep in sync with `ModsDirName` in
-# internal/gamedef/registry.go — the daemon and this script must agree on the
-# folder layout. Format: "<gameID>:<DirName>".
-GAME_MODS_DIRS=(
-    "morrowind:Morrowind_Mods"
-    "oblivion:Oblivion_Mods"
-    "skyrim:Skyrim_Mods"
-    "skyrimse:SkyrimSE_Mods"
-    "fallout3:Fallout3_Mods"
-    "falloutnv:FalloutNV_Mods"
-    "fallout4:Fallout4_Mods"
-    "starfield:Starfield_Mods"
-    "oblivionremastered:OblivionRemastered_Mods"
-    "ttw:TTW_Mods"
-    "stardewvalley:StardewValley_Mods"
-)
 
 # --- output helpers --------------------------------------------------------
 
@@ -137,7 +119,7 @@ Subcommands:
   register              (Re-)install desktop file + icon + nxm:// handler.
   unregister            Reverse \`register\`.
   nxm <URI>             One-shot: forward an nxm:// URL to the running daemon.
-  import [--from PATH]  Migrate legacy *_Mods/ folders into this clone.
+  import --from PATH    Move old *_Mods/ folders to your personal data folder.
   uninstall [--purge]   After closing Gorganizer and restoring games, unregister
                         and delete build artifacts. User data is preserved.
                         --purge additionally removes config, profiles,
@@ -732,106 +714,12 @@ cmd_unregister() {
 
 # --- migration -------------------------------------------------------------
 
-# Detect mods left behind by the old install.sh layout
-# (~/.local/share/gorganizer/<gameID>/mods/) and offer to move them into
-# this clone as <DirName>/. Returns 0 if any were found+moved (or nothing
-# to do); 1 only on hard failure.
-migrate_legacy_install() {
-    # Parallel arrays — paths theoretically could contain `|`, and bash
-    # has no clean way to escape a delimiter inside an array element. A
-    # second parallel array per field is uglier but unambiguous.
-    local srcs=() dsts=() games=() mapping
-    for mapping in "${GAME_MODS_DIRS[@]}"; do
-        local game="${mapping%%:*}" name="${mapping##*:}"
-        local src="$DATA_DIR/$game/mods"
-        local dst="$SCRIPT_DIR/$name"
-        if [ -d "$src" ] && [ ! -e "$dst" ]; then
-            srcs+=("$src")
-            dsts+=("$dst")
-            games+=("$game")
-        fi
-    done
-    [ ${#srcs[@]} -eq 0 ] && return 0
-
-    log "Found legacy mod folders from a previous install:"
-    local i
-    for ((i = 0; i < ${#srcs[@]}; i++)); do
-        echo "    ${srcs[$i]}" >&2
-        echo "        →  ${dsts[$i]}" >&2
-    done
-    if ! prompt_yn "Move them into this clone now?" N; then
-        warn "Skipped. Run \`./gorganizer.sh import\` to revisit later."
-        return 0
-    fi
-
-    for ((i = 0; i < ${#srcs[@]}; i++)); do
-        if mv "${srcs[$i]}" "${dsts[$i]}"; then
-            ok "Moved ${srcs[$i]} → ${dsts[$i]}"
-            # Remove now-empty parent if it has no other contents.
-            rmdir "$DATA_DIR/${games[$i]}" 2>/dev/null || true
-        else
-            err "Failed to move ${srcs[$i]}"
-        fi
-    done
-}
-
-# Migrate from another clone of gorganizer (the old in-tree dev pattern).
-migrate_from_path() {
-    local from="$1"
-    [ -d "$from" ] || { err "No such directory: $from"; return 1; }
-    from="$(cd "$from" && pwd)"
-    if [ "$from" = "$SCRIPT_DIR" ]; then
-        err "Source equals current clone. Nothing to do."
-        return 1
-    fi
-
-    local srcs=() dsts=() mapping
-    for mapping in "${GAME_MODS_DIRS[@]}"; do
-        local name="${mapping##*:}"
-        local src="$from/$name"
-        local dst="$SCRIPT_DIR/$name"
-        if [ -d "$src" ]; then
-            if [ -e "$dst" ]; then
-                warn "Skipping $name: target exists at $dst"
-                continue
-            fi
-            srcs+=("$src")
-            dsts+=("$dst")
-        fi
-    done
-    [ ${#srcs[@]} -eq 0 ] && { log "No *_Mods/ folders found in $from"; return 0; }
-
-    log "Will move from $from:"
-    local i
-    for ((i = 0; i < ${#srcs[@]}; i++)); do
-        echo "    ${srcs[$i]}  →  ${dsts[$i]}" >&2
-    done
-    if ! prompt_yn "Proceed?" N; then
-        warn "Cancelled."
-        return 0
-    fi
-    for ((i = 0; i < ${#srcs[@]}; i++)); do
-        if mv "${srcs[$i]}" "${dsts[$i]}"; then
-            ok "Moved ${srcs[$i]} → ${dsts[$i]}"
-        else
-            err "Failed to move ${srcs[$i]}"
-        fi
-    done
-}
-
 cmd_import() {
-    local from=""
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --from) shift; from="${1:-}"; shift ;;
-            *) err "Unknown option: $1"; return 2 ;;
-        esac
-    done
-    if [ -n "$from" ]; then
-        migrate_from_path "$from"
-    else
-        migrate_legacy_install
+    if [ "$#" -ne 2 ] || [ "$1" != --from ] || [ -z "$2" ]; then
+        err "Usage: $0 import --from <path>"
+        return 2
     fi
+    "$CTL_BIN" migrate-data --from "$2"
 }
 
 # --- daemon lifecycle ------------------------------------------------------
@@ -882,14 +770,6 @@ cmd_install() {
     runtime_family="$(detect_distro_family)"
     install_runtime_tools_interactive "$runtime_family"
 
-    # First-install migration only — gated by the sentinel so updates
-    # never re-prompt for legacy *_Mods/ moves.
-    if [ ! -f "$BOOTSTRAP_SENTINEL" ]; then
-        migrate_legacy_install || true
-        mkdir -p "$CONFIG_DIR"
-        touch "$BOOTSTRAP_SENTINEL"
-    fi
-
     # Refresh the desktop entry on every run so a moved clone or a
     # version bump shows up in the launcher immediately.
     if needs_register; then
@@ -909,7 +789,7 @@ cmd_install() {
     fi
     log "  Daemon:    $DAEMON_BIN"
     log "  Frontend:  $GUI_BIN"
-    log "  Mod root:  $SCRIPT_DIR/<Game>_Mods/"
+    log "  Mods:      $DATA_DIR/<game>/mods/"
     log "  Desktop:   $DESKTOP_FILE"
     echo ""
     log "Launch via your application menu, or run:"
@@ -917,6 +797,12 @@ cmd_install() {
 }
 
 # --- launch ----------------------------------------------------------------
+
+notify_user() {
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send "Gorganizer" "$1" || true
+    fi
+}
 
 cmd_launch() {
     if [ ! -x "$DAEMON_BIN" ] || [ ! -x "$GUI_BIN" ] || [ ! -x "$CTL_BIN" ]; then
@@ -926,7 +812,55 @@ cmd_launch() {
     fi
 
     export QT_LOGGING_RULES="${QT_LOGGING_RULES:+$QT_LOGGING_RULES;}qt.dbus.*=false;qt.qpa.systemtray.*=false;qt.qpa.theme.dbus.*=false;qt.qpa.theme.debug=false"
-    export GORGANIZER_ROOT="$SCRIPT_DIR"
+    if [ "${GORGANIZER_ROOT+x}" != x ]; then
+        local status plan count result first_blocker
+        if ! status="$("$CTL_BIN" migrate-data --status)"; then
+            err "Could not check whether your mods need moving. Please try again."
+            notify_user "Could not check whether your mods need moving. Please try again."
+            exit 1
+        fi
+        case "$status" in
+            pending)
+                if ! result="$("$CTL_BIN" migrate-data --resume 2>&1)"; then
+                    err "$result"
+                    notify_user "Could not finish moving your mods: $result"
+                    exit 1
+                fi
+                [ -z "$result" ] || log "$result"
+                ;;
+            none) ;;
+            *)
+                err "Could not check whether your mods need moving: $status"
+                notify_user "Could not check whether your mods need moving. Please try again."
+                exit 1
+                ;;
+        esac
+        plan="$("$CTL_BIN" migrate-data --from "$SCRIPT_DIR" --dry-run --count 2>&1)" || true
+        if [[ "$plan" =~ ^[0-9]+$ ]]; then
+            count="$plan"
+            if [ "$count" -gt 0 ]; then
+                notify_user "Moving your mods to your personal data folder. This happens once."
+                log "Moving your mods to your personal data folder. This happens once."
+                if result="$("$CTL_BIN" migrate-data --from "$SCRIPT_DIR" --yes 2>&1)"; then
+                    [ -z "$result" ] || log "$result"
+                    notify_user "Your mods are now in ~/.local/share/gorganizer."
+                    ok "Your mods are now in ~/.local/share/gorganizer."
+                else
+                    first_blocker="$(printf '%s\n' "$result" | sed -n 's/^[[:space:]]*Cannot move yet: //p' | sed -n '1p')"
+                    [ -n "$first_blocker" ] || first_blocker="${result##*$'\n'}"
+                    first_blocker="${first_blocker#Could not move your mods: }"
+                    first_blocker="${first_blocker%.}"
+                    warn "Gorganizer couldn't move your mods yet: $first_blocker. It will try again next time."
+                    notify_user "Gorganizer couldn't move your mods yet: $first_blocker. It will try again next time."
+                    export GORGANIZER_ROOT="$SCRIPT_DIR"
+                fi
+            fi
+        else
+            warn "Gorganizer couldn't check your old mods yet: $plan. It will try again next time."
+            notify_user "Gorganizer couldn't check your old mods yet. It will try again next time."
+            export GORGANIZER_ROOT="$SCRIPT_DIR"
+        fi
+    fi
     exec "$CTL_BIN" session --daemon "$DAEMON_BIN" --gui "$GUI_BIN" -- "$@"
 }
 
@@ -1113,8 +1047,8 @@ cmd_uninstall() {
     fi
 
     echo ""
-    log "${BOLD}*_Mods/${RESET} folders in $SCRIPT_DIR are user data — left untouched."
-    warn "Your mods are still in $SCRIPT_DIR/*_Mods/ — move them somewhere safe before deleting this folder."
+    log "Any old ${BOLD}*_Mods/${RESET} folders in $SCRIPT_DIR are left untouched."
+    warn "Check for old in-checkout mods before deleting this folder. Mods in your personal data folder are preserved."
     ok "Uninstalled."
 }
 

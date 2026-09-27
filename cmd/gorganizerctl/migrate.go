@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/instancelock"
 	"github.com/parka/gorganizer/internal/migrate"
 	"golang.org/x/sys/unix"
@@ -29,20 +31,84 @@ func runMigrateData(args []string) int {
 	return runMigrateDataWith(args, migrateDeps{in: os.Stdin, out: os.Stdout, errOut: os.Stderr, isTTY: err == nil})
 }
 
-// runMigrateDataWith plans or resumes a migration while holding the daemon instance lock.
+// runMigrateDataWith checks, plans, or resumes a move into the personal data folder.
 func runMigrateDataWith(args []string, deps migrateDeps) int {
 	fs := flag.NewFlagSet("migrate-data", flag.ContinueOnError)
 	fs.SetOutput(deps.errOut)
 	from := fs.String("from", "", "old source checkout")
 	dryRun := fs.Bool("dry-run", false, "show changes without moving")
+	jsonOutput := fs.Bool("json", false, "print the dry-run plan as JSON")
+	countOutput := fs.Bool("count", false, "print how many old folders the dry run found")
 	yes := fs.Bool("yes", false, "confirm move without a prompt")
 	resume := fs.Bool("resume", false, "finish an interrupted move")
+	status := fs.Bool("status", false, "check for an unfinished move")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if len(fs.Args()) != 0 || *resume && (*from != "" || *dryRun || *yes) || !*resume && *from == "" {
-		fmt.Fprintln(deps.errOut, "Use --from with an old folder, or use --resume to finish an interrupted move.")
+	if *countOutput {
+		*jsonOutput = true
+	}
+	if len(fs.Args()) != 0 || *jsonOutput && !*dryRun || *resume && (*status || *from != "" || *dryRun || *yes || *jsonOutput) || *status && (*from != "" || *dryRun || *yes || *jsonOutput) || !*resume && !*status && *from == "" {
+		fmt.Fprintln(deps.errOut, "Use --from with an old folder, --status to check for a move, or --resume to finish one.")
 		return 2
+	}
+	if *status {
+		waiting, err := migrate.JournalExists()
+		if err != nil {
+			fmt.Fprintf(deps.errOut, "Cannot check the move: %v\n", err)
+			return 1
+		}
+		if waiting {
+			fmt.Fprintln(deps.out, "pending")
+		} else {
+			fmt.Fprintln(deps.out, "none")
+		}
+		return 0
+	}
+	if *dryRun && *jsonOutput {
+		absolute, err := filepath.Abs(*from)
+		if err != nil {
+			fmt.Fprintf(deps.errOut, "Cannot find the old folder: %v\n", err)
+			return 1
+		}
+		info, err := os.Lstat(absolute)
+		if err != nil {
+			fmt.Fprintf(deps.errOut, "Cannot find the old folder: %v\n", err)
+			return 1
+		}
+		if !info.IsDir() {
+			fmt.Fprintln(deps.errOut, "The old folder must be a real directory.")
+			return 1
+		}
+		sources := make([]string, 0)
+		for _, name := range config.AllModsDirNames() {
+			if name == "" {
+				continue
+			}
+			source := filepath.Join(absolute, name)
+			if _, err := os.Lstat(source); err == nil {
+				sources = append(sources, source)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintf(deps.errOut, "Cannot check the old folders: %v\n", err)
+				return 1
+			}
+		}
+		if len(sources) == 0 {
+			waiting, err := migrate.JournalExists()
+			if err != nil {
+				fmt.Fprintf(deps.errOut, "Cannot check the move: %v\n", err)
+				return 1
+			}
+			if waiting {
+				fmt.Fprintln(deps.errOut, "An unfinished move needs to be resumed first.")
+				return 2
+			}
+			if err := printMigrationSources(deps.out, sources, *countOutput); err != nil {
+				fmt.Fprintf(deps.errOut, "Cannot show the move: %v\n", err)
+				return 1
+			}
+			return 0
+		}
 	}
 	release, err := instancelock.Acquire()
 	if errors.Is(err, instancelock.ErrHeld) {
@@ -81,7 +147,18 @@ func runMigrateDataWith(args []string, deps migrateDeps) int {
 		fmt.Fprintf(deps.errOut, "Cannot plan the move: %v\n", err)
 		return 1
 	}
-	printMigrationPlan(deps.out, plan)
+	if *jsonOutput {
+		sources := make([]string, 0, len(plan.Items))
+		for _, item := range plan.Items {
+			sources = append(sources, item.Source)
+		}
+		if err := printMigrationSources(deps.out, sources, *countOutput); err != nil {
+			fmt.Fprintf(deps.errOut, "Cannot show the move: %v\n", err)
+			return 1
+		}
+	} else {
+		printMigrationPlan(deps.out, plan)
+	}
 	if plan.HasBlockers() {
 		return 2
 	}
@@ -110,6 +187,17 @@ func runMigrateDataWith(args []string, deps migrateDeps) int {
 	}
 	fmt.Fprintln(deps.out, "Your mods and downloads are in your personal data folder.")
 	return 0
+}
+
+// printMigrationSources prints the detected old folders as JSON, or only their number when count is set.
+func printMigrationSources(out io.Writer, sources []string, count bool) error {
+	if count {
+		_, err := fmt.Fprintln(out, len(sources))
+		return err
+	}
+	return json.NewEncoder(out).Encode(struct {
+		Sources []string `json:"sources"`
+	}{Sources: sources})
 }
 
 // printCopyProgress prints copied bytes at most once per second.
