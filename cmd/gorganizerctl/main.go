@@ -18,6 +18,8 @@ import (
 	"github.com/parka/gorganizer/internal/vfs"
 )
 
+var version = "dev"
+
 // main dispatches the first argument to its subcommand and exits with its status.
 func main() {
 	if len(os.Args) < 2 {
@@ -37,6 +39,9 @@ func main() {
 		os.Exit(runExport(args))
 	case "import":
 		os.Exit(runImport(args))
+	case "--version":
+		printVersion(os.Stdout)
+		return
 	case "-h", "--help", "help":
 		usage()
 		os.Exit(0)
@@ -45,6 +50,11 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+}
+
+// printVersion prints the maintenance command's build version.
+func printVersion(out io.Writer) {
+	fmt.Fprintf(out, "gorganizerctl %s\n", version)
 }
 
 type recoveryDeps struct {

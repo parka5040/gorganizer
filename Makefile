@@ -9,6 +9,8 @@ PROTO_SRC   := $(PROTO_DIR)/gorganizer.proto
 PROTO_GO    := $(PROTO_DIR)/gorganizer.pb.go
 PROTO_GRPC  := $(PROTO_DIR)/gorganizer_grpc.pb.go
 TOOLS_BIN   := $(CURDIR)/.tools/bin
+OUT_DIR     ?= .
+GUI_BUILD_DIR ?= build
 
 # Version stamping. The VERSION file at the repo root is the canonical
 # source of truth — bump it on release. `git describe` is appended as a
@@ -49,14 +51,16 @@ $(PROTO_GO) $(PROTO_GRPC): $(PROTO_SRC)
 		$(PROTO_SRC)
 
 build: proto
-	$(GO) build $(GOFLAGS) -ldflags='$(LDFLAGS)' -o $(BINARY) $(CMD)
+	mkdir -p "$(OUT_DIR)"
+	$(GO) build $(GOFLAGS) -ldflags='$(LDFLAGS)' -o "$(OUT_DIR)/$(BINARY)" $(CMD)
 
 ctl: proto
-	$(GO) build $(GOFLAGS) -ldflags='$(LDFLAGS)' -o $(CTL_BINARY) $(CTL_CMD)
+	mkdir -p "$(OUT_DIR)"
+	$(GO) build $(GOFLAGS) -ldflags='$(LDFLAGS)' -o "$(OUT_DIR)/$(CTL_BINARY)" $(CTL_CMD)
 
 gui:
-	cmake -B build -DCMAKE_BUILD_TYPE=Release -DGORGANIZER_VERSION="$(VERSION)"
-	cmake --build build -j$$(command -v nproc >/dev/null 2>&1 && nproc || echo 1)
+	cmake -B "$(GUI_BUILD_DIR)" -DCMAKE_BUILD_TYPE=Release -DGORGANIZER_VERSION="$(VERSION)"
+	cmake --build "$(GUI_BUILD_DIR)" -j$$(command -v nproc >/dev/null 2>&1 && nproc || echo 1)
 
 test:
 	$(GO) test -race -count=1 ./internal/... ./cmd/... ./scripts/...
@@ -70,9 +74,9 @@ check-comments:
 verify: vet test check-comments
 
 clean:
-	rm -f $(BINARY) $(CTL_BINARY)
+	rm -f "$(OUT_DIR)/$(BINARY)" "$(OUT_DIR)/$(CTL_BINARY)"
 	rm -f $(PROTO_GO) $(PROTO_GRPC)
-	rm -rf build .tools
+	rm -rf "$(GUI_BUILD_DIR)" .tools
 
 install: build
-	install -Dm755 $(BINARY) $(DESTDIR)/usr/bin/$(BINARY)
+	install -Dm755 "$(OUT_DIR)/$(BINARY)" $(DESTDIR)/usr/bin/$(BINARY)
