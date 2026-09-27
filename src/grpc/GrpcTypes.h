@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QByteArray>
 #include <QDateTime>
 #include <QMap>
 #include <QString>
@@ -498,6 +499,13 @@ struct GrpcFomodPlan {
     QString modulePath;
     std::vector<GrpcFomodFile> requiredFiles;
     std::vector<GrpcFomodStep> steps;
+    bool legacyInfoOnly = false;
+    QString description;
+    QString screenshotPath;
+    QString version;
+    QString author;
+    QByteArray moduleConfigXml;
+    QByteArray screenshotData;
 };
 
 struct GrpcPreviewInstallResult {
@@ -505,6 +513,9 @@ struct GrpcPreviewInstallResult {
     bool hasFomod = false;
     GrpcFomodPlan plan;
     QStringList flatFileList;
+    QStringList selectableRoots;
+    QString detectedRoot;
+    bool rootAmbiguous = false;
 };
 
 enum GrpcTransferPolicy {

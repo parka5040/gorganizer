@@ -1,5 +1,6 @@
 #include "GrpcClient.h"
 #include "GrpcDeadline.h"
+#include "GrpcInstallPreview.h"
 #include "GrpcWorker.h"
 #include "gorganizer.grpc.pb.h"
 
@@ -7,6 +8,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFileInfo>
+#include <QMetaType>
 #include <QThread>
 #include <chrono>
 #include <cstdlib>
@@ -78,49 +80,6 @@ GrpcArchiveRow archiveRowFromProto(const gorganizer::v1::ArchiveRow& r)
     row.queuedAhead = r.queued_ahead();
     row.merged = r.merged();
     return row;
-}
-
-GrpcFomodPlan fomodPlanFromProto(const gorganizer::v1::FomodPlan& p)
-{
-    GrpcFomodPlan out;
-    out.moduleName = QString::fromStdString(p.module_name());
-    out.modulePath = QString::fromStdString(p.module_path());
-    for (const auto& f : p.required_files()) {
-        out.requiredFiles.push_back(GrpcFomodFile{
-            QString::fromStdString(f.source()),
-            QString::fromStdString(f.destination()),
-            f.is_folder(),
-            f.priority(),
-        });
-    }
-    for (const auto& step : p.steps()) {
-        GrpcFomodStep s;
-        s.name = QString::fromStdString(step.name());
-        for (const auto& g : step.groups()) {
-            GrpcFomodGroup gg;
-            gg.name = QString::fromStdString(g.name());
-            gg.type = static_cast<int>(g.type());
-            for (const auto& plugin : g.plugins()) {
-                GrpcFomodPlugin pp;
-                pp.name = QString::fromStdString(plugin.name());
-                pp.description = QString::fromStdString(plugin.description());
-                pp.imagePath = QString::fromStdString(plugin.image_path());
-                pp.defaultState = static_cast<int>(plugin.default_state());
-                for (const auto& f : plugin.files()) {
-                    pp.files.push_back(GrpcFomodFile{
-                        QString::fromStdString(f.source()),
-                        QString::fromStdString(f.destination()),
-                        f.is_folder(),
-                        f.priority(),
-                    });
-                }
-                gg.plugins.push_back(std::move(pp));
-            }
-            s.groups.push_back(std::move(gg));
-        }
-        out.steps.push_back(std::move(s));
-    }
-    return out;
 }
 
 GrpcExecutable execFromProto(const gorganizer::v1::Executable& e)
@@ -223,6 +182,7 @@ GrpcImportPreview importPreviewFromProto(const gorganizer::v1::PreviewImportResp
 GrpcClient::GrpcClient(QObject* parent)
     : QObject(parent)
 {
+    qRegisterMetaType<GrpcPreviewInstallResult>();
     m_connectionTimer = new QTimer(this);
     m_connectionTimer->setInterval(5000);
     connect(m_connectionTimer, &QTimer::timeout, this, &GrpcClient::onCheckConnection);
@@ -263,6 +223,8 @@ void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
     connect(worker, &GrpcWorker::downloadStarted, this, &GrpcClient::downloadStarted);
     connect(worker, &GrpcWorker::downloadCancelled, this, &GrpcClient::downloadCancelled);
     connect(worker, &GrpcWorker::downloadRetried, this, &GrpcClient::downloadRetried);
+    connect(worker, &GrpcWorker::previewInstallCompleted, this, &GrpcClient::previewInstallCompleted);
+    connect(worker, &GrpcWorker::previewInstallFailed, this, &GrpcClient::previewInstallFailed);
     connect(worker, &GrpcWorker::installRequestCompleted, this, &GrpcClient::installRequestCompleted);
     connect(worker, &GrpcWorker::installRequestFailed, this, &GrpcClient::installRequestFailed);
     connect(worker, &GrpcWorker::nexusAPIKeySet, this, &GrpcClient::nexusAPIKeySet);
@@ -539,24 +501,27 @@ void GrpcClient::retryDownload(const QString& downloadId)
 quint64 GrpcClient::startInstall(const QString& gameId, const QString& archiveRelPath,
                                  GrpcInstallMode mode, const QString& targetMod,
                                  const QString& previewId,
-                                 const std::vector<GrpcFomodFile>& fomodSelectedFiles)
+                                 const std::vector<GrpcFomodFile>& fomodSelectedFiles,
+                                 bool fomodConfirmed, const QString& selectedRoot)
 {
     return postInstall(gameId, archiveRelPath, QString(), mode, targetMod, previewId,
-                       fomodSelectedFiles);
+                       fomodSelectedFiles, fomodConfirmed, selectedRoot);
 }
 
 quint64 GrpcClient::startInstallExternal(const QString& gameId, const QString& externalArchivePath,
-                                         GrpcInstallMode mode, const QString& targetMod)
+                                         GrpcInstallMode mode, const QString& targetMod,
+                                         bool fomodConfirmed, const QString& selectedRoot)
 {
     return postInstall(gameId, QString(), externalArchivePath, mode, targetMod, QString(),
-                       std::vector<GrpcFomodFile>{});
+                       std::vector<GrpcFomodFile>{}, fomodConfirmed, selectedRoot);
 }
 
 // Assigns a request id and queues StartInstall on the install RPC worker, failing asynchronously when not connected.
 quint64 GrpcClient::postInstall(const QString& gameId, const QString& archiveRelPath,
                                 const QString& externalArchivePath, GrpcInstallMode mode,
                                 const QString& targetMod, const QString& previewId,
-                                const std::vector<GrpcFomodFile>& fomodSelectedFiles)
+                                const std::vector<GrpcFomodFile>& fomodSelectedFiles,
+                                bool fomodConfirmed, const QString& selectedRoot)
 {
     const quint64 requestId = ++m_nextInstallRequestId;
     if (!installRpcWorker()) {
@@ -566,7 +531,8 @@ quint64 GrpcClient::postInstall(const QString& gameId, const QString& archiveRel
         return requestId;
     }
     postTo(installRpcWorker(), &GrpcWorker::doStartInstall, requestId, gameId, archiveRelPath,
-           externalArchivePath, static_cast<int>(mode), targetMod, previewId, fomodSelectedFiles);
+           externalArchivePath, static_cast<int>(mode), targetMod, previewId, fomodSelectedFiles,
+           fomodConfirmed, selectedRoot);
     return requestId;
 }
 
@@ -826,20 +792,30 @@ bool GrpcClient::refreshArchiveMetadata(const QString& gameId, const QString& ar
 }
 
 bool GrpcClient::previewInstall(const QString& gameId, const QString& archiveRelPath,
-                                 GrpcPreviewInstallResult& out, QString& errorOut)
+                                 GrpcPreviewInstallResult& out, QString& errorOut,
+                                 const QString& externalArchivePath)
 {
-    gorganizer::v1::PreviewInstallRequest req;
-    req.set_game_id(gameId.toStdString());
-    req.set_archive_rel_path(archiveRelPath.toStdString());
+    auto req = previewInstallRequest(gameId, archiveRelPath, externalArchivePath);
     gorganizer::v1::PreviewInstallResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::PreviewInstall, req, resp,
-                              std::chrono::minutes(5)), errorOut)) return false;
-    out.previewId = QString::fromStdString(resp.preview_id());
-    out.hasFomod = resp.has_fomod();
-    if (resp.has_plan()) out.plan = fomodPlanFromProto(resp.plan());
-    out.flatFileList.clear();
-    for (const auto& f : resp.flat_file_list()) out.flatFileList.append(QString::fromStdString(f));
+                              std::chrono::minutes(10)), errorOut)) return false;
+    out = previewInstallResultFromProto(resp);
     return true;
+}
+
+quint64 GrpcClient::previewInstallAsync(const QString& gameId, const QString& archiveRelPath,
+                                        const QString& externalArchivePath)
+{
+    const quint64 requestId = ++m_nextPreviewRequestId;
+    if (!installRpcWorker()) {
+        QMetaObject::invokeMethod(this, [this, requestId] {
+            emit previewInstallFailed(requestId, QStringLiteral("not connected"));
+        }, Qt::QueuedConnection);
+        return requestId;
+    }
+    postTo(installRpcWorker(), &GrpcWorker::doPreviewInstall, requestId, gameId, archiveRelPath,
+           externalArchivePath);
+    return requestId;
 }
 
 bool GrpcClient::startInstallSync(const QString& gameId, const QString& archiveRelPath,
@@ -877,6 +853,15 @@ bool GrpcClient::discardPreview(const QString& previewId, QString& errorOut)
     req.set_preview_id(previewId.toStdString());
     gorganizer::v1::DiscardPreviewResponse resp;
     return mapError(invokeUnary(m_syncStub.get(), &Stub::DiscardPreview, req, resp), errorOut);
+}
+
+void GrpcClient::discardPreviewAsync(const QString& previewId)
+{
+    if (!unaryWorker()) {
+        qWarning("GrpcClient: DiscardPreview failed: not connected");
+        return;
+    }
+    post(&GrpcWorker::doDiscardPreview, previewId);
 }
 
 bool GrpcClient::renameMod(const QString& gameId, const QString& oldName,
