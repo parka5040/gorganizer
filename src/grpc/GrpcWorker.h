@@ -18,8 +18,11 @@ class GrpcWorker : public QObject {
 public:
     explicit GrpcWorker(std::shared_ptr<grpc::Channel> channel);
 
+    enum StreamKind { StreamArchive, StreamInstall, StreamPluginStatus };
+
     void stop();
     void cancelActiveStream();
+    void setStreamGeneration(quint64 generation);
 
 public slots:
     void doListGames();
@@ -71,10 +74,10 @@ public slots:
 
     void doShutdownDaemon();
 
-    void doStartWatching();
-    void doStreamArchiveEvents(const QString& gameId);
-    void doStreamInstallEvents(const QString& gameId);
-    void doStreamPluginStatus(const QString& gameId, const QString& profileName);
+    void doStartWatching(quint64 generation);
+    void doStreamArchiveEvents(const QString& gameId, quint64 generation);
+    void doStreamInstallEvents(const QString& gameId, quint64 generation);
+    void doStreamPluginStatus(const QString& gameId, const QString& profileName, quint64 generation);
 
     void doExportInstance(const QString& gameId, const QString& outputPath,
                           const QStringList& modFolders, const QStringList& profileNames,
@@ -131,15 +134,17 @@ signals:
     void nexusAPIKeySet(bool valid, const QString& errorMessage);
 
     void vfsStatusChanged(const GrpcVFSStatus& status);
-    void archiveEventReceived(const GrpcArchiveEvent& evt);
-    void installProgressEvent(const GrpcInstallProgress& progress);
+    void archiveEventReceived(quint64 generation, const GrpcArchiveEvent& evt);
+    void installProgressEvent(quint64 generation, const GrpcInstallProgress& progress);
+    void streamEventReceived(int kind, quint64 generation);
+    void streamEnded(int kind, quint64 generation, int statusCode);
     void daemonError(const QString& error);
     void daemonInfo(const QString& info);
     void recoveryPending(const QString& gameId, const QString& dataPath,
                          const QString& backupPath, const QString& reason);
 
-    void pluginStatusSnapshot(const std::vector<GrpcPluginStatus>& plugins);
-    void pluginStatusUpdate(const GrpcPluginStatus& plugin);
+    void pluginStatusSnapshot(quint64 generation, const std::vector<GrpcPluginStatus>& plugins);
+    void pluginStatusUpdate(quint64 generation, const GrpcPluginStatus& plugin);
 
     void dependencyWarning(const GrpcDependencyWarning& warning);
 
@@ -170,7 +175,7 @@ signals:
                                       int acknowledged);
     void dependencyEnableAckFailed(quint64 requestId, const QString& gameId, const QString& batchId,
                                    const QString& error);
-    void installCompletedHintReceived(const GrpcInstallCompleted& event);
+    void installCompletedHintReceived(quint64 generation, const GrpcInstallCompleted& event);
 
     void rpcError(const QString& method, const QString& error);
 
@@ -180,6 +185,7 @@ private:
     std::shared_ptr<grpc::Channel> m_channel;
     std::unique_ptr<Stub> m_stub;
     std::atomic<bool> m_stopped{false};
+    std::atomic<quint64> m_streamGeneration{0};
 
     std::mutex m_streamMu;
     grpc::ClientContext* m_streamCtx = nullptr;
@@ -195,7 +201,7 @@ private:
 
     template <typename Req, typename Ev, typename Dispatch>
     grpc::Status runStream(std::unique_ptr<grpc::ClientReader<Ev>> (Stub::*method)(grpc::ClientContext*, const Req&),
-                           const Req& req, Dispatch dispatch);
+                           const Req& req, Dispatch dispatch, quint64 generation = 0);
 
     template <typename Method>
     void runModLoaderOperation(quint64 requestId, const QString& gameId, const QString& operation,

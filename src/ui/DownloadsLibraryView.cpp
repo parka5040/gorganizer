@@ -152,6 +152,7 @@ DownloadsLibraryView::DownloadsLibraryView(GrpcClient* grpc, QWidget* parent)
     });
     connect(m_grpc, &GrpcClient::installProgressEvent,
             this, &DownloadsLibraryView::onInstallProgress);
+    connect(m_grpc, &GrpcClient::resubscribed, this, &DownloadsLibraryView::reloadFromDaemon);
 }
 
 void DownloadsLibraryView::setGame(const GameInfo& game)
