@@ -30,6 +30,7 @@ public slots:
     void onActiveGameChanged(const GameInfo& game);
     // Lets the user pick an unmanaged detected game and adds it to the managed set.
     void onAddNewGame();
+    void onLocateGame();
     // Runs the TTW installer dialog; on success marks ttw managed and active before re-detection.
     void onInstallTTW();
     // Reopens the latest recovery prompt for a game or requests its status while details are unavailable.
@@ -47,6 +48,7 @@ private slots:
 private:
     // Queues a recovery prompt without repeating the currently open dialog.
     void queueRecovery(const GrpcRecoveryPending& recovery);
+    void configureNewGame(const GameInfo& game);
 
     AppConfig& m_config;
     GrpcClient* m_grpc;
@@ -55,6 +57,7 @@ private:
     QAction* m_installTtwAction;
     QStatusBar* m_statusBar;
     QWidget* m_parentWindow;
+    QHash<quint64, GameInfo> m_pendingGames;
     QHash<QString, QSet<QString>> m_seenRecoveryIds;
     QSet<QString> m_shownRecoveryIds;
     QHash<QString, GrpcRecoveryPending> m_latestRecoveries;

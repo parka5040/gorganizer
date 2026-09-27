@@ -215,6 +215,7 @@ void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
     connect(worker, &GrpcWorker::gamesListed, this, &GrpcClient::gamesListed);
     connect(worker, &GrpcWorker::gamesDetected, this, &GrpcClient::gamesDetected);
     connect(worker, &GrpcWorker::gameConfigured, this, &GrpcClient::gameConfigured);
+    connect(worker, &GrpcWorker::gameConfigurationFinished, this, &GrpcClient::gameConfigurationFinished);
     connect(worker, &GrpcWorker::modsListed, this, &GrpcClient::modsListed);
     connect(worker, &GrpcWorker::modInfoReceived, this, &GrpcClient::modInfoReceived);
     connect(worker, &GrpcWorker::profilesListed, this, &GrpcClient::profilesListed);
@@ -250,6 +251,7 @@ void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
     connect(worker, &GrpcWorker::installRequestCompleted, this, &GrpcClient::installRequestCompleted);
     connect(worker, &GrpcWorker::installRequestFailed, this, &GrpcClient::installRequestFailed);
     connect(worker, &GrpcWorker::nexusAPIKeySet, this, &GrpcClient::nexusAPIKeySet);
+    connect(worker, &GrpcWorker::nexusKeySaveFinished, this, &GrpcClient::nexusKeySaveFinished);
     connect(worker, &GrpcWorker::vfsStatusChanged, this, &GrpcClient::vfsStatusChanged);
     connect(worker, &GrpcWorker::archiveEventReceived, this, [this, generation](quint64 streamGeneration, const GrpcArchiveEvent& event) {
         if (generation == m_connectionGeneration && streamGeneration == m_streamStates[GrpcWorker::StreamArchive].generation)
@@ -435,6 +437,15 @@ void GrpcClient::configureGame(const QString& gameId, const QString& name,
                                const QString& dataSubpath)
 {
     post(&GrpcWorker::doConfigureGame, gameId, name, steamAppId, installPath, dataSubpath);
+}
+
+quint64 GrpcClient::configureGameTracked(const QString& gameId, const QString& name,
+                                         uint32_t steamAppId, const QString& installPath,
+                                         const QString& dataSubpath)
+{
+    const quint64 id = ++m_nextSetupRequestId;
+    post(&GrpcWorker::doConfigureGameTracked, id, gameId, name, steamAppId, installPath, dataSubpath);
+    return id;
 }
 
 void GrpcClient::listMods(const QString& gameId) { post(&GrpcWorker::doListMods, gameId); }
@@ -901,6 +912,13 @@ void GrpcClient::unsubscribePluginStatus()
 void GrpcClient::setNexusAPIKey(const QString& apiKey)
 {
     post(&GrpcWorker::doSetNexusAPIKey, apiKey);
+}
+
+quint64 GrpcClient::saveNexusAPIKey(const QString& apiKey)
+{
+    const quint64 id = ++m_nextSetupRequestId;
+    post(&GrpcWorker::doSetNexusAPIKeyTracked, id, apiKey);
+    return id;
 }
 
 void GrpcClient::shutdownDaemon()

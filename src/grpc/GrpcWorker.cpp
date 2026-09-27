@@ -685,6 +685,22 @@ void GrpcWorker::doConfigureGame(const QString& gameId, const QString& name,
     emit gameConfigured();
 }
 
+void GrpcWorker::doConfigureGameTracked(quint64 requestId, const QString& gameId, const QString& name,
+                                        uint32_t steamAppId, const QString& installPath,
+                                        const QString& dataSubpath)
+{
+    gorganizer::v1::ConfigureGameRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_name(name.toStdString());
+    req.set_steam_app_id(steamAppId);
+    req.set_install_path(installPath.toStdString());
+    req.set_data_subpath(dataSubpath.toStdString());
+    gorganizer::v1::ConfigureGameResponse resp;
+    auto status = invoke(&Stub::ConfigureGame, req, resp, std::chrono::seconds(90));
+    emit gameConfigurationFinished(requestId, gameId, status.ok(),
+                                   QString::fromStdString(status.error_message()));
+}
+
 void GrpcWorker::doListMods(const QString& gameId)
 {
     gorganizer::v1::ListModsRequest req;
@@ -1073,6 +1089,17 @@ void GrpcWorker::doSetNexusAPIKey(const QString& apiKey)
     gorganizer::v1::SetNexusAPIKeyResponse resp;
     if (!call("SetNexusAPIKey", &Stub::SetNexusAPIKey, req, resp, std::chrono::seconds(12))) return;
     emit nexusAPIKeySet(resp.valid(), QString::fromStdString(resp.error_message()));
+}
+
+void GrpcWorker::doSetNexusAPIKeyTracked(quint64 requestId, const QString& apiKey)
+{
+    gorganizer::v1::SetNexusAPIKeyRequest req;
+    req.set_api_key(apiKey.toStdString());
+    gorganizer::v1::SetNexusAPIKeyResponse resp;
+    auto status = invoke(&Stub::SetNexusAPIKey, req, resp, std::chrono::seconds(12));
+    emit nexusKeySaveFinished(requestId, status.ok() && resp.valid(),
+                              status.ok() ? QString::fromStdString(resp.error_message())
+                                          : QString::fromStdString(status.error_message()));
 }
 
 void GrpcWorker::doShutdownDaemon()

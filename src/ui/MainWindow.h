@@ -107,6 +107,7 @@ private:
     QActionGroup* m_themeActions = nullptr;
     QActionGroup* m_appearanceActions = nullptr;
     QAction* m_addGameAction = nullptr;
+    QAction* m_locateGameAction = nullptr;
     QAction* m_exportAction = nullptr;
     QAction* m_importAction = nullptr;
     QAction* m_unmountAction = nullptr;

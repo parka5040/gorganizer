@@ -30,6 +30,9 @@ public slots:
     void doConfigureGame(const QString& gameId, const QString& name,
                          uint32_t steamAppId, const QString& installPath,
                          const QString& dataSubpath);
+    void doConfigureGameTracked(quint64 requestId, const QString& gameId, const QString& name,
+                                uint32_t steamAppId, const QString& installPath,
+                                const QString& dataSubpath);
 
     void doListMods(const QString& gameId);
     void doGetMod(const QString& gameId, const QString& modName);
@@ -78,6 +81,7 @@ public slots:
                         bool fomodConfirmed, const QString& selectedRoot);
 
     void doSetNexusAPIKey(const QString& apiKey);
+    void doSetNexusAPIKeyTracked(quint64 requestId, const QString& apiKey);
 
     void doShutdownDaemon();
 
@@ -118,6 +122,7 @@ signals:
     void gamesListed(const std::vector<GrpcGame>& games);
     void gamesDetected(const std::vector<GrpcGame>& games);
     void gameConfigured();
+    void gameConfigurationFinished(quint64 requestId, const QString& gameId, bool ok, const QString& error);
     void modsListed(const std::vector<GrpcModInfo>& mods);
     void modInfoReceived(const GrpcModInfo& info);
     void profilesListed(const std::vector<GrpcProfile>& profiles);
@@ -155,6 +160,7 @@ signals:
     void installRequestFailed(quint64 requestId, const QString& error);
 
     void nexusAPIKeySet(bool valid, const QString& errorMessage);
+    void nexusKeySaveFinished(quint64 requestId, bool saved, const QString& error);
 
     void vfsStatusChanged(const GrpcVFSStatus& status);
     void archiveEventReceived(quint64 generation, const GrpcArchiveEvent& evt);
