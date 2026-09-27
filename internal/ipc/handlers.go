@@ -1090,11 +1090,11 @@ func gameSettingsToProto(gs *dto.GameSettingsResult) *pb.GameSettings {
 
 func fomodPlanToProto(p *dto.FomodPlanResult) *pb.FomodPlan {
 	out := &pb.FomodPlan{
-		ModuleName:     p.ModuleName,
-		ModulePath:     p.ModulePath,
-		LegacyInfoOnly: p.LegacyInfoOnly,
-		Description:    p.Description,
-		ScreenshotPath: p.ScreenshotPath,
+		ModuleName:      p.ModuleName,
+		ModulePath:      p.ModulePath,
+		LegacyInfoOnly:  p.LegacyInfoOnly,
+		Description:     p.Description,
+		ScreenshotPath:  p.ScreenshotPath,
 		Version:         p.Version,
 		Author:          p.Author,
 		ModuleConfigXml: p.ModuleConfigXML,
