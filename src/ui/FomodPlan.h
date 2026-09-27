@@ -1,8 +1,8 @@
 #pragma once
 
+#include <QByteArray>
 #include <QString>
 #include <QList>
-#include <QDir>
 #include <optional>
 
 namespace gorganizer {
@@ -51,13 +51,12 @@ struct FomodStep {
 
 struct FomodPlan {
     QString moduleName;
-    QString modulePath;
     QList<FomodFile> requiredFiles;
     QList<FomodStep> steps;
 
     bool legacyInfoOnly = false;
     QString description;
-    QString screenshotPath;
+    QByteArray screenshotData;
     QString version;
     QString author;
 
@@ -69,10 +68,7 @@ struct FomodPlan {
 
 class FomodParser {
 public:
-    static std::optional<FomodPlan> parse(const QString& extractRoot);
-
-    // Idempotently extract any *.fomod files at the root or one level deep.
-    static void expandNestedFomods(const QString& extractRoot);
+    static std::optional<FomodPlan> parseModuleConfig(const QByteArray& xml);
 };
 
 }

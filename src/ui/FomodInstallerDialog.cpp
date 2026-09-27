@@ -110,8 +110,9 @@ void FomodInstallerDialog::buildPages()
             layout->addWidget(metaLbl);
         }
 
-        if (!m_plan.screenshotPath.isEmpty()) {
-            QPixmap pm(m_plan.screenshotPath);
+        if (!m_plan.screenshotData.isEmpty()) {
+            QPixmap pm;
+            pm.loadFromData(m_plan.screenshotData);
             if (!pm.isNull()) {
                 auto* img = new QLabel;
                 img->setPixmap(pm.scaled(QSize(640, 360),

@@ -510,10 +510,12 @@ quint64 GrpcClient::startInstall(const QString& gameId, const QString& archiveRe
 
 quint64 GrpcClient::startInstallExternal(const QString& gameId, const QString& externalArchivePath,
                                          GrpcInstallMode mode, const QString& targetMod,
-                                         bool fomodConfirmed, const QString& selectedRoot)
+                                         bool fomodConfirmed, const QString& selectedRoot,
+                                         const QString& previewId,
+                                         const std::vector<GrpcFomodFile>& fomodSelectedFiles)
 {
-    return postInstall(gameId, QString(), externalArchivePath, mode, targetMod, QString(),
-                       std::vector<GrpcFomodFile>{}, fomodConfirmed, selectedRoot);
+    return postInstall(gameId, QString(), externalArchivePath, mode, targetMod, previewId,
+                       fomodSelectedFiles, fomodConfirmed, selectedRoot);
 }
 
 // Assigns a request id and queues StartInstall on the install RPC worker, failing asynchronously when not connected.

@@ -47,7 +47,7 @@ public:
                       std::vector<QString>& archivesFlaggedOut, QString& errorOut);
     bool reinstallMod(const QString& gameId, const QString& modName,
                       GrpcReinstallResult& resultOut, QString& errorOut);
-    // Register a mod folder produced outside StartInstall (FOMOD wizard's local-extract path).
+    // Registers a mod folder created outside StartInstall.
     bool registerManualInstall(const QString& gameId, const QString& modName,
                                const QString& archiveRelPath, QString& errorOut);
 
@@ -162,7 +162,9 @@ public:
     // Queues an install from an archive outside the Downloads index and returns its request id.
     quint64 startInstallExternal(const QString& gameId, const QString& externalArchivePath,
                                  GrpcInstallMode mode, const QString& targetMod,
-                                 bool fomodConfirmed = false, const QString& selectedRoot = QString());
+                                 bool fomodConfirmed = false, const QString& selectedRoot = QString(),
+                                 const QString& previewId = QString(),
+                                 const std::vector<GrpcFomodFile>& fomodSelectedFiles = {});
     // Synchronous StartInstall for modal flows.
     bool startInstallSync(const QString& gameId, const QString& archiveRelPath,
                           const QString& externalArchivePath,

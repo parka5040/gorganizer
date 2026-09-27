@@ -391,10 +391,9 @@ void MainWindow::onInstallMod()
     }
 
     QString modName = QFileInfo(path).completeBaseName();
-    QString modsDir = GameInfo::modsDirPathFor(game.shortName);
 
-    ModInstallDialog dlg(path, modsDir, modName, this);
-    dlg.setDaemonContext(m_grpc, game.shortName);
+    ModInstallDialog dlg(game.shortName, modName, m_grpc,
+                         ModInstallDialog::ArchiveSource::fromExternal(path), this);
     if (dlg.exec() == QDialog::Accepted) {
         statusBar()->showMessage(
             QString("Installed \"%1\" (%2 files)")
