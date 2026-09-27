@@ -112,6 +112,15 @@ enum class GrpcVFSLifecycleState { Unspecified, Ready, RecoveryDeferred, Recover
 
 enum class GrpcRecoveryKind { Unspecified, Data, ModLoader, GameRoot };
 
+struct GrpcRecoveryPending {
+    QString gameId;
+    QString dataPath;
+    QString backupPath;
+    QString reason;
+    GrpcRecoveryKind kind = GrpcRecoveryKind::Unspecified;
+    QString recoveryId;
+};
+
 struct GrpcVFSStatus {
     bool mounted = false;
     QString gameId;
@@ -124,15 +133,8 @@ struct GrpcVFSStatus {
     uint64_t appliedGen = 0;
     GrpcVFSLifecycleState lifecycleState = GrpcVFSLifecycleState::Unspecified;
     QString lifecycleReason;
-};
-
-struct GrpcRecoveryPending {
-    QString gameId;
-    QString dataPath;
-    QString backupPath;
-    QString reason;
-    GrpcRecoveryKind kind = GrpcRecoveryKind::Unspecified;
-    QString recoveryId;
+    bool hasPendingRecovery = false;
+    GrpcRecoveryPending pendingRecovery;
 };
 
 struct GrpcFileConflict {

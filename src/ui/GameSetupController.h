@@ -38,6 +38,9 @@ public slots:
 private slots:
     // Shows a recovery prompt once for each pending item identity.
     void onRecoveryPending(const GrpcRecoveryPending& recovery);
+    void onVfsStatusReceived(const GrpcVFSStatus& status);
+    void onVfsStatusQueried(quint64 requestId, const GrpcVFSStatus& status);
+    void onVfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error);
     // Explains that a recovery confirmation went stale without changing the game.
     void onRpcError(const QString& method, const QString& error);
 
@@ -53,8 +56,10 @@ private:
     QStatusBar* m_statusBar;
     QWidget* m_parentWindow;
     QHash<QString, QSet<QString>> m_seenRecoveryIds;
+    QSet<QString> m_shownRecoveryIds;
     QHash<QString, GrpcRecoveryPending> m_latestRecoveries;
     QHash<QString, GrpcRecoveryPending> m_queuedRecoveries;
+    QHash<QString, quint64> m_pendingReviewQueries;
     QHash<QString, quint64> m_lastRecoveryEventSeq;
     QHash<QString, quint64> m_lastRestoreAttemptSeq;
     quint64 m_recoveryEventSeq = 0;

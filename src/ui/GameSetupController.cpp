@@ -32,6 +32,10 @@ GameSetupController::GameSetupController(AppConfig& config, GrpcClient* grpc,
     , m_parentWindow(parentWindow)
 {
     connect(m_grpc, &GrpcClient::recoveryPending, this, &GameSetupController::onRecoveryPending);
+    connect(m_grpc, &GrpcClient::vfsStatusReceived, this, &GameSetupController::onVfsStatusReceived);
+    connect(m_grpc, &GrpcClient::vfsStatusChanged, this, &GameSetupController::onVfsStatusReceived);
+    connect(m_grpc, &GrpcClient::vfsStatusQueried, this, &GameSetupController::onVfsStatusQueried);
+    connect(m_grpc, &GrpcClient::vfsStatusQueryFailed, this, &GameSetupController::onVfsStatusQueryFailed);
     connect(m_grpc, &GrpcClient::rpcError, this, &GameSetupController::onRpcError);
 }
 
@@ -131,21 +135,64 @@ void GameSetupController::onRecoveryPending(const GrpcRecoveryPending& recovery)
 {
     m_latestRecoveries.insert(recovery.gameId, recovery);
     m_lastRecoveryEventSeq.insert(recovery.gameId, ++m_recoveryEventSeq);
-    if (m_seenRecoveryIds.value(recovery.gameId).contains(recovery.recoveryId))
+    if (m_shownRecoveryIds.contains(recovery.recoveryId))
         return;
     m_seenRecoveryIds[recovery.gameId].insert(recovery.recoveryId);
+    m_shownRecoveryIds.insert(recovery.recoveryId);
     queueRecovery(recovery);
+}
+
+void GameSetupController::onVfsStatusReceived(const GrpcVFSStatus& status)
+{
+    if (!status.hasPendingRecovery)
+        return;
+    const GrpcRecoveryPending& recovery = status.pendingRecovery;
+    m_latestRecoveries.insert(status.gameId, recovery);
+    if (status.gameId != m_session->activeGame().shortName
+        || m_pendingReviewQueries.contains(status.gameId)
+        || m_shownRecoveryIds.contains(recovery.recoveryId))
+        return;
+    m_seenRecoveryIds[status.gameId].insert(recovery.recoveryId);
+    m_shownRecoveryIds.insert(recovery.recoveryId);
+    queueRecovery(recovery);
+}
+
+void GameSetupController::onVfsStatusQueried(quint64 requestId, const GrpcVFSStatus& status)
+{
+    if (m_pendingReviewQueries.value(status.gameId) != requestId)
+        return;
+    m_pendingReviewQueries.remove(status.gameId);
+    if (!status.hasPendingRecovery) {
+        m_statusBar->showMessage("No recovery is waiting for this game.", 5000);
+        return;
+    }
+    const GrpcRecoveryPending& recovery = status.pendingRecovery;
+    m_latestRecoveries.insert(status.gameId, recovery);
+    m_seenRecoveryIds[status.gameId].insert(recovery.recoveryId);
+    m_shownRecoveryIds.insert(recovery.recoveryId);
+    queueRecovery(recovery);
+}
+
+void GameSetupController::onVfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString&)
+{
+    if (m_pendingReviewQueries.value(gameId) != requestId)
+        return;
+    m_pendingReviewQueries.remove(gameId);
+    m_statusBar->showMessage("Gorganizer couldn't check the recovery details. Try Review… again.", 5000);
 }
 
 void GameSetupController::reviewRecovery(const QString& gameId)
 {
     if (!m_latestRecoveries.contains(gameId)) {
-        m_grpc->getVfsStatus(gameId);
-        m_statusBar->showMessage("Waiting for the recovery details from Gorganizer…", 5000);
+        if (!m_pendingReviewQueries.contains(gameId)) {
+            m_pendingReviewQueries.insert(gameId, m_grpc->queryVfsStatus(gameId));
+            m_statusBar->showMessage("Waiting for the recovery details from Gorganizer…", 5000);
+        }
         return;
     }
     const GrpcRecoveryPending recovery = m_latestRecoveries.value(gameId);
     m_seenRecoveryIds[gameId].insert(recovery.recoveryId);
+    m_shownRecoveryIds.insert(recovery.recoveryId);
     queueRecovery(recovery);
 }
 
@@ -220,6 +267,8 @@ void GameSetupController::onRpcError(const QString& method, const QString& error
     const QString gameId = parsed.fields.value(QStringLiteral("game"));
     const bool reannounced = m_latestRecoveries.contains(gameId)
         && m_lastRecoveryEventSeq.value(gameId) > m_lastRestoreAttemptSeq.value(gameId);
+    for (const QString& id : m_seenRecoveryIds.value(gameId))
+        m_shownRecoveryIds.remove(id);
     m_seenRecoveryIds.remove(gameId);
     dialogs::plainInfo(m_parentWindow, "Recovery changed", daemonErrorMessage(error));
     if (reannounced && m_latestRecoveries.contains(gameId)
