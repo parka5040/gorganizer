@@ -115,13 +115,9 @@ func main() {
 	}
 }
 
-// hardExit is the last-resort cleanup path; replicates releaseLock's socket+lock removal best-effort.
+// hardExit removes the daemon socket before exiting immediately.
 func hardExit(socketPath string, code int) {
 	_ = os.Remove(socketPath)
-	lockPath := config.LockPath()
-	if lockPath != "" {
-		_ = os.Remove(lockPath)
-	}
 	os.Exit(code)
 }
 

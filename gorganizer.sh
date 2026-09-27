@@ -827,7 +827,8 @@ cmd_stop() {
 
 DAEMON_PID=""
 start_daemon() {
-    mkdir -p "$RUNTIME_DIR" "$STATE_DIR"
+    mkdir -p -m 700 "$RUNTIME_DIR"
+    mkdir -p "$STATE_DIR"
     local i
     for i in 3 2; do
         if [ -e "$DAEMON_LOG.$((i - 1))" ]; then
