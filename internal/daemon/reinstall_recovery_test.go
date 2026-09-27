@@ -175,7 +175,9 @@ func TestReinstallRecoveryReapsOrphans(t *testing.T) {
 	}
 }
 
-func TestReinstallModRefusesModsEnabledInTheMountedProfile(t *testing.T) {
+// TestReinstallModTracksMountedProfileChangesDuringReplay checks that a mod enabled while sources replay is deployed at the swap.
+func TestReinstallModTracksMountedProfileChangesDuringReplay(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	install := filepath.Join(t.TempDir(), "Stardew Valley")
 	for _, marker := range []string{"Stardew Valley", "StardewValley"} {
 		writeFixture(t, filepath.Join(install, marker))
@@ -205,15 +207,8 @@ func TestReinstallModRefusesModsEnabledInTheMountedProfile(t *testing.T) {
 		}
 	})
 	farmFile := filepath.Join(install, "Mods", "Enabled", "manifest.json")
-	enabledDir := filepath.Join(modsDir, enabled)
-	before := snapshotTree(t, enabledDir)
-
-	var mountedErr *download.ModMountedError
-	if _, _, _, err := d.ReinstallMod("stardewvalley", enabled); !errors.As(err, &mountedErr) || mountedErr.Mod != enabled {
-		t.Fatalf("ReinstallMod(enabled) error = %v, want ModMountedError", err)
-	}
-	if got := snapshotTree(t, enabledDir); !reflect.DeepEqual(got, before) {
-		t.Errorf("refused reinstall changed the mod:\n got %v\nwant %v", got, before)
+	if _, _, _, err := d.ReinstallMod("stardewvalley", enabled); err != nil {
+		t.Fatalf("ReinstallMod(enabled): %v", err)
 	}
 	var st syscall.Stat_t
 	if err := syscall.Stat(farmFile, &st); err != nil || st.Nlink != 2 {
@@ -228,13 +223,11 @@ func TestReinstallModRefusesModsEnabledInTheMountedProfile(t *testing.T) {
 		}
 		return nil
 	}
-	disabledDir := filepath.Join(modsDir, disabled)
-	disabledBefore := snapshotTree(t, disabledDir)
-	if _, _, _, err := d.ReinstallMod("stardewvalley", disabled); !errors.As(err, &mountedErr) || mountedErr.Mod != disabled {
-		t.Fatalf("ReinstallMod enabled during replay error = %v, want ModMountedError", err)
+	if _, _, _, err := d.ReinstallMod("stardewvalley", disabled); err != nil {
+		t.Fatalf("ReinstallMod enabled during replay: %v", err)
 	}
-	if got := snapshotTree(t, disabledDir); !reflect.DeepEqual(got, disabledBefore) {
-		t.Errorf("mod enabled during replay changed:\n got %v\nwant %v", got, disabledBefore)
+	if _, err := os.Stat(filepath.Join(install, "Mods", "Disabled", "manifest.json")); err != nil {
+		t.Errorf("mod enabled during replay was not deployed: %v", err)
 	}
 	assertNoReinstallState(t, modsDir)
 	d.reinstallFault = nil

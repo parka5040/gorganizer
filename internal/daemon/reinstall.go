@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -62,9 +63,6 @@ func (md *ModService) ReinstallMod(gameID, modName string) (int, int, int, error
 	if err := requireRealModDir(gameID, modName, modDir); err != nil {
 		return 0, 0, 0, err
 	}
-	if err := md.refuseMountedReinstall(gameID, modName); err != nil {
-		return 0, 0, 0, err
-	}
 	modsDir := config.ModsDir(gameID)
 	meta, err := download.LoadModMetadata(modDir)
 	if err != nil {
@@ -94,31 +92,6 @@ func (md *ModService) ReinstallMod(gameID, modName string) (int, int, int, error
 	md.s.invalidateInstalledArchiveCache(gameID)
 	slog.Info("mod reinstalled", "game", gameID, "mod", modName, "archives", len(sources), "files", fileCount)
 	return len(sources), 0, fileCount, nil
-}
-
-// refuseMountedReinstall refuses a reinstall of a mod enabled in the game's mounted profile or linked into its applied farm, holding the game's profile lock.
-func (md *ModService) refuseMountedReinstall(gameID, modName string) error {
-	defer md.s.lockProfiles(gameID)()
-	return md.refuseEnabledInMountedProfile(gameID, modName)
-}
-
-// refuseEnabledInMountedProfile returns ModMountedError when modName is enabled in the game's mounted profile or linked into its applied farm; the caller holds the profile lock.
-func (md *ModService) refuseEnabledInMountedProfile(gameID, modName string) error {
-	md.s.mu.RLock()
-	defer md.s.mu.RUnlock()
-	return md.refuseEnabledInMountedProfileLocked(gameID, modName)
-}
-
-// refuseEnabledInMountedProfileLocked refuses a mod present in the mounted profile, applied farm, or active root deployment; the caller holds s.mu and the profile lock.
-func (md *ModService) refuseEnabledInMountedProfileLocked(gameID, modName string) error {
-	used, err := md.mountedModUsedLocked(gameID, modName)
-	if err != nil {
-		return err
-	}
-	if used {
-		return &download.ModMountedError{Mod: modName}
-	}
-	return nil
 }
 
 // mountedModUsedLocked reports whether the mounted farm or root deployment uses a mod; the caller holds s.mu and the profile lock.
@@ -243,10 +216,6 @@ func (md *ModService) commitReinstall(gameID, modName, modsDir, token string, sn
 	defer md.s.lockProfiles(gameID)()
 	modDir := filepath.Join(modsDir, modName)
 	stageDir := filepath.Join(modsDir, reinstallStagePrefix+token)
-	if err := md.refuseEnabledInMountedProfile(gameID, modName); err != nil {
-		_ = os.RemoveAll(stageDir)
-		return 0, err
-	}
 	final, err := mergedReinstallMetadata(modDir, stageDir, modName, snapshot)
 	if err != nil {
 		_ = os.RemoveAll(stageDir)
@@ -256,14 +225,14 @@ func (md *ModService) commitReinstall(gameID, modName, modsDir, token string, sn
 		_ = os.RemoveAll(stageDir)
 		return 0, fmt.Errorf("writing reinstalled metadata: %w", err)
 	}
-	if err := md.publishReinstallStage(gameID, modName, modsDir, token, false); err != nil {
+	if err := md.publishReinstallStage(gameID, modName, modsDir, token, dto.GameRunningOperationReinstall, false); err != nil {
 		return 0, err
 	}
 	return final.FileCount, nil
 }
 
 // publishReinstallStage records and swaps an already completed stage; the caller holds the game's profile lock.
-func (md *ModService) publishReinstallStage(gameID, modName, modsDir, token string, discardOnIntentFailure bool) error {
+func (md *ModService) publishReinstallStage(gameID, modName, modsDir, token, operation string, discardOnIntentFailure bool) error {
 	stageDir := filepath.Join(modsDir, reinstallStagePrefix+token)
 	modDir := filepath.Join(modsDir, modName)
 	intent := reinstallIntent{
@@ -287,7 +256,7 @@ func (md *ModService) publishReinstallStage(gameID, modName, modsDir, token stri
 		}
 		return err
 	}
-	return md.swapReinstalledMod(gameID, modName, modDir, stageDir, filepath.Join(modsDir, intent.Old), intentPath)
+	return md.swapReinstalledMod(gameID, modName, modDir, stageDir, filepath.Join(modsDir, intent.Old), intentPath, operation)
 }
 
 // mergedReinstallMetadata combines the current non-file keys of the original metadata with the replayed source and file lists.
@@ -314,9 +283,9 @@ func mergedReinstallMetadata(modDir, stageDir, modName string, snapshot *downloa
 	return &final, nil
 }
 
-// swapReinstalledMod moves the staged mod into place under s.mu after re-checking the mounted profile, restoring the original when the swap fails, and clears the intent once the original is gone.
-func (md *ModService) swapReinstalledMod(gameID, modName, modDir, stageDir, oldDir, intentPath string) error {
-	if err := md.swapInReinstalledMod(gameID, modName, modDir, stageDir, oldDir, intentPath); err != nil {
+// swapReinstalledMod publishes a staged mod and removes the previous folder after rebuilding any deployed farm.
+func (md *ModService) swapReinstalledMod(gameID, modName, modDir, stageDir, oldDir, intentPath, operation string) error {
+	if err := md.swapInReinstalledMod(gameID, modName, modDir, stageDir, oldDir, intentPath, operation); err != nil {
 		return err
 	}
 	if err := md.s.reinstallStep("installed"); err != nil {
@@ -333,9 +302,9 @@ func (md *ModService) swapReinstalledMod(gameID, modName, modDir, stageDir, oldD
 	return nil
 }
 
-// swapInReinstalledMod swaps the staged mod into place under s.mu and discards the stage and intent of a refused or failed swap only after releasing it.
-func (md *ModService) swapInReinstalledMod(gameID, modName, modDir, stageDir, oldDir, intentPath string) error {
-	discard, err := md.swapInReinstalledModLocked(gameID, modName, modDir, stageDir, oldDir)
+// swapInReinstalledMod swaps a completed stage and discards its intent after a refusal or successful rollback.
+func (md *ModService) swapInReinstalledMod(gameID, modName, modDir, stageDir, oldDir, intentPath, operation string) error {
+	discard, err := md.swapInReinstalledModLocked(gameID, modName, modDir, stageDir, oldDir, operation)
 	if discard {
 		_ = os.RemoveAll(stageDir)
 		removeReinstallIntent(intentPath)
@@ -343,12 +312,66 @@ func (md *ModService) swapInReinstalledMod(gameID, modName, modDir, stageDir, ol
 	return err
 }
 
-// swapInReinstalledModLocked re-checks the mount and renames the original aside and the staged mod into place while holding s.mu, so no mount can materialize the mod folder mid-swap, reporting whether the stage and intent must be discarded.
-func (md *ModService) swapInReinstalledModLocked(gameID, modName, modDir, stageDir, oldDir string) (bool, error) {
-	md.s.mu.RLock()
-	defer md.s.mu.RUnlock()
-	if err := md.refuseEnabledInMountedProfileLocked(gameID, modName); err != nil {
+// swapInReinstalledModLocked swaps a mod and rebuilds its mounted farm under s.mu, reporting whether the stage and intent can be discarded.
+func (md *ModService) swapInReinstalledModLocked(gameID, modName, modDir, stageDir, oldDir, operation string) (bool, error) {
+	md.s.mu.Lock()
+	defer md.s.mu.Unlock()
+	used, err := md.mountedModUsedLocked(gameID, modName)
+	if err != nil {
 		return true, err
+	}
+	var rebuild func() (bool, error)
+	if used {
+		mm := md.s.mountMgrs[gameID]
+		if mm == nil || !mm.IsMounted() {
+			return true, &dto.GameRunningError{GameID: gameID, Operation: operation}
+		}
+		if err := md.checkMountedModChangeLocked(gameID, operation); err != nil {
+			return true, err
+		}
+		release, err := md.s.reserveShared(gameID, dto.BusyOperationApply)
+		if err != nil {
+			return true, err
+		}
+		defer release()
+		gc, err := md.s.config.EffectiveGameConfig(gameID)
+		if err != nil {
+			return true, err
+		}
+		ms := md.s.mountStates[gameID]
+		_, entries, err := md.s.profileMgr.Load(gameID, ms.profileName)
+		if err != nil {
+			return true, fmt.Errorf("loading mounted profile %q: %w", ms.profileName, err)
+		}
+		previousDesired := md.s.svc.vfs.buildLayers(gameID, gc, entries)
+		previousApplied := mm.AppliedLayers()
+		wasDirty := mm.IsDirty()
+		root, err := md.s.ensureRootDeploymentManager(gameID, gc)
+		if err != nil {
+			return true, fmt.Errorf("initializing game-root deployment: %w", err)
+		}
+		rebuild = func() (bool, error) {
+			layers := md.s.svc.vfs.buildLayers(gameID, gc, entries)
+			err := mm.MarkDirty(layers)
+			if err == nil {
+				err = md.rematerializeModChangeLocked(mm)
+			}
+			if err == nil {
+				_, err = root.Apply(layers, ms.profileName)
+			}
+			if err != nil {
+				if rollbackErr := md.reinstallRename("rollback-stage", modDir, stageDir); rollbackErr != nil {
+					return false, errors.Join(fmt.Errorf("rebuilding deployed mod: %w", err), fmt.Errorf("moving replacement aside for recovery: %w", rollbackErr))
+				}
+				if rollbackErr := md.reinstallRename("rollback-original", oldDir, modDir); rollbackErr != nil {
+					return false, errors.Join(fmt.Errorf("rebuilding deployed mod: %w", err), fmt.Errorf("restoring original mod: %w", rollbackErr))
+				}
+				restoreErr := md.restoreModFarmLocked(mm, root, ms.profileName, previousApplied, previousDesired, wasDirty)
+				return restoreErr == nil, errors.Join(fmt.Errorf("rebuilding deployed mod: %w", err), restoreErr)
+			}
+			md.s.publishGuarded(dto.StatusEventResult{VFSStatus: md.s.svc.vfs.vfsStatus(gameID, gc, ms.profileName, mm, entries)})
+			return false, nil
+		}
 	}
 	if err := md.reinstallRename("move-aside", modDir, oldDir); err != nil {
 		return true, fmt.Errorf("moving original mod aside: %w", err)
@@ -358,9 +381,17 @@ func (md *ModService) swapInReinstalledModLocked(gameID, modName, modDir, stageD
 	}
 	if err := md.reinstallRename("install", stageDir, modDir); err != nil {
 		if rollbackErr := md.reinstallRename("restore", oldDir, modDir); rollbackErr != nil {
-			return false, fmt.Errorf("installing reinstalled mod: %w (original kept at %s for startup recovery: %v)", err, oldDir, rollbackErr)
+			return false, errors.Join(fmt.Errorf("installing reinstalled mod: %w", err), fmt.Errorf("restoring original mod from %s: %w", oldDir, rollbackErr))
 		}
 		return true, fmt.Errorf("installing reinstalled mod: %w", err)
+	}
+	if err := md.s.reinstallStep("swapped"); err != nil {
+		return false, err
+	}
+	if rebuild != nil {
+		if discard, err := rebuild(); err != nil {
+			return discard, err
+		}
 	}
 	return false, nil
 }

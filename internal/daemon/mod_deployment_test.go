@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/parka/gorganizer/internal/config"
-	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/dto"
 	"github.com/parka/gorganizer/internal/vfs"
 )
@@ -392,25 +391,59 @@ func TestRenameAppliedModRebuildsOrRollsBack(t *testing.T) {
 	}
 }
 
-// TestMergeIntoDeployedModRefused ensures a merge cannot overwrite bytes already exposed by the mounted farm.
-func TestMergeIntoDeployedModRefused(t *testing.T) {
+// TestMergeIntoDeployedModRebuildsFarm checks that a merge updates deployed Data and game-root files before removing the old mod folder.
+func TestMergeIntoDeployedModRebuildsFarm(t *testing.T) {
+	d, install, modDir := mountedModChangeFixture(t)
+	original, err := os.Stat(modDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(config.DownloadsDir(modChangeGame), "Update.zip")
+	writeZipFiles(t, archive, map[string]string{"a.esp": "replacement bytes", ".gorganizer-root/root.txt": "replacement root"})
+	if _, _, err := d.StartInstall(dto.StartInstallRequest{GameID: modChangeGame, ArchiveRelPath: "Update.zip", Mode: dto.InstallMergeIntoMod, TargetMod: "A"}); err != nil {
+		t.Fatalf("StartInstall: %v", err)
+	}
+	updated, err := os.Stat(modDir)
+	if err != nil {
+		t.Fatalf("stat merged mod folder: %v", err)
+	}
+	if os.SameFile(original, updated) {
+		t.Error("merge did not replace the mod folder")
+	}
+	for path, want := range map[string]string{
+		filepath.Join(modDir, "a.esp"):          "replacement bytes",
+		filepath.Join(install, "Data", "a.esp"): "replacement bytes",
+		filepath.Join(install, "root.txt"):      "replacement root",
+	} {
+		body, err := os.ReadFile(path)
+		if err != nil || string(body) != want {
+			t.Errorf("%s = %q, %v, want %q", path, body, err, want)
+		}
+	}
+	if target, err := os.Readlink(filepath.Join(install, "root.txt")); err != nil || target != filepath.Join(modDir, vfs.RootContentDirName, "root.txt") {
+		t.Errorf("root link = %q, %v", target, err)
+	}
+	if status, err := d.GetVFSStatus(modChangeGame); err != nil || !status.Mounted || status.Dirty {
+		t.Errorf("VFS status after merge = %+v, %v", status, err)
+	}
+	assertNoReinstallState(t, config.ModsDir(modChangeGame))
+}
+
+// TestMergeIntoDeployedModRefusedWhileGameRuns checks that a running game prevents publishing a completed merge.
+func TestMergeIntoDeployedModRefusedWhileGameRuns(t *testing.T) {
 	d, install, modDir := mountedModChangeFixture(t)
 	archive := filepath.Join(config.DownloadsDir(modChangeGame), "Update.zip")
 	writeZipFiles(t, archive, map[string]string{"a.esp": "replacement bytes"})
+	fakeProcesses(d, true, nil)
 	_, _, err := d.StartInstall(dto.StartInstallRequest{GameID: modChangeGame, ArchiveRelPath: "Update.zip", Mode: dto.InstallMergeIntoMod, TargetMod: "A"})
-	var mounted *download.ModMountedError
-	if !errors.As(err, &mounted) || mounted.Mod != "A" {
-		t.Fatalf("StartInstall error = %v, want ModMountedError(A)", err)
-	}
+	requireGameRunning(t, "StartInstall merge", err, dto.GameRunningOperationMerge)
 	for _, path := range []string{filepath.Join(modDir, "a.esp"), filepath.Join(install, "Data", "a.esp")} {
-		body, err := os.ReadFile(path)
-		if err != nil || string(body) != "original bytes" {
-			t.Errorf("%s = %q, %v, want original bytes", path, body, err)
+		body, readErr := os.ReadFile(path)
+		if readErr != nil || string(body) != "original bytes" {
+			t.Errorf("%s = %q, %v, want original bytes", path, body, readErr)
 		}
 	}
-	if d.mountMgrs[modChangeGame].IsDirty() {
-		t.Error("a refused merge dirtied the farm")
-	}
+	assertNoReinstallState(t, config.ModsDir(modChangeGame))
 }
 
 // TestRenameRefusedWhileSteamLaunchIsFresh ensures force is not relevant to rename and a fresh launch cannot expose dangling root links.

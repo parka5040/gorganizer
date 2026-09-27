@@ -10,6 +10,7 @@ import (
 	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/download"
+	"github.com/parka/gorganizer/internal/dto"
 )
 
 // prepareMergeStage recreates the original mod under a hidden stage using hardlinks for regular files.
@@ -66,10 +67,6 @@ func (is *InstallService) publishPreparedMerge(gameID, modName, token string, sn
 	modsDir := config.ModsDir(gameID)
 	modDir := filepath.Join(modsDir, modName)
 	stageDir := filepath.Join(modsDir, reinstallStagePrefix+token)
-	if err := is.s.svc.mods.refuseEnabledInMountedProfile(gameID, modName); err != nil {
-		_ = os.RemoveAll(stageDir)
-		return err
-	}
 	current, err := download.LoadModMetadata(modDir)
 	if err != nil {
 		_ = os.RemoveAll(stageDir)
@@ -86,7 +83,7 @@ func (is *InstallService) publishPreparedMerge(gameID, modName, token string, sn
 		_ = os.RemoveAll(stageDir)
 		return fmt.Errorf("writing merged metadata: %w", err)
 	}
-	return is.s.svc.mods.publishReinstallStage(gameID, modName, modsDir, token, true)
+	return is.s.svc.mods.publishReinstallStage(gameID, modName, modsDir, token, dto.GameRunningOperationMerge, true)
 }
 
 // mergeStageMetadata retains metadata edits made to the original while the merged files were prepared.

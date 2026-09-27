@@ -467,9 +467,6 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 		if err := download.ValidateMergeTarget(config.ModsDir(req.GameID), target); err != nil {
 			return "", 0, err
 		}
-		if err := is.s.svc.mods.refuseMountedReinstall(req.GameID, target); err != nil {
-			return "", 0, err
-		}
 	}
 
 	extractedRoot := extracted
@@ -582,9 +579,6 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 	var mergeToken, mergeStage string
 	var mergeSnapshot *download.ModMetadata
 	if req.Mode == dto.InstallMergeIntoMod {
-		if err := is.s.svc.mods.refuseMountedReinstall(req.GameID, target); err != nil {
-			return "", 0, err
-		}
 		var err error
 		mergeSnapshot, err = download.LoadModMetadata(filepath.Join(config.ModsDir(req.GameID), target))
 		if err != nil {
