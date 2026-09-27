@@ -567,6 +567,11 @@ message MountVFSRequest {
   // once. Without auto_swap, the daemon returns VFSMutexError so the
   // GUI can prompt.
   bool auto_swap = 3;
+  // When true and this game's mods are already deployed with a different
+  // profile, the daemon switches the deployed mods to profile_name in one
+  // step (refused while the game runs). Without it, a different profile is
+  // refused as before.
+  bool retarget_if_mounted = 4;
 }
 message MountVFSResponse {
   VFSStatus status = 1;
