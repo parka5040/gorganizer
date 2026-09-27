@@ -879,6 +879,10 @@ message DiscardPreviewResponse {}
 enum InstallMode {
   INSTALL_MODE_NEW_MOD = 0;      // install as a new mod folder
   INSTALL_MODE_MERGE_INTO = 1;   // append into target_mod's source_archives
+  // Replace target_mod's files with this archive (an update): the mod keeps
+  // its name, category, mod page and place in every profile; its old files
+  // are removed and its source archives become this archive.
+  INSTALL_MODE_REPLACE = 2;
 }
 
 message StartInstallRequest {
