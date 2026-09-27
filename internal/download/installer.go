@@ -2,6 +2,7 @@ package download
 
 import (
 	"archive/zip"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,6 +22,7 @@ import (
 
 type Extractor interface {
 	Extract(archivePath, destDir string) error
+	ExtractWithBudget(archivePath, destDir string, budget *ExtractBudget) error
 	CanHandle(archivePath string) bool
 }
 
@@ -358,50 +360,77 @@ func checkFomodAt(dir string) (string, FomodKind) {
 	return "", FomodKindNone
 }
 
-// ExpandNestedFomods extracts any *.fomod archives found up to two levels deep.
-func ExpandNestedFomods(extractDir string) {
-	visit := func(dir string) {
-		entries, err := os.ReadDir(dir)
+// ExpandNestedFomods extracts regular *.fomod archives from the root and its immediate subdirectories.
+func ExpandNestedFomods(extractDir string, budget *ExtractBudget) error {
+	entries, err := os.ReadDir(extractDir)
+	if err != nil {
+		return err
+	}
+	if err := expandNestedFomodsInDir(extractDir, entries, budget); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			dir := filepath.Join(extractDir, entry.Name())
+			children, err := os.ReadDir(dir)
+			if err != nil {
+				return err
+			}
+			if err := expandNestedFomodsInDir(dir, children, budget); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// expandNestedFomodsInDir extracts recognized nested installers from one directory.
+func expandNestedFomodsInDir(dir string, entries []os.DirEntry, budget *ExtractBudget) error {
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(strings.ToLower(name), ".fomod") || !entry.Type().IsRegular() {
+			continue
+		}
+		stem := name[:len(name)-len(".fomod")]
+		if fsutil.ValidateName(stem) != nil || strings.HasPrefix(stem, ".") {
+			return &ArchiveRejectedError{Reason: ArchiveRejectedNestedInstaller, Detail: name}
+		}
+		outDir := filepath.Join(dir, stem)
+		if _, err := os.Lstat(outDir); err == nil {
+			return &ArchiveRejectedError{Reason: ArchiveRejectedNestedInstaller, Detail: name}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		srcPath := filepath.Join(dir, name)
+		extractor, err := DetectExtractor(srcPath)
+		if errors.Is(err, ErrUnsupportedArchive) {
+			slog.Warn("ExpandNestedFomods: unrecognized nested .fomod archive", "path", srcPath)
+			continue
+		}
 		if err != nil {
-			return
+			return &ArchiveRejectedError{Reason: ArchiveRejectedNestedInstaller, Detail: fmt.Sprintf("%s: %v", name, err)}
 		}
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
+		tmp, err := os.MkdirTemp(dir, ".nested-fomod-*")
+		if err != nil {
+			return &ArchiveRejectedError{Reason: ArchiveRejectedNestedInstaller, Detail: fmt.Sprintf("%s: %v", name, err)}
+		}
+		if err := extractor.ExtractWithBudget(srcPath, tmp, budget); err != nil {
+			_ = os.RemoveAll(tmp)
+			var rejected *ArchiveRejectedError
+			if errors.As(err, &rejected) {
+				return err
 			}
-			name := e.Name()
-			if !strings.HasSuffix(strings.ToLower(name), ".fomod") {
-				continue
-			}
-			srcPath := filepath.Join(dir, name)
-			outDir := filepath.Join(dir, strings.TrimSuffix(name, filepath.Ext(name)))
-			if err := os.MkdirAll(outDir, 0755); err != nil {
-				slog.Warn("ExpandNestedFomods: mkdir failed", "path", outDir, "err", err)
-				continue
-			}
-			ex := []Extractor{&SevenZipExtractor{}, &ZipExtractor{}}
-			extracted := false
-			for _, x := range ex {
-				if err := x.Extract(srcPath, outDir); err == nil {
-					extracted = true
-					break
-				}
-			}
-			if !extracted {
-				slog.Warn("ExpandNestedFomods: could not extract nested .fomod", "path", srcPath)
-				_ = os.RemoveAll(outDir)
-				continue
-			}
-			_ = os.Remove(srcPath)
+			return &ArchiveRejectedError{Reason: ArchiveRejectedNestedInstaller, Detail: fmt.Sprintf("%s: %v", name, err)}
+		}
+		if err := os.Rename(tmp, outDir); err != nil {
+			_ = os.RemoveAll(tmp)
+			return &ArchiveRejectedError{Reason: ArchiveRejectedNestedInstaller, Detail: fmt.Sprintf("%s: %v", name, err)}
+		}
+		if err := os.Remove(srcPath); err != nil {
+			return &ArchiveRejectedError{Reason: ArchiveRejectedNestedInstaller, Detail: fmt.Sprintf("%s: %v", name, err)}
 		}
 	}
-	visit(extractDir)
-	level1, _ := os.ReadDir(extractDir)
-	for _, d1 := range level1 {
-		if d1.IsDir() {
-			visit(filepath.Join(extractDir, d1.Name()))
-		}
-	}
+	return nil
 }
 
 func findCaseInsensitiveChild(parent, target string) (string, error) {
@@ -705,14 +734,18 @@ func (e *ZipExtractor) CanHandle(archivePath string) bool {
 }
 
 func (e *ZipExtractor) Extract(archivePath, destDir string) error {
+	return e.ExtractWithBudget(archivePath, destDir, NewExtractBudget())
+}
+
+// ExtractWithBudget extracts a zip archive within the shared extraction budget.
+func (e *ZipExtractor) ExtractWithBudget(archivePath, destDir string, budget *ExtractBudget) error {
 	r, err := zip.OpenReader(archivePath)
 	if err != nil {
-		_ = os.RemoveAll(destDir)
 		return fmt.Errorf("opening zip: %w", err)
 	}
 	defer r.Close()
 
-	return extractEntries(r.File, destDir, defaultExtractLimits(), func(f *zip.File) string {
+	return extractEntries(r.File, destDir, budget, func(f *zip.File) string {
 		return f.Name
 	}, func(f *zip.File) bool {
 		return f.FileInfo().IsDir()
@@ -730,14 +763,18 @@ func (e *SevenZipExtractor) CanHandle(archivePath string) bool {
 }
 
 func (e *SevenZipExtractor) Extract(archivePath, destDir string) error {
+	return e.ExtractWithBudget(archivePath, destDir, NewExtractBudget())
+}
+
+// ExtractWithBudget extracts a 7z archive within the shared extraction budget.
+func (e *SevenZipExtractor) ExtractWithBudget(archivePath, destDir string, budget *ExtractBudget) error {
 	r, err := sevenzip.OpenReader(archivePath)
 	if err != nil {
-		_ = os.RemoveAll(destDir)
 		return fmt.Errorf("opening 7z: %w", err)
 	}
 	defer r.Close()
 
-	return extractEntries(r.File, destDir, defaultExtractLimits(), func(f *sevenzip.File) string {
+	return extractEntries(r.File, destDir, budget, func(f *sevenzip.File) string {
 		return f.Name
 	}, func(f *sevenzip.File) bool {
 		return f.FileInfo().IsDir()
@@ -755,6 +792,11 @@ func (e *RarExtractor) CanHandle(archivePath string) bool {
 }
 
 func (e *RarExtractor) Extract(archivePath, destDir string) error {
+	return e.ExtractWithBudget(archivePath, destDir, NewExtractBudget())
+}
+
+// ExtractWithBudget extracts a rar archive and validates it within the shared extraction budget.
+func (e *RarExtractor) ExtractWithBudget(archivePath, destDir string, budget *ExtractBudget) error {
 	cmd := exec.Command("unrar", "x", "-o+", "--", archivePath, destDir+"/")
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
@@ -764,9 +806,8 @@ func (e *RarExtractor) Extract(archivePath, destDir string) error {
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard
 		if err := cmd.Run(); err != nil {
-			_ = os.RemoveAll(destDir)
 			return err
 		}
 	}
-	return validateRarExtraction(destDir, defaultExtractLimits())
+	return validateRarExtraction(destDir, budget)
 }

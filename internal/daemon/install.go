@@ -66,7 +66,8 @@ func (is *InstallService) PreviewInstall(req dto.PreviewInstallRequest) (*dto.Pr
 	if _, err := os.Stat(absArchive); err != nil {
 		return nil, &ArchiveMissingError{GameID: gameID, Path: archiveRelPath}
 	}
-	tmp, err := extractArchive(absArchive)
+	budget := download.NewExtractBudget()
+	tmp, err := extractArchiveWithBudget(absArchive, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +85,10 @@ func (is *InstallService) PreviewInstall(req dto.PreviewInstallRequest) (*dto.Pr
 		out.PreviewID = is.s.previews.put(entry)
 		return out, nil
 	}
-	download.ExpandNestedFomods(tmp)
+	if err := download.ExpandNestedFomods(tmp, budget); err != nil {
+		os.RemoveAll(tmp)
+		return nil, fmt.Errorf("expanding nested installers: %w", err)
+	}
 	if root, kind := download.FindFomodRootKind(tmp); kind != download.FomodKindNone {
 		entry.HasFomod = true
 		entry.ModuleRoot = root
@@ -126,6 +130,11 @@ func (is *InstallService) PreviewInstall(req dto.PreviewInstallRequest) (*dto.Pr
 
 // extractArchive extracts absArchive into a fresh directory under the daemon's extraction root that the caller must remove.
 func extractArchive(absArchive string) (string, error) {
+	return extractArchiveWithBudget(absArchive, download.NewExtractBudget())
+}
+
+// extractArchiveWithBudget extracts absArchive into a fresh directory using the supplied operation budget.
+func extractArchiveWithBudget(absArchive string, budget *download.ExtractBudget) (string, error) {
 	extractor, err := download.DetectExtractor(absArchive)
 	if err != nil {
 		return "", fmt.Errorf("detecting archive type: %w", err)
@@ -138,7 +147,7 @@ func extractArchive(absArchive string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := extractor.Extract(absArchive, tmp); err != nil {
+	if err := extractor.ExtractWithBudget(absArchive, tmp, budget); err != nil {
 		os.RemoveAll(tmp)
 		return "", fmt.Errorf("extracting: %w", err)
 	}

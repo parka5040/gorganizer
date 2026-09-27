@@ -286,7 +286,9 @@ func TestPreviewInstallListsPlannedFiles(t *testing.T) {
 	nested := nestedFomodBytes(t)
 	control := t.TempDir()
 	writeZipFiles(t, filepath.Join(control, "Core", "nested.fomod"), map[string]string{"inner.txt": "inner"})
-	download.ExpandNestedFomods(control)
+	if err := download.ExpandNestedFomods(control, download.NewExtractBudget()); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(filepath.Join(control, "Core", "nested", "inner.txt")); err != nil {
 		t.Fatalf("fixture is not a nested FOMOD that ExpandNestedFomods expands: %v", err)
 	}
