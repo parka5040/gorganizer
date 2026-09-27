@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/dto"
+	"github.com/parka/gorganizer/internal/fsutil"
 	"github.com/parka/gorganizer/internal/mod"
 	"github.com/parka/gorganizer/internal/profile"
 )
@@ -48,7 +48,10 @@ func readManifestEntry(tr *tar.Reader, gameID string) (*Manifest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading archive: %w", err)
 	}
-	if hdr.Name != manifestEntryName || hdr.Typeflag != tar.TypeReg {
+	if err := validateEntryType(hdr); err != nil {
+		return nil, err
+	}
+	if hdr.Name != manifestEntryName || (hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA) {
 		return nil, &TransferPathError{Entry: hdr.Name}
 	}
 	data, err := io.ReadAll(io.LimitReader(tr, 64<<20))
@@ -65,12 +68,47 @@ func readManifestEntry(tr *tar.Reader, gameID string) (*Manifest, error) {
 	if m.GameID != gameID {
 		return nil, &TransferGameMismatchError{Want: gameID, Got: m.GameID}
 	}
+	seenMods := make([]string, 0, len(m.Mods))
 	for _, me := range m.Mods {
 		if err := download.ValidateTargetModName(me.Folder); err != nil {
 			return nil, err
 		}
+		for _, folder := range seenMods {
+			if strings.EqualFold(folder, me.Folder) {
+				return nil, &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: me.Folder}
+			}
+		}
+		seenMods = append(seenMods, me.Folder)
+	}
+	seenProfiles := map[string]bool{}
+	for _, name := range m.Profiles {
+		if err := validateImportedProfileName(name); err != nil {
+			return nil, err
+		}
+		if seenProfiles[name] {
+			return nil, &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: name}
+		}
+		seenProfiles[name] = true
 	}
 	return m, nil
+}
+
+// validateImportedProfileName rejects unsafe or reserved profile names from a bundle.
+func validateImportedProfileName(name string) error {
+	if fsutil.ValidateName(name) != nil || strings.HasPrefix(name, ".") || strings.EqualFold(name, profile.OverwriteModName) || strings.EqualFold(name, "Downloads") {
+		return &BundleRejectedError{Reason: BundleRejectedProfileName, Item: name}
+	}
+	return nil
+}
+
+// validateCollisionPolicy rejects unknown import collision policies.
+func validateCollisionPolicy(policy dto.CollisionPolicy) error {
+	switch policy {
+	case dto.PolicyAbort, dto.PolicySkip, dto.PolicyRename, dto.PolicyOverwrite:
+		return nil
+	default:
+		return &BundleRejectedError{Reason: BundleRejectedManifest, Item: fmt.Sprint(policy)}
+	}
 }
 
 // Preview reads an archive's manifest and reports per-item collisions against the target instance.
@@ -123,6 +161,14 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 	manifest, err := readManifestEntry(tr, opts.GameID)
 	if err != nil {
 		return summary, err
+	}
+	if err := validateCollisionPolicy(opts.Policy); err != nil {
+		return summary, err
+	}
+	for _, policy := range opts.ModPolicyOverrides {
+		if err := validateCollisionPolicy(policy); err != nil {
+			return summary, err
+		}
 	}
 
 	selMods, err := selectNames(manifestModFolders(manifest), opts.ModFolders, "mod folder")
@@ -178,10 +224,15 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 	if err := os.MkdirAll(profilesDir, 0755); err != nil {
 		return summary, err
 	}
-	stageID := mod.ImportStagePrefix + uuid.NewString()
-	stageMods := filepath.Join(modsDir, stageID)
-	stageProfiles := filepath.Join(profilesDir, stageID)
+	stageMods, err := os.MkdirTemp(modsDir, mod.ImportStagePrefix)
+	if err != nil {
+		return summary, fmt.Errorf("creating import staging directory: %w", err)
+	}
 	defer os.RemoveAll(stageMods)
+	stageProfiles := filepath.Join(profilesDir, filepath.Base(stageMods))
+	if err := os.Mkdir(stageProfiles, 0700); err != nil {
+		return summary, fmt.Errorf("creating profile staging directory: %w", err)
+	}
 	defer os.RemoveAll(stageProfiles)
 
 	itemsTotal := int32(len(selMods) + len(selProfiles))
@@ -204,6 +255,7 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 	for _, name := range manifest.Profiles {
 		manifestProfiles[name] = true
 	}
+	seenEntries := map[string]byte{}
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -219,6 +271,17 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 		prefix, rest, err := splitEntryName(hdr.Name)
 		if err != nil {
 			return summary, err
+		}
+		if err := validateEntryType(hdr); err != nil {
+			return summary, err
+		}
+		if (prefix == "overwrite" && !manifest.IncludesOverwrite) || (prefix == "gamesettings" && !manifest.IncludesGameSettings) {
+			return summary, &BundleRejectedError{Reason: BundleRejectedManifest, Item: hdr.Name}
+		}
+		if prefix != manifestEntryName {
+			if err := recordEntry(seenEntries, hdr); err != nil {
+				return summary, err
+			}
 		}
 		clean := strings.TrimSuffix(hdr.Name, "/")
 		switch prefix {
@@ -367,6 +430,9 @@ func finalizeMod(opts ImportOptions, folder, staged string, policy dto.Collision
 
 // finalizeProfile rewrites the staged modlist through the rename map and moves the profile into place.
 func finalizeProfile(opts ImportOptions, name, staged string, summary *dto.TransferSummary) error {
+	if err := validateImportedProfileName(name); err != nil {
+		return err
+	}
 	if err := rewriteModlist(filepath.Join(staged, "modlist.txt"), summary.Renamed); err != nil {
 		return err
 	}

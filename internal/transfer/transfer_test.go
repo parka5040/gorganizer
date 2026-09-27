@@ -23,6 +23,7 @@ func setRoot(t *testing.T, root string) {
 	t.Helper()
 	t.Setenv("GORGANIZER_ROOT", filepath.Join(root, "instance"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "xdg"))
+	t.Setenv("HOME", t.TempDir())
 }
 
 // writeFileT writes a file, creating parents.
