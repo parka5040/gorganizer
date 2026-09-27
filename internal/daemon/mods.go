@@ -92,6 +92,11 @@ func (md *ModService) RenameMod(gameID, oldName, newName string) error {
 	if err := md.s.refuseWhenShuttingDown("rename_mod"); err != nil {
 		return err
 	}
+	release, err := md.s.acquireShared(gameID, dto.GameRunningOperationRename)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if !md.s.gameConfigured(gameID) {
 		return fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
@@ -239,6 +244,11 @@ func (md *ModService) UninstallMod(gameID, modName string, force bool) ([]string
 	if err := md.s.refuseWhenShuttingDown("uninstall_mod"); err != nil {
 		return nil, err
 	}
+	release, err := md.s.acquireShared(gameID, dto.GameRunningOperationUninstall)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if !md.s.gameConfigured(gameID) {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
@@ -400,9 +410,17 @@ func modListContains(entries []mod.ModListEntry, modName string) bool {
 
 // RegisterManualInstall is the post-install hook for paths that produce a mod folder without StartInstall, refusing once shutdown began.
 func (md *ModService) RegisterManualInstall(gameID, modName, archiveRelPath string) (int, error) {
+	if err := md.s.awaitRecovery(); err != nil {
+		return 0, err
+	}
 	if err := md.s.refuseWhenShuttingDown("register_install"); err != nil {
 		return 0, err
 	}
+	release, err := md.s.acquireShared(gameID, "register_install")
+	if err != nil {
+		return 0, err
+	}
+	defer release()
 	modDir, err := md.manualInstallDir(gameID, modName)
 	if err != nil {
 		return 0, err
@@ -509,6 +527,14 @@ func (md *ModService) ListOverwriteFiles(gameID string) ([]dto.OverwriteEntryRes
 
 // ExtractOverwriteToMod graduates a subset of loose files from Overwrite.
 func (md *ModService) ExtractOverwriteToMod(gameID, modName string, files []string, keep bool) (int, error) {
+	if err := md.s.awaitRecovery(); err != nil {
+		return 0, err
+	}
+	release, err := md.s.acquireShared(gameID, "extract_overwrite")
+	if err != nil {
+		return 0, err
+	}
+	defer release()
 	if !md.s.gameConfigured(gameID) {
 		return 0, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}

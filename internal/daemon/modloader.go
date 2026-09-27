@@ -771,26 +771,15 @@ type loaderRecoveryTarget struct {
 	spec    smapi.LoaderSpec
 }
 
-// recoverModLoaders rolls back interrupted loader transactions of every configured loader game once per install directory, registering a pending recovery on failure and returning the directories whose transaction lock was held.
-func (s *session) recoverModLoaders() []loaderRecoveryTarget {
-	s.mu.RLock()
-	gameIDs := make([]string, 0, len(s.config.Games))
-	for gameID := range s.config.Games {
-		gameIDs = append(gameIDs, gameID)
-	}
-	s.mu.RUnlock()
-	var recoverable []string
-	for _, gameID := range gameIDs {
-		if s.deferredFor(gameID, "modloader") == nil {
-			recoverable = append(recoverable, gameID)
-		}
-	}
-	return s.recoverLoaderGames(recoverable, false)
-}
-
 // recoverAddedLoaderGames runs loader recovery for games configured or detected after startup, under each install's exclusive fence.
 func (s *session) recoverAddedLoaderGames(gameIDs []string) {
-	s.recoverLoaderGames(gameIDs, true)
+	var ready []string
+	for _, gameID := range gameIDs {
+		if s.deferredFor(gameID, "modloader") == nil {
+			ready = append(ready, gameID)
+		}
+	}
+	s.recoverLoaderGames(ready, true)
 }
 
 // recoverLoaderGames recovers each install directory of the loader games among gameIDs once, outside s.mu, taking its exclusive fence when fenced, registers a pending recovery for every loader game at a directory whose recovery fails, and returns the directories deferred because another transaction held their lock.
@@ -801,9 +790,6 @@ func (s *session) recoverLoaderGames(gameIDs []string, fenced bool) []loaderReco
 	}
 	var deferred []loaderRecoveryTarget
 	for _, target := range s.loaderRecoveryTargets(gameIDs) {
-		if s.deferredFor(target.gameIDs[0], "modloader") != nil {
-			continue
-		}
 		if !loaderStatePresent(target.gameDir) {
 			continue
 		}

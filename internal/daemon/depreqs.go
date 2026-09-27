@@ -536,6 +536,9 @@ func (md *ModDependencyService) observeDownload(snap download.DownloadSnapshot) 
 
 // consumeLandedArchive installs a landed archive for the dependency requests it satisfies and reports whether it handled the archive.
 func (md *ModDependencyService) consumeLandedArchive(gameID, downloadID, archivePath string, sidecar download.ArchiveSidecar) bool {
+	if md.s.deferredFor(gameID, "install") != nil {
+		return true
+	}
 	if _, _, err := dependencySpecFor(gameID); err != nil {
 		return false
 	}
@@ -649,8 +652,10 @@ func (md *ModDependencyService) installForRequests(gameID, rel, root, install st
 		GameID: gameID, ArchiveRelPath: rel, Mode: dto.InstallAsNewMod,
 	}, root)
 	if installErr != nil {
-		if md.s.shuttingDown.Load() {
-			slog.Warn("dependency install interrupted by shutdown; startup recovery resumes it", "game", gameID, "archive", rel, "err", installErr)
+		var deferred *dto.RecoveryDeferredError
+		var busy *dto.OperationBusyError
+		if md.s.shuttingDown.Load() || errors.As(installErr, &deferred) || errors.As(installErr, &busy) && busy.Operation == "recovery" {
+			slog.Warn("dependency install interrupted; recovery will resume it", "game", gameID, "archive", rel, "err", installErr)
 			return
 		}
 		slog.Warn("dependency install failed", "game", gameID, "archive", rel, "err", installErr)

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -50,14 +51,44 @@ func (ar *ArchiveService) handleLandedArchive(snap download.DownloadSnapshot, ar
 		slog.Warn("handling a landed archive skipped; the next start consumes it for waiting dependency requests but never auto-installs it", "game", snap.GameID, "archive", archivePath, "err", err)
 		return
 	}
+	landing := heldLanding{snap: snap, path: archivePath, sidecar: sidecar}
+	if ar.s.holdDeferredLanding(landing) {
+		return
+	}
+	var release func()
+	for {
+		var err error
+		release, err = ar.s.acquireShared(snap.GameID, "install")
+		if err == nil {
+			break
+		}
+		var busy *dto.OperationBusyError
+		if !errors.As(err, &busy) || busy.Operation != "recovery" {
+			return
+		}
+		select {
+		case <-ar.s.shutdownCh:
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	defer release()
+	if ar.s.holdDeferredLanding(landing) {
+		return
+	}
+	ar.s.mu.RLock()
+	pending := ar.s.recoveryPendingFor(snap.GameID)
+	ar.s.mu.RUnlock()
+	if pending != nil {
+		return
+	}
 	if deps := ar.s.svc.modDeps; deps != nil && deps.consumeLandedArchive(snap.GameID, snap.ID, archivePath, sidecar) {
 		return
 	}
 	settings, _ := config.LoadGameSettings(snap.GameID)
-	if !settings.AutoInstall {
-		return
+	if settings.AutoInstall {
+		ar.autoInstallAfterDownload(snap.GameID, archivePath, sidecar)
 	}
-	ar.autoInstallAfterDownload(snap.GameID, archivePath, sidecar)
 }
 
 // relFromDownloads converts an absolute archive path under DownloadsDir into the index-relative form.
