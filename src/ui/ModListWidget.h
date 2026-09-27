@@ -20,6 +20,7 @@ class QTimer;
 namespace gorganizer {
 
 class ModListWidget;
+class ModListSaveQueue;
 
 class ModListTreeView : public QTreeView {
     Q_OBJECT
@@ -64,9 +65,10 @@ public:
     void reloadAfterFailedSave(const GameInfo& game, const QString& profileName);
     // Rescans the mod folders and adopts the profile's modlist, showing every mod the list lacks as disabled; false when the list is busy or not loaded.
     bool adoptModList(const std::vector<GrpcModListEntry>& entries);
-    // Enables names with one SetModList carrying only the authoritative modlist and those mods, returning its request id or 0 when nothing changed and listing the flipped mods in changedOut.
+    // Enables names from the authoritative modlist and returns the tracked save request ID when flags change.
     quint64 enableModsInProfile(const std::vector<GrpcModListEntry>& authoritative, const QStringList& names,
                                 QStringList* changedOut);
+    bool readyForDependencyEnable() const;
     // Shows a SMAPI dependency report of the loaded profile as row indicators and context-menu actions.
     void setDependencyReport(const GrpcModDependencyReport& report);
     // Removes every SMAPI dependency indicator and forgets the report.
@@ -86,6 +88,7 @@ signals:
     void dependencyFetchRequested(const QStringList& uniqueIds);
     // The user asked to enable the disabled mods that satisfy one mod's SMAPI dependencies.
     void dependencyEnableRequested(const QStringList& modNames);
+    void modListReadyForEnable();
 
 private slots:
     void onConflictsReceived(const std::vector<GrpcFileConflict>& conflicts);
@@ -104,10 +107,11 @@ private slots:
     // Sends the next modlist request after a failed one.
     void onProfileRetryTimeout();
     // Clears the tracking state of a saved dependency enable.
-    void onModListSaved(quint64 requestId, const QString& gameId, const QString& profileName);
-    // Reverts the flags of a failed dependency enable and re-reads the profile's modlist.
-    void onModListSaveFailed(quint64 requestId, const QString& gameId, const QString& profileName,
-                             const QString& error);
+    void onModListSaved(quint64 requestId);
+    // Reloads the saved profile after a queued mod-list save fails.
+    void onModListSaveFailed(quint64 requestId);
+    // Resumes a deferred profile read once every queued save has completed.
+    void onModListSavesDrained();
 
 private:
     friend class ModListTreeView;
@@ -120,6 +124,8 @@ private:
     std::vector<ModMetadata> scanCatalog() const;
     // Records the order of a modlist the list sends as the loaded profile's order once its modlist was adopted.
     void noteSentModList(const std::vector<GrpcModListEntry>& entries);
+    // Records an optimistic edit and queues its full mod list for saving.
+    quint64 submitModList(const std::vector<GrpcModListEntry>& entries);
     // Requests the loaded profile's modlist and restarts the retry budget.
     void requestProfileModList();
     // Sends one modlist request for the loaded profile.
@@ -167,6 +173,7 @@ private:
     void extractOverwriteSelected();
 
     GrpcClient* m_grpc;
+    ModListSaveQueue* m_saveQueue;
     ModListTreeView* m_view;
     ModListModel* m_model;
     QWidget* m_placeholder;
@@ -205,6 +212,8 @@ private:
     int m_profileRetryAttempts = 0;
     bool m_profileLoadFailed = false;
     QString m_profileLoadError;
+    bool m_restoringSavedProfile = false;
+    bool m_savedProfileRestored = false;
     struct EnableSave {
         QString gameId;
         QString profileName;
