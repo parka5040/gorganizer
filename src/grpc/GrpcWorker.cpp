@@ -503,7 +503,7 @@ GrpcProfile GrpcWorker::profileFromProto(const gorganizer::v1::Profile& p)
 
 GrpcVFSStatus GrpcWorker::vfsStatusFromProto(const gorganizer::v1::VFSStatus& s)
 {
-    return {
+    GrpcVFSStatus out{
         .mounted = s.mounted(),
         .gameId = QString::fromStdString(s.game_id()),
         .profileName = QString::fromStdString(s.profile_name()),
@@ -516,6 +516,19 @@ GrpcVFSStatus GrpcWorker::vfsStatusFromProto(const gorganizer::v1::VFSStatus& s)
         .lifecycleState = vfsLifecycleFromProto(s.lifecycle_state()),
         .lifecycleReason = QString::fromStdString(s.lifecycle_reason()),
     };
+    if (s.has_pending_recovery()) {
+        const auto& pending = s.pending_recovery();
+        out.hasPendingRecovery = true;
+        out.pendingRecovery = {
+            QString::fromStdString(pending.game_id()),
+            QString::fromStdString(pending.data_path()),
+            QString::fromStdString(pending.backup_path()),
+            QString::fromStdString(pending.reason()),
+            recoveryKindFromProto(pending.kind()),
+            QString::fromStdString(pending.recovery_id()),
+        };
+    }
+    return out;
 }
 
 GrpcFileConflict GrpcWorker::conflictFromProto(const gorganizer::v1::FileConflict& c)

@@ -796,6 +796,37 @@ func TestRecoveryContractConversions(t *testing.T) {
 	}
 }
 
+// TestVFSStatusToProtoCarriesPendingRecovery converts optional recovery details and every supported kind.
+func TestVFSStatusToProtoCarriesPendingRecovery(t *testing.T) {
+	if got := vfsStatusToProto(&dto.VFSStatusResult{GameID: "falloutnv"}); got.GetPendingRecovery() != nil {
+		t.Fatalf("status without recovery has pending item: %+v", got.GetPendingRecovery())
+	}
+	for _, tc := range []struct {
+		name string
+		kind dto.RecoveryKind
+		want pb.RecoveryKind
+	}{
+		{"data", dto.RecoveryKindData, pb.RecoveryKind_RECOVERY_KIND_DATA},
+		{"loader", dto.RecoveryKindModLoader, pb.RecoveryKind_RECOVERY_KIND_MOD_LOADER},
+		{"root", dto.RecoveryKindGameRoot, pb.RecoveryKind_RECOVERY_KIND_GAME_ROOT},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pending := &dto.RecoveryPendingResult{
+				GameID: "ttw", DataPath: "Data", BackupPath: "Data.orig",
+				Reason: "needs recovery", Kind: tc.kind, RecoveryID: "shared-id",
+			}
+			got := vfsStatusToProto(&dto.VFSStatusResult{GameID: "ttw", PendingRecovery: pending})
+			want := &pb.RecoveryPending{
+				GameId: "ttw", DataPath: "Data", BackupPath: "Data.orig",
+				Reason: "needs recovery", Kind: tc.want, RecoveryId: "shared-id",
+			}
+			if !proto.Equal(got.GetPendingRecovery(), want) {
+				t.Errorf("pending recovery = %+v, want %+v", got.GetPendingRecovery(), want)
+			}
+		})
+	}
+}
+
 // TestRecoveryRPCBindings checks confirmations, retry status and deferred retry refusals through the handlers.
 func TestRecoveryRPCBindings(t *testing.T) {
 	fake := &fakeController{vfsStatus: &dto.VFSStatusResult{GameID: "stardewvalley", LifecycleState: dto.VFSLifecycleStateReady}}

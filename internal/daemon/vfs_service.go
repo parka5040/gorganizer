@@ -53,10 +53,24 @@ func (s *session) recoveryLifecycleLocked(gameID string) (dto.VFSLifecycleState,
 	return dto.VFSLifecycleStateReady, ""
 }
 
+// pendingRecoveryForStatusLocked copies the pending recovery with the requested game's ID.
+func (s *session) pendingRecoveryForStatusLocked(gameID string) *dto.RecoveryPendingResult {
+	pending := s.recoveryPendingFor(gameID)
+	if pending == nil {
+		return nil
+	}
+	copy := *pending
+	copy.GameID = gameID
+	return &copy
+}
+
 // unmountedVFSStatusLocked reports an install's lifecycle without an active mount; the caller holds s.mu.
 func (s *session) unmountedVFSStatusLocked(gameID string) *dto.VFSStatusResult {
 	state, reason := s.recoveryLifecycleLocked(gameID)
-	return &dto.VFSStatusResult{GameID: gameID, LifecycleState: state, LifecycleReason: reason}
+	return &dto.VFSStatusResult{
+		GameID: gameID, LifecycleState: state, LifecycleReason: reason,
+		PendingRecovery: s.pendingRecoveryForStatusLocked(gameID),
+	}
 }
 
 // vfsStatus builds a VFSStatusResult from the mount's live generation counters and recovery lifecycle; the caller holds s.mu.
@@ -89,6 +103,7 @@ func (vs *VFSService) vfsStatus(gameID string, gc config.GameConfig, profileName
 		DesiredGen:      desired,
 		LifecycleState:  state,
 		LifecycleReason: reason,
+		PendingRecovery: vs.s.pendingRecoveryForStatusLocked(gameID),
 	}
 }
 

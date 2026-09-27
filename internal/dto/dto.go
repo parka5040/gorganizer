@@ -84,6 +84,7 @@ type VFSStatusResult struct {
 	AppliedGen      uint64
 	LifecycleState  VFSLifecycleState
 	LifecycleReason string
+	PendingRecovery *RecoveryPendingResult
 }
 
 type FileConflictResult struct {

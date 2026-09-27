@@ -1075,7 +1075,7 @@ func vfsLifecycleToProto(state dto.VFSLifecycleState) pb.VFSLifecycleState {
 }
 
 func vfsStatusToProto(st *dto.VFSStatusResult) *pb.VFSStatus {
-	return &pb.VFSStatus{
+	out := &pb.VFSStatus{
 		Mounted:         st.Mounted,
 		GameId:          st.GameID,
 		ProfileName:     st.ProfileName,
@@ -1088,6 +1088,17 @@ func vfsStatusToProto(st *dto.VFSStatusResult) *pb.VFSStatus {
 		LifecycleState:  vfsLifecycleToProto(st.LifecycleState),
 		LifecycleReason: st.LifecycleReason,
 	}
+	if pending := st.PendingRecovery; pending != nil {
+		out.PendingRecovery = &pb.RecoveryPending{
+			GameId:     pending.GameID,
+			DataPath:   pending.DataPath,
+			BackupPath: pending.BackupPath,
+			Reason:     pending.Reason,
+			Kind:       recoveryKindToProto(pending.Kind),
+			RecoveryId: pending.RecoveryID,
+		}
+	}
+	return out
 }
 
 func downloadProgressToProto(p *dto.DownloadProgressResult) *pb.DownloadProgress {
