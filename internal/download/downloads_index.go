@@ -26,19 +26,19 @@ type DownloadsIndex struct {
 }
 
 type ArchiveSidecar struct {
-	ModID           int
-	ModName         string
-	GameDomain      string
-	ThumbnailURL    string
-	AdultContent    bool
-	FileID          int
-	FileName        string
-	FileArchiveName string
-	Version         string
-	Category        string
-	UploadedAt      string
-	DownloadedAt    string
-	SizeBytes       int64
+	ModID           int    `json:"mod_id"`
+	ModName         string `json:"mod_name"`
+	GameDomain      string `json:"game_domain"`
+	ThumbnailURL    string `json:"thumbnail_url"`
+	AdultContent    bool   `json:"adult_content"`
+	FileID          int    `json:"file_id"`
+	FileName        string `json:"file_name"`
+	FileArchiveName string `json:"file_archive_name"`
+	Version         string `json:"version"`
+	Category        string `json:"category"`
+	UploadedAt      string `json:"uploaded_at"`
+	DownloadedAt    string `json:"downloaded_at"`
+	SizeBytes       int64  `json:"size_bytes"`
 }
 
 var (

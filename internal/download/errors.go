@@ -36,6 +36,34 @@ func (e *ArchiveSaveError) Unwrap() error {
 	return e.Err
 }
 
+type ArchiveInformationSaveError struct {
+	Err error
+}
+
+// Error tells the user how to finish saving an already downloaded archive.
+func (e *ArchiveInformationSaveError) Error() string {
+	return "The archive downloaded, but its information could not be saved. Choose Retry to finish without downloading it again."
+}
+
+// Unwrap returns the underlying archive information save failure.
+func (e *ArchiveInformationSaveError) Unwrap() error {
+	return e.Err
+}
+
+type LandingRecoveryError struct {
+	Err error
+}
+
+// Error tells the user to remove a landing that cannot be recovered.
+func (e *LandingRecoveryError) Error() string {
+	return "This saved download cannot be finished. Remove it and download it again."
+}
+
+// Unwrap returns the failure that prevented the landing from being recovered.
+func (e *LandingRecoveryError) Unwrap() error {
+	return e.Err
+}
+
 type NXMExpiredError struct {
 	URI string
 }

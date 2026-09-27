@@ -122,7 +122,7 @@ func TestDownloadDiagnosticsContainNoCredentials(t *testing.T) {
 		}
 	}
 	seedPart()
-	m.runPipeline(context.Background(), &Download{ID: "first", GameID: gameID, NXMURI: nxmURI})
+	m.runPipeline(context.Background(), &Download{ID: "dl-00000000-0000-4000-8000-000000000001", GameID: gameID, NXMURI: nxmURI})
 	if snapshot.Status != StatusDownloaded {
 		t.Fatalf("first pipeline status = %v, error = %q", snapshot.Status, snapshot.Error)
 	}

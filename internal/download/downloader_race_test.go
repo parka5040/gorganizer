@@ -188,7 +188,7 @@ func TestProgressHookCanReenterManager(t *testing.T) {
 func TestConcurrentRetryHasOneWriter(t *testing.T) {
 	isolatedDownloadRoot(t)
 	const gameID = "skyrimse"
-	if err := SaveLedger(gameID, []LedgerEntry{{ID: "retry", GameID: gameID, GameSlug: "skyrimspecialedition", ModID: 7, FileID: 8, ArchiveRelPath: "7_Example/archive.zip", NXMURI: pipelineURI, Status: LedgerFailed}}); err != nil {
+	if err := SaveLedger(gameID, []LedgerEntry{{ID: "dl-00000000-0000-4000-8000-000000000001", GameID: gameID, GameSlug: "skyrimspecialedition", ModID: 7, FileID: 8, ArchiveRelPath: "7_Example/archive.zip", NXMURI: pipelineURI, Status: LedgerFailed}}); err != nil {
 		t.Fatal(err)
 	}
 	body := &slowPipelineBody{started: make(chan struct{}), release: make(chan struct{}), remaining: 1}
@@ -211,7 +211,7 @@ func TestConcurrentRetryHasOneWriter(t *testing.T) {
 	for range 2 {
 		go func() {
 			<-start
-			_, err := m.RetryDownload("retry", []string{gameID})
+			_, err := m.RetryDownload("dl-00000000-0000-4000-8000-000000000001", []string{gameID})
 			results <- err
 		}()
 	}

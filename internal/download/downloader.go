@@ -14,10 +14,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/dto"
 	"github.com/parka/gorganizer/internal/httpx"
 )
@@ -61,6 +61,7 @@ type Manager struct {
 	nexus        URLResolver
 	httpClient   *http.Client
 	openPart     func(string, string, bool) (archivePart, error)
+	landing      landingActions
 	mu           sync.RWMutex
 	active       map[string]*Download
 	queued       []*Download
@@ -395,6 +396,18 @@ func (m *Manager) RehydrateLedger(gameIDs []string) {
 			if e.Terminal() {
 				continue
 			}
+			if present, err := HasLanding(gameID, e.ID); present || err != nil {
+				if err != nil {
+					slog.Warn("checking archive landing failed", "game", gameID, "id", e.ID, "err", err)
+				} else {
+					e.Status = LedgerFailed
+					e.Error = (&ArchiveInformationSaveError{}).Error()
+					if err := UpsertLedgerEntry(e); err != nil {
+						slog.Warn("marking unfinished landing failed", "game", gameID, "id", e.ID, "err", err)
+					}
+				}
+				continue
+			}
 			if err := validateLedgerDestination(gameID, e); err != nil {
 				m.rejectLedgerEntry(gameID, e, err)
 				continue
@@ -599,15 +612,16 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 		m.fail(dl, fmt.Errorf("%w: incomplete archive part", ErrDownloadFailed))
 		return
 	}
-	if err := os.Rename(partPath, archivePath); err != nil {
-		m.fail(dl, fmt.Errorf("renaming .part: %w", err))
+	if err := UpsertLedgerEntry(LedgerEntry{
+		ID: state.ID, GameID: state.GameID, NXMURI: state.NXMURI,
+		GameSlug: state.GameSlug, ModID: state.ModID, FileID: state.FileID,
+		ArchiveRelPath: state.ArchiveRel,
+		BytesDone:      state.BytesDownloaded, BytesTotal: state.BytesTotal,
+		Status: LedgerDownloading,
+	}); err != nil {
+		m.fail(dl, &ArchiveSaveError{Err: fmt.Errorf("saving download ledger: %w", err)})
 		return
 	}
-	if err := atomicfile.SyncDir(filepath.Dir(archivePath)); err != nil {
-		slog.Warn("syncing download directory failed", "err", err)
-	}
-
-	relArchive := state.ArchiveRel
 	sidecar := ArchiveSidecar{
 		ModID:           link.ModID,
 		ModName:         modName,
@@ -626,20 +640,49 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 		sidecar.Category = NormalizeCategory(fileDetails.CategoryName)
 		sidecar.UploadedAt = fileDetails.UploadedTime
 	}
-	if err := checkArchiveFolder(archivePath, state.ArchiveRel); err != nil {
+	info, err := os.Lstat(partPath)
+	if err != nil {
+		m.fail(dl, fmt.Errorf("checking archive part identity: %w", err))
+		return
+	}
+	if !info.Mode().IsRegular() {
+		m.fail(dl, &ArchiveRejectedError{Reason: ArchiveRejectedDestination, Detail: state.ArchiveRel})
+		return
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		m.fail(dl, fmt.Errorf("checking archive part identity: unsupported file identity"))
+		return
+	}
+	created := time.Now().UTC()
+	sidecar.DownloadedAt = created.Format(time.RFC3339)
+	record := landingRecord{
+		SchemaVersion: landingSchemaVersion, ID: state.ID, GameID: state.GameID,
+		ArchiveRel: state.ArchiveRel, Size: info.Size(),
+		PartDev: uint64(stat.Dev), PartIno: stat.Ino,
+		Sidecar: sidecar, IndexEntry: landingIndexEntry{
+			Path: state.ArchiveRel, ModID: link.ModID, FileID: link.FileID,
+		}, CreatedAt: created,
+	}
+	lock := landingLock(state.GameID)
+	lock.Lock()
+	err = writeLanding(record)
+	if err != nil {
+		err = &ArchiveSaveError{Err: err}
+	} else {
+		_, err = finishLandingLocked(record, m.landing)
+		if err != nil {
+			var informationErr *ArchiveInformationSaveError
+			if !errors.As(err, &informationErr) {
+				err = &ArchiveInformationSaveError{Err: err}
+			}
+		}
+	}
+	lock.Unlock()
+	if err != nil {
 		m.fail(dl, err)
 		return
 	}
-	if err := SaveSidecar(archivePath, sidecar, time.Now()); err != nil {
-		slog.Warn("writing sidecar failed", "err", err)
-	}
-	if err := UpsertEntry(state.GameID, IndexEntry{
-		Path: relArchive, ModID: link.ModID, FileID: link.FileID,
-	}); err != nil {
-		slog.Warn("updating downloads index failed", "err", err)
-	}
-
-	_ = RemoveLedgerEntry(state.GameID, state.ID)
 
 	state = m.update(dl, func(d *Download) { d.Status = StatusDownloaded })
 	m.emitProgress(state)
@@ -837,8 +880,11 @@ func (m *Manager) fail(dl *Download, err error) {
 	})
 	m.emitProgress(state)
 	var saveErr *ArchiveSaveError
+	var informationErr *ArchiveInformationSaveError
 	if errors.As(err, &saveErr) {
 		slog.Error("download failed", "id", state.ID, "err", redactHTTPError(saveErr.Err))
+	} else if errors.As(err, &informationErr) {
+		slog.Error("saving archive information failed", "id", state.ID, "err", informationErr.Err)
 	} else {
 		slog.Error("download failed", "id", state.ID, "err", err)
 	}

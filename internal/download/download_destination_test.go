@@ -118,7 +118,7 @@ func TestNexusFilenameCannotEscapeDownloads(t *testing.T) {
 	root := isolatedDownloadRoot(t)
 	var snapshot DownloadSnapshot
 	m := destinationManager(destinationResolver{filename: "../../escape.zip", url: "https://cdn.example/archive.zip"}, &snapshot)
-	dl := &Download{ID: "download-1", GameID: "skyrimse", NXMURI: "nxm://skyrimse/mods/7/files/8"}
+	dl := &Download{ID: "dl-00000000-0000-4000-8000-000000000001", GameID: "skyrimse", NXMURI: "nxm://skyrimse/mods/7/files/8"}
 	m.runPipeline(context.Background(), dl)
 	if snapshot.Status != StatusDownloaded {
 		t.Fatalf("status = %v, error = %s", snapshot.Status, snapshot.Error)
@@ -145,7 +145,7 @@ func TestResumeRejectsUnsafeLedgerDestination(t *testing.T) {
 			if err := os.WriteFile(outside, []byte("keep"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			e := LedgerEntry{ID: "download-1", GameID: "skyrimse", NXMURI: "nxm://skyrimse/mods/7/files/8", ArchiveRelPath: rel, Status: LedgerDownloading}
+			e := LedgerEntry{ID: "dl-00000000-0000-4000-8000-000000000001", GameID: "skyrimse", NXMURI: "nxm://skyrimse/mods/7/files/8", ArchiveRelPath: rel, Status: LedgerDownloading}
 			if err := SaveLedger(e.GameID, []LedgerEntry{e}); err != nil {
 				t.Fatal(err)
 			}
@@ -194,7 +194,7 @@ func TestDownloadRejectsSymlinkPart(t *testing.T) {
 	}
 	var snapshot DownloadSnapshot
 	m := destinationManager(destinationResolver{filename: "archive.zip", url: "https://cdn.example/archive.zip"}, &snapshot)
-	m.runPipeline(context.Background(), &Download{ID: "download-1", GameID: "skyrimse", NXMURI: "nxm://skyrimse/mods/7/files/8"})
+	m.runPipeline(context.Background(), &Download{ID: "dl-00000000-0000-4000-8000-000000000001", GameID: "skyrimse", NXMURI: "nxm://skyrimse/mods/7/files/8"})
 	if snapshot.Status != StatusFailed || !strings.Contains(snapshot.Error, "archive rejected: destination") {
 		t.Fatalf("status = %v, error = %s", snapshot.Status, snapshot.Error)
 	}
@@ -216,7 +216,7 @@ func TestDownloadRejectsNonRegularPart(t *testing.T) {
 	}
 	var snapshot DownloadSnapshot
 	m := destinationManager(destinationResolver{filename: "archive.zip", url: "https://cdn.example/archive.zip"}, &snapshot)
-	m.runPipeline(context.Background(), &Download{ID: "download-1", GameID: "skyrimse", NXMURI: "nxm://skyrimse/mods/7/files/8"})
+	m.runPipeline(context.Background(), &Download{ID: "dl-00000000-0000-4000-8000-000000000001", GameID: "skyrimse", NXMURI: "nxm://skyrimse/mods/7/files/8"})
 	if snapshot.Status != StatusFailed || !strings.Contains(snapshot.Error, "archive rejected: destination") {
 		t.Fatalf("status = %v, error = %s", snapshot.Status, snapshot.Error)
 	}
@@ -255,7 +255,7 @@ func TestDownloadRejectsSymlinkFolder(t *testing.T) {
 	}
 	var snapshot DownloadSnapshot
 	m := destinationManager(destinationResolver{filename: "archive.zip", url: "https://cdn.example/archive.zip"}, &snapshot)
-	m.runPipeline(context.Background(), &Download{ID: "download-1", GameID: "skyrimse", NXMURI: "nxm://skyrimse/mods/7/files/8"})
+	m.runPipeline(context.Background(), &Download{ID: "dl-00000000-0000-4000-8000-000000000001", GameID: "skyrimse", NXMURI: "nxm://skyrimse/mods/7/files/8"})
 	if snapshot.Status != StatusFailed || !strings.Contains(snapshot.Error, "archive rejected: destination") {
 		t.Fatalf("status = %v, error = %s", snapshot.Status, snapshot.Error)
 	}

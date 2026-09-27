@@ -44,9 +44,10 @@ type installRecoveryUnit struct {
 }
 
 type heldLanding struct {
-	snap    download.DownloadSnapshot
-	path    string
-	sidecar download.ArchiveSidecar
+	snap        download.DownloadSnapshot
+	path        string
+	sidecar     download.ArchiveSidecar
+	autoInstall bool
 }
 
 // writeLaunchTicket durably records a launch before handing it to Steam or the script extender.
@@ -335,7 +336,7 @@ func (s *session) replayDeferredLandings(gameID string) {
 				if s.shuttingDown.Load() {
 					return
 				}
-				s.svc.archives.handleLandedArchive(landing.snap, landing.path, landing.sidecar)
+				s.svc.archives.handleLandedArchiveMode(landing.snap, landing.path, landing.sidecar, landing.autoInstall)
 			}
 		})
 	}
