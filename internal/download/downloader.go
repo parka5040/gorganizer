@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/dto"
 	"github.com/parka/gorganizer/internal/httpx"
 )
@@ -187,6 +186,10 @@ func (m *Manager) RetryDownload(id string, gameIDs []string) (queuedAhead int, e
 			if e.ID != id {
 				continue
 			}
+			if err := validateLedgerDestination(gameID, e); err != nil {
+				m.rejectLedgerEntry(gameID, e, err)
+				return 0, err
+			}
 			if e.NXMURI == "" {
 				return 0, fmt.Errorf("ledger entry %q has no NXM URI; cannot retry", id)
 			}
@@ -293,7 +296,8 @@ func (m *Manager) ActiveDownloadIDByArchive(absArchive string) string {
 		if dl.ArchiveRel == "" {
 			continue
 		}
-		if filepath.Join(config.DownloadsDir(dl.GameID), dl.ArchiveRel) == absArchive {
+		path, err := resolveArchiveDestination(dl.GameID, dl.ArchiveRel)
+		if err == nil && path == absArchive {
 			return dl.ID
 		}
 	}
@@ -329,6 +333,10 @@ func (m *Manager) RehydrateLedger(gameIDs []string) {
 			if e.Terminal() {
 				continue
 			}
+			if err := validateLedgerDestination(gameID, e); err != nil {
+				m.rejectLedgerEntry(gameID, e, err)
+				continue
+			}
 			if e.NXMURI == "" {
 				slog.Warn("ledger entry has no URI; marking failed", "id", e.ID)
 				upd := e
@@ -359,6 +367,17 @@ func (m *Manager) RehydrateLedger(gameIDs []string) {
 		}
 	}
 	m.signalPump()
+}
+
+// rejectLedgerEntry records a refused destination without changing its persisted path.
+func (m *Manager) rejectLedgerEntry(gameID string, e LedgerEntry, err error) {
+	e.GameID = gameID
+	e.Status = LedgerFailed
+	e.Error = err.Error()
+	if saveErr := UpsertLedgerEntry(e); saveErr != nil {
+		slog.Warn("could not mark download failed", "id", e.ID, "err", saveErr)
+	}
+	m.emitProgress(&Download{ID: e.ID, GameID: gameID, Status: StatusFailed, Error: e.Error})
 }
 
 func (m *Manager) signalPump() {
@@ -428,8 +447,13 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 	m.emitProgress(dl)
 
 	fileDetails, _ := m.nexus.GetFileDetails(link.GameSlug, link.ModID, link.FileID)
+	cdnURL, err := m.nexus.ResolveDownloadURL(link)
+	if err != nil {
+		m.fail(dl, fmt.Errorf("resolving CDN URL: %w", err))
+		return
+	}
 
-	archiveFilename := pickArchiveFilename(fileDetails, "", link)
+	archiveFilename := pickArchiveFilename(fileDetails, cdnURL, link)
 	folder := fmt.Sprintf("%d_%s", link.ModID, SanitizeForFolder(modName))
 	if strings.TrimSpace(modName) == "" {
 		folder = fmt.Sprintf("%d", link.ModID)
@@ -437,25 +461,22 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 	if dl.ArchiveRel == "" {
 		dl.ArchiveRel = filepath.Join(folder, archiveFilename)
 	}
-	downloadsDir := config.DownloadsDir(dl.GameID)
-	archivePath := filepath.Join(downloadsDir, dl.ArchiveRel)
-	if err := os.MkdirAll(filepath.Dir(archivePath), 0755); err != nil {
-		m.fail(dl, fmt.Errorf("creating archive dir: %w", err))
+	archivePath, err := resolveArchiveDestination(dl.GameID, dl.ArchiveRel)
+	if err != nil {
+		m.fail(dl, err)
+		return
+	}
+	if err := ensureArchiveFolder(archivePath, dl.ArchiveRel); err != nil {
+		m.fail(dl, err)
 		return
 	}
 	partPath := PartPath(archivePath)
-
-	cdnURL, err := m.nexus.ResolveDownloadURL(link)
+	resumeFrom, err := partSize(partPath, dl.ArchiveRel)
 	if err != nil {
-		m.fail(dl, fmt.Errorf("resolving CDN URL: %w", err))
+		m.fail(dl, err)
 		return
 	}
-
-	var resumeFrom int64
-	if fi, statErr := os.Stat(partPath); statErr == nil {
-		resumeFrom = fi.Size()
-		dl.BytesDownloaded = resumeFrom
-	}
+	dl.BytesDownloaded = resumeFrom
 
 	_ = UpsertLedgerEntry(LedgerEntry{
 		ID: dl.ID, GameID: dl.GameID, NXMURI: dl.NXMURI,
@@ -477,13 +498,23 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 				BytesDone:      dl.BytesDownloaded, BytesTotal: dl.BytesTotal,
 				Status: LedgerCancelled, Error: "cancelled",
 			})
-			os.Remove(partPath)
+			if checkArchiveFolder(archivePath, dl.ArchiveRel) == nil {
+				_ = os.Remove(partPath)
+			}
 			return
 		}
 		m.fail(dl, err)
 		return
 	}
 
+	if err := checkArchiveFolder(archivePath, dl.ArchiveRel); err != nil {
+		m.fail(dl, err)
+		return
+	}
+	if _, err := partSize(partPath, dl.ArchiveRel); err != nil {
+		m.fail(dl, err)
+		return
+	}
 	if err := os.Rename(partPath, archivePath); err != nil {
 		m.fail(dl, fmt.Errorf("renaming .part: %w", err))
 		return
@@ -495,7 +526,7 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 		ModName:         modName,
 		GameDomain:      link.GameSlug,
 		FileID:          link.FileID,
-		FileArchiveName: archiveFilename,
+		FileArchiveName: filepath.Base(archivePath),
 		SizeBytes:       dl.BytesDownloaded,
 	}
 	if modInfo != nil {
@@ -507,6 +538,10 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 		sidecar.Version = fileDetails.Version
 		sidecar.Category = NormalizeCategory(fileDetails.CategoryName)
 		sidecar.UploadedAt = fileDetails.UploadedTime
+	}
+	if err := checkArchiveFolder(archivePath, dl.ArchiveRel); err != nil {
+		m.fail(dl, err)
+		return
 	}
 	if err := SaveSidecar(archivePath, sidecar, time.Now()); err != nil {
 		slog.Warn("writing sidecar failed", "err", err)
@@ -548,9 +583,8 @@ func (m *Manager) streamToFile(ctx context.Context, cdnURL, destPath string, res
 	switch resp.StatusCode {
 	case http.StatusOK:
 		if resumeFrom > 0 {
-			slog.Warn("server ignored Range header; restarting from 0", "url", cdnURL)
+			slog.Warn("server ignored Range header; restarting from 0")
 			resumeFrom = 0
-			_ = os.Truncate(destPath, 0)
 			dl.BytesDownloaded = 0
 		}
 	case http.StatusPartialContent:
@@ -562,16 +596,19 @@ func (m *Manager) streamToFile(ctx context.Context, cdnURL, destPath string, res
 		dl.BytesTotal = cl + resumeFrom
 	}
 
-	var out *os.File
-	if resumeFrom > 0 {
-		out, err = os.OpenFile(destPath, os.O_WRONLY|os.O_APPEND, 0644)
-	} else {
-		out, err = os.Create(destPath)
+	if err := checkArchiveFolder(destPath, dl.ArchiveRel); err != nil {
+		return err
 	}
+	out, err := openArchivePart(destPath, dl.ArchiveRel, resumeFrom > 0)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
+	if resumeFrom == 0 {
+		if err := out.Truncate(0); err != nil {
+			return fmt.Errorf("truncating archive part: %w", err)
+		}
+	}
 
 	buf := make([]byte, 64*1024)
 	var lastLedger time.Time
@@ -641,13 +678,14 @@ func snapshotOf(dl *Download) DownloadSnapshot {
 
 // pickArchiveFilename chooses the on-disk filename for an archive.
 func pickArchiveFilename(details *NexusFileDetails, downloadURL string, link *NXMLink) string {
-	if details != nil && details.FileName != "" {
-		return details.FileName
+	if details != nil {
+		if name, ok := SafeArchiveFilename(details.FileName); ok {
+			return name
+		}
 	}
 	if u, err := neturl.Parse(downloadURL); err == nil {
-		base := filepath.Base(u.Path)
-		if base != "" && base != "." && base != "/" {
-			return base
+		if name, ok := SafeArchiveFilename(u.Path); ok {
+			return name
 		}
 	}
 	return fmt.Sprintf("%d_%d.archive", link.ModID, link.FileID)
