@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -140,7 +141,9 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 		return fmt.Errorf("writing sentinel: %w", err)
 	}
 
-	_ = RemoveIntent(intentPath)
+	if err := RemoveIntent(intentPath); err != nil {
+		slog.Warn("activation committed but could not remove intent", "path", intentPath, "err", err)
+	}
 
 	m.tree = tree
 	m.layers = layers
@@ -318,23 +321,22 @@ func (m *MountManager) ReMaterialize() error {
 	}
 
 	if err := renameExchange(dataPath, staging); err != nil {
-		oldFarm := oldFarmPath(dataPath)
-		_ = os.RemoveAll(oldFarm)
-		if rerr := os.Rename(dataPath, oldFarm); rerr != nil {
-			_ = os.RemoveAll(staging)
-			_ = RemoveIntent(applyPath)
-			return fmt.Errorf("apply swap (fallback, aside): %w", rerr)
+		if rmErr := os.RemoveAll(staging); rmErr != nil {
+			err = errors.Join(err, fmt.Errorf("removing staging overlay: %w", rmErr))
 		}
-		if rerr := os.Rename(staging, dataPath); rerr != nil {
-			_ = os.Rename(oldFarm, dataPath)
-			_ = RemoveIntent(applyPath)
-			return fmt.Errorf("apply swap (fallback, in): %w", rerr)
+		if rmErr := RemoveIntent(applyPath); rmErr != nil {
+			err = errors.Join(err, rmErr)
 		}
-		_ = os.RemoveAll(oldFarm)
+		if errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EINVAL) {
+			return fmt.Errorf("this game's drive does not support the atomic folder swap Gorganizer needs to apply changes while mods are active; deactivate mods, then apply: %w", err)
+		}
+		return fmt.Errorf("apply swap: %w", err)
 	}
 
 	_ = os.RemoveAll(staging)
-	_ = RemoveIntent(applyPath)
+	if err := RemoveIntent(applyPath); err != nil {
+		slog.Warn("apply committed but could not remove intent", "path", applyPath, "err", err)
+	}
 	m.appliedGen = targetGen
 	m.appliedLayers = append([]Layer(nil), m.layers...)
 
@@ -435,5 +437,3 @@ func layersForSentinel(layers []Layer) []SentinelLayer {
 	}
 	return out
 }
-
-var _ = errors.Is

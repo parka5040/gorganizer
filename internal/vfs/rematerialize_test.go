@@ -1,8 +1,12 @@
 package vfs
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -71,6 +75,93 @@ func TestReMaterialize_AppliesModAndCapturesWrites(t *testing.T) {
 			t.Errorf("residue left behind: %s", sib)
 		}
 	}
+}
+
+// TestExchangeErrorsNeverUsePlainRenames leaves the old farm mounted and dirty when an atomic swap fails.
+func TestExchangeErrorsNeverUsePlainRenames(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{name: "unsupported syscall", err: syscall.ENOSYS},
+		{name: "unsupported filesystem", err: syscall.EINVAL},
+		{name: "other exchange error", err: errors.New("exchange refused")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			dataPath := filepath.Join(dir, "Data")
+			modPath := filepath.Join(dir, "Mod")
+			mustFile(t, filepath.Join(dataPath, "Skyrim.esm"), "master")
+			mustFile(t, filepath.Join(modPath, "Mod.esp"), "mod")
+			mm := NewMountManager(dataPath, "", "skyrimse")
+			if err := mm.Activate([]Layer{{Name: "__base__", RootPath: dataPath, Enabled: true}}, ""); err != nil {
+				t.Fatalf("Activate: %v", err)
+			}
+			t.Cleanup(func() { _ = mm.Deactivate() })
+			mustFile(t, filepath.Join(dataPath, "Saves", "quicksave.ess"), "SAVEDATA")
+			if err := mm.MarkDirty([]Layer{
+				{Name: "__base__", RootPath: dataPath, Enabled: true},
+				{Name: "Mod", RootPath: modPath, Enabled: true},
+			}); err != nil {
+				t.Fatalf("MarkDirty: %v", err)
+			}
+			before := farmFiles(t, dataPath)
+			appliedBefore, desiredBefore := mm.Generations()
+			originalExchange := renameExchange
+			renameExchange = func(_, _ string) error { return tc.err }
+			t.Cleanup(func() { renameExchange = originalExchange })
+
+			err := mm.ReMaterialize()
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("ReMaterialize error = %v, want %v", err, tc.err)
+			}
+			if (errors.Is(tc.err, syscall.ENOSYS) || errors.Is(tc.err, syscall.EINVAL)) &&
+				!strings.Contains(err.Error(), "this game's drive does not support the atomic folder swap") {
+				t.Errorf("unsupported swap error lacks user guidance: %v", err)
+			}
+			if got := farmFiles(t, dataPath); !reflect.DeepEqual(got, before) {
+				t.Errorf("Data changed after failed exchange: before=%v after=%v", before, got)
+			}
+			for _, path := range []string{oldFarmPath(dataPath), stagingDirPath(dataPath), applyingIntentPath(dataPath)} {
+				if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+					t.Errorf("transition sibling %s still exists: %v", path, statErr)
+				}
+			}
+			appliedAfter, desiredAfter := mm.Generations()
+			if appliedAfter != appliedBefore || desiredAfter != desiredBefore || !mm.IsDirty() {
+				t.Errorf("generations after failed exchange = %d/%d, want dirty %d/%d", appliedAfter, desiredAfter, appliedBefore, desiredBefore)
+			}
+		})
+	}
+}
+
+// farmFiles returns the relative file contents in a farm for comparing a failed swap against its original state.
+func farmFiles(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	files := make(map[string]string)
+	if err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			files[rel+"/"] = ""
+			return nil
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		files[rel] = string(body)
+		return nil
+	}); err != nil {
+		t.Fatalf("walking farm %s: %v", dir, err)
+	}
+	return files
 }
 
 // TestReMaterialize_MaterializesLatestTree locks that the latest tree is applied and appliedGen reaches desiredGen.

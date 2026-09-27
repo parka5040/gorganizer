@@ -106,9 +106,9 @@ func ReadIntent(markerPath string) (*ActivationIntent, error) {
 	return &in, nil
 }
 
-// RemoveIntent deletes an intent marker; idempotent.
+// RemoveIntent durably deletes an intent marker if it exists.
 func RemoveIntent(markerPath string) error {
-	if err := os.Remove(markerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := atomicfile.RemoveDurable(markerPath); err != nil {
 		return fmt.Errorf("removing intent %s: %w", markerPath, err)
 	}
 	return nil
