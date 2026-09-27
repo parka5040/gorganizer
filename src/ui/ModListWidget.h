@@ -63,8 +63,7 @@ public:
     void reloadMods();
     // Reloads the list after a failed mod-list save and re-adopts the profile's mod list.
     void reloadAfterFailedSave(const GameInfo& game, const QString& profileName);
-    // Rescans the mod folders and adopts the profile's modlist, showing every mod the list lacks as disabled; false when the list is busy or not loaded.
-    bool adoptModList(const std::vector<GrpcModListEntry>& entries);
+    quint64 adoptModList(const std::vector<GrpcModListEntry>& entries);
     // Enables names from the authoritative modlist and returns the tracked save request ID when flags change.
     quint64 enableModsInProfile(const std::vector<GrpcModListEntry>& authoritative, const QStringList& names,
                                 QStringList* changedOut);
@@ -89,6 +88,8 @@ signals:
     // The user asked to enable the disabled mods that satisfy one mod's SMAPI dependencies.
     void dependencyEnableRequested(const QStringList& modNames);
     void modListReadyForEnable();
+    void modListAdopted(quint64 adoptionId);
+    void modListAdoptionDeferred(quint64 adoptionId);
 
 private slots:
     void onConflictsReceived(const std::vector<GrpcFileConflict>& conflicts);
@@ -132,8 +133,19 @@ private:
     std::vector<GrpcModListEntry> toggleEntries() const;
     // Rescans the mod catalog without re-reading separators.
     void rescanCatalog();
-    // Scans the mod folders, keeping the loaded profile's enabled flags and order once its modlist was adopted.
-    std::vector<ModMetadata> scanCatalog() const;
+    enum class ScanPurpose { Folder, Catalog, Adoption };
+    struct ScanTag {
+        ActionContext context;
+        quint64 generation = 0;
+    };
+    void requestScan(ScanPurpose purpose);
+    void startScan();
+    void onScanFinished(const ScanTag& tag, std::vector<ModMetadata> scanned);
+    void finishFolderScan(std::vector<ModMetadata> scanned, const ScanTag& tag);
+    void finishCatalogScan(std::vector<ModMetadata> scanned);
+    bool finishAdoption(const std::vector<GrpcModListEntry>& entries, std::vector<ModMetadata> scanned,
+                        quint64 adoptionId);
+    std::vector<ModMetadata> scanCatalog(std::vector<ModMetadata> scanned) const;
     // Records the order of a modlist the list sends as the loaded profile's order once its modlist was adopted.
     void noteSentModList(const std::vector<GrpcModListEntry>& entries);
     // Records an optimistic edit and queues its full mod list for saving.
@@ -213,6 +225,14 @@ private:
     bool m_updatingModel = false;
     int m_interactionDepth = 0;
     quint64 m_editSerial = 0;
+    quint64 m_scanGeneration = 0;
+    bool m_scanRunning = false;
+    bool m_scanFirstPending = false;
+    bool m_scanFolderPending = false;
+    bool m_scanCatalogPending = false;
+    std::optional<std::vector<GrpcModListEntry>> m_scanAdoptionPending;
+    quint64 m_scanAdoptionSerial = 0;
+    quint64 m_scanAdoptionId = 0;
     bool m_reloadPending = false;
     std::optional<GrpcModDependencyReport> m_dependencyReport;
     bool m_profileAdopted = false;

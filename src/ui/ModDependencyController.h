@@ -68,6 +68,8 @@ private slots:
     void onListInteractionFinished();
     // Restarts an enable job after the mod list finishes saving or reloads its saved state.
     void onModListReadyForEnable();
+    void onModListAdopted(quint64 adoptionId);
+    void onModListAdoptionDeferred(quint64 adoptionId);
     void onConnected();
     // Forgets every in-flight request once the client stopped its workers, since no answer can arrive any more.
     void onWorkersStopped();
@@ -103,7 +105,7 @@ private:
     };
 
     struct EnableJob {
-        enum class Stage { Loading, WaitingForList, WaitingForSaves, Saving, Acknowledging };
+        enum class Stage { Loading, WaitingForList, WaitingForSaves, WaitingForAdoption, Saving, Acknowledging };
         Stage stage = Stage::Loading;
         quint64 generation = 0;
         QString gameId;
@@ -117,6 +119,8 @@ private:
         bool saved = false;
         quint64 listRequestId = 0;
         quint64 listEditSerial = 0;
+        std::vector<GrpcModListEntry> adoptionEntries;
+        quint64 adoptionId = 0;
         quint64 saveRequestId = 0;
         QHash<quint64, QStringList> ackRequests;
         int acknowledged = 0;
@@ -153,8 +157,8 @@ private:
     void requestJobModList();
     // Reports whether the job still targets the active game and profile and the loaded mod list.
     bool jobCurrent() const;
-    // Adopts the authoritative modlist, enables the job's mods in one batch and records which pending enables it satisfied.
     void applyJob(const std::vector<GrpcModListEntry>& entries);
+    void finishApplyingJob(const std::vector<GrpcModListEntry>& entries);
     // Acknowledges the satisfied pending enables, one request per batch with at least one UniqueID.
     void acknowledgeJob();
     // Ends the enable job, reporting failure when given and either refreshing now or, with retryLater, only after the retry delay.

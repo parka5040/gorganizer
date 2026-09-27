@@ -25,7 +25,10 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QMessageBox>
+#include <QMetaObject>
+#include <QPointer>
 #include <QSet>
+#include <QThreadPool>
 #include <QTimer>
 #include <QTreeWidget>
 #include <QDialog>
@@ -340,6 +343,13 @@ void ModListWidget::loadForGame(const GameInfo& game, const QString& profileName
         clearDependencyReport();
         dropProfileAdoption();
     }
+    ++m_scanGeneration;
+    m_scanFirstPending = game.detected;
+    m_scanFolderPending = false;
+    m_scanCatalogPending = false;
+    if (m_scanAdoptionPending)
+        emit modListAdoptionDeferred(m_scanAdoptionId);
+    m_scanAdoptionPending.reset();
     m_updatingModel = true;
     m_model->clear();
     m_mods.clear();
@@ -373,16 +383,93 @@ void ModListWidget::scanModsFolder()
     }
     m_reloadPending = false;
     ++m_editSerial;
-    m_separators.clear();
-    m_mods = scanCatalog();
+    requestScan(ScanPurpose::Folder);
+}
 
+void ModListWidget::requestScan(ScanPurpose purpose)
+{
+    ++m_scanGeneration;
+    if (purpose == ScanPurpose::Folder)
+        m_scanFolderPending = true;
+    else if (purpose == ScanPurpose::Catalog)
+        m_scanCatalogPending = true;
+    startScan();
+    updateEditLock();
+}
+
+void ModListWidget::startScan()
+{
+    if (m_scanRunning || m_modsDir.isEmpty()
+        || (!m_scanFolderPending && !m_scanCatalogPending && !m_scanAdoptionPending))
+        return;
+    m_scanRunning = true;
+    const ScanTag tag{actionContext(), m_scanGeneration};
+    const QString modsDir = tag.context.modsDir;
+    QPointer<ModListWidget> receiver(this);
+    QThreadPool::globalInstance()->start([modsDir, tag, receiver] {
+        std::vector<ModMetadata> scanned = ModCatalog::scan(modsDir);
+        if (!receiver)
+            return;
+        QMetaObject::invokeMethod(receiver.data(), [receiver, tag, scanned = std::move(scanned)]() mutable {
+            if (receiver)
+                receiver->onScanFinished(tag, std::move(scanned));
+        }, Qt::QueuedConnection);
+    });
+}
+
+void ModListWidget::onScanFinished(const ScanTag& tag, std::vector<ModMetadata> scanned)
+{
+    if (tag.generation == m_scanGeneration && matchesContext(tag.context)) {
+        const bool folder = m_scanFolderPending;
+        const bool catalog = m_scanCatalogPending;
+        auto adoption = std::move(m_scanAdoptionPending);
+        const quint64 adoptionSerial = m_scanAdoptionSerial;
+        const quint64 adoptionId = m_scanAdoptionId;
+        m_scanFolderPending = false;
+        m_scanCatalogPending = false;
+        m_scanAdoptionPending.reset();
+        if (isInteracting()) {
+            if (folder || catalog)
+                m_reloadPending = true;
+            if (adoption) {
+                m_profileListPending = true;
+                emit modListAdoptionDeferred(adoptionId);
+            }
+        } else {
+            if (folder)
+                finishFolderScan(scanned, tag);
+            else if (catalog)
+                finishCatalogScan(scanned);
+            if (adoption) {
+                if (folder || catalog || tag.generation != m_scanGeneration || !matchesContext(tag.context)) {
+                    emit modListAdoptionDeferred(adoptionId);
+                } else if (!m_saveQueue->isIdle()) {
+                    m_profileListPending = true;
+                    emit modListAdoptionDeferred(adoptionId);
+                } else if (m_editSerial != adoptionSerial) {
+                    requestProfileModList();
+                    emit modListAdoptionDeferred(adoptionId);
+                } else {
+                    finishAdoption(*adoption, std::move(scanned), adoptionId);
+                }
+            }
+        }
+    }
+    m_scanRunning = false;
+    startScan();
+}
+
+void ModListWidget::finishFolderScan(std::vector<ModMetadata> scanned, const ScanTag& tag)
+{
+    const ActionContext context = actionContext();
+    m_separators.clear();
+    m_mods = scanCatalog(std::move(scanned));
     if (!m_gameId.isEmpty() && !m_profileName.isEmpty()) {
-        const ActionContext context = actionContext();
         std::vector<GrpcSeparator> seps;
         bool viewEnabled = false;
         QString err;
         const bool loaded = m_grpc->listSeparators(context.gameId, context.profileName, seps, viewEnabled, err);
-        if (!matchesContext(context))
+        if (!matchesContext(context) || tag.generation != m_scanGeneration)
             return;
         if (isInteracting()) {
             m_reloadPending = true;
@@ -402,9 +489,9 @@ void ModListWidget::scanModsFolder()
             m_visualCheck->setEnabled(!m_collapsedSeparatorView);
         }
     }
-
+    m_scanFirstPending = false;
+    updateEditLock();
     rebuildView();
-
     requestProfileModList();
     if (!m_gameId.isEmpty() && !m_profileName.isEmpty())
         m_grpc->getConflicts(m_gameId, m_profileName);
@@ -713,14 +800,20 @@ void ModListWidget::rescanCatalog()
     }
     ++m_editSerial;
     m_reloadPending = false;
-    m_mods = scanCatalog();
+    requestScan(ScanPurpose::Catalog);
+}
+
+void ModListWidget::finishCatalogScan(std::vector<ModMetadata> scanned)
+{
+    m_mods = scanCatalog(std::move(scanned));
+    m_scanFirstPending = false;
+    updateEditLock();
     requestProfileModList();
     refreshView();
 }
 
-std::vector<ModMetadata> ModListWidget::scanCatalog() const
+std::vector<ModMetadata> ModListWidget::scanCatalog(std::vector<ModMetadata> scanned) const
 {
-    std::vector<ModMetadata> scanned = ModCatalog::scan(m_modsDir);
     if (!m_profileAdopted) {
         for (auto& meta : scanned) {
             meta.enabled = false;
@@ -842,7 +935,7 @@ void ModListWidget::dropProfileAdoption()
 
 bool ModListWidget::editsBlocked() const
 {
-    return !m_gameId.isEmpty() && !m_profileName.isEmpty() && !m_profileAdopted;
+    return !m_gameId.isEmpty() && (m_scanFirstPending || (!m_profileName.isEmpty() && !m_profileAdopted));
 }
 
 void ModListWidget::updateEditLock()
@@ -851,7 +944,10 @@ void ModListWidget::updateEditLock()
     const bool failed = blocked && m_profileLoadFailed;
     m_model->setEditable(!blocked);
     m_addSeparatorBtn->setEnabled(!blocked);
-    if (failed) {
+    if (m_scanFirstPending && !m_gameId.isEmpty()) {
+        m_profileStateLabel->setText(QStringLiteral("Refreshing mods…"));
+        m_profileStateLabel->setToolTip(QString());
+    } else if (failed) {
         m_profileStateLabel->setText(m_restoringSavedProfile
             ? QStringLiteral("Couldn't reload the saved profile. Try again.")
             : QStringLiteral("Couldn't load this profile. Mod changes are disabled."));
@@ -869,7 +965,7 @@ void ModListWidget::updateEditLock()
                                                        "daemon."));
     }
     m_profileStateLabel->setVisible(blocked || m_restoringSavedProfile || m_savedProfileRestored);
-    m_profileRetryButton->setVisible(failed);
+    m_profileRetryButton->setVisible(failed && !m_scanFirstPending);
 }
 
 void ModListWidget::onProfileModListReceived(quint64 requestId, const QString& gameId, const QString& profileName,
@@ -901,13 +997,28 @@ void ModListWidget::refreshView()
         m_grpc->getConflicts(m_gameId, m_profileName);
 }
 
-bool ModListWidget::adoptModList(const std::vector<GrpcModListEntry>& entries)
+quint64 ModListWidget::adoptModList(const std::vector<GrpcModListEntry>& entries)
 {
     if (m_gameId.isEmpty() || m_modsDir.isEmpty() || isInteracting() || !m_saveQueue->isIdle())
-        return false;
+        return 0;
     m_reloadPending = false;
     m_profileListPending = false;
-    std::vector<ModMetadata> scanned = ModCatalog::scan(m_modsDir);
+    if (m_scanAdoptionPending)
+        emit modListAdoptionDeferred(m_scanAdoptionId);
+    m_scanAdoptionPending = entries;
+    m_scanAdoptionSerial = m_editSerial;
+    requestScan(ScanPurpose::Adoption);
+    m_scanAdoptionId = m_scanGeneration;
+    return m_scanAdoptionId;
+}
+
+bool ModListWidget::finishAdoption(const std::vector<GrpcModListEntry>& entries, std::vector<ModMetadata> scanned,
+                                   quint64 adoptionId)
+{
+    if (isInteracting() || !m_saveQueue->isIdle()) {
+        m_profileListPending = true;
+        return false;
+    }
     QHash<QString, int> position;
     for (int i = 0; i < int(entries.size()); ++i) {
         if (!position.contains(entries[i].modName))
@@ -941,6 +1052,7 @@ bool ModListWidget::adoptModList(const std::vector<GrpcModListEntry>& entries)
     for (const auto& meta : scanned)
         m_profileOrder.insert(meta.folder, parseHexIndex(meta.trueIndex) / kTrueIndexStep);
     m_profileAdopted = true;
+    m_scanFirstPending = false;
     const bool unchanged = sameRows(m_mods, scanned);
     m_mods = std::move(scanned);
     if (!unchanged)
@@ -950,6 +1062,7 @@ bool ModListWidget::adoptModList(const std::vector<GrpcModListEntry>& entries)
         m_savedProfileRestored = true;
     }
     updateEditLock();
+    emit modListAdopted(adoptionId);
     emit modListReadyForEnable();
     return true;
 }
@@ -1004,7 +1117,8 @@ void ModListWidget::setSelectedModsEnabled(const ActionContext& context, const Q
 
 bool ModListWidget::readyForDependencyEnable() const
 {
-    return m_profileAdopted && !m_restoringSavedProfile && !isInteracting() && m_saveQueue->isIdle();
+    return m_profileAdopted && !editsBlocked() && !m_restoringSavedProfile && !isInteracting()
+        && m_saveQueue->isIdle();
 }
 
 quint64 ModListWidget::enableModsInProfile(const std::vector<GrpcModListEntry>& authoritative, const QStringList& names,
