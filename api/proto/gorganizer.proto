@@ -190,6 +190,9 @@ service Gorganizer {
   rpc RollbackManagedTool(RollbackManagedToolRequest) returns (ManagedToolStatus);
 
   rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+  // GetShutdownPlan reports, without changing anything, which games' mods
+  // a shutdown started now would leave deployed and why.
+  rpc GetShutdownPlan(GetShutdownPlanRequest) returns (ShutdownPlan);
   // Lightweight, non-streaming readiness probe used by the splash screen.
   // Polled at ~150 ms during cold start; the frontend unlocks the main
   // window when GamesWarmed flips true.
@@ -1031,6 +1034,20 @@ message SetNexusAPIKeyResponse {
 
 message ShutdownRequest {}
 message ShutdownResponse {}
+
+message GetShutdownPlanRequest {}
+message ShutdownPlan {
+  repeated ShutdownPlanItem items = 1;
+}
+// One mounted game. retained_reason is empty when shutdown would turn its
+// mods off, otherwise a short machine-readable cause: game_running,
+// launch_recent, tool_running, recovery_deferred, steam_busy, busy.
+message ShutdownPlanItem {
+  string game_id = 1;
+  string profile_name = 2;
+  bool will_unmount = 3;
+  string retained_reason = 4;
+}
 
 message HealthRequest {}
 // Readiness reports the cold-start state of the daemon. The splash holds
