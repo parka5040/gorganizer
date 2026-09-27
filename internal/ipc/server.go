@@ -118,6 +118,9 @@ type VFSController interface {
 	MountVFSWithOptions(gameID, profileName string, autoSwap, retarget bool) (*dto.VFSStatusResult, error)
 	MountVFS(gameID, profileName string) (*dto.VFSStatusResult, error)
 	UnmountVFS(gameID string) error
+	SetSteamMaintenance(gameID string, enabled, verificationConfirmed bool) (*dto.VFSStatusResult, error)
+	ImportPreservedFiles(gameID, batchID, modName string, relativePaths []string) (string, int, error)
+	DeletePreservedBatch(gameID, batchID string) (*dto.VFSStatusResult, error)
 	GetVFSStatus(gameID string) (*dto.VFSStatusResult, error)
 	RebuildVFS(gameID string) error
 	RestoreFromBackup(gameID string, expectedKind dto.RecoveryKind, recoveryID string) error

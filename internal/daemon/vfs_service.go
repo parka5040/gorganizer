@@ -454,6 +454,11 @@ func (vs *VFSService) UnmountVFS(gameID string) error {
 	}
 	vs.s.mu.Lock()
 	defer vs.s.mu.Unlock()
+	return vs.unmountVFSLocked(gameID, false)
+}
+
+// unmountVFSLocked deactivates the game's farm with the normal teardown checks while the caller holds s.mu.
+func (vs *VFSService) unmountVFSLocked(gameID string, allowUnmounted bool) error {
 	if err := vs.s.deferredForLocked(gameID, dto.BusyOperationUnmount); err != nil {
 		return err
 	}
@@ -480,6 +485,16 @@ func (vs *VFSService) UnmountVFS(gameID string) error {
 	if err != nil {
 		return err
 	}
+	if allowUnmounted && !mm.IsMounted() {
+		if pending := vs.s.recoveryPendingFor(gameID); pending != nil {
+			return fmt.Errorf("recovery pending for %s: %s", gameID, pending.Reason)
+		}
+		steamState, readErr := vs.s.readSteamAppState(vs.s.mountInstallPath(gc), gc.SteamAppID)
+		if readErr == nil && !steamState.Idle() {
+			return &dto.SteamMaintenanceError{GameID: gameID, Reason: "busy"}
+		}
+		return nil
+	}
 	state := vs.s.mountStates[gameID]
 	_, capture, err := vs.s.steamCaptureLocked(gameID, mm.DataPath())
 	if err != nil {
@@ -502,14 +517,11 @@ func (vs *VFSService) UnmountVFS(gameID string) error {
 	return removeLaunchTicket(mm.DataPath())
 }
 
-// GetVFSStatus reports gameID's mount with the same profile, mount point, mod and file counts, dirty flag, and generations the status stream carries.
-func (vs *VFSService) GetVFSStatus(gameID string) (*dto.VFSStatusResult, error) {
-	vs.s.mu.RLock()
-	defer vs.s.mu.RUnlock()
-
+// statusLocked returns the current VFS status while the caller holds s.mu.
+func (vs *VFSService) statusLocked(gameID string) *dto.VFSStatusResult {
 	mm, ok := vs.s.mountMgrs[gameID]
 	if !ok {
-		return vs.s.unmountedVFSStatusLocked(gameID), nil
+		return vs.s.unmountedVFSStatusLocked(gameID)
 	}
 	gc, err := vs.s.config.EffectiveGameConfig(gameID)
 	if err != nil {
@@ -527,7 +539,15 @@ func (vs *VFSService) GetVFSStatus(gameID string) (*dto.VFSStatusResult, error) 
 			entries = loaded
 		}
 	}
-	return vs.vfsStatus(gameID, gc, profileName, mm, entries), nil
+	return vs.vfsStatus(gameID, gc, profileName, mm, entries)
+}
+
+// GetVFSStatus reports gameID's mount with the same profile, mount point, mod and file counts, dirty flag, and generations the status stream carries.
+func (vs *VFSService) GetVFSStatus(gameID string) (*dto.VFSStatusResult, error) {
+	vs.s.mu.RLock()
+	defer vs.s.mu.RUnlock()
+
+	return vs.statusLocked(gameID), nil
 }
 
 // RetryDeferredRecovery attempts to recover a game whose startup recovery was deferred until its install became idle.

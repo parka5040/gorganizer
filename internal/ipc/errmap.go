@@ -372,6 +372,9 @@ func grpcError(err error) error {
 	if mapped, ok := MapError(err); ok {
 		return mapped
 	}
+	if errors.Is(err, daemon.ErrVerificationConfirmationRequired) {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
 	for _, entry := range sentinelCodes {
 		if errors.Is(err, entry.sentinel) {
 			return status.Error(entry.code, err.Error())

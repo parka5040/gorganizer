@@ -213,6 +213,33 @@ func (s *gorganizerServer) UnmountVFS(_ context.Context, req *pb.UnmountVFSReque
 	return &pb.UnmountVFSResponse{}, nil
 }
 
+// SetSteamMaintenance converts a maintenance request and returns the resulting deployment status.
+func (s *gorganizerServer) SetSteamMaintenance(_ context.Context, req *pb.SetSteamMaintenanceRequest) (*pb.VFSStatus, error) {
+	result, err := s.ctrl.SetSteamMaintenance(req.GetGameId(), req.GetEnabled(), req.GetVerificationConfirmed())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return vfsStatusToProto(result), nil
+}
+
+// ImportPreservedFiles converts a retained-file selection into a new disabled mod.
+func (s *gorganizerServer) ImportPreservedFiles(_ context.Context, req *pb.ImportPreservedFilesRequest) (*pb.ImportPreservedFilesResponse, error) {
+	name, count, err := s.ctrl.ImportPreservedFiles(req.GetGameId(), req.GetBatchId(), req.GetModName(), req.GetRelativePaths())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.ImportPreservedFilesResponse{ModName: name, FileCount: int32(count)}, nil
+}
+
+// DeletePreservedBatch removes a retained batch and returns the resulting deployment status.
+func (s *gorganizerServer) DeletePreservedBatch(_ context.Context, req *pb.DeletePreservedBatchRequest) (*pb.VFSStatus, error) {
+	result, err := s.ctrl.DeletePreservedBatch(req.GetGameId(), req.GetBatchId())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return vfsStatusToProto(result), nil
+}
+
 func (s *gorganizerServer) GetVFSStatus(_ context.Context, req *pb.GetVFSStatusRequest) (*pb.VFSStatus, error) {
 	st, err := s.ctrl.GetVFSStatus(req.GetGameId())
 	if err != nil {
