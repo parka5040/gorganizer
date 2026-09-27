@@ -518,10 +518,33 @@ func (s *gorganizerServer) ListProfileIniFiles(_ context.Context, req *pb.ListPr
 }
 
 func (s *gorganizerServer) SaveProfileIniFile(_ context.Context, req *pb.SaveProfileIniFileRequest) (*pb.SaveProfileIniFileResponse, error) {
-	if err := s.ctrl.SaveProfileIniFile(req.GetGameId(), req.GetProfileName(), req.GetFilename(), req.GetContent()); err != nil {
+	result, err := s.ctrl.SaveProfileIniFile(req.GetGameId(), req.GetProfileName(), req.GetFilename(), req.GetContent())
+	if err != nil {
 		return nil, grpcError(err)
 	}
-	return &pb.SaveProfileIniFileResponse{}, nil
+	return profileIniSaveToProto(result), nil
+}
+
+// profileIniSaveToProto converts a profile INI save result to its wire representation.
+func profileIniSaveToProto(result *dto.ProfileIniSaveResult) *pb.SaveProfileIniFileResponse {
+	out := &pb.SaveProfileIniFileResponse{ApplyError: result.ApplyError}
+	switch result.Outcome {
+	case dto.IniSaveSaved:
+		out.Outcome = pb.IniSaveOutcome_INI_SAVE_OUTCOME_SAVED
+	case dto.IniSaveSavedAndApplied:
+		out.Outcome = pb.IniSaveOutcome_INI_SAVE_OUTCOME_SAVED_AND_APPLIED
+	case dto.IniSaveSavedApplyFailed:
+		out.Outcome = pb.IniSaveOutcome_INI_SAVE_OUTCOME_SAVED_APPLY_FAILED
+	}
+	return out
+}
+
+func (s *gorganizerServer) ApplyProfileIniFiles(_ context.Context, req *pb.ApplyProfileIniFilesRequest) (*pb.ApplyProfileIniFilesResponse, error) {
+	count, err := s.ctrl.ApplyProfileIniFiles(req.GetGameId(), req.GetProfileName())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.ApplyProfileIniFilesResponse{AppliedFileCount: int32(count)}, nil
 }
 
 func (s *gorganizerServer) SetProfileIniEnabled(_ context.Context, req *pb.SetProfileIniEnabledRequest) (*pb.ProfileIniStatus, error) {

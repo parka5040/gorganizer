@@ -180,7 +180,8 @@ type SettingsController interface {
 
 type IniController interface {
 	ListProfileIniFiles(gameID, profileName string) (*dto.ProfileIniListResult, error)
-	SaveProfileIniFile(gameID, profileName, filename, content string) error
+	SaveProfileIniFile(gameID, profileName, filename, content string) (*dto.ProfileIniSaveResult, error)
+	ApplyProfileIniFiles(gameID, profileName string) (int, error)
 	SetProfileIniEnabled(gameID, profileName string, enabled bool) (*dto.ProfileIniStatusResult, error)
 	GetProfileIniStatus(gameID, profileName string) (*dto.ProfileIniStatusResult, error)
 	ListIniTweaks(gameID, profileName string) ([]dto.IniTweakStateResult, error)

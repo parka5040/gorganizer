@@ -224,8 +224,9 @@ public:
     bool listProfileIniFiles(const QString& gameId, const QString& profileName,
                              std::vector<GrpcProfileIniFile>& filesOut,
                              GrpcProfileIniStatus& statusOut, QString& errorOut);
-    bool saveProfileIniFile(const QString& gameId, const QString& profileName,
-                            const QString& filename, const QString& content, QString& errorOut);
+    quint64 saveProfileIniFile(const QString& gameId, const QString& profileName,
+                               const QString& filename, const QString& content);
+    quint64 applyProfileIniFiles(const QString& gameId, const QString& profileName);
     bool setProfileIniEnabled(const QString& gameId, const QString& profileName,
                               bool enabled, GrpcProfileIniStatus& statusOut, QString& errorOut);
     bool getProfileIniStatus(const QString& gameId, const QString& profileName,
@@ -364,6 +365,10 @@ signals:
                                       int acknowledged);
     void dependencyEnableAckFailed(quint64 requestId, const QString& gameId, const QString& batchId,
                                    const QString& error);
+    void profileIniSaved(quint64 requestId, const GrpcIniSaveResult& result);
+    void profileIniSaveFailed(quint64 requestId, const QString& error);
+    void profileIniFilesApplied(quint64 requestId, int appliedFileCount);
+    void profileIniFilesApplyFailed(quint64 requestId, const QString& error);
     // Reports that a mod finished installing for the subscribed game, as a refresh hint.
     void installCompletedHintReceived(const GrpcInstallCompleted& event);
 
@@ -416,6 +421,7 @@ private:
     quint64 m_nextModActionRequestId = 0;
     quint64 m_nextModLoaderRequestId = 0;
     quint64 m_nextModListRequestId = 0;
+    quint64 m_nextIniRequestId = 0;
     quint64 m_nextDependencyRequestId = 0;
     quint64 m_nextVfsRequestId = 0;
     quint64 m_nextSteamRequestId = 0;

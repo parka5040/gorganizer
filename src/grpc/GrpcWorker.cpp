@@ -1435,4 +1435,53 @@ void GrpcWorker::doAckDependencyEnable(quint64 requestId, const QString& gameId,
     emit dependencyEnableAcknowledged(requestId, gameId, batchId, resp.acknowledged());
 }
 
+// Saves one profile INI and reports whether the game received the settings.
+void GrpcWorker::doSaveProfileIniFile(quint64 requestId, const QString& gameId, const QString& profileName,
+                                      const QString& filename, const QString& content)
+{
+    gorganizer::v1::SaveProfileIniFileRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_profile_name(profileName.toStdString());
+    req.set_filename(filename.toStdString());
+    req.set_content(content.toStdString());
+    gorganizer::v1::SaveProfileIniFileResponse resp;
+    auto status = invoke(&Stub::SaveProfileIniFile, req, resp);
+    if (!status.ok()) {
+        emit profileIniSaveFailed(requestId, QString::fromStdString(status.error_message()));
+        return;
+    }
+    GrpcIniSaveResult result;
+    switch (resp.outcome()) {
+    case gorganizer::v1::INI_SAVE_OUTCOME_SAVED:
+        result.outcome = GrpcIniSaveOutcome::Saved;
+        break;
+    case gorganizer::v1::INI_SAVE_OUTCOME_SAVED_AND_APPLIED:
+        result.outcome = GrpcIniSaveOutcome::SavedAndApplied;
+        break;
+    case gorganizer::v1::INI_SAVE_OUTCOME_SAVED_APPLY_FAILED:
+        result.outcome = GrpcIniSaveOutcome::SavedApplyFailed;
+        break;
+    default:
+        emit profileIniSaveFailed(requestId, QStringLiteral("Unknown INI save result"));
+        return;
+    }
+    result.applyError = QString::fromStdString(resp.apply_error());
+    emit profileIniSaved(requestId, result);
+}
+
+// Copies the profile's INIs to the game without changing the profile toggle.
+void GrpcWorker::doApplyProfileIniFiles(quint64 requestId, const QString& gameId, const QString& profileName)
+{
+    gorganizer::v1::ApplyProfileIniFilesRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_profile_name(profileName.toStdString());
+    gorganizer::v1::ApplyProfileIniFilesResponse resp;
+    auto status = invoke(&Stub::ApplyProfileIniFiles, req, resp);
+    if (!status.ok()) {
+        emit profileIniFilesApplyFailed(requestId, QString::fromStdString(status.error_message()));
+        return;
+    }
+    emit profileIniFilesApplied(requestId, resp.applied_file_count());
+}
+
 }
