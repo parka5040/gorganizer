@@ -252,6 +252,7 @@ void DownloadsModel::replaceFromDaemon(const std::vector<GrpcDownloadRow>& rows)
         r.hidden = src.hidden;
         r.installedModFolder = src.installedModFolder;
         r.merged = src.merged;
+        r.downloadId = src.downloadId;
         r.pct = -1;
         r.phase = phaseFromDownloadStatus(src.status);
 

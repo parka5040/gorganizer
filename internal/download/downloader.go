@@ -82,12 +82,20 @@ type DownloadSnapshot struct {
 
 // NewManager creates a download Manager; caller must Stop() on shutdown.
 func NewManager(nexus URLResolver, maxConcurrent int, hooks ManagerHooks) *Manager {
+	return NewManagerWithClient(nexus, maxConcurrent, hooks, httpx.DownloadClient())
+}
+
+// NewManagerWithClient creates a download Manager with the supplied HTTP client.
+func NewManagerWithClient(nexus URLResolver, maxConcurrent int, hooks ManagerHooks, client *http.Client) *Manager {
+	if client == nil {
+		client = httpx.DownloadClient()
+	}
 	if maxConcurrent < 1 {
 		maxConcurrent = 3
 	}
 	m := &Manager{
 		nexus:        nexus,
-		httpClient:   httpx.DownloadClient(),
+		httpClient:   client,
 		active:       make(map[string]*Download),
 		retrying:     make(map[string]bool),
 		destinations: make(map[string]string),
@@ -98,6 +106,13 @@ func NewManager(nexus URLResolver, maxConcurrent int, hooks ManagerHooks) *Manag
 	}
 	go m.runQueuePump()
 	return m
+}
+
+// SetResolver changes the resolver used by pipelines started after the change.
+func (m *Manager) SetResolver(r URLResolver) {
+	m.mu.Lock()
+	m.nexus = r
+	m.mu.Unlock()
 }
 
 // Stop halts the queue pump; active downloads keep running.
@@ -293,6 +308,21 @@ func (m *Manager) CancelDownload(id string, gameIDs []string) error {
 	return &DownloadNotFoundError{ID: id}
 }
 
+// IsActive reports whether a download is running, queued, or being retried.
+func (m *Manager) IsActive(id string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if _, ok := m.active[id]; ok || m.retrying[id] {
+		return true
+	}
+	for _, dl := range m.queued {
+		if dl.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Manager) GetProgress(downloadID string) (*DownloadSnapshot, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -446,6 +476,9 @@ func (m *Manager) runQueuePump() {
 }
 
 func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
+	m.mu.RLock()
+	resolver := m.nexus
+	m.mu.RUnlock()
 	defer func() {
 		m.mu.Lock()
 		delete(m.active, dl.ID)
@@ -460,7 +493,7 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 		return
 	}
 
-	modInfo, err := m.nexus.GetModInfo(link.GameSlug, link.ModID)
+	modInfo, err := resolver.GetModInfo(link.GameSlug, link.ModID)
 	modName := fmt.Sprintf("mod_%d", link.ModID)
 	if err == nil && modInfo != nil {
 		modName = modInfo.Name
@@ -468,8 +501,8 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 	state = m.update(dl, func(d *Download) { d.ModName = modName })
 	m.emitProgress(state)
 
-	fileDetails, _ := m.nexus.GetFileDetails(link.GameSlug, link.ModID, link.FileID)
-	cdnURL, err := m.nexus.ResolveDownloadURL(link)
+	fileDetails, _ := resolver.GetFileDetails(link.GameSlug, link.ModID, link.FileID)
+	cdnURL, err := resolver.ResolveDownloadURL(link)
 	if err != nil {
 		m.fail(dl, fmt.Errorf("resolving CDN URL: %w", redactHTTPError(err)))
 		return

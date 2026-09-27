@@ -137,7 +137,7 @@ type ArchiveController interface {
 	CancelDownload(id string) error
 	RetryDownload(id string) (queuedAhead int, err error)
 	ListArchives(gameID string) ([]dto.ArchiveRowResult, error)
-	RemoveArchive(gameID, archiveRelPath string) error
+	RemoveArchive(gameID, archiveRelPath, downloadID string) error
 	SetArchiveHidden(gameID, archiveRelPath string, hidden bool) error
 	SetArchivesHiddenBulk(gameID string, hidden bool, scope dto.BulkHideScope) (int, error)
 	RefreshArchiveMetadata(gameID, archiveRelPath string) (*dto.ArchiveRowResult, error)

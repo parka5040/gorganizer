@@ -212,6 +212,7 @@ GrpcArchiveRow DownloadsLibraryView::rowFromModel(const DownloadRowData& d)
     r.thumbnailUrl = d.thumbnailUrl;
     r.adultContent = d.adultContent;
     r.status = static_cast<int>(d.phase);
+    r.downloadId = d.downloadId;
     r.installedModFolder = d.installedModFolder;
     return r;
 }
@@ -241,6 +242,18 @@ void DownloadsLibraryView::onContextMenu(const QPoint& pos)
             QString dlId = d.downloadId;
             menu.addAction("Retry Download", this, [this, dlId] {
                 if (!dlId.isEmpty()) m_grpc->retryDownload(dlId);
+            });
+            menu.addAction("Remove From List", this, [this, row] {
+                if (!dialogs::confirm(this, "Remove Download",
+                    "Remove this download from the list? Any partly downloaded file is deleted."))
+                    return;
+                QString err;
+                if (!m_grpc->removeArchive(m_game.shortName, row.archiveRelPath, row.downloadId, err)) {
+                    dialogs::warn(this, "Remove Failed", err);
+                    return;
+                }
+                m_model->removeTransientByDownloadId(row.downloadId);
+                reloadFromDaemon();
             });
             menu.addSeparator();
         }
@@ -278,7 +291,7 @@ void DownloadsLibraryView::onContextMenu(const QPoint& pos)
         }
         menu.addSeparator();
         menu.addAction("Open Nexus Page", this, [this, row] { openNexusPage(row); });
-        if (!inFlight)
+        if (!inFlight && !retryable && !row.archiveRelPath.isEmpty())
             menu.addAction("Delete Archive", this, [this, row] { actionDelete(row); });
         menu.addSeparator();
     }
@@ -493,11 +506,12 @@ void DownloadsLibraryView::actionDelete(const GrpcArchiveRow& row)
         QString("Delete %1 from disk? This cannot be undone.").arg(row.fileArchiveName)))
         return;
     QString err;
-    if (!m_grpc->removeArchive(m_game.shortName, row.archiveRelPath, err)) {
+    if (!m_grpc->removeArchive(m_game.shortName, row.archiveRelPath, row.downloadId, err)) {
         dialogs::warn(this, "Delete Failed", err);
         return;
     }
-    m_model->removeByKey(row.archiveRelPath);
+    m_model->removeTransientByDownloadId(row.downloadId);
+    reloadFromDaemon();
 }
 
 void DownloadsLibraryView::openNexusPage(const GrpcArchiveRow& row)

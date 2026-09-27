@@ -216,19 +216,21 @@ func (ar *ArchiveService) ListArchives(gameID string) ([]dto.ArchiveRowResult, e
 		rows = append(rows, row)
 	}
 
-	indexed := make(map[string]struct{}, len(idx.Archives))
-	for _, e := range idx.Archives {
-		indexed[e.Path] = struct{}{}
+	indexed := make(map[string]int, len(idx.Archives))
+	for i, e := range idx.Archives {
+		indexed[e.Path] = i
 	}
 	if entries, err := download.LoadLedger(gameID); err == nil {
-		var toEvict []string
 		for _, le := range entries {
-			if le.Terminal() || le.Status == "" {
-				toEvict = append(toEvict, le.ID)
-				continue
-			}
-			if _, dup := indexed[le.ArchiveRelPath]; dup {
-				toEvict = append(toEvict, le.ID)
+			if i, dup := indexed[le.ArchiveRelPath]; dup {
+				if !le.Terminal() || le.Status == download.LedgerFailed || le.Status == download.LedgerCancelled {
+					rows[i].DownloadID = le.ID
+					rows[i].Status = ledgerToDownloadStatus(le.Status)
+					rows[i].BytesDownloaded = le.BytesDone
+					if rows[i].GameDomain == "" {
+						rows[i].GameDomain = le.GameSlug
+					}
+				}
 				continue
 			}
 			rows = append(rows, dto.ArchiveRowResult{
@@ -241,9 +243,6 @@ func (ar *ArchiveService) ListArchives(gameID string) ([]dto.ArchiveRowResult, e
 				SizeBytes:       le.BytesTotal,
 				Status:          ledgerToDownloadStatus(le.Status),
 			})
-		}
-		for _, id := range toEvict {
-			_ = download.RemoveLedgerEntry(gameID, id)
 		}
 	}
 	return rows, nil
@@ -265,21 +264,71 @@ func ledgerToDownloadStatus(ls download.LedgerStatus) dto.DownloadStatus {
 	return dto.DownloadStatusUnknown
 }
 
-// RemoveArchive deletes an archive, its sidecar, and the index entry.
-func (ar *ArchiveService) RemoveArchive(gameID, archiveRelPath string) error {
+// RemoveArchive removes a terminal download by ID and optionally deletes its archive and index entry.
+func (ar *ArchiveService) RemoveArchive(gameID, archiveRelPath, downloadID string) error {
 	if !ar.s.gameConfigured(gameID) {
 		return fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
-	downloadsDir := config.DownloadsDir(gameID)
-	absArchive, err := archivePath(downloadsDir, archiveRelPath)
-	if err != nil {
-		return err
+	if archiveRelPath == "" && downloadID == "" {
+		return &UnsafePathError{Field: "archive_rel_path"}
+	}
+	var absArchive string
+	if archiveRelPath != "" {
+		var err error
+		absArchive, err = archivePath(config.DownloadsDir(gameID), archiveRelPath)
+		if err != nil {
+			return err
+		}
+	}
+	if downloadID != "" {
+		manager := ar.s.downloadStateSnapshot().manager
+		if manager != nil && (manager.IsActive(downloadID) ||
+			(absArchive != "" && manager.ActiveDownloadIDByArchive(absArchive) != "")) {
+			return download.ErrArchiveDownloadBusy
+		}
+		entries, err := download.LoadLedger(gameID)
+		if err != nil {
+			return err
+		}
+		var match *download.LedgerEntry
+		for i := range entries {
+			if entries[i].ID == downloadID {
+				match = &entries[i]
+				break
+			}
+		}
+		switch {
+		case match == nil || match.Status == download.LedgerDownloaded:
+			if archiveRelPath == "" {
+				return &download.DownloadNotFoundError{ID: downloadID}
+			}
+		case match.Status == download.LedgerQueued || match.Status == download.LedgerDownloading:
+			return download.ErrArchiveDownloadBusy
+		default:
+			if err := download.RemoveLedgerEntry(gameID, downloadID); err != nil {
+				return err
+			}
+		}
+	}
+	if archiveRelPath == "" {
+		return nil
 	}
 	_ = os.Remove(absArchive)
 	_ = os.Remove(download.SidecarPath(absArchive))
 	_ = os.Remove(download.PartPath(absArchive))
 	if err := download.RemoveEntry(gameID, archiveRelPath); err != nil {
 		return err
+	}
+	entries, err := download.LoadLedger(gameID)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.ArchiveRelPath == archiveRelPath {
+			if err := download.RemoveLedgerEntry(gameID, entry.ID); err != nil {
+				return err
+			}
+		}
 	}
 	ar.s.invalidateInstalledArchiveCache(gameID)
 	ar.s.archiveBus.Publish(gameID, dto.ArchiveEventResult{
