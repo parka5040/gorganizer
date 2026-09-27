@@ -250,6 +250,7 @@ public:
     void setNexusAPIKey(const QString& apiKey);
 
     void shutdownDaemon();
+    bool getShutdownPlanSync(int timeoutMs, std::vector<GrpcShutdownPlanItem>& items, QString& errorOut);
     // Synchronous shutdown for app exit; polls socket file for graceful daemon exit.
     bool shutdownDaemonSync(int rpcTimeoutMs, int pollTimeoutMs, QString& errorOut);
 

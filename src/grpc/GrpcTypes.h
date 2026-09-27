@@ -121,6 +121,13 @@ struct GrpcRecoveryPending {
     QString recoveryId;
 };
 
+struct GrpcShutdownPlanItem {
+    QString gameId;
+    QString profileName;
+    bool willUnmount = false;
+    QString retainedReason;
+};
+
 struct GrpcVFSStatus {
     bool mounted = false;
     QString gameId;

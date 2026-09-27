@@ -37,6 +37,8 @@
 #include <QActionGroup>
 #include <QAbstractButton>
 #include <QCloseEvent>
+#include <QCheckBox>
+#include <QSettings>
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QPushButton>
@@ -346,16 +348,65 @@ void MainWindow::closeEvent(QCloseEvent* event)
         paragraphs.append(QStringLiteral("Installing \"%1\" is still in progress.\n\n%2")
                               .arg(m_pendingExternalInstall->name, consequence));
     }
+    const bool interrupted = !paragraphs.isEmpty();
+    if (m_grpc->isConnected()) {
+        std::vector<GrpcShutdownPlanItem> items;
+        QString error;
+        if (m_grpc->getShutdownPlanSync(2000, items, error)) {
+            for (const auto& item : items) {
+                if (item.willUnmount) continue;
+                QString reason;
+                if (item.retainedReason == QLatin1String("game_running"))
+                    reason = QStringLiteral("the game is still running");
+                else if (item.retainedReason == QLatin1String("launch_recent"))
+                    reason = QStringLiteral("the game was started moments ago");
+                else if (item.retainedReason == QLatin1String("tool_running"))
+                    reason = QStringLiteral("a tool started from Gorganizer is still running");
+                else if (item.retainedReason == QLatin1String("recovery_deferred"))
+                    reason = QStringLiteral("an earlier change is waiting for the game to close");
+                else if (item.retainedReason == QLatin1String("steam_busy"))
+                    reason = QStringLiteral("Steam is updating the game");
+                else
+                    reason = QStringLiteral("another change is still in progress");
+                const auto game = GameInfo::findByShortName(item.gameId);
+                const QString name = game ? game->name : item.gameId;
+                paragraphs.append(QStringLiteral("Mods for %1 will stay active because %2. "
+                                                 "Gorganizer turns them off the next time it starts after the game has closed.")
+                                      .arg(name, reason));
+            }
+            if (!m_daemonOwned && !items.empty()) {
+                paragraphs.append(QStringLiteral("Gorganizer's background service keeps running after this window closes, "
+                                                 "so your mods stay active until you choose Unmount Mods."));
+            }
+        }
+    }
     if (paragraphs.isEmpty()) {
         QMainWindow::closeEvent(event);
         return;
     }
-    const QString title = loaderOperation.isEmpty() ? QStringLiteral("Mod Install Running")
-                                                    : QStringLiteral("SMAPI Operation Running");
-    const QString text = paragraphs.join(QStringLiteral("\n\n")) + QStringLiteral("\n\nQuit anyway?");
-    if (!dialogs::plainConfirm(this, title, text, QMessageBox::Warning, QMessageBox::No)) {
-        event->ignore();
-        return;
+    if (!interrupted) {
+        QSettings settings;
+        if (!settings.value(QStringLiteral("shutdown/hideRetentionNotice"), false).toBool()) {
+            QMessageBox box(this);
+            box.setIcon(QMessageBox::Information);
+            box.setWindowTitle(QStringLiteral("Mods Still Active"));
+            box.setStandardButtons(QMessageBox::Ok);
+            box.setTextFormat(Qt::PlainText);
+            box.setText(paragraphs.join(QStringLiteral("\n\n")));
+            auto* checkbox = new QCheckBox(QStringLiteral("Don't show again"), &box);
+            box.setCheckBox(checkbox);
+            box.exec();
+            if (checkbox->isChecked())
+                settings.setValue(QStringLiteral("shutdown/hideRetentionNotice"), true);
+        }
+    } else {
+        const QString title = loaderOperation.isEmpty() ? QStringLiteral("Mod Install Running")
+                                                        : QStringLiteral("SMAPI Operation Running");
+        const QString text = paragraphs.join(QStringLiteral("\n\n")) + QStringLiteral("\n\nQuit anyway?");
+        if (!dialogs::plainConfirm(this, title, text, QMessageBox::Warning, QMessageBox::No)) {
+            event->ignore();
+            return;
+        }
     }
     QMainWindow::closeEvent(event);
 }

@@ -645,6 +645,17 @@ func (s *gorganizerServer) Health(_ context.Context, _ *pb.HealthRequest) (*pb.R
 	}, nil
 }
 
+func (s *gorganizerServer) GetShutdownPlan(_ context.Context, _ *pb.GetShutdownPlanRequest) (*pb.ShutdownPlan, error) {
+	plan := &pb.ShutdownPlan{}
+	for _, item := range s.ctrl.GetShutdownPlan() {
+		plan.Items = append(plan.Items, &pb.ShutdownPlanItem{
+			GameId: item.GameID, ProfileName: item.ProfileName,
+			WillUnmount: item.WillUnmount, RetainedReason: item.RetainedReason,
+		})
+	}
+	return plan, nil
+}
+
 func (s *gorganizerServer) WatchStatus(_ *pb.WatchStatusRequest, stream pb.Gorganizer_WatchStatusServer) error {
 	ch := s.ctrl.WatchStatus()
 	ctx := stream.Context()

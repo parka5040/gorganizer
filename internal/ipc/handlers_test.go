@@ -75,6 +75,7 @@ type fakeController struct {
 	launchPid         int
 	launchArgs        []any
 	readiness         dto.ReadinessResult
+	shutdownPlan      []dto.ShutdownPlanItem
 	statusCh          chan dto.StatusEventResult
 	exportReq         dto.ExportRequest
 	importReq         dto.ImportRequest
@@ -263,6 +264,10 @@ func (f *fakeController) LaunchGame(gameID string, useTool bool, profileName str
 
 func (f *fakeController) Health() dto.ReadinessResult {
 	return f.readiness
+}
+
+func (f *fakeController) GetShutdownPlan() []dto.ShutdownPlanItem {
+	return f.shutdownPlan
 }
 
 func (f *fakeController) WatchStatus() <-chan dto.StatusEventResult {
@@ -904,6 +909,23 @@ func TestHealthMapping(t *testing.T) {
 	mustEqualProto(t, resp, &pb.Readiness{
 		SocketReady: true, RecoveryDone: true, GamesWarmed: false, LastInitStep: "warming games",
 	})
+}
+
+// TestShutdownPlanMapping verifies mounted games and retention reasons reach the wire unchanged.
+func TestShutdownPlanMapping(t *testing.T) {
+	fake := &fakeController{shutdownPlan: []dto.ShutdownPlanItem{
+		{GameID: "skyrimse", ProfileName: "Current", RetainedReason: "game_running"},
+		{GameID: "stardewvalley", ProfileName: "Default", WillUnmount: true},
+	}}
+	client := newTestClient(t, fake)
+	resp, err := client.GetShutdownPlan(t.Context(), &pb.GetShutdownPlanRequest{})
+	if err != nil {
+		t.Fatalf("GetShutdownPlan: %v", err)
+	}
+	mustEqualProto(t, resp, &pb.ShutdownPlan{Items: []*pb.ShutdownPlanItem{
+		{GameId: "skyrimse", ProfileName: "Current", RetainedReason: "game_running"},
+		{GameId: "stardewvalley", ProfileName: "Default", WillUnmount: true},
+	}})
 }
 
 // TestWatchStatusStream locks the dto.StatusEventResult → pb.StatusEvent oneof mapping and stream termination.
