@@ -379,12 +379,11 @@ func (tt *TTWService) fnvPrefixPath(fnv config.GameConfig) (string, bool) {
 	if tt.s.toolMgr == nil {
 		return "", false
 	}
-	steamRoot, err := tools.FindSteamRootForTTW()
+	compatData, err := tools.ResolveCompatDataPath(&fnv, 0)
 	if err != nil {
 		return "", false
 	}
-	return filepath.Join(steamRoot, "steamapps", "compatdata",
-		fmt.Sprintf("%d", fnv.SteamAppID), "pfx"), true
+	return filepath.Join(compatData, "pfx"), true
 }
 
 func readDotNet48ReleaseRev(prefixPath string) uint32 {

@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/dto"
 	"github.com/parka/gorganizer/internal/gamedef"
 	"github.com/parka/gorganizer/internal/tools"
@@ -107,6 +108,40 @@ func TestDetectInstalledGamesCarriesCapabilities(t *testing.T) {
 		"stardewvalley": stardewCapabilities(),
 		"skyrimse":      skyrimSECapabilities(),
 	})
+}
+
+// TestDetectedDuplicateKeepsConfiguredInstall checks the daemon never reports or persists an alternate install.
+func TestDetectedDuplicateKeepsConfiguredInstall(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	native := filepath.Join(home, ".local", "share", "Steam")
+	flatpak := filepath.Join(home, ".var", "app", "com.valvesoftware.Steam", ".local", "share", "Steam")
+	configured := filepath.Join(flatpak, "steamapps", "common", "Stardew Valley")
+	d := newIsolatedDaemon(t, map[string]config.GameConfig{
+		"stardewvalley": {Name: "Stardew Valley", InstallPath: configured, SteamAppID: 413150, DataSubpath: "Mods", SteamLibraryPath: flatpak},
+	})
+	for _, root := range []string{native, flatpak} {
+		writeTestFile(t, filepath.Join(root, "steamapps", "appmanifest_413150.acf"),
+			`"AppState" { "appid" "413150" "installdir" "Stardew Valley" }`)
+		writeTestFile(t, filepath.Join(root, "steamapps", "common", "Stardew Valley", "StardewValley"), "")
+	}
+	games, err := d.DetectInstalledGames()
+	if err != nil || len(games) != 1 || games[0].InstallPath != configured {
+		t.Fatalf("detected = %+v, err = %v, want configured install %q", games, err, configured)
+	}
+	if got := d.config.Games["stardewvalley"].InstallPath; got != configured {
+		t.Fatalf("saved install = %q, want %q", got, configured)
+	}
+	if err := os.Remove(filepath.Join(flatpak, "steamapps", "appmanifest_413150.acf")); err != nil {
+		t.Fatal(err)
+	}
+	games, err = d.DetectInstalledGames()
+	if err != nil || len(games) != 0 {
+		t.Fatalf("detected alternate install = %+v, err = %v; want no replacement", games, err)
+	}
+	if got := d.config.Games["stardewvalley"].InstallPath; got != configured {
+		t.Fatalf("saved install switched to %q", got)
+	}
 }
 
 // TestCapabilitiesForDataRootRegistry checks every data-root registry game keeps the Bethesda feature set.

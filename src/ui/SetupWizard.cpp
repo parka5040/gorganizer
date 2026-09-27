@@ -228,8 +228,8 @@ QWizardPage* SetupWizard::createSteamDetectionPage()
             m_steamPathLabel->setText("Steam not found. You can locate a game below.");
             m_detectedGames.clear();
         } else {
-            m_steamPathLabel->setText("Steam found at: " + QString::fromStdString(root->string()));
-            m_detectedGames = GameDetector::detectGames(GameDetector::findLibraryFolders(*root));
+            m_steamPathLabel->setText("Steam installations found. Searching all game libraries.");
+            m_detectedGames = GameDetector::detectAll();
         }
         refreshDetectedGames();
     });

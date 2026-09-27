@@ -3,6 +3,7 @@
 #include "Paths.h"
 
 #include <algorithm>
+#include <set>
 
 namespace {
 
@@ -87,21 +88,33 @@ std::optional<std::filesystem::path> GameDetector::findSteamRoot()
 
 std::vector<std::filesystem::path> GameDetector::findLibraryFolders(const std::filesystem::path& steamRoot)
 {
-    std::vector<std::filesystem::path> folders;
-    auto vdfPath = steamRoot / "steamapps" / "libraryfolders.vdf";
-    auto parsed = VdfParser::parseFile(vdfPath);
+    std::vector<std::filesystem::path> folders{steamRoot};
+    auto parsed = VdfParser::parseFile(steamRoot / "steamapps" / "libraryfolders.vdf");
     if (!parsed)
         return folders;
 
-    auto root = parsed->value("libraryfolders").toMap();
-    for (auto it = root.begin(); it != root.end(); ++it) {
-        auto entry = it.value().toMap();
-        QString path = entry.value("path").toString();
-        if (!path.isEmpty()) {
-            std::filesystem::path p(path.toStdString());
-            if (std::filesystem::exists(p / "steamapps"))
-                folders.push_back(p);
-        }
+    auto entries = parsed->value("libraryfolders").toMap();
+    std::vector<std::pair<int, QString>> numbered;
+    for (auto it = entries.begin(); it != entries.end(); ++it) {
+        bool valid = false;
+        int number = it.key().toInt(&valid);
+        if (valid && number >= 0)
+            numbered.emplace_back(number, it.key());
+    }
+    std::sort(numbered.begin(), numbered.end());
+    for (const auto& item : numbered) {
+        const auto value = entries.value(item.second);
+        QString path = value.typeId() == QMetaType::QString
+                           ? value.toString() : value.toMap().value("path").toString();
+        if (path.isEmpty())
+            continue;
+        std::filesystem::path candidate(path.toStdString());
+        std::error_code ec;
+        if (!candidate.is_absolute() || !std::filesystem::is_directory(candidate / "steamapps", ec))
+            continue;
+        auto resolved = std::filesystem::canonical(candidate, ec);
+        if (!ec && std::find(folders.begin(), folders.end(), resolved) == folders.end())
+            folders.push_back(resolved);
     }
     return folders;
 }
@@ -154,18 +167,24 @@ std::optional<GameInfo> GameDetector::parseAppManifest(
 std::vector<GameInfo> GameDetector::detectGames(const std::vector<std::filesystem::path>& libraryFolders)
 {
     std::vector<GameInfo> detected;
+    std::set<uint32_t> seenApps;
     for (const auto& folder : libraryFolders) {
         auto steamapps = folder / "steamapps";
-        if (!std::filesystem::exists(steamapps))
+        std::error_code ec;
+        if (!std::filesystem::is_directory(steamapps, ec))
             continue;
 
-        for (const auto& entry : std::filesystem::directory_iterator(steamapps)) {
-            auto filename = entry.path().filename().string();
-            if (filename.starts_with("appmanifest_") && filename.ends_with(".acf")) {
-                auto game = parseAppManifest(entry.path(), folder);
-                if (game)
-                    detected.push_back(*game);
-            }
+        std::vector<std::filesystem::path> manifests;
+        for (std::filesystem::directory_iterator it(steamapps, ec), end; !ec && it != end; it.increment(ec)) {
+            auto filename = it->path().filename().string();
+            if (filename.starts_with("appmanifest_") && filename.ends_with(".acf"))
+                manifests.push_back(it->path());
+        }
+        std::sort(manifests.begin(), manifests.end());
+        for (const auto& manifest : manifests) {
+            auto game = parseAppManifest(manifest, folder);
+            if (game && seenApps.insert(game->appId).second)
+                detected.push_back(*game);
         }
     }
 
@@ -176,10 +195,13 @@ std::vector<GameInfo> GameDetector::detectGames(const std::vector<std::filesyste
 
 std::vector<GameInfo> GameDetector::detectAll()
 {
-    auto root = findSteamRoot();
-    if (!root)
-        return {};
-    auto folders = findLibraryFolders(*root);
+    std::vector<std::filesystem::path> folders;
+    for (const auto& root : Paths::steamRoots()) {
+        for (const auto& folder : findLibraryFolders(root)) {
+            if (std::find(folders.begin(), folders.end(), folder) == folders.end())
+                folders.push_back(folder);
+        }
+    }
     auto detected = detectGames(folders);
 
     bool hasFO3 = false, hasFNV = false;
