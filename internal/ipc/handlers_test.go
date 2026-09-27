@@ -242,7 +242,7 @@ func (f *fakeController) ExportInstance(_ context.Context, req dto.ExportRequest
 	return f.transferSummary, f.transferErr
 }
 
-func (f *fakeController) PreviewImport(gameID, archivePath string) (dto.ImportPreview, error) {
+func (f *fakeController) PreviewImport(_ context.Context, gameID, archivePath string) (dto.ImportPreview, error) {
 	f.previewArgs = []string{gameID, archivePath}
 	return f.preview, f.transferErr
 }

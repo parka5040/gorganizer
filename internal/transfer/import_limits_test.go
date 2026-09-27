@@ -243,7 +243,7 @@ func TestManifestLimitCannotBeBypassed(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	_, err = Preview(testGame, archive)
+	_, err = Preview(context.Background(), testGame, archive)
 	requireBundleRejected(t, err, BundleRejectedLimit, manifestEntryName)
 	_, err = Import(context.Background(), ImportOptions{GameID: testGame, ArchivePath: archive, Policy: dto.PolicyOverwrite}, nil)
 	requireBundleRejected(t, err, BundleRejectedLimit, manifestEntryName)

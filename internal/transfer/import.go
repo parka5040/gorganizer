@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/config"
@@ -54,18 +56,34 @@ type ImportOptions struct {
 }
 
 // ReadManifest opens an archive and returns its validated manifest without extracting anything.
-func ReadManifest(gameID, archivePath string) (*Manifest, error) {
+func ReadManifest(ctx context.Context, gameID, archivePath string) (*Manifest, error) {
 	tr, closer, err := openArchiveReader(archivePath)
 	if err != nil {
 		return nil, err
 	}
 	defer closer()
-	m, _, err := readManifestEntry(tr, gameID, defaultImportLimits().manifestBytes)
+	m, _, err := readManifestEntry(ctx, tr, gameID, defaultImportLimits().manifestBytes)
 	return m, err
 }
 
+type manifestContextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+// Read returns the next manifest bytes unless validation was cancelled.
+func (r manifestContextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(p)
+}
+
 // readManifestEntry consumes the first tar entry, requiring a size-bounded valid manifest for gameID.
-func readManifestEntry(tr *tar.Reader, gameID string, maxBytes int64) (*Manifest, int64, error) {
+func readManifestEntry(ctx context.Context, tr *tar.Reader, gameID string, maxBytes int64) (*Manifest, int64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	hdr, err := tr.Next()
 	if err != nil {
 		return nil, 0, fmt.Errorf("reading archive: %w", err)
@@ -79,9 +97,12 @@ func readManifestEntry(tr *tar.Reader, gameID string, maxBytes int64) (*Manifest
 	if hdr.Size < 0 || hdr.Size > maxBytes {
 		return nil, 0, &BundleRejectedError{Reason: BundleRejectedLimit, Item: manifestEntryName}
 	}
-	data, err := io.ReadAll(io.LimitReader(tr, hdr.Size))
+	data, err := io.ReadAll(manifestContextReader{ctx: ctx, r: io.LimitReader(tr, hdr.Size)})
 	if err != nil {
 		return nil, 0, fmt.Errorf("reading manifest: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
 	}
 	m, err := DecodeManifest(data)
 	if err != nil {
@@ -93,20 +114,34 @@ func readManifestEntry(tr *tar.Reader, gameID string, maxBytes int64) (*Manifest
 	if m.GameID != gameID {
 		return nil, 0, &TransferGameMismatchError{Want: gameID, Got: m.GameID}
 	}
-	seenMods := make([]string, 0, len(m.Mods))
+	if len(m.Mods) > 100_000 || len(m.Profiles) > 100_000 {
+		return nil, 0, &BundleRejectedError{Reason: BundleRejectedLimit, Item: manifestEntryName}
+	}
+	seenMods := make(map[string]string, len(m.Mods))
+	seenFolds := make(map[string]string, len(m.Mods))
 	for _, me := range m.Mods {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
 		if err := download.ValidateTargetModName(me.Folder); err != nil {
 			return nil, 0, err
 		}
-		for _, folder := range seenMods {
-			if strings.EqualFold(folder, me.Folder) {
-				return nil, 0, &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: me.Folder}
-			}
+		key := strings.ToLower(me.Folder)
+		if folder, ok := seenMods[key]; ok && strings.EqualFold(folder, me.Folder) {
+			return nil, 0, &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: me.Folder}
 		}
-		seenMods = append(seenMods, me.Folder)
+		fold := simpleFoldKey(me.Folder)
+		if folder, ok := seenFolds[fold]; ok && strings.EqualFold(folder, me.Folder) {
+			return nil, 0, &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: me.Folder}
+		}
+		seenMods[key] = me.Folder
+		seenFolds[fold] = me.Folder
 	}
-	seenProfiles := map[string]bool{}
+	seenProfiles := make(map[string]bool, len(m.Profiles))
 	for _, name := range m.Profiles {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
 		if err := validateImportedProfileName(name); err != nil {
 			return nil, 0, err
 		}
@@ -116,6 +151,19 @@ func readManifestEntry(tr *tar.Reader, gameID string, maxBytes int64) (*Manifest
 		seenProfiles[name] = true
 	}
 	return m, hdr.Size, nil
+}
+
+// simpleFoldKey maps equivalent Unicode spellings to the same mod identity key.
+func simpleFoldKey(name string) string {
+	return strings.Map(func(r rune) rune {
+		min := r
+		for next := unicode.SimpleFold(r); next != r; next = unicode.SimpleFold(next) {
+			if next < min {
+				min = next
+			}
+		}
+		return min
+	}, name)
 }
 
 // validateImportedProfileName rejects unsafe or reserved profile names from a bundle.
@@ -137,8 +185,8 @@ func validateCollisionPolicy(policy dto.CollisionPolicy) error {
 }
 
 // Preview reads an archive's manifest and reports per-item collisions against the target instance.
-func Preview(gameID, archivePath string) (dto.ImportPreview, error) {
-	m, err := ReadManifest(gameID, archivePath)
+func Preview(ctx context.Context, gameID, archivePath string) (dto.ImportPreview, error) {
+	m, err := ReadManifest(ctx, gameID, archivePath)
 	if err != nil {
 		return dto.ImportPreview{}, err
 	}
@@ -151,6 +199,9 @@ func Preview(gameID, archivePath string) (dto.ImportPreview, error) {
 		IncludesGameSettings: m.IncludesGameSettings,
 	}
 	for _, me := range m.Mods {
+		if err := ctx.Err(); err != nil {
+			return dto.ImportPreview{}, err
+		}
 		out.Mods = append(out.Mods, dto.ImportPreviewMod{
 			Folder:      me.Folder,
 			Name:        me.Name,
@@ -162,6 +213,9 @@ func Preview(gameID, archivePath string) (dto.ImportPreview, error) {
 		})
 	}
 	for _, name := range m.Profiles {
+		if err := ctx.Err(); err != nil {
+			return dto.ImportPreview{}, err
+		}
 		out.Profiles = append(out.Profiles, dto.ImportPreviewProfile{
 			Name:      name,
 			Collision: profileExists(gameID, name),
@@ -187,7 +241,7 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 	}
 	defer closer()
 
-	manifest, manifestSize, err := readManifestEntry(tr, opts.GameID, limits.manifestBytes)
+	manifest, manifestSize, err := readManifestEntry(ctx, tr, opts.GameID, limits.manifestBytes)
 	if err != nil {
 		return summary, err
 	}
@@ -381,6 +435,29 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 	}
 
 	for _, me := range manifest.Mods {
+		if !selMods[me.Folder] || skipMods[me.Folder] {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return summary, err
+		}
+		if err := checkStagedRoot(filepath.Join(stageMods, me.Folder), "mods/"+me.Folder); err != nil {
+			return summary, err
+		}
+	}
+	for _, name := range manifest.Profiles {
+		if !selProfiles[name] || skipProfiles[name] {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return summary, err
+		}
+		if err := checkStagedRoot(filepath.Join(stageProfiles, name), "profiles/"+name); err != nil {
+			return summary, err
+		}
+	}
+
+	for _, me := range manifest.Mods {
 		if !selMods[me.Folder] {
 			continue
 		}
@@ -393,9 +470,6 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 			continue
 		}
 		staged := filepath.Join(stageMods, me.Folder)
-		if _, err := os.Stat(staged); err != nil {
-			return summary, fmt.Errorf("archive has no data for mod %q: %w", me.Folder, os.ErrNotExist)
-		}
 		if err := finalizeMod(opts, me.Folder, staged, policyFor(me.Folder), &summary); err != nil {
 			return summary, err
 		}
@@ -416,9 +490,6 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 			continue
 		}
 		staged := filepath.Join(stageProfiles, name)
-		if _, err := os.Stat(staged); err != nil {
-			return summary, fmt.Errorf("archive has no data for profile %q: %w", name, os.ErrNotExist)
-		}
 		if err := finalizeProfile(opts, name, staged, &summary); err != nil {
 			return summary, err
 		}
@@ -438,6 +509,18 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 
 	progress("done", "")
 	return summary, nil
+}
+
+// checkStagedRoot requires a selected bundle root to be a real directory.
+func checkStagedRoot(path, item string) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) || err == nil && !info.IsDir() {
+		return &BundleRejectedError{Reason: BundleRejectedManifest, Item: item}
+	}
+	if err != nil {
+		return fmt.Errorf("checking staged bundle root %s: %w", item, err)
+	}
+	return nil
 }
 
 // finalizeMod moves one staged mod into ModsDir, applying the collision policy under the install lock.
@@ -582,15 +665,33 @@ func mergeOverwrite(stagedRoot, owDir string) error {
 		if rel == "." {
 			return nil
 		}
+		if err := fsutil.CheckExistingPath(owDir, rel); err != nil {
+			if errors.Is(err, fsutil.ErrExistingLink) {
+				return &BundleRejectedError{Reason: BundleRejectedLink, Item: filepath.ToSlash(rel)}
+			}
+			if errors.Is(err, fsutil.ErrExistingNonDirectory) {
+				return &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: filepath.ToSlash(rel)}
+			}
+			return err
+		}
 		dest := filepath.Join(owDir, rel)
+		info, err := os.Lstat(dest)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if err == nil && (info.IsDir() != d.IsDir() || !info.IsDir() && !info.Mode().IsRegular()) {
+			return &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: filepath.ToSlash(rel)}
+		}
 		if d.IsDir() {
 			return os.MkdirAll(dest, 0755)
 		}
 		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 			return err
 		}
-		if err := os.RemoveAll(dest); err != nil {
-			return err
+		if err == nil {
+			if err := os.Remove(dest); err != nil {
+				return err
+			}
 		}
 		return os.Rename(p, dest)
 	})

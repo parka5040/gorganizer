@@ -135,7 +135,7 @@ func TestImportRejectsReservedModFolderNames(t *testing.T) {
 			archive := writeArchiveFile(t, buildTarBytes(t, m, []tarEntry{
 				{&tar.Header{Name: "mods/M/a.esp", Typeflag: tar.TypeReg, Mode: 0644, Size: 4}, []byte("good")},
 			}))
-			if _, err := Preview(testGame, archive); err == nil {
+			if _, err := Preview(context.Background(), testGame, archive); err == nil {
 				t.Fatal("Preview accepted a reserved mod folder name")
 			}
 			_, err := Import(context.Background(), ImportOptions{GameID: testGame, ArchivePath: archive, Policy: dto.PolicyOverwrite}, nil)

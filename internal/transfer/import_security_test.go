@@ -63,7 +63,7 @@ func TestImportRejectsProfileTraversalBeforeWrites(t *testing.T) {
 			m := craftedManifest()
 			m.Profiles = []string{"Safe", name}
 			archive := writeArchiveFile(t, buildTarBytes(t, m, nil))
-			_, err := Preview(testGame, archive)
+			_, err := Preview(context.Background(), testGame, archive)
 			requireBundleRejected(t, err, BundleRejectedProfileName, name)
 			_, err = Import(context.Background(), ImportOptions{
 				GameID: testGame, ArchivePath: archive, Policy: dto.PolicyOverwrite, ProfileNames: []string{"Safe"},
@@ -109,7 +109,7 @@ func TestImportRejectsDuplicateIdentity(t *testing.T) {
 			}
 			archive := writeArchiveFile(t, buildTarBytes(t, m, tc.entries))
 			if tc.modify != nil {
-				_, err := Preview(testGame, archive)
+				_, err := Preview(context.Background(), testGame, archive)
 				requireBundleRejected(t, err, BundleRejectedDuplicate, tc.item)
 			}
 			_, err := Import(context.Background(), ImportOptions{GameID: testGame, ArchivePath: archive, Policy: dto.PolicyOverwrite}, nil)

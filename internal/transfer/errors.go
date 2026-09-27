@@ -44,6 +44,16 @@ const (
 	BundleRejectedManifest    = "manifest"
 )
 
+type TransferTooLargeError struct {
+	Reason string
+	Item   string
+}
+
+// Error describes an export that cannot fit within import limits.
+func (e *TransferTooLargeError) Error() string {
+	return fmt.Sprintf("This export is larger than Gorganizer can import again (%s). Export fewer mods at a time.", e.Reason)
+}
+
 type BundleRejectedError struct {
 	Reason string
 	Item   string
