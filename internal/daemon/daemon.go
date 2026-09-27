@@ -281,8 +281,10 @@ func (d *Daemon) shutdownRetentionReasonLocked(gameID string) string {
 	if d.sharedHeldLocked(gameID, dto.BusyOperationTool, dto.BusyOperationScriptExtender) {
 		return "tool_running"
 	}
-	if change, _ := d.steamStateForLocked(gameID); change == vfs.StorefrontBusy {
-		return "steam_busy"
+	if mm := d.mountMgrs[gameID]; mm != nil {
+		if _, _, err := d.steamCaptureLocked(gameID, mm.DataPath()); err != nil {
+			return "steam_busy"
+		}
 	}
 	return ""
 }
