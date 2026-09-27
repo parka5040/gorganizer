@@ -541,6 +541,10 @@ message VFSStatus {
   // (e.g. "game_running", "launch_grace", "process_scan_failed").
   VFSLifecycleState lifecycle_state = 10;
   string lifecycle_reason = 11;
+  // pending_recovery is the recovery currently waiting for the user's
+  // decision for this game (the same item the RecoveryPending event carries),
+  // so a GUI that missed the event can still show the prompt.
+  RecoveryPending pending_recovery = 12;
 }
 
 enum VFSLifecycleState {
