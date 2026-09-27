@@ -642,6 +642,11 @@ func (s *gorganizerServer) Health(_ context.Context, _ *pb.HealthRequest) (*pb.R
 		RecoveryDone: r.RecoveryDone,
 		GamesWarmed:  r.GamesWarmed,
 		LastInitStep: r.LastInitStep,
+		InstanceId:   r.InstanceID,
+		Pid:          r.PID,
+		Version:      r.Version,
+		ApiEpoch:     r.APIEpoch,
+		Stopping:     r.Stopping,
 	}, nil
 }
 

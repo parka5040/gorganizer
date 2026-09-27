@@ -31,6 +31,12 @@ func main() {
 	args := os.Args[2:]
 
 	switch subcommand {
+	case "ping":
+		os.Exit(runPing(args))
+	case "wait-ready":
+		os.Exit(runWaitReady(args))
+	case "stop":
+		os.Exit(runStop(args))
 	case "recover":
 		os.Exit(runRecover(args))
 	case "recover-confirm":
@@ -104,6 +110,9 @@ func usage() {
 	fmt.Fprint(os.Stderr, `gorganizerctl — gorganizer maintenance CLI
 
 Subcommands:
+  ping                         Check whether Gorganizer is running.
+  wait-ready [--timeout 60s]   Wait for startup to finish.
+  stop [--timeout 46s]         Ask Gorganizer to stop and wait for it to exit.
   recover --game <id>          Repair interrupted SMAPI, game-root files and
                                the Data folder for a configured game.
   recover --data-path <path>   Check only the specified Data folder.

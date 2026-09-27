@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -33,8 +34,13 @@ func main() {
 	logLevel := flag.String("log-level", "", "Log level (debug, info, warn, error)")
 	handleNXM := flag.String("handle-nxm", "", "Forward NXM URI to running daemon and exit")
 	showVersion := flag.Bool("version", false, "Print version and exit")
+	printSocket := flag.Bool("print-socket-path", false, "Print the daemon socket path and exit")
 	flag.Parse()
 
+	if *printSocket {
+		printSocketPath(os.Stdout, *socketPath)
+		return
+	}
 	if *showVersion {
 		fmt.Printf("gorganizerd %s (commit %s, built %s)\n", version, commit, buildDate)
 		return
@@ -64,10 +70,7 @@ func main() {
 		Level: level,
 	})))
 
-	sock := config.SocketPath()
-	if *socketPath != "" {
-		sock = *socketPath
-	}
+	sock := socketPathFor(*socketPath)
 
 	releaseLock, err := instancelock.Acquire()
 	if err != nil {
@@ -76,7 +79,7 @@ func main() {
 	}
 	defer releaseLock()
 
-	d, err := daemon.New(cfg)
+	d, err := daemon.NewWithVersion(cfg, version)
 	if err != nil {
 		slog.Error("failed to create daemon", "err", err)
 		os.Exit(1)
@@ -114,6 +117,19 @@ func main() {
 		slog.Error("daemon failed", "err", err)
 		os.Exit(1)
 	}
+}
+
+// socketPathFor resolves the daemon socket path without creating directories.
+func socketPathFor(override string) string {
+	if override != "" {
+		return override
+	}
+	return config.SocketPath()
+}
+
+// printSocketPath prints the socket path without starting the daemon.
+func printSocketPath(out io.Writer, override string) {
+	fmt.Fprintln(out, socketPathFor(override))
 }
 
 // hardExit removes the daemon socket before exiting immediately.
