@@ -147,7 +147,7 @@ func TestMapErrorShuttingDownIsUnavailable(t *testing.T) {
 	assertStatus(t, mapped, codes.Unavailable, "daemon_shutting_down:")
 }
 
-// TestMapErrorGameRunningEscapesItsValues locks the code, message and escaping of the pending-changes refusal.
+// TestMapErrorGameRunningEscapesItsValues checks the code and encoded operation of game-running refusals.
 func TestMapErrorGameRunningEscapesItsValues(t *testing.T) {
 	for _, tc := range []struct {
 		err  error
@@ -156,6 +156,8 @@ func TestMapErrorGameRunningEscapesItsValues(t *testing.T) {
 		{&dto.GameRunningError{GameID: "stardewvalley", Operation: dto.GameRunningOperationLaunch}, "game_running:game=stardewvalley:operation=launch"},
 		{fmt.Errorf("apply: %w", &dto.GameRunningError{GameID: "skyrimse", Operation: dto.GameRunningOperationApply}), "game_running:game=skyrimse:operation=apply"},
 		{&dto.GameRunningError{GameID: "stardewvalley", Operation: dto.GameRunningOperationUnmount}, "game_running:game=stardewvalley:operation=unmount"},
+		{&dto.GameRunningError{GameID: "skyrimse", Operation: dto.GameRunningOperationReinstall}, "game_running:game=skyrimse:operation=reinstall"},
+		{&dto.GameRunningError{GameID: "skyrimse", Operation: dto.GameRunningOperationMerge}, "game_running:game=skyrimse:operation=merge"},
 		{&dto.GameRunningError{GameID: "a:b=c", Operation: "x y"}, "game_running:game=a%3Ab%3Dc:operation=x%20y"},
 	} {
 		mapped, handled := MapError(tc.err)
