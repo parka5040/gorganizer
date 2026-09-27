@@ -256,7 +256,12 @@ func (md *ModService) UninstallMod(gameID, modName string, force bool) ([]string
 	if err != nil {
 		return nil, err
 	}
-	defer md.s.lockMods(gameID, modName)()
+	unlockMods := md.s.lockMods(gameID, modName)
+	defer func() {
+		if unlockMods != nil {
+			unlockMods()
+		}
+	}()
 	if err := requireRealModDir(gameID, modName, modDir); err != nil {
 		return nil, err
 	}
@@ -280,7 +285,7 @@ func (md *ModService) UninstallMod(gameID, modName string, force bool) ([]string
 		modsDir := config.ModsDir(gameID)
 		entries, _ := os.ReadDir(modsDir)
 		for _, ent := range entries {
-			if !ent.IsDir() || ent.Name() == "Downloads" || ent.Name() == modName {
+			if !ent.IsDir() || ent.Name() == "Downloads" || ent.Name() == modName || strings.HasPrefix(ent.Name(), ".gorganizer-trash-") {
 				continue
 			}
 			other, err := download.LoadModMetadata(filepath.Join(modsDir, ent.Name()))
@@ -295,12 +300,17 @@ func (md *ModService) UninstallMod(gameID, modName string, force bool) ([]string
 		}
 	}
 
-	applied, err := md.uninstallModWithFarm(gameID, modName, force)
+	applied, trash, err := md.uninstallModWithFarm(gameID, modName, force)
 	if err != nil {
 		return nil, err
 	}
-	if err := removeModFolder(modDir); err != nil {
-		return nil, err
+	unlockMods()
+	unlockMods = nil
+	if md.s.uninstallBeforeDelete != nil {
+		md.s.uninstallBeforeDelete(trash)
+	}
+	if err := removeModFolder(trash); err != nil {
+		slog.Warn("could not remove uninstalled mod trash; it will be retried at startup", "game", gameID, "path", trash, "err", err)
 	}
 
 	var flagged []string

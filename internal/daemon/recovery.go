@@ -6,10 +6,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/dto"
 	"github.com/parka/gorganizer/internal/vfs"
 )
@@ -57,7 +60,7 @@ func (s *session) awaitRecoveryCtx(ctx context.Context) error {
 	}
 }
 
-// RecoverAll resolves interrupted mod-loader transactions, game-root deployments and Data farms, deactivates root deployments orphaned by an unmounted farm, and reaps stale install staging and archive extractions before any farm-acting or installing RPC may proceed.
+// RecoverAll resolves interrupted transactions and farms, then reaps orphan staging, mod trash, and archive extractions before admitting work.
 func (s *session) RecoverAll() {
 	s.setReadinessStep("checking crash recovery", nil)
 	defer s.setReadinessStep("recovery complete", func(r *dto.ReadinessResult) { r.RecoveryDone = true })
@@ -68,7 +71,31 @@ func (s *session) RecoverAll() {
 	for _, gameID := range ids {
 		s.sweepOrphanStageDirs(gameID)
 	}
+	for _, gameID := range s.configuredGameIDs() {
+		s.sweepUninstalledModTrash(gameID)
+	}
 	s.sweepStaleExtractions()
+}
+
+// sweepUninstalledModTrash removes direct, non-symlinked trash directories left by interrupted uninstalls.
+func (s *session) sweepUninstalledModTrash(gameID string) {
+	modsDir := config.ModsDir(gameID)
+	entries, err := os.ReadDir(modsDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("could not scan uninstalled mod trash", "game", gameID, "err", err)
+		}
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), ".gorganizer-trash-") {
+			continue
+		}
+		path := filepath.Join(modsDir, entry.Name())
+		if err := removeModFolder(path); err != nil {
+			slog.Warn("could not remove uninstalled mod trash", "game", gameID, "path", path, "err", err)
+		}
+	}
 }
 
 // recoverUnits runs the startup recovery sequence for the selected games, returning false if an interrupted transaction still needs another attempt.

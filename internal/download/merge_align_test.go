@@ -159,6 +159,18 @@ func TestNormalizeDerivedModName(t *testing.T) {
 	}
 }
 
+// TestValidateTargetModNameRejectsTrashNames verifies hidden uninstall trash names cannot be chosen as mod folders.
+func TestValidateTargetModNameRejectsTrashNames(t *testing.T) {
+	for _, name := range []string{".gorganizer-trash-1234", ".gorganizer-trash-", ".gorganizer-trash-mod"} {
+		t.Run(name, func(t *testing.T) {
+			var invalid *InvalidTargetModError
+			if err := ValidateTargetModName(name); !errors.As(err, &invalid) {
+				t.Errorf("ValidateTargetModName(%q) = %v, want InvalidTargetModError", name, err)
+			}
+		})
+	}
+}
+
 // TestPatchModMetadataFieldIsSurgical verifies only the named top-level key changes and a missing file is never created.
 func TestPatchModMetadataFieldIsSurgical(t *testing.T) {
 	modDir := t.TempDir()

@@ -4,8 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/parka/gorganizer/internal/atomicfile"
+	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/dto"
 	"github.com/parka/gorganizer/internal/mod"
@@ -84,42 +88,43 @@ func (md *ModService) restoreModFarmLocked(mm *vfs.MountManager, root *vfs.RootD
 	return restoreErr
 }
 
-// uninstallModWithFarm removes every profile and farm reference to a mod so its folder can be deleted without the daemon lock; the caller holds the install lock.
-func (md *ModService) uninstallModWithFarm(gameID, modName string, force bool) (bool, error) {
+// uninstallModWithFarm removes every profile and farm reference to a mod and moves its folder to trash; the caller holds the install lock.
+func (md *ModService) uninstallModWithFarm(gameID, modName string, force bool) (bool, string, error) {
 	defer md.s.lockProfiles(gameID)()
 	md.s.mu.Lock()
 	defer md.s.mu.Unlock()
 	if md.s.recoveryPendingFor(gameID) != nil || md.s.refuseLoaderIntentLocked(gameID) != nil {
-		return false, &dto.GameRunningError{GameID: gameID, Operation: dto.GameRunningOperationUninstall}
+		return false, "", &dto.GameRunningError{GameID: gameID, Operation: dto.GameRunningOperationUninstall}
 	}
 	used, err := md.mountedModUsedLocked(gameID, modName)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	if !used {
 		snapshots, err := md.snapshotModListsLocked(gameID)
 		if err != nil {
-			return false, err
+			return false, "", err
 		}
 		if err := md.dropFromModListsLocked(gameID, modName, force); err != nil {
-			return false, errors.Join(err, md.restoreModListsLocked(snapshots))
+			return false, "", errors.Join(err, md.restoreModListsLocked(snapshots))
 		}
-		return false, nil
+		trash, err := md.moveModToTrashLocked(gameID, modName)
+		return false, trash, err
 	}
 	if mm := md.s.mountMgrs[gameID]; mm == nil || !mm.IsMounted() {
-		return false, &dto.GameRunningError{GameID: gameID, Operation: dto.GameRunningOperationUninstall}
+		return false, "", &dto.GameRunningError{GameID: gameID, Operation: dto.GameRunningOperationUninstall}
 	}
 	if err := md.checkMountedModChangeLocked(gameID, dto.GameRunningOperationUninstall); err != nil {
-		return false, err
+		return false, "", err
 	}
 	release, err := md.s.reserveShared(gameID, dto.BusyOperationApply)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	defer release()
 	snapshots, err := md.snapshotModListsLocked(gameID)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	if !force {
 		var enabled []string
@@ -132,14 +137,14 @@ func (md *ModService) uninstallModWithFarm(gameID, modName string, force bool) (
 			}
 		}
 		if len(enabled) > 0 {
-			return false, &ModInUseError{Name: modName, Profiles: enabled}
+			return false, "", &ModInUseError{Name: modName, Profiles: enabled}
 		}
 	}
 	mm := md.s.mountMgrs[gameID]
 	ms := md.s.mountStates[gameID]
 	gc, err := md.s.config.EffectiveGameConfig(gameID)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	var current []mod.ModListEntry
 	for _, snapshot := range snapshots {
@@ -160,26 +165,45 @@ func (md *ModService) uninstallModWithFarm(gameID, modName string, force bool) (
 	layers := md.s.svc.vfs.buildLayers(gameID, gc, without)
 	root, err := md.s.ensureRootDeploymentManager(gameID, gc)
 	if err != nil {
-		return false, fmt.Errorf("initializing game-root deployment: %w", err)
+		return false, "", fmt.Errorf("initializing game-root deployment: %w", err)
 	}
 	if err := mm.MarkDirty(layers); err != nil {
-		return false, fmt.Errorf("preparing Data farm without mod: %w", err)
+		return false, "", fmt.Errorf("preparing Data farm without mod: %w", err)
 	}
 	if err := md.rematerializeModChangeLocked(mm); err != nil {
 		rollback := md.restoreModFarmLocked(mm, root, ms.profileName, previousApplied, previousDesired, wasDirty)
-		return false, errors.Join(fmt.Errorf("rebuilding Data farm without mod: %w", err), rollback)
+		return false, "", errors.Join(fmt.Errorf("rebuilding Data farm without mod: %w", err), rollback)
 	}
 	if _, err := root.Apply(layers, ms.profileName); err != nil {
 		rollback := md.restoreModFarmLocked(mm, root, ms.profileName, previousApplied, previousDesired, wasDirty)
-		return false, errors.Join(fmt.Errorf("applying game-root deployment without mod: %w", err), rollback)
+		return false, "", errors.Join(fmt.Errorf("applying game-root deployment without mod: %w", err), rollback)
 	}
 	if err := md.dropFromModListsLocked(gameID, modName, true); err != nil {
 		rollback := md.restoreModListsLocked(snapshots)
 		rollback = errors.Join(rollback, md.restoreModFarmLocked(mm, root, ms.profileName, previousApplied, previousDesired, wasDirty))
-		return false, errors.Join(fmt.Errorf("updating modlists: %w", err), rollback)
+		return false, "", errors.Join(fmt.Errorf("updating modlists: %w", err), rollback)
 	}
 	md.s.publishGuarded(dto.StatusEventResult{VFSStatus: md.s.svc.vfs.vfsStatus(gameID, gc, ms.profileName, mm, without)})
-	return true, nil
+	trash, err := md.moveModToTrashLocked(gameID, modName)
+	return true, trash, err
+}
+
+// moveModToTrashLocked moves an uninstalled mod into a hidden sibling and syncs the mods directory; the caller holds s.mu and the profile lock.
+func (md *ModService) moveModToTrashLocked(gameID, modName string) (string, error) {
+	modsDir := config.ModsDir(gameID)
+	trash := filepath.Join(modsDir, ".gorganizer-trash-"+uuid.NewString())
+	modDir := filepath.Join(modsDir, modName)
+	rename := os.Rename
+	if md.s.uninstallRename != nil {
+		rename = md.s.uninstallRename
+	}
+	if err := rename(modDir, trash); err != nil {
+		return "", fmt.Errorf("could not finish removing the mod: %w", err)
+	}
+	if err := atomicfile.SyncDir(modsDir); err != nil {
+		return trash, fmt.Errorf("could not save the mod removal: %w", err)
+	}
+	return trash, nil
 }
 
 // removeModFolder deletes a mod directory, retrying a failed removal once.
