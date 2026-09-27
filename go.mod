@@ -6,6 +6,7 @@ require (
 	github.com/bodgit/sevenzip v1.6.1
 	github.com/google/uuid v1.6.0
 	github.com/klauspost/compress v1.17.11
+	github.com/nwaples/rardecode/v2 v2.4.1
 	golang.org/x/sys v0.40.0
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
@@ -16,7 +17,6 @@ require (
 	github.com/bodgit/plumbing v1.3.0 // indirect
 	github.com/bodgit/windows v1.0.1 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
-	github.com/nwaples/rardecode/v2 v2.4.1 // indirect
 	github.com/pierrec/lz4/v4 v4.1.22 // indirect
 	github.com/spf13/afero v1.11.0 // indirect
 	github.com/ulikunitz/xz v0.5.12 // indirect
