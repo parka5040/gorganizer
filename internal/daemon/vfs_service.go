@@ -169,6 +169,7 @@ func (vs *VFSService) mountVFSOwned(gameID, profileName string, autoSwap bool, o
 					return nil, fmt.Errorf("auto-swap root deactivate of %s failed: %w", conflict, err)
 				}
 			}
+			vs.s.logSteamStateLocked(conflict, "auto-swap unmount")
 			if err := conflictMM.Deactivate(); err != nil {
 				if restoreErr := vs.s.applyRootDeployment(conflict, conflictGC, conflictState.profileName); restoreErr != nil {
 					return nil, fmt.Errorf("auto-swap deactivate of %s failed: %v; restoring root deployment also failed: %w", conflict, err, restoreErr)
@@ -224,6 +225,7 @@ func (vs *VFSService) mountVFSOwned(gameID, profileName string, autoSwap bool, o
 	if _, err := rootManager.Apply(layers, profileName); err != nil {
 		return nil, fmt.Errorf("applying game-root deployment: %w", err)
 	}
+	mm.SetStorefrontBaseline(vs.s.steamBaselineLocked(gameID, effectiveGC))
 	if err := mm.Activate(layers, profileName); err != nil {
 		if _, rootErr := rootManager.Deactivate(); rootErr != nil {
 			return nil, fmt.Errorf("activating Data VFS failed: %v; rolling back game-root deployment also failed: %w", err, rootErr)
@@ -344,6 +346,7 @@ func (vs *VFSService) UnmountVFS(gameID string) error {
 			return fmt.Errorf("deactivating game-root deployment: %w", err)
 		}
 	}
+	vs.s.logSteamStateLocked(gameID, "unmount")
 	if err := mm.Deactivate(); err != nil {
 		if restoreErr := vs.s.applyRootDeployment(gameID, gc, state.profileName); restoreErr != nil {
 			return fmt.Errorf("deactivating Data VFS failed: %v; restoring game-root deployment also failed: %w", err, restoreErr)
@@ -586,6 +589,7 @@ func (vs *VFSService) rebuildVFSOwned(gameID string, owner uint64) error {
 		}
 		return err
 	}
+	vs.s.logSteamStateLocked(gameID, "apply")
 	if err := mm.ReMaterialize(); err != nil {
 		if _, restoreErr := rootManager.Apply(oldLayers, ms.profileName); restoreErr != nil {
 			return fmt.Errorf("re-materializing Data VFS failed: %v; restoring game-root deployment also failed: %w", err, restoreErr)

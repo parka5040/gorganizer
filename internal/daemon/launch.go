@@ -51,6 +51,9 @@ func (ls *LaunchService) LaunchGame(gameID string, useTool bool, profileName str
 		}
 	}
 
+	if mm.IsMounted() {
+		ls.s.logSteamState(gameID, "launch")
+	}
 	if mm.IsMounted() && mm.IsDirty() {
 		if err := ls.refuseDirtyRunningFarm(gameID); err != nil {
 			return 0, err

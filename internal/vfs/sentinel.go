@@ -167,23 +167,35 @@ type SentinelLayer struct {
 	Enabled bool   `json:"enabled"`
 }
 
+type StorefrontSnapshot struct {
+	Store            string    `json:"store"`
+	AppID            int       `json:"app_id"`
+	BuildID          string    `json:"build_id"`
+	StateFlags       uint64    `json:"state_flags"`
+	UpdateResult     string    `json:"update_result"`
+	LastUpdated      int64     `json:"last_updated"`
+	DepotFingerprint string    `json:"depot_fingerprint"`
+	CapturedAt       time.Time `json:"captured_at"`
+}
+
 type Sentinel struct {
-	SchemaVersion       int             `json:"schema_version"`
-	Magic               string          `json:"magic"`
-	GameID              string          `json:"game_id"`
-	ProfileName         string          `json:"profile_name"`
-	ActivationPID       int             `json:"activation_pid"`
-	ActivationStartedAt time.Time       `json:"activation_started_at"`
-	Hash                string          `json:"hash"`
-	BackupPath          string          `json:"backup_path"`
-	OverwriteMod        string          `json:"overwrite_mod"`
-	OverwriteRoot       string          `json:"overwrite_root"`
-	Layers              []SentinelLayer `json:"layers"`
-	MaterializerVersion int             `json:"materializer_version"`
-	FarmID              string          `json:"farm_id,omitempty"`
-	Manifest            string          `json:"manifest,omitempty"`
-	ManifestSHA256      string          `json:"manifest_sha256,omitempty"`
-	ManifestEntries     int             `json:"manifest_entries,omitempty"`
+	SchemaVersion       int                 `json:"schema_version"`
+	Magic               string              `json:"magic"`
+	GameID              string              `json:"game_id"`
+	ProfileName         string              `json:"profile_name"`
+	ActivationPID       int                 `json:"activation_pid"`
+	ActivationStartedAt time.Time           `json:"activation_started_at"`
+	Hash                string              `json:"hash"`
+	BackupPath          string              `json:"backup_path"`
+	OverwriteMod        string              `json:"overwrite_mod"`
+	OverwriteRoot       string              `json:"overwrite_root"`
+	Layers              []SentinelLayer     `json:"layers"`
+	MaterializerVersion int                 `json:"materializer_version"`
+	FarmID              string              `json:"farm_id,omitempty"`
+	Manifest            string              `json:"manifest,omitempty"`
+	ManifestSHA256      string              `json:"manifest_sha256,omitempty"`
+	ManifestEntries     int                 `json:"manifest_entries,omitempty"`
+	Storefront          *StorefrontSnapshot `json:"storefront,omitempty"`
 }
 
 var (
