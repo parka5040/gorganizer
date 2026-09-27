@@ -35,6 +35,9 @@ public:
     void configureGame(const QString& gameId, const QString& name,
                        uint32_t steamAppId, const QString& installPath,
                        const QString& dataSubpath);
+    quint64 configureGameTracked(const QString& gameId, const QString& name,
+                                 uint32_t steamAppId, const QString& installPath,
+                                 const QString& dataSubpath);
 
     void listMods(const QString& gameId);
     // Synchronous ListMods for modal flows (export mod checklist).
@@ -254,6 +257,7 @@ public:
                           QString& errorOut);
 
     void setNexusAPIKey(const QString& apiKey);
+    quint64 saveNexusAPIKey(const QString& apiKey);
 
     void shutdownDaemon();
     bool getShutdownPlanSync(int timeoutMs, std::vector<GrpcShutdownPlanItem>& items, QString& errorOut);
@@ -274,6 +278,7 @@ signals:
     void gamesListed(const std::vector<GrpcGame>& games);
     void gamesDetected(const std::vector<GrpcGame>& games);
     void gameConfigured();
+    void gameConfigurationFinished(quint64 requestId, const QString& gameId, bool ok, const QString& error);
 
     void modsListed(const std::vector<GrpcModInfo>& mods);
     void modInfoReceived(const GrpcModInfo& info);
@@ -330,6 +335,7 @@ signals:
     void recoveryPending(const GrpcRecoveryPending& recovery);
 
     void nexusAPIKeySet(bool valid, const QString& errorMessage);
+    void nexusKeySaveFinished(quint64 requestId, bool saved, const QString& error);
 
     void transferProgress(const GrpcTransferProgress& progress);
     void transferCompleted(const GrpcTransferSummary& summary);
@@ -424,6 +430,7 @@ private:
     quint64 m_nextIniRequestId = 0;
     quint64 m_nextDependencyRequestId = 0;
     quint64 m_nextVfsRequestId = 0;
+    quint64 m_nextSetupRequestId = 0;
     quint64 m_nextSteamRequestId = 0;
     QString m_subscribedGame;
     QString m_pluginGame;

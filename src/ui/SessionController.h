@@ -85,8 +85,10 @@ protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
-    // Rebuilds the managed-game list from a daemon detection pass (authoritative over local detection).
+    // Rebuilds the managed-game list from the daemon's configured and detected games.
     void onGamesDetected(const std::vector<GrpcGame>& detectedGames);
+    void onGamesListed(const std::vector<GrpcGame>& configuredGames);
+    void refreshManagedGames();
     // Tracks daemon VFS state for the active game and surfaces the Apply affordance.
     void onVfsStatusChanged(const GrpcVFSStatus& status);
     // Tracks the mount state and pending changes of the active game from a polled VFS status, ignoring other games.
@@ -138,6 +140,8 @@ private:
     QWidget* m_parentWindow;
 
     std::vector<GameInfo> m_managedGames;
+    std::vector<GrpcGame> m_configuredGames;
+    std::vector<GrpcGame> m_detectedGames;
     GameInfo m_activeGame;
     QString m_currentProfile = "Default";
     QString m_requestedProfile;

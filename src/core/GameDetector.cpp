@@ -58,11 +58,11 @@ bool validInstallLayout(const std::filesystem::path& installDir,
 std::optional<std::filesystem::path> installRootForExecutable(
     const gorganizer::GameInfo& game, const std::filesystem::path& exePath)
 {
-    const QString selectedStem = QString::fromStdString(exePath.stem().string());
+    const QString selectedName = QString::fromStdString(exePath.filename().string());
     for (const auto& configured : game.executablePaths) {
         const auto rel = relativePath(configured);
-        const QString configuredStem = QString::fromStdString(rel.stem().string());
-        if (configuredStem.compare(selectedStem, Qt::CaseInsensitive) != 0)
+        const QString configuredName = QString::fromStdString(rel.filename().string());
+        if (configuredName.compare(selectedName, Qt::CaseInsensitive) != 0)
             continue;
 
         auto root = exePath;
@@ -207,7 +207,7 @@ std::optional<GameInfo> GameDetector::fromExecutable(const std::filesystem::path
 
     QString stem = QString::fromStdString(exePath.stem().string()).toLower();
     auto game = GameInfo::findByExeStem(stem);
-    if (!game || game->dataDirOptional)
+    if (!game)
         return std::nullopt;
 
     auto installDir = installRootForExecutable(*game, exePath);

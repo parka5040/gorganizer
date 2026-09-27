@@ -15,7 +15,6 @@
 #include "ThemeManager.h"
 #include <QEventLoop>
 #include <QMessageBox>
-#include <QStatusBar>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -137,14 +136,6 @@ int main(int argc, char* argv[])
                      });
 #endif
 
-    QString wizardApiKey;
-    if (config.isFirstBoot()) {
-        gorganizer::SetupWizard wizard(config);
-        if (wizard.exec() == QDialog::Rejected)
-            return 0;
-        wizardApiKey = wizard.validatedApiKey();
-    }
-
     qint64 daemonPid = 0;
     bool daemonOwned = false;
 
@@ -177,32 +168,6 @@ int main(int argc, char* argv[])
 
     gorganizer::GrpcClient grpcClient;
     grpcClient.connectToDaemon();
-
-    QString wizardKeyMessage;
-    QStatusBar* wizardStatusBar = nullptr;
-    bool wizardKeyAnswered = false;
-    if (!wizardApiKey.isEmpty()) {
-        auto reportWizardKeyResult = [&wizardKeyAnswered, &wizardKeyMessage, &wizardStatusBar](bool saved) {
-            if (wizardKeyAnswered)
-                return;
-            wizardKeyAnswered = true;
-            wizardKeyMessage = saved
-                ? "Nexus key saved."
-                : "Couldn't save your Nexus key. Open Tools → Settings to try again.";
-            if (wizardStatusBar)
-                wizardStatusBar->showMessage(wizardKeyMessage, 10000);
-        };
-        QObject::connect(&grpcClient, &gorganizer::GrpcClient::nexusAPIKeySet, &app,
-            [reportWizardKeyResult](bool valid, const QString&) { reportWizardKeyResult(valid); });
-        QObject::connect(&grpcClient, &gorganizer::GrpcClient::rpcError, &app,
-            [reportWizardKeyResult](const QString& method, const QString&) {
-                if (method == "SetNexusAPIKey")
-                    reportWizardKeyResult(false);
-            });
-        QObject::connect(&grpcClient, &gorganizer::GrpcClient::connected, &grpcClient,
-            [&grpcClient, wizardApiKey] { grpcClient.setNexusAPIKey(wizardApiKey); },
-            Qt::SingleShotConnection);
-    }
 
     {
         gorganizer::SplashScreen splash(&grpcClient);
@@ -242,16 +207,28 @@ int main(int argc, char* argv[])
                         "Check the daemon log for details:\n"
                         "  $XDG_STATE_HOME/gorganizer/daemon.log\n"
                         "  (or ~/.local/state/gorganizer/daemon.log)").arg(lastStepSeen));
+            if (daemonOwned) {
+                QString shutdownErr;
+                grpcClient.shutdownDaemonSync(3000, 10000, shutdownErr);
+            }
             return 1;
+        }
+    }
+
+    if (config.isFirstBoot()) {
+        gorganizer::SetupWizard wizard(config, &grpcClient);
+        if (wizard.exec() == QDialog::Rejected) {
+            if (daemonOwned) {
+                QString shutdownErr;
+                grpcClient.shutdownDaemonSync(3000, 10000, shutdownErr);
+            }
+            return 0;
         }
     }
 
     gorganizer::MainWindow mainWindow(config, &grpcClient);
     mainWindow.setDaemonOwned(daemonOwned);
     mainWindow.show();
-    wizardStatusBar = mainWindow.statusBar();
-    if (wizardKeyAnswered)
-        wizardStatusBar->showMessage(wizardKeyMessage, 10000);
 
     int exitCode = app.exec();
 

@@ -9,6 +9,8 @@
 #include "ErrorPresenter.h"
 
 #include <QAction>
+#include <QDir>
+#include <QFileDialog>
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QPushButton>
@@ -38,6 +40,30 @@ GameSetupController::GameSetupController(AppConfig& config, GrpcClient* grpc,
     connect(m_grpc, &GrpcClient::vfsStatusQueried, this, &GameSetupController::onVfsStatusQueried);
     connect(m_grpc, &GrpcClient::vfsStatusQueryFailed, this, &GameSetupController::onVfsStatusQueryFailed);
     connect(m_grpc, &GrpcClient::rpcError, this, &GameSetupController::onRpcError);
+    connect(m_grpc, &GrpcClient::gameConfigurationFinished, this,
+        [this](quint64 requestId, const QString&, bool ok, const QString& error) {
+            if (!m_pendingGames.contains(requestId))
+                return;
+            const auto game = m_pendingGames.take(requestId);
+            if (!ok) {
+                presentError(m_parentWindow, "Couldn't add game", "add this game", error, true);
+                return;
+            }
+            auto managed = m_config.managedGames();
+            if (std::find(managed.begin(), managed.end(), game.shortName) == managed.end()) {
+                managed.push_back(game.shortName);
+                m_config.setManagedGames(managed);
+            }
+            m_config.setActiveGameShortName(game.shortName);
+            m_grpc->listGames();
+            m_statusBar->showMessage(QString("%1 added.").arg(game.name), 5000);
+        });
+    connect(m_grpc, &GrpcClient::disconnected, this, [this] {
+        if (!m_pendingGames.isEmpty()) {
+            m_pendingGames.clear();
+            m_statusBar->showMessage("Couldn't add the game. The background service disconnected.", 5000);
+        }
+    });
 }
 
 void GameSetupController::onActiveGameChanged(const GameInfo& game)
@@ -55,6 +81,10 @@ void GameSetupController::onActiveGameChanged(const GameInfo& game)
 
 void GameSetupController::onAddNewGame()
 {
+    if (!m_grpc->isConnected()) {
+        dialogs::warn(m_parentWindow, "Background service unavailable", "Wait for the background service to reconnect and try again.");
+        return;
+    }
     auto allDetected = GameDetector::detectAll();
     auto managed = m_config.managedGames();
     QSet<QString> managedSet(managed.begin(), managed.end());
@@ -72,9 +102,7 @@ void GameSetupController::onAddNewGame()
     }
     if (candidates.empty()) {
         dialogs::info(m_parentWindow, "Add New Game",
-            "Every Bethesda game Steam can detect is already being managed.\n\n"
-            "Install a new supported title in Steam, or use the manual-locate "
-            "flow by editing ~/.config/gorganizer/gorganizer.conf.");
+            "No other supported games were found in Steam. Use Locate game… to choose a game executable.");
         return;
     }
 
@@ -84,20 +112,43 @@ void GameSetupController::onAddNewGame()
     if (!ok) return;
     int idx = labels.indexOf(chosenLabel);
     if (idx < 0) return;
-    const auto& chosen = candidates[idx];
+    configureNewGame(candidates[idx]);
+}
 
-    managed.push_back(chosen.shortName);
-    m_config.setManagedGames(managed);
+void GameSetupController::onLocateGame()
+{
+    if (!m_grpc->isConnected()) {
+        dialogs::warn(m_parentWindow, "Background service unavailable", "Wait for the background service to reconnect and try again.");
+        return;
+    }
+    const QString path = QFileDialog::getOpenFileName(m_parentWindow,
+        "Select the game executable", QDir::homePath(), "All files (*);;Windows executables (*.exe)");
+    if (path.isEmpty())
+        return;
+    auto game = GameDetector::fromExecutable(std::filesystem::path(path.toStdString()));
+    if (!game) {
+        dialogs::warn(m_parentWindow, "Unsupported game", "This file is not a supported game executable.");
+        return;
+    }
+    configureNewGame(*game);
+}
 
-    if (m_grpc->isConnected())
-        m_grpc->detectGames();
-    else
-        m_session->loadManagedGames();
-
-    m_config.setActiveGameShortName(chosen.shortName);
-    m_statusBar->showMessage(
-        QString("%1 added. Use the Game dropdown to switch.").arg(chosen.name),
-        5000);
+void GameSetupController::configureNewGame(const GameInfo& game)
+{
+    if (!m_grpc->isConnected()) {
+        dialogs::warn(m_parentWindow, "Background service unavailable", "Wait for the background service to reconnect and try again.");
+        return;
+    }
+    for (const auto& pending : m_pendingGames) {
+        if (pending.shortName == game.shortName) {
+            m_statusBar->showMessage("Still adding this game…", 5000);
+            return;
+        }
+    }
+    const quint64 id = m_grpc->configureGameTracked(game.shortName, game.name, game.appId,
+        QString::fromStdString(game.installDir.string()), game.dataSubpath);
+    m_pendingGames.insert(id, game);
+    m_statusBar->showMessage(QString("Adding %1…").arg(game.name));
 }
 
 void GameSetupController::onInstallTTW()

@@ -74,6 +74,7 @@ SessionController::SessionController(AppConfig& config, GrpcClient* grpc,
     });
     connect(m_recoveryButton, &QPushButton::clicked, this, &SessionController::onRecoveryAction);
     connect(m_grpc, &GrpcClient::gamesDetected, this, &SessionController::onGamesDetected);
+    connect(m_grpc, &GrpcClient::gamesListed, this, &SessionController::onGamesListed);
     connect(m_grpc, &GrpcClient::vfsStatusChanged, this, &SessionController::onVfsStatusChanged);
     connect(m_grpc, &GrpcClient::vfsStatusReceived, this, &SessionController::onVfsStatusReceived);
     connect(m_grpc, &GrpcClient::vfsRetargeted, this, &SessionController::onVfsRetargeted);
@@ -137,6 +138,8 @@ SessionController::SessionController(AppConfig& config, GrpcClient* grpc,
         m_lifecycleStates.clear();
         m_autoMountQueryId = 0;
         m_retryGameId.clear();
+        m_configuredGames.clear();
+        m_detectedGames.clear();
         m_recoveryButton->setEnabled(false);
         m_recoveryButton->setText(pending ? "Review…" : "Check Again");
         refreshRecoveryIndicator();
@@ -169,22 +172,36 @@ void SessionController::loadManagedGames()
 
 void SessionController::onGamesDetected(const std::vector<GrpcGame>& detectedGames)
 {
-    auto managedShortNames = m_config.managedGames();
-    QSet<QString> keep(managedShortNames.begin(), managedShortNames.end());
+    m_detectedGames = detectedGames;
+    m_grpc->listGames();
+}
 
+void SessionController::onGamesListed(const std::vector<GrpcGame>& configuredGames)
+{
+    m_configuredGames = configuredGames;
+    refreshManagedGames();
+}
+
+void SessionController::refreshManagedGames()
+{
     m_managedGames.clear();
-    bool ttwVfsActive = false;
-    for (const auto& g : detectedGames) {
-        if (g.gameId == "ttw" && g.vfsActive)
-            ttwVfsActive = true;
-        if (!keep.contains(g.gameId))
+    for (const auto& shortName : m_config.managedGames()) {
+        auto configured = std::find_if(m_configuredGames.begin(), m_configuredGames.end(),
+            [&shortName](const GrpcGame& game) { return game.gameId == shortName; });
+        if (configured != m_configuredGames.end()) {
+            m_managedGames.push_back(toGameInfo(*configured));
             continue;
-        m_managedGames.push_back(toGameInfo(g));
+        }
+        auto detected = std::find_if(m_detectedGames.begin(), m_detectedGames.end(),
+            [&shortName](const GrpcGame& game) { return game.gameId == shortName; });
+        if (detected != m_detectedGames.end())
+            m_managedGames.push_back(toGameInfo(*detected));
     }
     m_gameSelector->setGames(m_managedGames);
-    QString activeShort = m_config.activeGameShortName();
-    m_gameSelector->setActiveGameByShortName(activeShort);
-    m_runButton->setTTWVfsActive(ttwVfsActive);
+    m_gameSelector->setActiveGameByShortName(m_config.activeGameShortName());
+    auto ttw = std::find_if(m_configuredGames.begin(), m_configuredGames.end(),
+        [](const GrpcGame& game) { return game.gameId == "ttw"; });
+    m_runButton->setTTWVfsActive(ttw != m_configuredGames.end() && ttw->vfsActive);
     auto current = m_gameSelector->currentGame();
     if (current.detected)
         switchToGame(current.appId);
@@ -193,11 +210,9 @@ void SessionController::onGamesDetected(const std::vector<GrpcGame>& detectedGam
 void SessionController::switchToGame(uint32_t appId)
 {
     auto found = GameInfo::findIn(m_managedGames, appId);
-    if (!found) {
-        auto current = m_gameSelector->currentGame();
-        if (!current.shortName.isEmpty())
-            found = current;
-    }
+    auto current = m_gameSelector->currentGame();
+    if (!current.shortName.isEmpty() && (current.appId == appId || !found))
+        found = current;
     const QString previousGame = m_activeGame.shortName;
     m_activeGame = found.value_or(GameInfo{});
     m_config.setActiveGameShortName(m_activeGame.shortName);
@@ -655,6 +670,7 @@ void SessionController::mountForMaintenance(const QString& gameId, const QString
 
 void SessionController::onConnected()
 {
+    m_grpc->listGames();
     m_hasModStatus = false;
     m_steamMaintenance = GrpcSteamMaintenanceState::Unspecified;
     m_hasSavedSteamFiles = false;

@@ -61,6 +61,7 @@ MainWindow::MainWindow(AppConfig& config, GrpcClient* grpc, QWidget* parent)
 
     if (m_grpc->isConnected()) {
         statusBar()->showMessage("Gorganizer's background service connected", 3000);
+        m_grpc->listGames();
         m_grpc->detectGames();
         m_grpc->startWatching();
     }
@@ -73,6 +74,7 @@ void MainWindow::setupUi()
     fileMenu->addAction("&Install Mod...", this, &MainWindow::onInstallMod);
     fileMenu->addSeparator();
     m_addGameAction = fileMenu->addAction("&Add New Game...");
+    m_locateGameAction = fileMenu->addAction("Locate game…");
     fileMenu->addSeparator();
     m_exportAction = fileMenu->addAction("&Export Mods...");
     m_exportAction->setEnabled(false);
@@ -268,6 +270,8 @@ void MainWindow::wireConnections()
 
     connect(m_addGameAction, &QAction::triggered,
             m_gameSetup, &GameSetupController::onAddNewGame);
+    connect(m_locateGameAction, &QAction::triggered,
+            m_gameSetup, &GameSetupController::onLocateGame);
     connect(m_exportAction, &QAction::triggered, this, &MainWindow::onExportMods);
     connect(m_importAction, &QAction::triggered, this, &MainWindow::onImportMods);
     connect(m_unmountAction, &QAction::triggered,
