@@ -15,6 +15,8 @@ import (
 )
 
 var removeActivationData = os.RemoveAll
+var removeFailedStaging = os.RemoveAll
+var removeOldFarm = os.RemoveAll
 var syncFarmParent = atomicfile.SyncDir
 
 type MountManager struct {
@@ -293,6 +295,13 @@ func (m *MountManager) clearMountedLocked() {
 	m.appliedGen = 0
 }
 
+// ResetAfterRestore clears the manager's mount state after external recovery restored the original Data directory.
+func (m *MountManager) ResetAfterRestore() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.clearMountedLocked()
+}
+
 // retirementErrorLocked reports unfinished cleanup and clears the mount state once the original is live.
 func (m *MountManager) retirementErrorLocked(dataPath, backupPath string, backupID directoryIdentity, cause error) error {
 	dataID, dataExists, dataErr := directoryAt(dataPath)
@@ -308,6 +317,11 @@ func (m *MountManager) retirementErrorLocked(dataPath, backupPath string, backup
 func (m *MountManager) MarkDirty(layers []Layer) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.markDirtyLocked(layers)
+}
+
+// markDirtyLocked replaces the desired tree while the manager lock is held.
+func (m *MountManager) markDirtyLocked(layers []Layer) error {
 	if !m.mounted {
 		return ErrNotMounted
 	}
@@ -324,10 +338,37 @@ func (m *MountManager) MarkDirty(layers []Layer) error {
 	return nil
 }
 
+// Retarget atomically deploys another profile's layers and restores the old desired state if the swap fails.
+func (m *MountManager) Retarget(layers []Layer, profileName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	oldTree, oldLayers, oldApplied := m.tree, m.layers, m.appliedLayers
+	oldProfile, oldDesired, oldAppliedGen := m.profileName, m.desiredGen, m.appliedGen
+	if err := m.markDirtyLocked(layers); err != nil {
+		return err
+	}
+	m.profileName = profileName
+	if err := m.reMaterializeLocked(true); err != nil {
+		var committed *RetargetCommittedError
+		if errors.As(err, &committed) {
+			return err
+		}
+		m.tree, m.layers, m.appliedLayers = oldTree, oldLayers, oldApplied
+		m.profileName, m.desiredGen, m.appliedGen = oldProfile, oldDesired, oldAppliedGen
+		return err
+	}
+	return nil
+}
+
 // ReMaterialize captures new writes and atomically swaps in a farm rebuilt from the current in-memory tree.
 func (m *MountManager) ReMaterialize() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.reMaterializeLocked(false)
+}
+
+// reMaterializeLocked applies the desired tree while the manager lock is held.
+func (m *MountManager) reMaterializeLocked(retarget bool) error {
 	if !m.mounted {
 		return ErrNotMounted
 	}
@@ -369,8 +410,7 @@ func (m *MountManager) ReMaterialize() error {
 	overwriteName := m.deriveOverwriteName(m.layers)
 	stats, err := BuildInto(staging, tree, m.layers, overwriteName)
 	if err != nil {
-		_ = os.RemoveAll(staging)
-		return fmt.Errorf("materializing staging overlay: %w", err)
+		return retargetCleanupFailure(retarget, fmt.Errorf("materializing staging overlay: %w", err), removeFailedStaging(staging))
 	}
 
 	sentLayers := layersForSentinel(m.layers)
@@ -392,8 +432,7 @@ func (m *MountManager) ReMaterialize() error {
 		ManifestSHA256:      stats.ManifestSHA256,
 		ManifestEntries:     stats.ManifestEntries,
 	}); err != nil {
-		_ = os.RemoveAll(staging)
-		return fmt.Errorf("writing staging sentinel: %w", err)
+		return retargetCleanupFailure(retarget, fmt.Errorf("writing staging sentinel: %w", err), removeFailedStaging(staging))
 	}
 
 	applyPath := applyingIntentPath(dataPath)
@@ -416,26 +455,50 @@ func (m *MountManager) ReMaterialize() error {
 		applyIntent.OperationID, applyIntent.LiveFarmID, applyIntent.StagingFarmID = "", "", ""
 	}
 	if err := WriteIntent(applyPath, applyIntent); err != nil {
-		_ = os.RemoveAll(staging)
-		return fmt.Errorf("writing apply intent: %w", err)
+		return retargetCleanupFailure(retarget, fmt.Errorf("writing apply intent: %w", err), removeFailedStaging(staging))
 	}
 
 	if err := renameExchange(dataPath, staging); err != nil {
-		if rmErr := os.RemoveAll(staging); rmErr != nil {
-			err = errors.Join(err, fmt.Errorf("removing staging overlay: %w", rmErr))
-		} else if rmErr := RemoveIntent(applyPath); rmErr != nil {
-			err = errors.Join(err, rmErr)
+		var cleanupErr error
+		if rmErr := removeFailedStaging(staging); rmErr != nil {
+			cleanupErr = fmt.Errorf("removing staging overlay: %w", rmErr)
+		} else {
+			cleanupErr = RemoveIntent(applyPath)
 		}
 		if errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EINVAL) {
-			return fmt.Errorf("this game's drive does not support the atomic folder swap Gorganizer needs to apply changes while mods are active; deactivate mods, then apply: %w", err)
+			err = fmt.Errorf("this game's drive does not support the atomic folder swap Gorganizer needs to apply changes while mods are active; deactivate mods, then apply: %w", err)
+		} else {
+			err = fmt.Errorf("apply swap: %w", err)
 		}
-		return fmt.Errorf("apply swap: %w", err)
+		return retargetCleanupFailure(retarget, err, cleanupErr)
 	}
 	if err := syncFarmParent(filepath.Dir(dataPath)); err != nil {
+		if !retarget {
+			return fmt.Errorf("syncing applied farm: %w", err)
+		}
+		if rollbackErr := renameExchange(dataPath, staging); rollbackErr != nil {
+			m.appliedGen = targetGen
+			m.appliedLayers = append([]Layer(nil), m.layers...)
+			return &RetargetCommittedError{Cause: errors.Join(fmt.Errorf("syncing applied farm: %w", err), fmt.Errorf("returning the old farm: %w", rollbackErr))}
+		}
+		cleanupErr := syncFarmParent(filepath.Dir(dataPath))
+		if rmErr := removeFailedStaging(staging); rmErr != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("removing the failed new farm: %w", rmErr))
+		} else {
+			cleanupErr = errors.Join(cleanupErr, RemoveIntent(applyPath))
+		}
+		if cleanupErr != nil {
+			return &RetargetCleanupError{Cause: errors.Join(fmt.Errorf("syncing applied farm: %w", err), cleanupErr)}
+		}
 		return fmt.Errorf("syncing applied farm: %w", err)
 	}
-	if err := os.RemoveAll(staging); err != nil {
-		return fmt.Errorf("removing old farm: %w", err)
+	if err := removeOldFarm(staging); err != nil {
+		if !retarget {
+			return fmt.Errorf("removing old farm: %w", err)
+		}
+		m.appliedGen = targetGen
+		m.appliedLayers = append([]Layer(nil), m.layers...)
+		return &RetargetCommittedError{Cause: fmt.Errorf("removing old farm: %w", err)}
 	}
 	if err := RemoveIntent(applyPath); err != nil {
 		slog.Warn("apply committed but could not remove intent", "path", applyPath, "err", err)
@@ -446,6 +509,18 @@ func (m *MountManager) ReMaterialize() error {
 	slog.Info("VFS re-materialized to apply pending changes",
 		"path", dataPath, "applied_gen", m.appliedGen, "desired_gen", m.desiredGen)
 	return nil
+}
+
+// retargetCleanupFailure reports a failed profile switch and whether its staging cleanup needs recovery.
+func retargetCleanupFailure(retarget bool, cause, cleanupErr error) error {
+	if cleanupErr == nil {
+		return cause
+	}
+	joined := errors.Join(cause, fmt.Errorf("cleaning failed staging: %w", cleanupErr))
+	if retarget {
+		return &RetargetCleanupError{Cause: joined}
+	}
+	return joined
 }
 
 // IsDirty reports whether pending edits are not yet applied to the on-disk farm.

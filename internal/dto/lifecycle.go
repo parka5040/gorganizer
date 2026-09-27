@@ -8,6 +8,7 @@ const (
 	GameRunningOperationUnmount   = "unmount"
 	GameRunningOperationUninstall = "uninstall"
 	GameRunningOperationRename    = "rename"
+	GameRunningOperationRetarget  = "retarget"
 )
 
 type ShuttingDownError struct {
@@ -37,6 +38,9 @@ func (e *GameRunningError) Error() string {
 	}
 	if e.Operation == GameRunningOperationRename {
 		return fmt.Sprintf("%s is still running, or was started less than two minutes ago, so a mod cannot be renamed; close the game first", e.GameID)
+	}
+	if e.Operation == GameRunningOperationRetarget {
+		return fmt.Sprintf("%s is still running, or was started less than two minutes ago, so its deployed mods cannot be switched; close the game first", e.GameID)
 	}
 	return fmt.Sprintf("%s is still running, or was started less than two minutes ago, so its pending mod changes cannot be applied (%s); close it first", e.GameID, e.Operation)
 }

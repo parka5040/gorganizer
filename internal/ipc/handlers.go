@@ -193,7 +193,9 @@ func (s *gorganizerServer) MountVFS(_ context.Context, req *pb.MountVFSRequest) 
 		st  *dto.VFSStatusResult
 		err error
 	)
-	if req.GetAutoSwap() {
+	if req.GetRetargetIfMounted() {
+		st, err = s.ctrl.MountVFSWithOptions(req.GetGameId(), req.GetProfileName(), req.GetAutoSwap(), true)
+	} else if req.GetAutoSwap() {
 		st, err = s.ctrl.MountVFSWithSwap(req.GetGameId(), req.GetProfileName())
 	} else {
 		st, err = s.ctrl.MountVFS(req.GetGameId(), req.GetProfileName())

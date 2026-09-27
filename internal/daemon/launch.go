@@ -44,10 +44,12 @@ func (ls *LaunchService) LaunchGame(gameID string, useTool bool, profileName str
 	if err := ls.loaderPreflight(gameID, mm, profileName); err != nil {
 		return 0, err
 	}
-	if !mm.IsMounted() && profileName != "" {
-		slog.Info("auto-mounting VFS before launch", "game", gameID, "profile", profileName)
-		if _, err := ls.s.svc.vfs.mountVFSOwned(gameID, profileName, false, reservation.id); err != nil {
-			return 0, fmt.Errorf("auto-mount of %s VFS failed: %w", gameID, err)
+	if profileName != "" {
+		if !mm.IsMounted() {
+			slog.Info("auto-mounting VFS before launch", "game", gameID, "profile", profileName)
+		}
+		if _, err := ls.s.svc.vfs.mountVFSOwned(gameID, profileName, false, true, reservation.id); err != nil {
+			return 0, fmt.Errorf("preparing %s mods for launch: %w", gameID, err)
 		}
 	}
 
@@ -344,7 +346,7 @@ func (ls *LaunchService) loaderPreflight(gameID string, mm *vfs.MountManager, pr
 	}
 	mounted := mm.IsMounted()
 	evaluated := profileName
-	if mounted && hasState {
+	if mounted && hasState && profileName == "" {
 		evaluated = state.profileName
 	}
 	roots, err := ls.launchModRoots(gameID, mm, mounted, evaluated)

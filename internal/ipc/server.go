@@ -115,6 +115,7 @@ type ProfileController interface {
 }
 
 type VFSController interface {
+	MountVFSWithOptions(gameID, profileName string, autoSwap, retarget bool) (*dto.VFSStatusResult, error)
 	MountVFS(gameID, profileName string) (*dto.VFSStatusResult, error)
 	UnmountVFS(gameID string) error
 	GetVFSStatus(gameID string) (*dto.VFSStatusResult, error)

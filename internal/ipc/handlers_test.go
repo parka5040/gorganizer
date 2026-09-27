@@ -3,6 +3,7 @@ package ipc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -184,6 +185,13 @@ func (f *fakeController) MountVFS(gameID, profileName string) (*dto.VFSStatusRes
 func (f *fakeController) MountVFSWithSwap(gameID, profileName string) (*dto.VFSStatusResult, error) {
 	f.mountCalled = "MountVFSWithSwap"
 	f.mountArgs = []string{gameID, profileName}
+	return f.vfsStatus, nil
+}
+
+// MountVFSWithOptions records a retargeting request for the transport tests.
+func (f *fakeController) MountVFSWithOptions(gameID, profileName string, autoSwap, retarget bool) (*dto.VFSStatusResult, error) {
+	f.mountCalled = "MountVFSWithOptions"
+	f.mountArgs = []string{gameID, profileName, fmt.Sprint(autoSwap), fmt.Sprint(retarget)}
 	return f.vfsStatus, nil
 }
 
@@ -554,6 +562,28 @@ func TestMountVFSAutoSwapRouting(t *testing.T) {
 				MountPoint: "/games/SkyrimSE/Data", EnabledModCount: 5, TotalFileCount: 100,
 				Dirty: true, DesiredGen: 7, AppliedGen: 6,
 			})
+		})
+	}
+}
+
+// TestMountVFSRetargetRouting forwards both retarget and auto-swap to the daemon controller.
+func TestMountVFSRetargetRouting(t *testing.T) {
+	for _, autoSwap := range []bool{false, true} {
+		t.Run(fmt.Sprint(autoSwap), func(t *testing.T) {
+			fake := &fakeController{vfsStatus: &dto.VFSStatusResult{Mounted: true, GameID: "skyrimse", ProfileName: "B"}}
+			client := newTestClient(t, fake)
+			resp, err := client.MountVFS(t.Context(), &pb.MountVFSRequest{
+				GameId: "skyrimse", ProfileName: "B", AutoSwap: autoSwap, RetargetIfMounted: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fake.mountCalled != "MountVFSWithOptions" || !reflect.DeepEqual(fake.mountArgs, []string{"skyrimse", "B", fmt.Sprint(autoSwap), "true"}) {
+				t.Errorf("controller call = %s %v", fake.mountCalled, fake.mountArgs)
+			}
+			if resp.GetStatus().GetProfileName() != "B" {
+				t.Errorf("status profile = %q, want B", resp.GetStatus().GetProfileName())
+			}
 		})
 	}
 }
