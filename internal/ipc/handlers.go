@@ -227,10 +227,25 @@ func (s *gorganizerServer) RebuildVFS(_ context.Context, req *pb.RebuildVFSReque
 }
 
 func (s *gorganizerServer) RestoreFromBackup(_ context.Context, req *pb.RestoreFromBackupRequest) (*pb.RestoreFromBackupResponse, error) {
-	if err := s.ctrl.RestoreFromBackup(req.GetGameId()); err != nil {
+	kind := recoveryKindFromProto(req.GetExpectedKind())
+	if req.GetExpectedKind() != pb.RecoveryKind_RECOVERY_KIND_UNSPECIFIED && kind == dto.RecoveryKindUnspecified {
+		kind = dto.RecoveryKind(-1)
+	}
+	if err := s.ctrl.RestoreFromBackup(req.GetGameId(), kind, req.GetRecoveryId()); err != nil {
 		return nil, grpcError(err)
 	}
 	return &pb.RestoreFromBackupResponse{}, nil
+}
+
+func (s *gorganizerServer) RetryVFSRecovery(_ context.Context, req *pb.RetryVFSRecoveryRequest) (*pb.VFSStatus, error) {
+	if err := s.ctrl.RetryDeferredRecovery(req.GetGameId()); err != nil {
+		return nil, grpcError(err)
+	}
+	st, err := s.ctrl.GetVFSStatus(req.GetGameId())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return vfsStatusToProto(st), nil
 }
 
 func (s *gorganizerServer) GetConflicts(_ context.Context, req *pb.GetConflictsRequest) (*pb.ConflictsResponse, error) {
@@ -653,6 +668,8 @@ func (s *gorganizerServer) WatchStatus(_ *pb.WatchStatusRequest, stream pb.Gorga
 					DataPath:   evt.RecoveryPending.DataPath,
 					BackupPath: evt.RecoveryPending.BackupPath,
 					Reason:     evt.RecoveryPending.Reason,
+					Kind:       recoveryKindToProto(evt.RecoveryPending.Kind),
+					RecoveryId: evt.RecoveryPending.RecoveryID,
 				},
 			}
 		case evt.DependencyWarning != nil:
@@ -1015,6 +1032,48 @@ func modListFromProto(entries []*pb.ModListEntry) []dto.ModListEntryResult {
 	return result
 }
 
+// recoveryKindFromProto translates a wire recovery kind into the domain kind.
+func recoveryKindFromProto(kind pb.RecoveryKind) dto.RecoveryKind {
+	switch kind {
+	case pb.RecoveryKind_RECOVERY_KIND_DATA:
+		return dto.RecoveryKindData
+	case pb.RecoveryKind_RECOVERY_KIND_MOD_LOADER:
+		return dto.RecoveryKindModLoader
+	case pb.RecoveryKind_RECOVERY_KIND_GAME_ROOT:
+		return dto.RecoveryKindGameRoot
+	default:
+		return dto.RecoveryKindUnspecified
+	}
+}
+
+// recoveryKindToProto translates a domain recovery kind into the wire kind.
+func recoveryKindToProto(kind dto.RecoveryKind) pb.RecoveryKind {
+	switch kind {
+	case dto.RecoveryKindData:
+		return pb.RecoveryKind_RECOVERY_KIND_DATA
+	case dto.RecoveryKindModLoader:
+		return pb.RecoveryKind_RECOVERY_KIND_MOD_LOADER
+	case dto.RecoveryKindGameRoot:
+		return pb.RecoveryKind_RECOVERY_KIND_GAME_ROOT
+	default:
+		return pb.RecoveryKind_RECOVERY_KIND_UNSPECIFIED
+	}
+}
+
+// vfsLifecycleToProto translates a domain lifecycle state into the wire state.
+func vfsLifecycleToProto(state dto.VFSLifecycleState) pb.VFSLifecycleState {
+	switch state {
+	case dto.VFSLifecycleStateReady:
+		return pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_READY
+	case dto.VFSLifecycleStateRecoveryDeferred:
+		return pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_RECOVERY_DEFERRED
+	case dto.VFSLifecycleStateRecoveryPending:
+		return pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_RECOVERY_PENDING
+	default:
+		return pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_UNSPECIFIED
+	}
+}
+
 func vfsStatusToProto(st *dto.VFSStatusResult) *pb.VFSStatus {
 	return &pb.VFSStatus{
 		Mounted:         st.Mounted,
@@ -1026,6 +1085,8 @@ func vfsStatusToProto(st *dto.VFSStatusResult) *pb.VFSStatus {
 		Dirty:           st.Dirty,
 		DesiredGen:      st.DesiredGen,
 		AppliedGen:      st.AppliedGen,
+		LifecycleState:  vfsLifecycleToProto(st.LifecycleState),
+		LifecycleReason: st.LifecycleReason,
 	}
 }
 

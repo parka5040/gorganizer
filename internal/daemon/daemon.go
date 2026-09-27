@@ -159,6 +159,13 @@ func newWithClock(cfg *config.Config, now func() time.Time, scans ...func(string
 		d.ensureMountManager(gameID, gc)
 	}
 	d.mu.Unlock()
+	for _, gameID := range d.configuredGameIDs() {
+		if d.deferredFor(gameID, "recovery") != nil {
+			if status, err := d.GetVFSStatus(gameID); err == nil {
+				d.publishGuarded(dto.StatusEventResult{VFSStatus: status})
+			}
+		}
+	}
 	d.svc.modDeps.resumeRecoveredLandings(recoveredLandings)
 
 	return d, nil

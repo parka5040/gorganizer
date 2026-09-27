@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -96,6 +98,22 @@ type rootRecoveryUnit struct {
 	gameIDs []string
 }
 
+// identifiedRecovery retains an unchanged pending item's identity and assigns a random identity to a replacement.
+func identifiedRecovery(previous, pending *dto.RecoveryPendingResult) *dto.RecoveryPendingResult {
+	if previous != nil && previous.RecoveryID != "" && previous.GameID == pending.GameID && previous.DataPath == pending.DataPath &&
+		previous.BackupPath == pending.BackupPath && previous.Reason == pending.Reason && previous.Kind == pending.Kind {
+		return previous
+	}
+	pending.RecoveryID = ""
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		slog.Error("cannot generate a recovery identity", "game", pending.GameID, "err", err)
+		return pending
+	}
+	pending.RecoveryID = hex.EncodeToString(bytes[:])
+	return pending
+}
+
 // rootRecoveryUnits resolves the distinct root deployment managers of the selected games with the games sharing each.
 func (s *session) rootRecoveryUnits(gameIDs []string) []rootRecoveryUnit {
 	s.mu.Lock()
@@ -154,11 +172,14 @@ func (s *session) recoverRootDeployments(ids []string) bool {
 				GameID: affectedGameID, DataPath: outcome.Pending.Path,
 				BackupPath: filepath.Join(unit.manager.GameRoot(), vfs.RootBackupDirName),
 				Reason:     "game-root deployment: " + outcome.Pending.Reason,
+				Kind:       dto.RecoveryKindGameRoot,
 			}
 			s.pendingRecoveriesMu.Lock()
+			pending = identifiedRecovery(s.rootPendingRecoveries[affectedGameID], pending)
 			s.rootPendingRecoveries[affectedGameID] = pending
 			s.pendingRecoveriesMu.Unlock()
 			s.publishRecoveryEvent(dto.StatusEventResult{RecoveryPending: pending})
+			s.publishRecoveryStatuses(affectedGameID)
 		}
 	}
 	return complete
@@ -212,14 +233,17 @@ func (s *session) recoverDataFarms(gameIDs []string) bool {
 			DataPath:   outcome.Pending.DataPath,
 			BackupPath: outcome.Pending.BackupPath,
 			Reason:     outcome.Pending.Reason,
+			Kind:       dto.RecoveryKindData,
 		}
 		s.pendingRecoveriesMu.Lock()
+		pending = identifiedRecovery(s.pendingRecoveries[dataPath], pending)
 		s.pendingRecoveries[dataPath] = pending
 		s.gamesAtPath[dataPath] = append([]string{}, gameIDs...)
 		s.pendingRecoveriesMu.Unlock()
 		slog.Warn("recovery pending — refusing to mount/launch until user confirms",
 			"data_path", dataPath, "games", gameIDs, "reason", pending.Reason)
 		s.publishRecoveryEvent(dto.StatusEventResult{RecoveryPending: pending})
+		s.publishRecoveryStatuses(gameIDs[0])
 	}
 	return complete
 }

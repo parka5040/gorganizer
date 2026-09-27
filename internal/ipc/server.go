@@ -119,7 +119,8 @@ type VFSController interface {
 	UnmountVFS(gameID string) error
 	GetVFSStatus(gameID string) (*dto.VFSStatusResult, error)
 	RebuildVFS(gameID string) error
-	RestoreFromBackup(gameID string) error
+	RestoreFromBackup(gameID string, expectedKind dto.RecoveryKind, recoveryID string) error
+	RetryDeferredRecovery(gameID string) error
 }
 
 type ConflictController interface {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"reflect"
 	"testing"
 	"time"
@@ -52,6 +53,9 @@ type fakeController struct {
 	getModListArgs    []string
 	setModListArgs    []any
 	vfsStatus         *dto.VFSStatusResult
+	restoreArgs       []any
+	retryGame         string
+	retryErr          error
 	mountCalled       string
 	mountArgs         []string
 	downloadID        string
@@ -181,6 +185,23 @@ func (f *fakeController) MountVFSWithSwap(gameID, profileName string) (*dto.VFSS
 	f.mountCalled = "MountVFSWithSwap"
 	f.mountArgs = []string{gameID, profileName}
 	return f.vfsStatus, nil
+}
+
+// GetVFSStatus returns the canned VFS status.
+func (f *fakeController) GetVFSStatus(string) (*dto.VFSStatusResult, error) {
+	return f.vfsStatus, nil
+}
+
+// RestoreFromBackup records the expected kind and recovery identity.
+func (f *fakeController) RestoreFromBackup(gameID string, kind dto.RecoveryKind, id string) error {
+	f.restoreArgs = []any{gameID, kind, id}
+	return nil
+}
+
+// RetryDeferredRecovery records the game and returns the canned retry error.
+func (f *fakeController) RetryDeferredRecovery(gameID string) error {
+	f.retryGame = gameID
+	return f.retryErr
 }
 
 func (f *fakeController) StartDownload(nxmURI string) (string, int, error) {
@@ -731,6 +752,84 @@ func TestLaunchGameMapping(t *testing.T) {
 	}
 }
 
+// TestRecoveryContractConversions checks the explicit wire mappings and their unknown-value fallbacks.
+func TestRecoveryContractConversions(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		domain dto.RecoveryKind
+		wire   pb.RecoveryKind
+	}{
+		{"unspecified", dto.RecoveryKindUnspecified, pb.RecoveryKind_RECOVERY_KIND_UNSPECIFIED},
+		{"data", dto.RecoveryKindData, pb.RecoveryKind_RECOVERY_KIND_DATA},
+		{"loader", dto.RecoveryKindModLoader, pb.RecoveryKind_RECOVERY_KIND_MOD_LOADER},
+		{"root", dto.RecoveryKindGameRoot, pb.RecoveryKind_RECOVERY_KIND_GAME_ROOT},
+		{"unknown domain", dto.RecoveryKind(99), pb.RecoveryKind_RECOVERY_KIND_UNSPECIFIED},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := recoveryKindToProto(tc.domain); got != tc.wire {
+				t.Errorf("to proto = %v, want %v", got, tc.wire)
+			}
+			if tc.domain != dto.RecoveryKind(99) && recoveryKindFromProto(tc.wire) != tc.domain {
+				t.Errorf("from proto = %v, want %v", recoveryKindFromProto(tc.wire), tc.domain)
+			}
+		})
+	}
+	if got := recoveryKindFromProto(pb.RecoveryKind(99)); got != dto.RecoveryKindUnspecified {
+		t.Errorf("unknown wire kind = %v", got)
+	}
+	for _, tc := range []struct {
+		name  string
+		state dto.VFSLifecycleState
+		wire  pb.VFSLifecycleState
+	}{
+		{"unspecified", dto.VFSLifecycleStateUnspecified, pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_UNSPECIFIED},
+		{"ready", dto.VFSLifecycleStateReady, pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_READY},
+		{"deferred", dto.VFSLifecycleStateRecoveryDeferred, pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_RECOVERY_DEFERRED},
+		{"pending", dto.VFSLifecycleStateRecoveryPending, pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_RECOVERY_PENDING},
+		{"unknown", dto.VFSLifecycleState(99), pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_UNSPECIFIED},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := vfsStatusToProto(&dto.VFSStatusResult{LifecycleState: tc.state, LifecycleReason: "game_running"}); got.GetLifecycleState() != tc.wire || got.GetLifecycleReason() != "game_running" {
+				t.Errorf("status = %+v, want state %v and reason game_running", got, tc.wire)
+			}
+		})
+	}
+}
+
+// TestRecoveryRPCBindings checks confirmations, retry status and deferred retry refusals through the handlers.
+func TestRecoveryRPCBindings(t *testing.T) {
+	fake := &fakeController{vfsStatus: &dto.VFSStatusResult{GameID: "stardewvalley", LifecycleState: dto.VFSLifecycleStateReady}}
+	client := newTestClient(t, fake)
+	for _, tc := range []struct {
+		kind pb.RecoveryKind
+		want dto.RecoveryKind
+	}{
+		{pb.RecoveryKind_RECOVERY_KIND_DATA, dto.RecoveryKindData},
+		{pb.RecoveryKind_RECOVERY_KIND_MOD_LOADER, dto.RecoveryKindModLoader},
+		{pb.RecoveryKind_RECOVERY_KIND_GAME_ROOT, dto.RecoveryKindGameRoot},
+		{pb.RecoveryKind(99), dto.RecoveryKind(-1)},
+	} {
+		if _, err := client.RestoreFromBackup(t.Context(), &pb.RestoreFromBackupRequest{GameId: "stardewvalley", ExpectedKind: tc.kind, RecoveryId: "abc"}); err != nil {
+			t.Fatal(err)
+		}
+		if want := []any{"stardewvalley", tc.want, "abc"}; !reflect.DeepEqual(fake.restoreArgs, want) {
+			t.Errorf("restore args = %v, want %v", fake.restoreArgs, want)
+		}
+	}
+	result, err := client.RetryVFSRecovery(t.Context(), &pb.RetryVFSRecoveryRequest{GameId: "stardewvalley"})
+	if err != nil || result.GetLifecycleState() != pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_READY || fake.retryGame != "stardewvalley" {
+		t.Fatalf("retry = %+v (%v), game = %q", result, err, fake.retryGame)
+	}
+	fake.retryErr = &dto.RecoveryDeferredError{GameID: "stardewvalley", Operation: "recovery"}
+	if _, err := client.RetryVFSRecovery(t.Context(), &pb.RetryVFSRecoveryRequest{GameId: "stardewvalley"}); status.Code(err) != codes.FailedPrecondition {
+		t.Errorf("deferred retry = %v, want failed precondition", err)
+	}
+	fake.retryErr = os.ErrNotExist
+	if _, err := client.RetryVFSRecovery(t.Context(), &pb.RetryVFSRecoveryRequest{GameId: "unknown-game"}); status.Code(err) != codes.NotFound {
+		t.Errorf("unknown game retry = %v, want not found", err)
+	}
+}
+
 // TestHealthMapping locks dto.ReadinessResult → pb.Readiness conversion.
 func TestHealthMapping(t *testing.T) {
 	fake := &fakeController{readiness: dto.ReadinessResult{
@@ -753,10 +852,12 @@ func TestWatchStatusStream(t *testing.T) {
 		Mounted: true, GameID: "skyrimse", ProfileName: "Default",
 		MountPoint: "/games/SkyrimSE/Data", EnabledModCount: 2, TotalFileCount: 10,
 		Dirty: false, DesiredGen: 3, AppliedGen: 3,
+		LifecycleState: dto.VFSLifecycleStateRecoveryDeferred, LifecycleReason: "game_running",
 	}}
 	fake.statusCh <- dto.StatusEventResult{RecoveryPending: &dto.RecoveryPendingResult{
 		GameID: "skyrimse", DataPath: "/games/SkyrimSE/Data",
 		BackupPath: "/games/SkyrimSE/Data.gorganizer-backup", Reason: "unclean shutdown",
+		Kind: dto.RecoveryKindData, RecoveryID: "0123456789abcdef0123456789abcdef",
 	}}
 	fake.statusCh <- dto.StatusEventResult{DependencyWarning: &dto.DependencyWarningResult{
 		PluginFilename: "SkyUI_SE.esp", Detail: "missing master", Kind: dto.DepKindMasterAbsent,
@@ -777,6 +878,7 @@ func TestWatchStatusStream(t *testing.T) {
 		Mounted: true, GameId: "skyrimse", ProfileName: "Default",
 		MountPoint: "/games/SkyrimSE/Data", EnabledModCount: 2, TotalFileCount: 10,
 		Dirty: false, DesiredGen: 3, AppliedGen: 3,
+		LifecycleState: pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_RECOVERY_DEFERRED, LifecycleReason: "game_running",
 	})
 	evt, err = stream.Recv()
 	if err != nil {
@@ -785,6 +887,7 @@ func TestWatchStatusStream(t *testing.T) {
 	mustEqualProto(t, evt.GetRecoveryPending(), &pb.RecoveryPending{
 		GameId: "skyrimse", DataPath: "/games/SkyrimSE/Data",
 		BackupPath: "/games/SkyrimSE/Data.gorganizer-backup", Reason: "unclean shutdown",
+		Kind: pb.RecoveryKind_RECOVERY_KIND_DATA, RecoveryId: "0123456789abcdef0123456789abcdef",
 	})
 	evt, err = stream.Recv()
 	if err != nil {

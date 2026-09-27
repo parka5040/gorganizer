@@ -373,7 +373,7 @@ func TestDeferredLandingWaitsForManualRecovery(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(config.ModsDir(depsGame), "Dep Core")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("archive installed before manual recovery: %v", err)
 	}
-	if err := d.RestoreFromBackup(depsGame); err != nil {
+	if err := d.RestoreFromBackup(depsGame, dto.RecoveryKindUnspecified, ""); err != nil {
 		t.Fatal(err)
 	}
 	if completed := waitCompleted(t, installs); completed.ModName != "Dep Core" {

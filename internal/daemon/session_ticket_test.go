@@ -99,7 +99,7 @@ func TestRestartDuringGamePreservesDataAndRoot(t *testing.T) {
 	requireDeferred(t, err, dto.BusyOperationMount)
 	requireDeferred(t, restarted.UnmountVFS("stardewvalley"), dto.BusyOperationUnmount)
 	requireDeferred(t, restarted.RebuildVFS("stardewvalley"), dto.BusyOperationApply)
-	requireDeferred(t, restarted.RestoreFromBackup("stardewvalley"), "restore_from_backup")
+	requireDeferred(t, restarted.RestoreFromBackup("stardewvalley", dto.RecoveryKindUnspecified, ""), "restore_from_backup")
 	_, _, err = restarted.LaunchExecutable("stardewvalley", "unknown", "Default")
 	requireDeferred(t, err, dto.BusyOperationTool)
 	_, _, err = restarted.StartInstall(dto.StartInstallRequest{GameID: "stardewvalley"})

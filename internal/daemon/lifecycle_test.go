@@ -95,7 +95,7 @@ func TestShutdownRefusesNewWorkWithATypedError(t *testing.T) {
 	requireShuttingDown(t, "RenameMod", d.RenameMod("stardewvalley", "Anything", "Other"))
 	_, err = d.RegisterManualInstall("stardewvalley", "Anything", "")
 	requireShuttingDown(t, "RegisterManualInstall", err)
-	requireShuttingDown(t, "RestoreFromBackup", d.RestoreFromBackup("stardewvalley"))
+	requireShuttingDown(t, "RestoreFromBackup", d.RestoreFromBackup("stardewvalley", dto.RecoveryKindUnspecified, ""))
 	_, err = d.InstallTTWPrereqs()
 	requireShuttingDown(t, "InstallTTWPrereqs", err)
 	_, err = d.LaunchTTWInstaller(dto.TTWInstallerInfoResult{}, "TTW Data")

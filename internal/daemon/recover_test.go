@@ -83,7 +83,7 @@ func TestRecovery_PathKeyedSharedFNVAndTTW(t *testing.T) {
 		t.Errorf("MountVFS(ttw) succeeded while recovery pending; should refuse")
 	}
 
-	if err := d.RestoreFromBackup("ttw"); err != nil {
+	if err := d.RestoreFromBackup("ttw", dto.RecoveryKindUnspecified, ""); err != nil {
 		t.Fatalf("RestoreFromBackup(ttw): %v", err)
 	}
 	for _, gid := range []string{"falloutnv", "ttw"} {
