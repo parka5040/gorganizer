@@ -147,19 +147,28 @@ func runStopWith(args []string, deps lifecycleDeps) int {
 		fmt.Fprintln(deps.out, "Gorganizer is not running.")
 		return 0
 	}
+	exited, err := waitProcessExit(ctx, deps.procRoot, pid, start)
+	if err != nil {
+		fmt.Fprintln(deps.out, "Could not verify Gorganizer's process.")
+		return 1
+	}
+	if !exited {
+		fmt.Fprintln(deps.out, "Gorganizer is still finishing a mod operation. It will stop on its own; check again in a minute.")
+		return 1
+	}
+	return 0
+}
+
+// waitProcessExit waits for a process with a verified start time to exit.
+func waitProcessExit(ctx context.Context, procRoot string, pid int, start uint64) (bool, error) {
 	for {
-		alive, checkErr := processAlive(deps.procRoot, pid, start)
-		if checkErr != nil {
-			fmt.Fprintln(deps.out, "Could not verify Gorganizer's process.")
-			return 1
-		}
-		if !alive {
-			return 0
+		alive, err := processAlive(procRoot, pid, start)
+		if err != nil || !alive {
+			return !alive, err
 		}
 		select {
 		case <-ctx.Done():
-			fmt.Fprintln(deps.out, "Gorganizer is still finishing a mod operation. It will stop on its own; check again in a minute.")
-			return 1
+			return false, nil
 		case <-time.After(lifecyclePollInterval):
 		}
 	}

@@ -30,9 +30,14 @@ struct GrpcSyncStub {
 
 namespace {
 
-// Return the daemon socket path for the current user.
+// socketPath returns the daemon socket path for the current GUI session.
 QString socketPath()
 {
+    if (qgetenv("GORGANIZER_SUPERVISED") == "1") {
+        QByteArray configured = qgetenv("GORGANIZER_SOCKET");
+        if (!configured.isEmpty())
+            return QString::fromUtf8(configured);
+    }
     const char* xdg = std::getenv("XDG_RUNTIME_DIR");
     if (xdg && xdg[0])
         return QString::fromUtf8(xdg) + "/gorganizer/gorganizer.sock";

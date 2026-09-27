@@ -18,19 +18,21 @@
 #include <QStatusBar>
 #include <cstdio>
 #include <cstring>
+#include <vector>
+#include <QByteArray>
 #include <unistd.h>
 
 #ifndef GORGANIZER_VERSION
 #define GORGANIZER_VERSION "dev"
 #endif
 
-// Force Fusion style for consistent QSS rendering across DEs.
+// makeFusionStyle returns Qt's Fusion style.
 static QStyle* makeFusionStyle()
 {
     return QStyleFactory::create("Fusion");
 }
 
-// Locate gorganizerd next to the frontend, in the dev layout, or in PATH.
+// findDaemonBinary locates the daemon executable next to the GUI or on PATH.
 static QString findDaemonBinary()
 {
     QString appDir = QCoreApplication::applicationDirPath();
@@ -49,9 +51,26 @@ static QString findDaemonBinary()
     return {};
 }
 
-// Return the daemon socket path for the current user.
+// findCtlBinary locates the supervisor beside the GUI or in the development layout.
+static QString findCtlBinary()
+{
+    QString appDir = QCoreApplication::applicationDirPath();
+    for (const QString& path : {appDir + "/gorganizerctl", appDir + "/../../gorganizerctl"}) {
+        QFileInfo info(path);
+        if (info.isFile() && info.isExecutable())
+            return info.canonicalFilePath();
+    }
+    return {};
+}
+
+// socketPath returns the daemon socket path for the current GUI session.
 static QString socketPath()
 {
+    if (qgetenv("GORGANIZER_SUPERVISED") == "1") {
+        QByteArray configured = qgetenv("GORGANIZER_SOCKET");
+        if (!configured.isEmpty())
+            return QString::fromUtf8(configured);
+    }
     const char* xdg = std::getenv("XDG_RUNTIME_DIR");
     if (xdg && xdg[0])
         return QString::fromUtf8(xdg) + "/gorganizer/gorganizer.sock";
@@ -70,6 +89,23 @@ int main(int argc, char* argv[])
     qunsetenv("QT_STYLE_OVERRIDE");
 
     QApplication app(argc, argv);
+    bool supervised = qgetenv("GORGANIZER_SUPERVISED") == "1";
+    if (!supervised) {
+        QString ctl = findCtlBinary();
+        if (!ctl.isEmpty()) {
+            QByteArray binary = QFile::encodeName(ctl);
+            QByteArray gui = QFile::encodeName(QCoreApplication::applicationFilePath());
+            std::vector<char*> args = {binary.data(), const_cast<char*>("session"),
+                                        const_cast<char*>("--gui"), gui.data(),
+                                        const_cast<char*>("--")};
+            for (int i = 1; i < argc; ++i)
+                args.push_back(argv[i]);
+            args.push_back(nullptr);
+            execv(binary.constData(), args.data());
+            std::perror("gorganizerctl session");
+            return 1;
+        }
+    }
     app.setApplicationName("gorganizer");
     app.setOrganizationName("gorganizer");
     app.setApplicationVersion(GORGANIZER_VERSION);
@@ -107,7 +143,7 @@ int main(int argc, char* argv[])
 
     bool alreadyRunning = QFileInfo::exists(sock);
 
-    if (!alreadyRunning) {
+    if (!supervised && !alreadyRunning) {
         QString daemonBin = findDaemonBinary();
         if (daemonBin.isEmpty()) {
             qWarning("gorganizerd not found — running without daemon");
@@ -195,8 +231,8 @@ int main(int argc, char* argv[])
                 QString("The Gorganizer daemon did not finish initializing in time.\n\n"
                         "Last step seen: %1\n\n"
                         "Check the daemon log for details:\n"
-                        "  $XDG_STATE_HOME/gorganizer/gorganizerd.log\n"
-                        "  (or ~/.local/state/gorganizer/gorganizerd.log)").arg(lastStepSeen));
+                        "  $XDG_STATE_HOME/gorganizer/daemon.log\n"
+                        "  (or ~/.local/state/gorganizer/daemon.log)").arg(lastStepSeen));
             return 1;
         }
     }
