@@ -35,6 +35,9 @@ func DetectContentRoot(extractDir, gameID string) (string, bool) {
 			return dir, false
 		}
 	}
+	if len(dirs) == 1 && isBethesdaDataSubdir(dirs[0]) {
+		return "", false
+	}
 	if len(dirs) == 1 {
 		wrapper := filepath.Join(extractDir, dirs[0])
 		children, err := os.ReadDir(wrapper)
@@ -47,8 +50,7 @@ func DetectContentRoot(extractDir, gameID string) (string, bool) {
 		}
 	}
 	for _, dir := range dirs {
-		switch strings.ToLower(dir) {
-		case "textures", "meshes", "scripts", "sound", "interface", "skse", "nvse", "fose", "f4se":
+		if isBethesdaDataSubdir(dir) {
 			hasGameFiles = true
 		}
 	}
