@@ -1,6 +1,7 @@
-package main
+package instancelock
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,17 +14,13 @@ import (
 func singletonTestRuntime(t *testing.T) string {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
-	dir, err := os.MkdirTemp("", "gzr")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	dir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", dir)
 	return config.RuntimeDir()
 }
 
-// TestSingletonRejectsLinkedLock checks that symlinked and hardlinked locks cannot modify their targets.
-func TestSingletonRejectsLinkedLock(t *testing.T) {
+// TestAcquireRejectsLinkedLock checks that symlinked and hardlinked locks cannot modify their targets.
+func TestAcquireRejectsLinkedLock(t *testing.T) {
 	cases := []struct {
 		name string
 		link func(target, lockPath string) error
@@ -44,7 +41,7 @@ func TestSingletonRejectsLinkedLock(t *testing.T) {
 			if err := tc.link(target, config.LockPath()); err != nil {
 				t.Fatal(err)
 			}
-			if release, err := acquireSingleInstanceLock(); err == nil {
+			if release, err := Acquire(); err == nil {
 				release()
 				t.Fatal("accepted a linked lock")
 			}
@@ -61,10 +58,10 @@ func TestSingletonRejectsLinkedLock(t *testing.T) {
 	}
 }
 
-// TestSingletonKeepsStableLockInode checks that releases preserve the file used for locking.
-func TestSingletonKeepsStableLockInode(t *testing.T) {
+// TestAcquireKeepsStableLockInode checks that releases preserve the file used for locking.
+func TestAcquireKeepsStableLockInode(t *testing.T) {
 	singletonTestRuntime(t)
-	release, err := acquireSingleInstanceLock()
+	release, err := Acquire()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +70,7 @@ func TestSingletonKeepsStableLockInode(t *testing.T) {
 		release()
 		t.Fatal(err)
 	}
-	if other, err := acquireSingleInstanceLock(); err == nil {
+	if other, err := Acquire(); err == nil {
 		other()
 		release()
 		t.Fatal("second daemon acquired the held lock")
@@ -88,7 +85,7 @@ func TestSingletonKeepsStableLockInode(t *testing.T) {
 	if !os.SameFile(first, stillThere) {
 		t.Error("lock inode changed on release")
 	}
-	secondRelease, err := acquireSingleInstanceLock()
+	secondRelease, err := Acquire()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,14 +99,14 @@ func TestSingletonKeepsStableLockInode(t *testing.T) {
 	}
 }
 
-// TestSingletonRejectsUnsafeRuntimeDir checks that a symlinked runtime folder is refused without modification.
-func TestSingletonRejectsUnsafeRuntimeDir(t *testing.T) {
+// TestAcquireRejectsUnsafeRuntimeDir checks that a symlinked runtime folder is refused without modification.
+func TestAcquireRejectsUnsafeRuntimeDir(t *testing.T) {
 	dir := singletonTestRuntime(t)
 	target := t.TempDir()
 	if err := os.Symlink(target, dir); err != nil {
 		t.Fatal(err)
 	}
-	if release, err := acquireSingleInstanceLock(); err == nil {
+	if release, err := Acquire(); err == nil {
 		release()
 		t.Fatal("accepted symlinked runtime directory")
 	} else if !strings.Contains(err.Error(), "No existing files were removed.") {
@@ -127,8 +124,8 @@ func TestSingletonRejectsUnsafeRuntimeDir(t *testing.T) {
 	}
 }
 
-// TestSingletonTightensOwnedPublicRuntimeDir checks that an owned 0755 runtime folder left by an older launcher is made private and used.
-func TestSingletonTightensOwnedPublicRuntimeDir(t *testing.T) {
+// TestAcquireTightensOwnedPublicRuntimeDir checks that an owned 0755 runtime folder left by an older launcher is made private and used.
+func TestAcquireTightensOwnedPublicRuntimeDir(t *testing.T) {
 	dir := singletonTestRuntime(t)
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -136,7 +133,7 @@ func TestSingletonTightensOwnedPublicRuntimeDir(t *testing.T) {
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	release, err := acquireSingleInstanceLock()
+	release, err := Acquire()
 	if err != nil {
 		t.Fatalf("acquireSingleInstanceLock: %v", err)
 	}
@@ -147,5 +144,23 @@ func TestSingletonTightensOwnedPublicRuntimeDir(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o700 {
 		t.Errorf("runtime folder mode = %v, want 0700", info.Mode().Perm())
+	}
+}
+
+// TestAcquireReportsHeld checks that a second open file description reports the held lock.
+func TestAcquireReportsHeld(t *testing.T) {
+	singletonTestRuntime(t)
+	release, err := Acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	other, err := Acquire()
+	if other != nil {
+		other()
+		t.Fatal("second acquisition returned a release function")
+	}
+	if !errors.Is(err, ErrHeld) {
+		t.Fatalf("second acquisition = %v, want ErrHeld", err)
 	}
 }

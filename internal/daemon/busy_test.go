@@ -16,6 +16,23 @@ func useProcessTable(t *testing.T, procDir string) {
 	t.Cleanup(func() { processTableRoot = previous })
 }
 
+// fakeCommandLine writes a process entry with a NUL-separated command line to a fake process table.
+func fakeCommandLine(t *testing.T, procDir, pid, exe, cwd string, args ...string) {
+	t.Helper()
+	dir := filepath.Join(procDir, pid)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, target := range map[string]string{"exe": exe, "cwd": cwd} {
+		if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cmdline"), []byte(strings.Join(args, "\x00")+"\x00"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // staleLaunchDaemon mounts a Stardew daemon whose Steam launch flag is older than the launch grace, with the clock at now.
 func staleLaunchDaemon(t *testing.T) *Daemon {
 	t.Helper()

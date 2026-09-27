@@ -1,4 +1,4 @@
-package main
+package instancelock
 
 import (
 	"errors"
@@ -12,8 +12,8 @@ import (
 	"github.com/parka/gorganizer/internal/fsutil"
 )
 
-// acquireSingleInstanceLock takes an exclusive flock so only one daemon runs at a time.
-func acquireSingleInstanceLock() (release func(), err error) {
+// Acquire takes an exclusive flock so only one service or offline recovery runs at a time.
+func Acquire() (release func(), err error) {
 	lockPath := config.LockPath()
 	dir := filepath.Dir(lockPath)
 	if err := fsutil.EnsurePrivateDir(dir); err != nil {
@@ -38,7 +38,7 @@ func acquireSingleInstanceLock() (release func(), err error) {
 	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, fmt.Errorf("Gorganizer's background service is already running (lock held at %s).", lockPath)
+			return nil, &heldError{path: lockPath}
 		}
 		return nil, fmt.Errorf("acquiring lock %s: %w", lockPath, err)
 	}
