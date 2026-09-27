@@ -682,6 +682,9 @@ message ListArchivesResponse {
 message RemoveArchiveRequest {
   string game_id = 1;
   string archive_rel_path = 2;
+  // download_id removes a failed or cancelled download's entry, including one
+  // that never received an archive path. Active downloads are refused.
+  string download_id = 3;
 }
 message RemoveArchiveResponse {}
 

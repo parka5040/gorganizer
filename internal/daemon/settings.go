@@ -42,7 +42,7 @@ func (se *SettingsService) SetGameSettings(gameID string, autoInstall bool) (*dt
 	return &dto.GameSettingsResult{GameID: gameID, AutoInstall: s.AutoInstall}, nil
 }
 
-// SetNexusAPIKey validates and stores a Nexus API key and replaces the download manager, refusing once shutdown began.
+// SetNexusAPIKey validates and stores a Nexus API key and updates the download resolver, refusing once shutdown began.
 func (se *SettingsService) SetNexusAPIKey(ctx context.Context, apiKey string) (*dto.NexusAPIKeyResult, error) {
 	nexus := newNexusDownloadClient(apiKey)
 	if err := nexus.ValidateAPIKey(ctx); err != nil {
@@ -54,22 +54,33 @@ func (se *SettingsService) SetNexusAPIKey(ctx context.Context, apiKey string) (*
 	}
 
 	se.s.mu.Lock()
-	defer se.s.mu.Unlock()
 	if err := se.s.refuseWhenShuttingDown("set_nexus_api_key"); err != nil {
+		se.s.mu.Unlock()
 		return nil, err
 	}
 
+	previousKey := se.s.config.NexusAPIKey
 	se.s.config.NexusAPIKey = apiKey
-	se.s.invalidateNexusPremiumCache()
 	if err := se.s.config.Save(); err != nil {
+		se.s.config.NexusAPIKey = previousKey
+		se.s.mu.Unlock()
 		return nil, fmt.Errorf("saving config: %w", err)
 	}
+	se.s.invalidateNexusPremiumCache()
 
+	var rehydrate *download.Manager
+	var gameIDs []string
 	if se.s.downloadMgr != nil {
-		se.s.downloadMgr.Stop()
+		se.s.downloadMgr.SetResolver(nexus)
+	} else {
+		rehydrate = newDownloadManager(nexus, 3, se.s.svc.archives.managerHooks())
+		se.s.downloadMgr = rehydrate
+		gameIDs = se.s.downloadStateSnapshotLocked().gameIDs
 	}
-	se.s.downloadMgr = download.NewManager(nexus, 3, se.s.svc.archives.managerHooks())
-	se.s.downloadMgr.RehydrateLedger(se.s.downloadStateSnapshotLocked().gameIDs)
+	se.s.mu.Unlock()
+	if rehydrate != nil {
+		rehydrate.RehydrateLedger(gameIDs)
+	}
 
 	slog.Info("nexus API key set and validated")
 	return &dto.NexusAPIKeyResult{Valid: true}, nil

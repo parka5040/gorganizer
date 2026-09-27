@@ -874,11 +874,12 @@ bool GrpcClient::setArchivesHiddenBulk(const QString& gameId, bool hidden, GrpcB
     return true;
 }
 
-bool GrpcClient::removeArchive(const QString& gameId, const QString& archiveRelPath, QString& errorOut)
+bool GrpcClient::removeArchive(const QString& gameId, const QString& archiveRelPath, const QString& downloadId, QString& errorOut)
 {
     gorganizer::v1::RemoveArchiveRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_archive_rel_path(archiveRelPath.toStdString());
+    req.set_download_id(downloadId.toStdString());
     gorganizer::v1::RemoveArchiveResponse resp;
     return mapError(invokeUnary(m_syncStub.get(), &Stub::RemoveArchive, req, resp), errorOut);
 }

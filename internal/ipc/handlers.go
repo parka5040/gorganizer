@@ -285,7 +285,7 @@ func (s *gorganizerServer) ListArchives(_ context.Context, req *pb.ListArchivesR
 }
 
 func (s *gorganizerServer) RemoveArchive(_ context.Context, req *pb.RemoveArchiveRequest) (*pb.RemoveArchiveResponse, error) {
-	if err := s.ctrl.RemoveArchive(req.GetGameId(), req.GetArchiveRelPath()); err != nil {
+	if err := s.ctrl.RemoveArchive(req.GetGameId(), req.GetArchiveRelPath(), req.GetDownloadId()); err != nil {
 		return nil, grpcError(err)
 	}
 	return &pb.RemoveArchiveResponse{}, nil

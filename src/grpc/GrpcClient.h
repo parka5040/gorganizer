@@ -139,7 +139,7 @@ public:
     bool listArchives(const QString& gameId, std::vector<GrpcArchiveRow>& rowsOut, QString& errorOut);
     bool setArchiveHidden(const QString& gameId, const QString& archiveRelPath, bool hidden, QString& errorOut);
     bool setArchivesHiddenBulk(const QString& gameId, bool hidden, GrpcBulkHideScope scope, int& affectedOut, QString& errorOut);
-    bool removeArchive(const QString& gameId, const QString& archiveRelPath, QString& errorOut);
+    bool removeArchive(const QString& gameId, const QString& archiveRelPath, const QString& downloadId, QString& errorOut);
     bool refreshArchiveMetadata(const QString& gameId, const QString& archiveRelPath,
                                 GrpcArchiveRow& rowOut, QString& errorOut);
     void startDownload(const QString& nxmUri);

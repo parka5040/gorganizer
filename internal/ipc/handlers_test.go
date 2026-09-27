@@ -59,6 +59,7 @@ type fakeController struct {
 	startDownloadURI  string
 	archives          []dto.ArchiveRowResult
 	listArchivesGame  string
+	removeArchiveArgs []string
 	bulkAffected      int
 	bulkArgs          []any
 	installFolder     string
@@ -190,6 +191,11 @@ func (f *fakeController) StartDownload(nxmURI string) (string, int, error) {
 func (f *fakeController) ListArchives(gameID string) ([]dto.ArchiveRowResult, error) {
 	f.listArchivesGame = gameID
 	return f.archives, nil
+}
+
+func (f *fakeController) RemoveArchive(gameID, archiveRelPath, downloadID string) error {
+	f.removeArchiveArgs = []string{gameID, archiveRelPath, downloadID}
+	return nil
 }
 
 func (f *fakeController) SetArchivesHiddenBulk(gameID string, hidden bool, scope dto.BulkHideScope) (int, error) {
@@ -580,6 +586,22 @@ func TestListArchivesFieldMapping(t *testing.T) {
 		Status: pb.DownloadStatus_DOWNLOAD_STATUS_INSTALLED, InstalledModFolder: "SkyUI",
 		DownloadId: "dl-9", BytesDownloaded: 1024, QueuedAhead: 2, Merged: true,
 	})
+}
+
+// TestRemoveArchiveDownloadIDMapping passes an ID-only removal through the archive RPC.
+func TestRemoveArchiveDownloadIDMapping(t *testing.T) {
+	fake := &fakeController{}
+	client := newTestClient(t, fake)
+	resp, err := client.RemoveArchive(t.Context(), &pb.RemoveArchiveRequest{
+		GameId: "skyrimse", DownloadId: "dl-no-path",
+	})
+	if err != nil {
+		t.Fatalf("RemoveArchive: %v", err)
+	}
+	if got, want := fake.removeArchiveArgs, []string{"skyrimse", "", "dl-no-path"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("controller args = %v, want %v", got, want)
+	}
+	mustEqualProto(t, resp, &pb.RemoveArchiveResponse{})
 }
 
 // TestSetArchivesHiddenBulkScopeMapping locks proto scope → dto.BulkHideScope conversion and affected count.
