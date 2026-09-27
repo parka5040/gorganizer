@@ -49,9 +49,7 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
 
     m_collapseViewsCheck = new QCheckBox("Show one ordering for both views");
     m_collapseViewsCheck->setToolTip(
-        "When on, the Separator View checkbox in the mod list is forced on and "
-        "disabled, and any reorder writes the same index into both visual_index "
-        "and true_index. Toggling off later leaves any cross-stamping in place.");
+        "Keep grouped and priority views in the same order. Turning this off does not restore the previous order.");
     if (m_config)
         m_collapseViewsCheck->setChecked(m_config->collapsedSeparatorView());
     connect(m_collapseViewsCheck, &QCheckBox::toggled,

@@ -99,7 +99,7 @@ private:
     void autoMountActiveProfile();
     // Rechecks deferred recovery or requests a review of pending recovery for the active game.
     void onRecoveryAction();
-    // Updates the persistent recovery indicator and its action for the active game.
+    // Updates the active game's mod status and recovery action.
     void refreshRecoveryIndicator();
     // Sends the unmount RPC for gameId and reports it in the status bar.
     void requestUnmount(const QString& gameId);
@@ -127,7 +127,7 @@ private:
     QToolButton* m_applyButton;
     QAction* m_unmountAction;
     QLabel* m_statusInfo;
-    QLabel* m_recoveryLabel;
+    QLabel* m_modStatusLabel;
     QPushButton* m_recoveryButton;
     QTimer* m_profileSwitchTimer;
     QStatusBar* m_statusBar;
@@ -144,8 +144,9 @@ private:
     bool m_waitingForSaves = false;
     bool m_vfsDirty = false;
     bool m_vfsMounted = false;
+    bool m_hasModStatus = false;
+    GrpcSteamMaintenanceState m_steamMaintenance = GrpcSteamMaintenanceState::Unspecified;
     QHash<QString, GrpcVFSLifecycleState> m_lifecycleStates;
-    QString m_lifecycleReason;
     quint64 m_autoMountQueryId = 0;
     QString m_retryGameId;
     QSet<QString> m_recoveryMountSkipped;

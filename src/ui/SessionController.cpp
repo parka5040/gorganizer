@@ -49,17 +49,15 @@ SessionController::SessionController(AppConfig& config, GrpcClient* grpc,
     , m_applyButton(applyButton)
     , m_unmountAction(unmountAction)
     , m_statusInfo(statusInfo)
-    , m_recoveryLabel(new QLabel(statusBar))
+    , m_modStatusLabel(new QLabel(statusBar))
     , m_recoveryButton(new QPushButton("Check Again", statusBar))
     , m_profileSwitchTimer(new QTimer(this))
     , m_statusBar(statusBar)
     , m_parentWindow(parentWindow)
 {
-    m_recoveryLabel->setTextFormat(Qt::PlainText);
-    m_recoveryLabel->setWordWrap(true);
-    m_recoveryLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    m_statusBar->addPermanentWidget(m_recoveryLabel, 1);
-    m_recoveryLabel->hide();
+    m_modStatusLabel->setTextFormat(Qt::PlainText);
+    m_modStatusLabel->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
+    m_statusBar->addPermanentWidget(m_modStatusLabel);
     m_statusBar->addPermanentWidget(m_recoveryButton);
     m_recoveryButton->hide();
     connect(m_statusBar, &QStatusBar::messageChanged, this, [this](const QString& message) {
@@ -127,6 +125,8 @@ SessionController::SessionController(AppConfig& config, GrpcClient* grpc,
         m_retargetGameId.clear();
         m_appliedProfile.clear();
         m_vfsMounted = false;
+        m_hasModStatus = false;
+        m_steamMaintenance = GrpcSteamMaintenanceState::Unspecified;
         updateProfileSwitchControls();
         const bool pending = m_lifecycleStates.value(m_activeGame.shortName)
             == GrpcVFSLifecycleState::RecoveryPending;
@@ -135,7 +135,9 @@ SessionController::SessionController(AppConfig& config, GrpcClient* grpc,
         m_retryGameId.clear();
         m_recoveryButton->setEnabled(false);
         m_recoveryButton->setText(pending ? "Review…" : "Check Again");
+        refreshRecoveryIndicator();
     });
+    refreshRecoveryIndicator();
 }
 
 void SessionController::loadManagedGames()
@@ -204,7 +206,8 @@ void SessionController::switchToGame(uint32_t appId)
         m_retargetGameId.clear();
         m_appliedProfile.clear();
         m_vfsMounted = false;
-        m_lifecycleReason.clear();
+        m_hasModStatus = false;
+        m_steamMaintenance = GrpcSteamMaintenanceState::Unspecified;
         setVfsDirty(false);
         updateProfileSwitchControls();
         if (wasSwitching)
@@ -291,11 +294,11 @@ void SessionController::startProfileSwitch()
         if (recoveryBlocked(m_activeGame.shortName))
             m_statusBar->showMessage("Gorganizer needs to finish recovering this game's mods before switching profiles.", 5000);
         else if (m_autoMountSuppressed.contains(m_activeGame.shortName))
-            m_statusBar->showMessage("Mods stay unmounted while SMAPI is being changed; they are mounted when it finishes.", 5000);
+            m_statusBar->showMessage("Mod activation is paused while SMAPI is being changed. Try again when it finishes.", 5000);
         else if (!m_grpc->isConnected())
             m_statusBar->showMessage("The background service disconnected before profiles could be switched.", 5000);
         else
-            m_statusBar->showMessage("The game's mods are not mounted. Select a profile to use next time.", 5000);
+            m_statusBar->showMessage("Mods are inactive for this game. Select a profile to use next time.", 5000);
         return;
     }
     if (m_requestedProfile == m_appliedProfile) {
@@ -323,7 +326,7 @@ void SessionController::onProfileChanged(const QString& profileName)
         showProfile(profileName);
         m_config.setLastProfileFor(m_activeGame.shortName, profileName);
         if (m_autoMountSuppressed.contains(m_activeGame.shortName))
-            m_statusBar->showMessage("Mods stay unmounted while SMAPI is being changed; they are mounted when it finishes.", 5000);
+            m_statusBar->showMessage("Mod activation is paused while SMAPI is being changed. Try again when it finishes.", 5000);
         else if (recoveryBlocked(m_activeGame.shortName))
             refreshRecoveryIndicator();
         return;
@@ -335,7 +338,7 @@ void SessionController::onProfileChanged(const QString& profileName)
         return;
     }
     if (m_autoMountSuppressed.contains(m_activeGame.shortName)) {
-        m_statusBar->showMessage("Mods stay unmounted while SMAPI is being changed; they are mounted when it finishes.", 5000);
+        m_statusBar->showMessage("Mod activation is paused while SMAPI is being changed. Try again when it finishes.", 5000);
         showProfile(m_appliedProfile);
         return;
     }
@@ -360,7 +363,7 @@ void SessionController::onProfileChanged(const QString& profileName)
 
 void SessionController::onVfsRetargeted(quint64 requestId, const GrpcVFSStatus& status)
 {
-    if (requestId != m_retargetRequestId || status.gameId != m_retargetGameId
+    if (!m_grpc->isConnected() || requestId != m_retargetRequestId || status.gameId != m_retargetGameId
         || status.gameId != m_activeGame.shortName)
         return;
     m_retargetRequestId = 0;
@@ -407,7 +410,7 @@ void SessionController::onVfsRetargetFailed(quint64 requestId, const QString& ga
 
 void SessionController::onRetargetStatusQueried(quint64 requestId, const GrpcVFSStatus& status)
 {
-    if (requestId != m_retargetStatusQueryId || status.gameId != m_activeGame.shortName)
+    if (!m_grpc->isConnected() || requestId != m_retargetStatusQueryId || status.gameId != m_activeGame.shortName)
         return;
     m_retargetStatusQueryId = 0;
     m_vfsMounted = status.mounted;
@@ -422,7 +425,7 @@ void SessionController::onRetargetStatusQueried(quint64 requestId, const GrpcVFS
             m_statusBar->showMessage(QString("Couldn't switch profiles. Showing the active profile \"%1\".")
                                          .arg(m_appliedProfile), 5000);
         else
-            m_statusBar->showMessage("Couldn't switch profiles. The game's mods are not mounted.", 5000);
+            m_statusBar->showMessage("Couldn't switch profiles. Mods are inactive for this game.", 5000);
         return;
     }
     m_waitingForSaves = true;
@@ -445,7 +448,7 @@ void SessionController::onRetargetStatusQueryFailed(quint64 requestId, const QSt
 
 void SessionController::onVfsStatusChanged(const GrpcVFSStatus& status)
 {
-    if (!m_activeGame.detected || status.gameId != m_activeGame.shortName)
+    if (!m_grpc->isConnected() || !m_activeGame.detected || status.gameId != m_activeGame.shortName)
         return;
     m_vfsMounted = status.mounted;
     m_appliedProfile = status.mounted ? status.profileName : QString();
@@ -460,7 +463,7 @@ void SessionController::onVfsStatusChanged(const GrpcVFSStatus& status)
 
 void SessionController::onVfsStatusReceived(const GrpcVFSStatus& status)
 {
-    if (!m_activeGame.detected || status.gameId != m_activeGame.shortName)
+    if (!m_grpc->isConnected() || !m_activeGame.detected || status.gameId != m_activeGame.shortName)
         return;
     const bool wasMounted = m_vfsMounted;
     m_vfsMounted = status.mounted;
@@ -485,14 +488,20 @@ bool SessionController::recoveryBlocked(const QString& gameId) const
 void SessionController::updateVfsStatus(const GrpcVFSStatus& status)
 {
     const QString gameId = status.gameId;
+    const auto previousState = m_lifecycleStates.value(gameId);
+    const bool firstStatus = !m_hasModStatus;
     const bool wasBlocked = recoveryBlocked(gameId);
     m_lifecycleStates.insert(gameId, status.lifecycleState);
-    m_lifecycleReason = status.lifecycleReason;
+    m_steamMaintenance = status.steamMaintenance;
+    m_hasModStatus = true;
     if (recoveryBlocked(gameId))
         m_recoveryMountSkipped.insert(gameId);
     if (m_unmountAction)
         m_unmountAction->setEnabled(!profileSwitchPending() && !recoveryBlocked(gameId));
     refreshRecoveryIndicator();
+    if (status.lifecycleState == GrpcVFSLifecycleState::RecoveryDeferred
+        && (firstStatus || previousState != GrpcVFSLifecycleState::RecoveryDeferred))
+        m_statusBar->showMessage("Mods were left active because the game may still be running.", 5000);
     if (status.mounted || status.lifecycleState != GrpcVFSLifecycleState::Ready
         || (!wasBlocked && !m_recoveryMountSkipped.contains(gameId) && !m_pendingRemounts.contains(gameId)))
         return;
@@ -516,6 +525,7 @@ void SessionController::setVfsDirty(bool dirty)
     }
     if (dirty && !profileSwitchPending() && !recoveryBlocked(m_activeGame.shortName))
         m_statusBar->showMessage("Mod changes pending — click \"Apply Changes\" or just launch.", 4000);
+    refreshStatusInfo();
 }
 
 void SessionController::onApplyChanges()
@@ -544,16 +554,15 @@ void SessionController::onUnmountMods()
     const auto refusedForLoader = [this, &gameId] {
         if (!m_autoMountSuppressed.contains(gameId))
             return false;
-        dialogs::plainInfo(m_parentWindow, "Unmount mods",
-            "SMAPI is being changed for this game right now, and gorganizer unmounts and mounts its mods as "
-            "part of that. Try again when it finishes.");
+        dialogs::plainInfo(m_parentWindow, "Deactivate Mods",
+            "SMAPI is being changed for this game right now. Gorganizer will deactivate and activate "
+            "its mods as part of that change. Try again when it finishes.");
         return true;
     };
     if (refusedForLoader())
         return;
-    if (!dialogs::confirm(m_parentWindow, "Unmount mods",
-            "Restore the game's vanilla Data folder?\n\nAny new writes (saves, tool output) "
-            "are captured into Overwrite first. Do this when you've finished playing."))
+    if (!dialogs::confirm(m_parentWindow, "Deactivate Mods",
+            "Deactivate mods and restore the original game files? New files created while playing will be kept in Overwrite."))
         return;
     if (!m_activeGame.detected || m_activeGame.shortName != gameId || !m_grpc->isConnected()
         || recoveryBlocked(gameId) || profileSwitchPending())
@@ -566,14 +575,14 @@ void SessionController::onUnmountMods()
 void SessionController::requestUnmount(const QString& gameId)
 {
     m_grpc->unmountVfs(gameId);
-    m_statusBar->showMessage("Unmounting mods…", 4000);
+    m_statusBar->showMessage("Deactivating mods…", 4000);
 }
 
 quint64 SessionController::unmountForMaintenance(const QString& gameId)
 {
     if (gameId.isEmpty() || !m_grpc->isConnected())
         return 0;
-    m_statusBar->showMessage("Unmounting mods…", 4000);
+    m_statusBar->showMessage("Deactivating mods…", 4000);
     return m_grpc->unmountVfsForMaintenance(gameId);
 }
 
@@ -589,7 +598,7 @@ void SessionController::suppressAutoMount(const QString& gameId)
         if (!m_appliedProfile.isEmpty())
             showProfile(m_appliedProfile);
         updateProfileSwitchControls();
-        m_statusBar->showMessage("Mods stay unmounted while SMAPI is being changed; they are mounted when it finishes.", 5000);
+        m_statusBar->showMessage("Mod activation is paused while SMAPI is being changed. Try again when it finishes.", 5000);
     }
     m_autoMountSkipped.remove(gameId);
     m_pendingRemounts.remove(gameId);
@@ -616,7 +625,7 @@ void SessionController::remountAfterMaintenance(const QString& gameId, const QSt
         return;
     if (m_autoMountSuppressed.contains(gameId)) {
         m_autoMountSkipped.insert(gameId);
-        m_statusBar->showMessage("Mods stay unmounted while SMAPI is being changed; they are mounted when it finishes.", 5000);
+        m_statusBar->showMessage("Mod activation is paused while SMAPI is being changed. Try again when it finishes.", 5000);
         return;
     }
     mountForMaintenance(gameId, profileName);
@@ -630,16 +639,19 @@ void SessionController::mountForMaintenance(const QString& gameId, const QString
     }
     if (!m_grpc->isConnected()) {
         m_pendingRemounts.insert(gameId, profileName);
-        m_statusBar->showMessage("The mods are mounted again once the gorganizer daemon is reachable.", 5000);
+        m_statusBar->showMessage("Gorganizer will activate the mods again when its background service reconnects.", 5000);
         return;
     }
     m_pendingRemounts.remove(gameId);
     m_grpc->mountVfsWithSwap(gameId, profileName);
-    m_statusBar->showMessage("Mounting mods again…", 4000);
+    m_statusBar->showMessage("Activating mods again…", 4000);
 }
 
 void SessionController::onConnected()
 {
+    m_hasModStatus = false;
+    m_steamMaintenance = GrpcSteamMaintenanceState::Unspecified;
+    refreshRecoveryIndicator();
     const QHash<QString, QString> pending = m_pendingRemounts;
     for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
         if (!m_activeGame.detected || it.key() != m_activeGame.shortName || m_autoMountSuppressed.contains(it.key())
@@ -663,7 +675,7 @@ void SessionController::autoMountActiveProfile()
     m_recoveryMountSkipped.remove(m_activeGame.shortName);
     if (m_autoMountSuppressed.contains(m_activeGame.shortName)) {
         m_autoMountSkipped.insert(m_activeGame.shortName);
-        m_statusBar->showMessage("Mods stay unmounted while SMAPI is being changed; they are mounted when it finishes.", 5000);
+        m_statusBar->showMessage("Mod activation is paused while SMAPI is being changed. Try again when it finishes.", 5000);
         return;
     }
     m_grpc->mountVfsWithSwap(m_activeGame.shortName, m_currentProfile);
@@ -692,7 +704,7 @@ void SessionController::onRpcError(const QString& method, const QString& error)
         }
         if (parsed.token == QLatin1String("modloader_busy") && m_autoMountSuppressed.contains(gameId)) {
             m_autoMountSkipped.insert(gameId);
-            m_statusBar->showMessage("Mods stay unmounted while SMAPI is being changed; they are mounted when it finishes.", 5000);
+            m_statusBar->showMessage("Mod activation is paused while SMAPI is being changed. Try again when it finishes.", 5000);
             return;
         }
     }
@@ -706,8 +718,8 @@ void SessionController::onRpcError(const QString& method, const QString& error)
         presentError(m_parentWindow, "Apply Changes", "apply mod changes", error, true);
         return;
     }
-    const QString operation = method == QLatin1String("MountVFS") ? QStringLiteral("mount mods")
-        : method == QLatin1String("UnmountVFS") ? QStringLiteral("unmount mods")
+    const QString operation = method == QLatin1String("MountVFS") ? QStringLiteral("activate mods")
+        : method == QLatin1String("UnmountVFS") ? QStringLiteral("deactivate mods")
         : method == QLatin1String("RebuildVFS") ? QStringLiteral("apply mod changes")
         : method == QLatin1String("RetryVFSRecovery") ? QStringLiteral("check recovery")
         : method == QLatin1String("RestoreFromBackup") ? QStringLiteral("restore the game files")
@@ -735,10 +747,10 @@ void SessionController::onRecoveryAction()
 void SessionController::refreshRecoveryIndicator()
 {
     const auto state = m_lifecycleStates.value(m_activeGame.shortName);
-    const bool deferred = m_activeGame.detected && state == GrpcVFSLifecycleState::RecoveryDeferred;
-    const bool pending = m_activeGame.detected && state == GrpcVFSLifecycleState::RecoveryPending;
-    m_statusInfo->setVisible(!deferred && !pending);
-    m_recoveryLabel->setVisible(deferred || pending);
+    const bool deferred = m_hasModStatus && m_activeGame.detected
+        && state == GrpcVFSLifecycleState::RecoveryDeferred;
+    const bool pending = m_hasModStatus && m_activeGame.detected
+        && state == GrpcVFSLifecycleState::RecoveryPending;
     m_recoveryButton->setVisible(deferred || pending);
     m_recoveryButton->setEnabled(m_grpc->isConnected() && (pending || m_retryGameId.isEmpty()));
     m_recoveryButton->setText(pending ? "Review…"
@@ -748,33 +760,42 @@ void SessionController::refreshRecoveryIndicator()
 
 void SessionController::refreshStatusInfo()
 {
-    if (!m_activeGame.detected) {
-        m_statusInfo->setText("No game selected");
-        return;
-    }
+    m_statusInfo->setText(m_activeGame.detected
+        ? QString("%1 - %2").arg(m_activeGame.name, m_currentProfile)
+        : QStringLiteral("No game selected"));
+
+    QString text;
+    QString tip;
     const auto state = m_lifecycleStates.value(m_activeGame.shortName);
-    m_statusInfo->setText(QString("%1 - %2").arg(m_activeGame.name, m_currentProfile));
-    if (state == GrpcVFSLifecycleState::RecoveryPending) {
-        m_recoveryLabel->setText("Gorganizer needs your decision to finish an interrupted change.");
-        m_recoveryLabel->setToolTip(m_recoveryLabel->text());
-        return;
+    if (!m_grpc->isConnected()) {
+        text = QStringLiteral("Connection lost");
+        tip = QStringLiteral("Gorganizer's background service is disconnected, so mod status is unknown.");
+    } else if (!m_hasModStatus || !m_activeGame.detected) {
+        text = QStringLiteral("Checking mod status…");
+        tip = QStringLiteral("Gorganizer is checking whether mods are active for this game.");
+    } else if (state == GrpcVFSLifecycleState::RecoveryPending) {
+        text = QStringLiteral("Needs your decision");
+        tip = QStringLiteral("Gorganizer needs your decision to finish an interrupted mod change.");
+    } else if (state == GrpcVFSLifecycleState::RecoveryDeferred) {
+        text = QStringLiteral("Waiting for the game to close");
+        tip = QStringLiteral("Mods were left active because the game may still be running.");
+    } else if (m_steamMaintenance == GrpcSteamMaintenanceState::VerifyRequired
+               || m_steamMaintenance == GrpcSteamMaintenanceState::UserRequested) {
+        text = QStringLiteral("Paused for Steam");
+        tip = QStringLiteral("Mods are paused until you verify the game or finish updating it in Steam.");
+    } else if (!m_vfsMounted) {
+        text = QStringLiteral("Mods inactive");
+        tip = QStringLiteral("Mods are not active for this game.");
+    } else if (m_vfsDirty) {
+        text = QStringLiteral("Changes pending");
+        tip = QStringLiteral("Mod changes will be applied when you choose Apply Changes or launch the game.");
+    } else {
+        text = QStringLiteral("Mods active");
+        tip = QStringLiteral("Mods are active for this game.");
     }
-    if (state != GrpcVFSLifecycleState::RecoveryDeferred)
-        return;
-    if (m_lifecycleReason == QLatin1String("launch_grace"))
-        m_recoveryLabel->setText("The game was started moments ago, so your mods were left in place. "
-                                 "Gorganizer will check again shortly.");
-    else if (m_lifecycleReason == QLatin1String("process_scan_failed"))
-        m_recoveryLabel->setText("Gorganizer couldn't check whether the game is running, "
-                                 "so your mods were left in place.");
-    else if (m_lifecycleReason == QLatin1String("launch_record_invalid")
-             || m_lifecycleReason == QLatin1String("launch_record_unreadable"))
-        m_recoveryLabel->setText("Gorganizer couldn't read its record of the last game launch, "
-                                 "so your mods were left in place.");
-    else
-        m_recoveryLabel->setText("The game may still be running, so your mods were left in place. "
-                                 "Gorganizer will finish once the game closes.");
-    m_recoveryLabel->setToolTip(m_recoveryLabel->text());
+    m_modStatusLabel->setText(text);
+    m_modStatusLabel->setToolTip(tip);
+    m_modStatusLabel->setAccessibleName(text);
 }
 
 }
