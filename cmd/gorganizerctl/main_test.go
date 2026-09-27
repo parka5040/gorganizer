@@ -22,6 +22,16 @@ func TestMain(m *testing.M) {
 	os.Exit(testsafe.RunWithSafeEnvironment(m))
 }
 
+// TestPrintVersion checks that the maintenance command reports its stamped version.
+func TestPrintVersion(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var out bytes.Buffer
+	printVersion(&out)
+	if want := "gorganizerctl " + version + "\n"; out.String() != want {
+		t.Fatalf("version output = %q, want %q", out.String(), want)
+	}
+}
+
 // TestResolveDataPathExplicitPath verifies a supplied path does not require config or Steam discovery.
 func TestResolveDataPathExplicitPath(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())

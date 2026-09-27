@@ -1,5 +1,7 @@
 # Build output
 build/
+.build-staging/
+.build-fingerprint
 # Repo-local Go build tools
 .tools/
 cmake-build-*/
@@ -18,6 +20,8 @@ qrc_*
 # source directories that share names with the binaries.
 /gorganizerd
 /gorganizerctl
+/gorganizerd.tmp.*
+/gorganizerctl.tmp.*
 /commentcheck
 /cmd/runtime-probe/runtime-probe
 /cmd/vfs-smoke/vfs-smoke

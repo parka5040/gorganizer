@@ -472,28 +472,79 @@ check_go_version_warning() {
 
 # --- build -----------------------------------------------------------------
 
+build_fingerprint() (
+    cd "$SCRIPT_DIR" || return 1
+    find . \( -type d \( -name build -o -name .build-staging -o -name .tools \
+        -o -name .git -o -name .gocache -o -name .tmp \) -prune \) -o \
+        \( -type f \( -name '*.go' -o -name '*.cpp' -o -name '*.h' \
+            -o -name '*.proto' -o -name CMakeLists.txt -o -name go.mod \
+            -o -name go.sum -o -name Makefile -o -name VERSION \
+            -o -path './resources/*' -o -path './assets/*' \) \
+            ! -name '*.pb.go' -print0 \) | \
+        LC_ALL=C sort -z | xargs -0 -r sha256sum | sha256sum
+)
+
 needs_build() {
     [ "${1:-}" = "force" ] && return 0
     [ ! -x "$DAEMON_BIN" ] && return 0
+    [ ! -x "$CTL_BIN" ]    && return 0
     [ ! -x "$GUI_BIN" ]    && return 0
-    local changed
-    changed=$(find "$SCRIPT_DIR" \
-        \( -name '*.go' -o -name '*.cpp' -o -name '*.h' \
-           -o -name '*.proto' -o -name 'CMakeLists.txt' \) \
-        -not -path '*/build/*' \
-        -newer "$GUI_BIN" -print -quit 2>/dev/null)
-    [ -n "$changed" ]
+    [ ! -f "$SCRIPT_DIR/.build-fingerprint" ] && return 0
+    command -v sha256sum >/dev/null 2>&1 || return 0
+    local fingerprint
+    fingerprint="$(build_fingerprint)" || return 0
+    [ "$fingerprint" != "$(< "$SCRIPT_DIR/.build-fingerprint")" ]
 }
 
-do_build() {
-    local force="${1:-}"
-    if [ "$force" = "force" ]; then
+validate_build_binary() {
+    local output
+    [ -x "$1" ] || return 1
+    output="$("$1" --version)" || return 1
+    [[ "$output" == *"$2"* ]]
+}
+
+build_and_publish() (
+    local stage="$SCRIPT_DIR/.build-staging" version fingerprint
+    local daemon_tmp="" ctl_tmp="" gui_tmp="" fingerprint_tmp=""
+    trap 'rm -f "$daemon_tmp" "$ctl_tmp" "$gui_tmp" "$fingerprint_tmp"' EXIT
+    trap 'exit 1' INT TERM
+
+    if [ "${1:-}" = "force" ]; then
         log "Cleaning previous build..."
-        make clean >/dev/null
+        rm -rf "$stage" || return 1
     fi
+    mkdir -p "$stage/bin" || return 1
+    command -v sha256sum >/dev/null 2>&1 || return 1
+    version="$(sed -n '1{s/[[:space:]]*$//;p;}' "$SCRIPT_DIR/VERSION")" || return 1
+    [ -n "$version" ] || return 1
+    fingerprint="$(build_fingerprint)" || return 1
+
     log "Building (delegated to make)..."
-    if ! make all gui; then
-        err "Build failed."
+    make OUT_DIR="$stage/bin" GUI_BUILD_DIR="$stage/gui" all gui || return 1
+    validate_build_binary "$stage/bin/gorganizerd" "$version" || return 1
+    validate_build_binary "$stage/bin/gorganizerctl" "$version" || return 1
+    validate_build_binary "$stage/gui/src/gorganizer" "$version" || return 1
+    [ "$(build_fingerprint)" = "$fingerprint" ] || return 1
+
+    mkdir -p "$SCRIPT_DIR/build/src" || return 1
+    daemon_tmp="$(mktemp "$DAEMON_BIN.tmp.XXXXXX")" || return 1
+    ctl_tmp="$(mktemp "$CTL_BIN.tmp.XXXXXX")" || return 1
+    gui_tmp="$(mktemp "$GUI_BIN.tmp.XXXXXX")" || return 1
+    fingerprint_tmp="$(mktemp "$stage/fingerprint.XXXXXX")" || return 1
+    install -m 755 "$stage/bin/gorganizerd" "$daemon_tmp" || return 1
+    install -m 755 "$stage/bin/gorganizerctl" "$ctl_tmp" || return 1
+    install -m 755 "$stage/gui/src/gorganizer" "$gui_tmp" || return 1
+    printf '%s\n' "$fingerprint" > "$fingerprint_tmp" || return 1
+
+    mv -f "$daemon_tmp" "$DAEMON_BIN" || return 1
+    mv -f "$ctl_tmp" "$CTL_BIN" || return 1
+    mv -f "$gui_tmp" "$GUI_BIN" || return 1
+    mv -f "$fingerprint_tmp" "$SCRIPT_DIR/.build-fingerprint" || return 1
+)
+
+do_build() {
+    if ! build_and_publish "${1:-}"; then
+        err "The new build failed. Your installed version is unchanged."
         local family
         family="$(detect_distro_family)"
         local install_cmd; install_cmd="$(pm_install_cmd "$family")"
@@ -1219,6 +1270,8 @@ cmd_uninstall() {
 }
 
 # --- dispatch --------------------------------------------------------------
+
+[ "${GORGANIZER_SH_SOURCE_ONLY:-}" = 1 ] && return 0
 
 # Compatibility alias: --rebuild → build --rebuild (top-level, no subcommand).
 if [ "${1:-}" = "--rebuild" ]; then
