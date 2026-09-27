@@ -277,6 +277,18 @@ QString knownTokenMessage(const InstallError& parsed)
         return QStringLiteral("%1 still has an unfinished mod change from before. Gorganizer will finish it "
                               "after the game closes. Close the game, then try again.")
             .arg(gameName(field("game"), QStringLiteral("This game")));
+    if (token == QLatin1String("steam_maintenance_required")) {
+        const QString game = gameName(field("game"), QStringLiteral("this game"));
+        if (field("reason") == QLatin1String("busy"))
+            return QStringLiteral("Steam is updating or checking %1. Wait until Steam has finished, then try again.")
+                .arg(game);
+        if (field("reason") == QLatin1String("user"))
+            return QStringLiteral("Mods for %1 are paused while you update or verify the game in Steam. "
+                                  "Choose \"Steam Finished\" when Steam is done.").arg(game);
+        return QStringLiteral("Steam changed files of %1 while mods were active. Your changed files were saved. "
+                              "In Steam, verify the game's files, then choose \"Verification Finished\".")
+            .arg(game);
+    }
     if (token == QLatin1String("install_record_failed"))
         return QStringLiteral("\"%1\" could not be installed because its install information could not be saved. "
                               "Check that the disk is not full, then try again.")
@@ -394,6 +406,7 @@ bool tokenValuesPercentEscaped(const QString& token)
         QStringLiteral("farm_recovery_deferred"),
         QStringLiteral("recovery_stale"),
         QStringLiteral("install_record_failed"),
+        QStringLiteral("steam_maintenance_required"),
     };
     return escaped.contains(token);
 }

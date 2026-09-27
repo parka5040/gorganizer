@@ -79,3 +79,13 @@ type RecoveryStaleError struct {
 func (e *RecoveryStaleError) Error() string {
 	return fmt.Sprintf("the recovery confirmed for %s is no longer the pending one", e.GameID)
 }
+
+type SteamMaintenanceError struct {
+	GameID string
+	Reason string
+}
+
+// Error reports that Steam is changing the game or that a Steam verification is needed before mods can be used again.
+func (e *SteamMaintenanceError) Error() string {
+	return fmt.Sprintf("%s needs Steam maintenance (%s) before its mods can be used", e.GameID, e.Reason)
+}

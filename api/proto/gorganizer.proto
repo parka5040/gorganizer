@@ -63,6 +63,14 @@ service Gorganizer {
   // because its game may still be running, and recovers it once the game is
   // confirmed closed. It never forces recovery while the game runs.
   rpc RetryVFSRecovery(RetryVFSRecoveryRequest) returns (VFSStatus);
+  // Steam maintenance: enabled=true takes the game's mods down (as Unmount
+  // does) and keeps them down while the user updates or verifies the game in
+  // Steam; enabled=false with verification_confirmed=true ends it once Steam
+  // is idle. Files Steam wrote while mods were deployed are kept in preserved
+  // batches that can be imported as a disabled mod or deleted.
+  rpc SetSteamMaintenance(SetSteamMaintenanceRequest) returns (VFSStatus);
+  rpc ImportPreservedFiles(ImportPreservedFilesRequest) returns (ImportPreservedFilesResponse);
+  rpc DeletePreservedBatch(DeletePreservedBatchRequest) returns (VFSStatus);
 
   // Conflict analysis
   rpc GetConflicts(GetConflictsRequest) returns (ConflictsResponse);
@@ -545,6 +553,50 @@ message VFSStatus {
   // decision for this game (the same item the RecoveryPending event carries),
   // so a GUI that missed the event can still show the prompt.
   RecoveryPending pending_recovery = 12;
+  // steam_maintenance is NONE when Steam and the deployed mods agree,
+  // STEAM_BUSY while Steam updates or checks the game, and VERIFY_REQUIRED
+  // after Steam changed the game while mods were deployed (mounting and
+  // launching are refused until the user confirms a Steam verification).
+  SteamMaintenanceState steam_maintenance = 13;
+  repeated PreservedBatch preserved_batches = 14;
+}
+
+enum SteamMaintenanceState {
+  STEAM_MAINTENANCE_STATE_UNSPECIFIED = 0;
+  STEAM_MAINTENANCE_STATE_NONE = 1;
+  STEAM_MAINTENANCE_STATE_STEAM_BUSY = 2;
+  STEAM_MAINTENANCE_STATE_VERIFY_REQUIRED = 3;
+  STEAM_MAINTENANCE_STATE_USER_REQUESTED = 4;
+}
+
+message PreservedBatch {
+  string batch_id = 1;
+  string created_at = 2;
+  int32 file_count = 3;
+  string reason = 4;
+  string path = 5;
+}
+
+message SetSteamMaintenanceRequest {
+  string game_id = 1;
+  bool enabled = 2;
+  bool verification_confirmed = 3;
+}
+
+message ImportPreservedFilesRequest {
+  string game_id = 1;
+  string batch_id = 2;
+  string mod_name = 3;
+  repeated string relative_paths = 4;
+}
+message ImportPreservedFilesResponse {
+  string mod_name = 1;
+  int32 file_count = 2;
+}
+
+message DeletePreservedBatchRequest {
+  string game_id = 1;
+  string batch_id = 2;
 }
 
 enum VFSLifecycleState {
