@@ -83,6 +83,30 @@ func WriteFileDurable(path string, data []byte, perm os.FileMode) (Outcome, erro
 
 // CopyFileDurable copies a regular file and reports whether the destination is durable.
 func CopyFileDurable(src, dst string, perm os.FileMode, replace bool) (Outcome, error) {
+	return copyFileDurable(src, dst, perm, replace, nil)
+}
+
+type progressWriter struct {
+	writer    io.Writer
+	onWritten func(int64)
+}
+
+// Write copies bytes and reports the amount written to the destination.
+func (w progressWriter) Write(data []byte) (int, error) {
+	n, err := w.writer.Write(data)
+	if n > 0 {
+		w.onWritten(int64(n))
+	}
+	return n, err
+}
+
+// CopyFileDurableWithProgress copies a regular file while reporting written bytes.
+func CopyFileDurableWithProgress(src, dst string, perm os.FileMode, replace bool, onWritten func(int64)) (Outcome, error) {
+	return copyFileDurable(src, dst, perm, replace, onWritten)
+}
+
+// copyFileDurable copies a regular file and optionally reports bytes written.
+func copyFileDurable(src, dst string, perm os.FileMode, replace bool, onWritten func(int64)) (Outcome, error) {
 	from, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return NotPublished, fmt.Errorf("atomicfile: opening source %s: %w", src, err)
@@ -106,7 +130,11 @@ func CopyFileDurable(src, dst string, perm os.FileMode, replace bool) (Outcome, 
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
 	}()
-	if _, err := copyData(tmp, from); err != nil {
+	var destination io.Writer = tmp
+	if onWritten != nil {
+		destination = progressWriter{writer: tmp, onWritten: onWritten}
+	}
+	if _, err := copyData(destination, from); err != nil {
 		return NotPublished, fmt.Errorf("atomicfile: copying %s to %s: %w", src, tmpName, err)
 	}
 	if err := closeFile(from); err != nil {

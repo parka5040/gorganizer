@@ -37,6 +37,8 @@ func main() {
 		os.Exit(runWaitReady(args))
 	case "stop":
 		os.Exit(runStop(args))
+	case "migrate-data":
+		os.Exit(runMigrateData(args))
 	case "recover":
 		os.Exit(runRecover(args))
 	case "recover-confirm":
@@ -113,6 +115,9 @@ Subcommands:
   ping                         Check whether Gorganizer is running.
   wait-ready [--timeout 60s]   Wait for startup to finish.
   stop [--timeout 46s]         Ask Gorganizer to stop and wait for it to exit.
+  migrate-data --from <path> [--dry-run] [--yes]
+                               Move mods and downloads to your personal data folder.
+  migrate-data --resume        Finish an interrupted move.
   recover --game <id>          Repair interrupted SMAPI, game-root files and
                                the Data folder for a configured game.
   recover --data-path <path>   Check only the specified Data folder.

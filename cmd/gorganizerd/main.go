@@ -17,6 +17,7 @@ import (
 	"github.com/parka/gorganizer/internal/daemon"
 	"github.com/parka/gorganizer/internal/instancelock"
 	"github.com/parka/gorganizer/internal/ipc"
+	"github.com/parka/gorganizer/internal/migrate"
 	"github.com/parka/gorganizer/internal/transfer"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -79,6 +80,11 @@ func main() {
 	}
 	defer releaseLock()
 
+	if err := checkMigrationBeforeStart(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	d, err := daemon.NewWithVersion(cfg, version)
 	if err != nil {
 		slog.Error("failed to create daemon", "err", err)
@@ -130,6 +136,18 @@ func socketPathFor(override string) string {
 // printSocketPath prints the socket path without starting the daemon.
 func printSocketPath(out io.Writer, override string) {
 	fmt.Fprintln(out, socketPathFor(override))
+}
+
+// checkMigrationBeforeStart refuses to start the daemon until an interrupted move is finished.
+func checkMigrationBeforeStart() error {
+	exists, err := migrate.JournalExists()
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("A move of your mods is unfinished. Run gorganizerctl migrate-data --resume.")
+	}
+	return nil
 }
 
 // hardExit removes the daemon socket before exiting immediately.
