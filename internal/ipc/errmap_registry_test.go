@@ -64,6 +64,7 @@ func registeredTokenSamples() map[string]error {
 		tokenInstallSelectionEmpty:      download.ErrEmptyInstallSelection,
 		tokenPluginStateFailed:          &dto.PluginStateError{GameID: "skyrimse", Cause: fmt.Errorf("disk full")},
 		tokenFarmRecoveryDeferred:       &dto.RecoveryDeferredError{GameID: "skyrimse", Operation: "mount"},
+		tokenRecoveryStale:              &dto.RecoveryStaleError{GameID: "skyrimse"},
 	}
 }
 

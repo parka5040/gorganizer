@@ -65,3 +65,12 @@ type RecoveryDeferredError struct {
 func (e *RecoveryDeferredError) Error() string {
 	return fmt.Sprintf("%s still has an interrupted mod deployment that is waiting for the game to close (%s)", e.GameID, e.Operation)
 }
+
+type RecoveryStaleError struct {
+	GameID string
+}
+
+// Error reports that a recovery confirmation no longer matches the game's current pending recovery.
+func (e *RecoveryStaleError) Error() string {
+	return fmt.Sprintf("the recovery confirmed for %s is no longer the pending one", e.GameID)
+}

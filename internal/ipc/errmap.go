@@ -66,6 +66,7 @@ const (
 	tokenInstallSelectionEmpty      = "install_selection_empty:"
 	tokenPluginStateFailed          = "plugin_state_failed:"
 	tokenFarmRecoveryDeferred       = "farm_recovery_deferred:"
+	tokenRecoveryStale              = "recovery_stale:"
 )
 
 var errorTokens = []string{
@@ -78,7 +79,7 @@ var errorTokens = []string{
 	tokenSteamNotRunning, tokenTTWRequiresVanillaFNV, tokenXNVSEMissingForTTW, tokenFNV4GBNotAppliedForTTW,
 	tokenTransferGameMismatch, tokenTransferSchema, tokenTransferPath, tokenTransferCollision, tokenTransferOverwriteMounted,
 	tokenArchiveRejected, tokenBundleRejected, tokenProfileIdentityInvalid, tokenInstallSelectionEmpty,
-	tokenPluginStateFailed, tokenFarmRecoveryDeferred,
+	tokenPluginStateFailed, tokenFarmRecoveryDeferred, tokenRecoveryStale,
 }
 
 // MapError turns a structured error into a gRPC status; unrecognized errors pass through with ok=false.
@@ -98,6 +99,10 @@ func MapError(err error) (error, bool) {
 	if errors.As(err, &deferred) {
 		msg := tokenFarmRecoveryDeferred + fmt.Sprintf("game=%s:operation=%s", escapeTokenValue(deferred.GameID), escapeTokenValue(deferred.Operation))
 		return status.Error(codes.FailedPrecondition, msg), true
+	}
+	var stale *dto.RecoveryStaleError
+	if errors.As(err, &stale) {
+		return status.Error(codes.FailedPrecondition, tokenRecoveryStale+"game="+escapeTokenValue(stale.GameID)), true
 	}
 	var running *dto.GameRunningError
 	if errors.As(err, &running) {

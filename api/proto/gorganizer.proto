@@ -59,6 +59,10 @@ service Gorganizer {
   // confirming calls RestoreFromBackup which performs the destructive
   // restore (remove Data, rename Data.orig → Data) under explicit consent.
   rpc RestoreFromBackup(RestoreFromBackupRequest) returns (RestoreFromBackupResponse);
+  // RetryVFSRecovery re-checks an install whose startup recovery was deferred
+  // because its game may still be running, and recovers it once the game is
+  // confirmed closed. It never forces recovery while the game runs.
+  rpc RetryVFSRecovery(RetryVFSRecoveryRequest) returns (VFSStatus);
 
   // Conflict analysis
   rpc GetConflicts(GetConflictsRequest) returns (ConflictsResponse);
@@ -530,6 +534,24 @@ message VFSStatus {
   bool dirty = 7;
   uint64 desired_gen = 8;
   uint64 applied_gen = 9;
+  // lifecycle_state reports whether the install is usable. RECOVERY_DEFERRED
+  // means startup recovery is waiting because the game may still be running:
+  // the deployed mods are kept and every change to this install is refused
+  // until the game closes. lifecycle_reason is a short machine-readable cause
+  // (e.g. "game_running", "launch_grace", "process_scan_failed").
+  VFSLifecycleState lifecycle_state = 10;
+  string lifecycle_reason = 11;
+}
+
+enum VFSLifecycleState {
+  VFS_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  VFS_LIFECYCLE_STATE_READY = 1;
+  VFS_LIFECYCLE_STATE_RECOVERY_DEFERRED = 2;
+  VFS_LIFECYCLE_STATE_RECOVERY_PENDING = 3;
+}
+
+message RetryVFSRecoveryRequest {
+  string game_id = 1;
 }
 
 message MountVFSRequest {
@@ -553,6 +575,12 @@ message UnmountVFSResponse {}
 
 message RestoreFromBackupRequest {
   string game_id = 1;
+  // When set, the confirmation applies only if the game's current pending
+  // recovery has this kind and recovery_id; otherwise the daemon refuses with
+  // recovery_stale and re-announces the current item. Unset keeps the legacy
+  // behaviour of resolving the current item.
+  RecoveryKind expected_kind = 2;
+  string recovery_id = 3;
 }
 message RestoreFromBackupResponse {}
 
@@ -566,6 +594,19 @@ message RecoveryPending {
   string data_path = 2;
   string backup_path = 3;
   string reason = 4;
+  // kind selects the prompt: DATA restores Data from Data.orig (destructive),
+  // MOD_LOADER retries an interrupted SMAPI transaction, GAME_ROOT retries
+  // game-root file recovery. recovery_id is an opaque identity of this pending
+  // item; it changes when the item is replaced.
+  RecoveryKind kind = 5;
+  string recovery_id = 6;
+}
+
+enum RecoveryKind {
+  RECOVERY_KIND_UNSPECIFIED = 0;
+  RECOVERY_KIND_DATA = 1;
+  RECOVERY_KIND_MOD_LOADER = 2;
+  RECOVERY_KIND_GAME_ROOT = 3;
 }
 
 message GetVFSStatusRequest {
