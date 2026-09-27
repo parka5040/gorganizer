@@ -105,6 +105,10 @@ service Gorganizer {
   rpc StartInstall(StartInstallRequest) returns (StartInstallResponse);
   rpc DiscardPreview(DiscardPreviewRequest) returns (DiscardPreviewResponse);
   rpc StreamInstallEvents(StreamInstallEventsRequest) returns (stream InstallEvent);
+  // Reports what became of a StartInstall or ReinstallMod call by its
+  // client_request_id, so a client whose call ended without a definite
+  // answer (deadline, cancellation, lost connection) can reconcile it.
+  rpc GetInstallOutcome(GetInstallOutcomeRequest) returns (GetInstallOutcomeResponse);
 
   // Per-game settings (auto-install toggle, etc.)
   rpc GetGameSettings(GetGameSettingsRequest) returns (GameSettings);
@@ -412,6 +416,9 @@ message UninstallModResponse {
 message ReinstallModRequest {
   string game_id = 1;
   string mod_name = 2;
+  // Optional client-chosen unique id (a UUID); GetInstallOutcome reports the
+  // call's outcome under it.
+  string client_request_id = 3;
 }
 message ReinstallModResponse {
   int32 archives_replayed = 1;
@@ -879,6 +886,36 @@ message DiscardPreviewRequest {
 }
 message DiscardPreviewResponse {}
 
+enum InstallOutcomeState {
+  INSTALL_OUTCOME_STATE_UNSPECIFIED = 0;
+  // The daemon has no record of the id: the call never arrived, the daemon
+  // restarted, or the record expired. The result cannot be confirmed.
+  INSTALL_OUTCOME_STATE_UNKNOWN = 1;
+  INSTALL_OUTCOME_STATE_RUNNING = 2;
+  INSTALL_OUTCOME_STATE_SUCCEEDED = 3;
+  INSTALL_OUTCOME_STATE_FAILED = 4;
+  // Stopped before anything was published; nothing changed.
+  INSTALL_OUTCOME_STATE_CANCELLED = 5;
+}
+
+message GetInstallOutcomeRequest {
+  string game_id = 1;
+  string client_request_id = 2;
+}
+message GetInstallOutcomeResponse {
+  InstallOutcomeState state = 1;
+  // SUCCEEDED: the installed or reinstalled mod folder and its file count.
+  string mod_folder = 2;
+  int32 file_count = 3;
+  // FAILED: the error exactly as the original call would have returned it
+  // (token grammar), with its gRPC status code.
+  string error = 4;
+  int32 error_code = 5;
+  // SUCCEEDED reinstall: archives replayed and skipped.
+  int32 archives_replayed = 6;
+  int32 archives_skipped = 7;
+}
+
 enum InstallMode {
   INSTALL_MODE_NEW_MOD = 0;      // install as a new mod folder
   INSTALL_MODE_MERGE_INTO = 1;   // append into target_mod's source_archives
@@ -908,6 +945,9 @@ message StartInstallRequest {
   bool fomod_confirmed = 8;
   // Content root chosen by the user from PreviewInstallResponse.selectable_roots.
   string selected_root = 9;
+  // Optional client-chosen unique id (a UUID); GetInstallOutcome reports the
+  // call's outcome under it and InstallCompleted echoes it.
+  string client_request_id = 10;
 }
 message StartInstallResponse {
   string mod_folder = 1;
@@ -963,6 +1003,9 @@ message InstallCompleted {
   string batch_id = 4;
   // Every dependency request batch the install satisfied (all profiles).
   repeated string batch_ids = 5;
+  // The StartInstallRequest.client_request_id of the call that installed it;
+  // empty for daemon-started installs.
+  string client_request_id = 6;
 }
 
 // --- Game launch messages ---
