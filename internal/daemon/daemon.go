@@ -11,6 +11,7 @@ import (
 	"github.com/parka/gorganizer/internal/dto"
 	inipkg "github.com/parka/gorganizer/internal/ini"
 	"github.com/parka/gorganizer/internal/profile"
+	"github.com/parka/gorganizer/internal/steam"
 	"github.com/parka/gorganizer/internal/tools"
 	"github.com/parka/gorganizer/internal/vfs"
 )
@@ -82,6 +83,7 @@ func newWithClock(cfg *config.Config, now func() time.Time, scans ...func(string
 		replayRunning:           make(map[string]bool),
 		gamesAtPath:             make(map[string][]string),
 		nexusUsers:              nexusClientUserValidator{},
+		readSteamAppState:       steam.ReadAppState,
 		now:                     now,
 	}
 	if len(scans) > 0 {

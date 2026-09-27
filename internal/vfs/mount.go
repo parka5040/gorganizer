@@ -28,6 +28,7 @@ type MountManager struct {
 	appliedLayers []Layer
 	profileName   string
 	mounted       bool
+	storefront    *StorefrontSnapshot
 
 	desiredGen uint64
 	appliedGen uint64
@@ -50,6 +51,34 @@ func (m *MountManager) SetOverwriteRoot(root string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.overwriteRoot = root
+}
+
+// SetStorefrontBaseline sets the snapshot to record on the next activation.
+func (m *MountManager) SetStorefrontBaseline(baseline *StorefrontSnapshot) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.storefront = nil
+	if baseline != nil {
+		copy := *baseline
+		m.storefront = &copy
+	}
+}
+
+// StorefrontBaseline reads the current farm's recorded storefront snapshot.
+func (m *MountManager) StorefrontBaseline() (*StorefrontSnapshot, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, err := ReadSentinel(m.gameDataPath)
+	if errors.Is(err, ErrSentinelMissing) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateSentinel(s); err != nil {
+		return nil, err
+	}
+	return s.Storefront, nil
 }
 
 // SetMountedForTesting flips the mounted flag without filesystem work; test-only.
@@ -160,6 +189,7 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 		Manifest:            stats.Manifest,
 		ManifestSHA256:      stats.ManifestSHA256,
 		ManifestEntries:     stats.ManifestEntries,
+		Storefront:          m.storefront,
 	}
 	if err := WriteSentinel(dataPath, sentinel); err != nil {
 		return rollback(fmt.Errorf("writing sentinel: %w", err))
@@ -289,6 +319,7 @@ func (m *MountManager) clearMountedLocked() {
 	m.appliedLayers = nil
 	m.profileName = ""
 	m.mounted = false
+	m.storefront = nil
 	m.desiredGen = 0
 	m.appliedGen = 0
 }
@@ -391,6 +422,7 @@ func (m *MountManager) ReMaterialize() error {
 		Manifest:            stats.Manifest,
 		ManifestSHA256:      stats.ManifestSHA256,
 		ManifestEntries:     stats.ManifestEntries,
+		Storefront:          s.Storefront,
 	}); err != nil {
 		_ = os.RemoveAll(staging)
 		return fmt.Errorf("writing staging sentinel: %w", err)

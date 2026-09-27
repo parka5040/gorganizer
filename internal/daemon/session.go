@@ -20,6 +20,7 @@ import (
 	inipkg "github.com/parka/gorganizer/internal/ini"
 	"github.com/parka/gorganizer/internal/plugins"
 	"github.com/parka/gorganizer/internal/profile"
+	"github.com/parka/gorganizer/internal/steam"
 	"github.com/parka/gorganizer/internal/tools"
 	"github.com/parka/gorganizer/internal/vfs"
 )
@@ -72,6 +73,7 @@ type session struct {
 	modChangeRematerialize func(*vfs.MountManager) error
 	launchFault            func(step string) error
 	steamOpener            func(url string) (int, error)
+	readSteamAppState      func(string, int) (steam.AppState, error)
 
 	activeGameID   string
 	activeGameIDMu sync.RWMutex
