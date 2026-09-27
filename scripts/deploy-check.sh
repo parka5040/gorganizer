@@ -28,7 +28,7 @@ try:
         install = game.get("install_path")
         if not install:
             continue
-        subpath = game.get("data_subpath", "")
+        subpath = game.get("data_subpath") or "Data"
         if not isinstance(install, str) or not os.path.isabs(install) or not isinstance(subpath, str):
             raise ValueError("Invalid game path")
         install = os.path.normpath(install)
