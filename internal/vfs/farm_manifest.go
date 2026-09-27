@@ -69,13 +69,21 @@ func (w *farmManifestWriter) close() {
 }
 
 func (w *farmManifestWriter) record(farmPath, rel string) error {
+	entry, err := farmEntryAt(farmPath, rel)
+	if err != nil {
+		return err
+	}
+	return w.append(entry)
+}
+
+func farmEntryAt(farmPath, rel string) (FarmManifestEntry, error) {
 	info, err := os.Lstat(farmPath)
 	if err != nil {
-		return fmt.Errorf("lstat placed entry %q: %w", farmPath, err)
+		return FarmManifestEntry{}, fmt.Errorf("lstat placed entry %q: %w", farmPath, err)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return fmt.Errorf("%w: no file identity for %q", ErrManifestInvalid, farmPath)
+		return FarmManifestEntry{}, fmt.Errorf("%w: no file identity for %q", ErrManifestInvalid, farmPath)
 	}
 	entry := FarmManifestEntry{Path: rel, Dev: uint64(stat.Dev), Ino: stat.Ino}
 	switch {
@@ -85,13 +93,17 @@ func (w *farmManifestWriter) record(farmPath, rel string) error {
 		entry.Type = "l"
 		entry.LinkTarget, err = os.Readlink(farmPath)
 		if err != nil {
-			return fmt.Errorf("reading placed symlink %q: %w", farmPath, err)
+			return FarmManifestEntry{}, fmt.Errorf("reading placed symlink %q: %w", farmPath, err)
 		}
 	default:
-		return fmt.Errorf("%w: unsupported placed entry %q", ErrManifestInvalid, farmPath)
+		return FarmManifestEntry{}, fmt.Errorf("%w: unsupported placed entry %q", ErrManifestInvalid, farmPath)
 	}
+	return entry, nil
+}
+
+func (w *farmManifestWriter) append(entry FarmManifestEntry) error {
 	if err := w.encoder.Encode(entry); err != nil {
-		return fmt.Errorf("writing farm manifest entry %q: %w", rel, err)
+		return fmt.Errorf("writing farm manifest entry %q: %w", entry.Path, err)
 	}
 	w.count++
 	return nil
@@ -201,11 +213,13 @@ func ReadFarmManifest(dataPath string, s *Sentinel) (*FarmManifest, error) {
 			return nil, fmt.Errorf("%w: invalid entry %q", ErrManifestInvalid, entry.Path)
 		}
 		fold := NormalizePath(entry.Path)
-		if _, exists := manifest.Casefold[fold]; exists {
+		if _, exists := manifest.Entries[entry.Path]; exists {
 			return nil, fmt.Errorf("%w: duplicate path %q", ErrManifestInvalid, entry.Path)
 		}
 		manifest.Entries[entry.Path] = entry
-		manifest.Casefold[fold] = entry.Path
+		if _, exists := manifest.Casefold[fold]; !exists {
+			manifest.Casefold[fold] = entry.Path
+		}
 		if len(manifest.Entries) > s.ManifestEntries {
 			return nil, fmt.Errorf("%w: too many entries", ErrManifestInvalid)
 		}

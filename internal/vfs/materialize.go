@@ -151,17 +151,109 @@ func devID(path string) (uint64, error) {
 
 var devIDOf = devID
 
-// CaptureNewFiles moves files not placed by the farm (st_nlink == 1) into overwriteRoot.
+// CaptureNewFiles moves files not owned by a verified farm manifest into overwriteRoot, using link counts for legacy farms.
 func CaptureNewFiles(dataDir, overwriteRoot string) (int, error) {
 	return CaptureNewFilesInto(dataDir, overwriteRoot, false, false)
 }
 
-// CaptureNewFilesInto moves unplaced (st_nlink == 1) files other than farm metadata from dataDir into targetRoot, optionally linking them back.
+var writeSuccessorSentinel = WriteSentinel
+
+// CaptureNewFilesInto moves files not owned by a verified farm manifest into targetRoot, using link counts for legacy farms and optionally relinking them.
 func CaptureNewFilesInto(dataDir, targetRoot string, relink bool, _ bool) (int, error) {
 	if targetRoot == "" {
 		return 0, nil
 	}
 
+	s, err := ReadSentinel(dataDir)
+	if err != nil {
+		slog.Warn("capture using legacy link-count rule", "path", dataDir, "reason", err)
+		return captureLegacyFilesInto(dataDir, targetRoot, relink)
+	}
+	if s.SchemaVersion != 3 {
+		slog.Warn("capture using legacy link-count rule", "path", dataDir, "reason", fmt.Sprintf("sentinel schema version %d", s.SchemaVersion))
+		return captureLegacyFilesInto(dataDir, targetRoot, relink)
+	}
+	manifest, err := ReadFarmManifest(dataDir, s)
+	if err != nil {
+		slog.Warn("capture using legacy link-count rule", "path", dataDir, "reason", err)
+		return captureLegacyFilesInto(dataDir, targetRoot, relink)
+	}
+	classification, err := ClassifyFarm(dataDir, manifest)
+	if err != nil {
+		return 0, fmt.Errorf("classifying farm %q: %w", dataDir, err)
+	}
+	moved := 0
+	relinked := make(map[string]FarmManifestEntry)
+	for _, rel := range classification.Output {
+		farmPath := filepath.Join(dataDir, filepath.FromSlash(rel))
+		dst := filepath.Join(targetRoot, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+			return moved, fmt.Errorf("mkdir %q: %w", filepath.Dir(dst), err)
+		}
+		if err := moveFile(farmPath, dst); err != nil {
+			return moved, fmt.Errorf("moving captured file %q -> %q: %w", farmPath, dst, err)
+		}
+		slog.Info("captured new file", "src", farmPath, "dst", dst, "relink", relink)
+		moved++
+		if relink {
+			if err := relinkCaptured(dst, farmPath); err != nil {
+				return moved, err
+			}
+			entry, err := farmEntryAt(farmPath, rel)
+			if err != nil {
+				return moved, err
+			}
+			relinked[rel] = entry
+		}
+	}
+	if len(relinked) > 0 {
+		if err := publishSuccessorManifest(dataDir, s, manifest, relinked); err != nil {
+			return moved, err
+		}
+	}
+	return moved, nil
+}
+
+func publishSuccessorManifest(dataDir string, s *Sentinel, manifest *FarmManifest, relinked map[string]FarmManifestEntry) error {
+	writer, err := newFarmManifestWriter(dataDir)
+	if err != nil {
+		return err
+	}
+	defer writer.close()
+	for rel, entry := range manifest.Entries {
+		if replacement, ok := relinked[rel]; ok {
+			entry = replacement
+			delete(relinked, rel)
+		}
+		if err := writer.append(entry); err != nil {
+			return err
+		}
+	}
+	for _, entry := range relinked {
+		if err := writer.append(entry); err != nil {
+			return err
+		}
+	}
+	name, digest, count, err := writer.finish(dataDir)
+	if err != nil {
+		return err
+	}
+	oldName := s.Manifest
+	successor := *s
+	successor.FarmID = writer.farmID
+	successor.Manifest = name
+	successor.ManifestSHA256 = digest
+	successor.ManifestEntries = count
+	if err := writeSuccessorSentinel(dataDir, &successor); err != nil {
+		return fmt.Errorf("publishing successor sentinel: %w", err)
+	}
+	if err := os.Remove(filepath.Join(dataDir, oldName)); err != nil {
+		slog.Warn("could not remove old farm manifest", "path", filepath.Join(dataDir, oldName), "err", err)
+	}
+	return nil
+}
+
+func captureLegacyFilesInto(dataDir, targetRoot string, relink bool) (int, error) {
 	moved := 0
 	walkErr := filepath.Walk(dataDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {

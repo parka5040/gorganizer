@@ -150,7 +150,7 @@ func TestManifestRoundTripLargeFarm(t *testing.T) {
 	}
 }
 
-// TestManifestRejectsUnsafeAndDuplicatePaths checks that unsafe and ambiguous entry names are rejected.
+// TestManifestRejectsUnsafeAndDuplicatePaths checks that unsafe and duplicate exact entry names are rejected.
 func TestManifestRejectsUnsafeAndDuplicatePaths(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	entry := func(p string) string {
@@ -170,7 +170,6 @@ func TestManifestRejectsUnsafeAndDuplicatePaths(t *testing.T) {
 		{"hidden metadata", entry(".gorganizer-secret"), 1},
 		{"backslash", entry(`Assets\unsafe`), 1},
 		{"duplicate", entry("A.txt") + entry("A.txt"), 2},
-		{"casefold duplicate", entry("A.txt") + entry("a.TXT"), 2},
 		{"count mismatch", entry("A.txt"), 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
