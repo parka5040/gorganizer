@@ -779,7 +779,13 @@ func (s *session) recoverModLoaders() []loaderRecoveryTarget {
 		gameIDs = append(gameIDs, gameID)
 	}
 	s.mu.RUnlock()
-	return s.recoverLoaderGames(gameIDs, false)
+	var recoverable []string
+	for _, gameID := range gameIDs {
+		if s.deferredFor(gameID, "modloader") == nil {
+			recoverable = append(recoverable, gameID)
+		}
+	}
+	return s.recoverLoaderGames(recoverable, false)
 }
 
 // recoverAddedLoaderGames runs loader recovery for games configured or detected after startup, under each install's exclusive fence.
@@ -795,6 +801,9 @@ func (s *session) recoverLoaderGames(gameIDs []string, fenced bool) []loaderReco
 	}
 	var deferred []loaderRecoveryTarget
 	for _, target := range s.loaderRecoveryTargets(gameIDs) {
+		if s.deferredFor(target.gameIDs[0], "modloader") != nil {
+			continue
+		}
 		if !loaderStatePresent(target.gameDir) {
 			continue
 		}

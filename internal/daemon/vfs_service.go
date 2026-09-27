@@ -76,6 +76,9 @@ func (vs *VFSService) mountVFSOwned(gameID, profileName string, autoSwap bool, o
 	vs.s.mu.Lock()
 	defer vs.s.mu.Unlock()
 
+	if err := vs.s.deferredForLocked(gameID, dto.BusyOperationMount); err != nil {
+		return nil, err
+	}
 	if pending := vs.s.recoveryPendingFor(gameID); pending != nil {
 		return nil, fmt.Errorf("recovery pending for %s: %s — confirm via the GUI prompt or `gorganizerctl recover-confirm` first",
 			gameID, pending.Reason)
@@ -123,6 +126,9 @@ func (vs *VFSService) mountVFSOwned(gameID, profileName string, autoSwap bool, o
 			delete(vs.s.mountStates, conflict)
 			vs.s.setSteamLaunched(conflict, false)
 			vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: &dto.VFSStatusResult{GameID: conflict}})
+			if err := removeLaunchTicket(conflictMM.DataPath()); err != nil {
+				return nil, err
+			}
 			slog.Info("auto-swap: deactivated conflicting VFS", "deactivated", conflict, "now_activating", gameID)
 		}
 	}
@@ -249,8 +255,14 @@ func (vs *VFSService) alreadyMountedStatus(gameID, profileName string, gc config
 }
 
 func (vs *VFSService) UnmountVFS(gameID string) error {
+	if err := vs.s.awaitRecovery(); err != nil {
+		return err
+	}
 	vs.s.mu.Lock()
 	defer vs.s.mu.Unlock()
+	if err := vs.s.deferredForLocked(gameID, dto.BusyOperationUnmount); err != nil {
+		return err
+	}
 
 	mm, ok := vs.s.mountMgrs[gameID]
 	if !ok {
@@ -289,7 +301,7 @@ func (vs *VFSService) UnmountVFS(gameID string) error {
 	delete(vs.s.mountStates, gameID)
 	vs.s.setSteamLaunched(gameID, false)
 	vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: &dto.VFSStatusResult{GameID: gameID}})
-	return nil
+	return removeLaunchTicket(mm.DataPath())
 }
 
 // GetVFSStatus reports gameID's mount with the same profile, mount point, mod and file counts, dirty flag, and generations the status stream carries.
@@ -323,6 +335,12 @@ func (vs *VFSService) GetVFSStatus(gameID string) (*dto.VFSStatusResult, error) 
 // RestoreFromBackup resolves one pending recovery of gameID per confirmation, the mod-loader entry first, re-announcing any entry that remains, and refuses once shutdown began.
 func (vs *VFSService) RestoreFromBackup(gameID string) error {
 	if err := vs.s.refuseWhenShuttingDown("restore_from_backup"); err != nil {
+		return err
+	}
+	if err := vs.s.awaitRecovery(); err != nil {
+		return err
+	}
+	if err := vs.s.deferredFor(gameID, "restore_from_backup"); err != nil {
 		return err
 	}
 	loaderHandled, err := vs.s.retryLoaderRecovery(gameID)
@@ -391,6 +409,9 @@ func (vs *VFSService) RestoreFromBackup(gameID string) error {
 	if err := vfs.RestoreFromBackup(pending.DataPath); err != nil {
 		return fmt.Errorf("restoring %s: %w", pending.DataPath, err)
 	}
+	if err := removeLaunchTicket(pending.DataPath); err != nil {
+		return err
+	}
 
 	vs.s.pendingRecoveriesMu.Lock()
 	delete(vs.s.pendingRecoveries, resolved)
@@ -411,8 +432,14 @@ func (vs *VFSService) RebuildVFS(gameID string) error {
 
 // rebuildVFSOwned applies pending mod changes while excluding the caller's own launch or tool reservation.
 func (vs *VFSService) rebuildVFSOwned(gameID string, owner uint64) error {
+	if err := vs.s.awaitRecovery(); err != nil {
+		return err
+	}
 	vs.s.mu.Lock()
 	defer vs.s.mu.Unlock()
+	if err := vs.s.deferredForLocked(gameID, dto.BusyOperationApply); err != nil {
+		return err
+	}
 
 	mm, ok := vs.s.mountMgrs[gameID]
 	if !ok || !mm.IsMounted() {

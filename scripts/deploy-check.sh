@@ -40,6 +40,7 @@ try:
             data + ".orig",
             os.path.join(data, ".gorganizer-overlay.json"),
             data + ".gorganizer-activating",
+            data + ".gorganizer-session",
             os.path.join(install, ".gorganizer-root-manifest.json"),
             os.path.join(install, ".gorganizer-root-intent.json"),
             os.path.join(install, ".gorganizer-modloader-intent.json"),

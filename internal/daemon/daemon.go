@@ -38,6 +38,11 @@ type Daemon struct {
 
 // New creates a Daemon from configuration with all subsystems initialized.
 func New(cfg *config.Config) (*Daemon, error) {
+	return newWithClock(cfg, time.Now)
+}
+
+// newWithClock initializes a daemon using the supplied clock for startup recovery and launches.
+func newWithClock(cfg *config.Config, now func() time.Time, scans ...func(string) (bool, error)) (*Daemon, error) {
 	profileMgr := profile.NewManager(config.DataDir())
 	s := &session{
 		config:                  cfg,
@@ -66,9 +71,13 @@ func New(cfg *config.Config) (*Daemon, error) {
 		pendingRecoveries:       make(map[string]*dto.RecoveryPendingResult),
 		rootPendingRecoveries:   make(map[string]*dto.RecoveryPendingResult),
 		loaderPendingRecoveries: make(map[string]*dto.RecoveryPendingResult),
+		deferredRecoveries:      make(map[string]deferredRecovery),
 		gamesAtPath:             make(map[string][]string),
 		nexusUsers:              nexusClientUserValidator{},
-		now:                     time.Now,
+		now:                     now,
+	}
+	if len(scans) > 0 {
+		s.procScan = scans[0]
 	}
 	s.svc = services{
 		game:      &GameService{s: s},
@@ -121,11 +130,9 @@ func New(cfg *config.Config) (*Daemon, error) {
 	go d.runPreviewSweeper()
 
 	download.SetModsDirResolver(config.ModsDir)
+	d.classifyStartupRecoveries()
 	d.recoverInterruptedReinstalls()
-	gameIDs := make([]string, 0, len(cfg.Games))
-	for gameID := range cfg.Games {
-		gameIDs = append(gameIDs, gameID)
-	}
+	gameIDs := d.recoverableGameIDs()
 	recoveredLandings := d.svc.modDeps.recoverInterruptedRequests(gameIDs)
 
 	if cfg.NexusAPIKey != "" {
@@ -275,6 +282,9 @@ func (d *Daemon) deactivateIdleFarms() {
 				slog.Error("restoring root deployment after shutdown deactivation failure failed", "game", gameID, "err", restoreErr)
 			}
 			continue
+		}
+		if err := removeLaunchTicket(mm.DataPath()); err != nil {
+			slog.Error("removing launch record after shutdown deactivation failed", "game", gameID, "err", err)
 		}
 	}
 }

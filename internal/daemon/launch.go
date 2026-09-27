@@ -135,6 +135,9 @@ func (ls *LaunchService) LaunchGame(gameID string, useTool bool, profileName str
 			slog.Warn("could not verify script extender manifest", "err", verr)
 		}
 		preferred := ls.s.preferredProton()
+		if err := ls.s.writeLaunchTicketForGame(gameID, profileName, mm.DataPath()); err != nil {
+			return 0, err
+		}
 		handle, err := ls.s.toolMgr.LaunchGame(gameID, true, &gc, preferred)
 		if err != nil {
 			return 0, fmt.Errorf("launching via script extender: %w", err)
@@ -143,6 +146,9 @@ func (ls *LaunchService) LaunchGame(gameID string, useTool bool, profileName str
 		return handle.PID, nil
 	}
 
+	if err := ls.s.writeLaunchTicketForGame(gameID, profileName, mm.DataPath()); err != nil {
+		return 0, err
+	}
 	pid, err := ls.s.openSteamURL(fmt.Sprintf("steam://rungameid/%d", gc.SteamAppID))
 	if err != nil {
 		return 0, fmt.Errorf("launching via Steam: %w", err)
@@ -175,6 +181,9 @@ func xdgOpenURL(url string) (int, error) {
 func (ls *LaunchService) admitLaunch(gameID string) (config.GameConfig, *vfs.MountManager, sharedReservation, error) {
 	ls.s.mu.Lock()
 	defer ls.s.mu.Unlock()
+	if err := ls.s.deferredForLocked(gameID, dto.BusyOperationLaunch); err != nil {
+		return config.GameConfig{}, nil, sharedReservation{}, err
+	}
 	if pending := ls.s.recoveryPendingFor(gameID); pending != nil {
 		return config.GameConfig{}, nil, sharedReservation{}, fmt.Errorf("recovery pending for %s: %s — confirm via the GUI prompt or `gorganizerctl recover-confirm` first",
 			gameID, pending.Reason)

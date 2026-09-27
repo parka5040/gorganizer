@@ -16,6 +16,8 @@ import (
 
 const SentinelFilename = ".gorganizer-overlay.json"
 
+const RetainedSessionSiblingSuffix = ".gorganizer-session"
+
 const SentinelMagic = "gorganizer-overlay"
 
 const CurrentSentinelSchema = 2
@@ -31,9 +33,14 @@ const (
 	sentinelTempName = ".tmp-" + SentinelFilename + "-"
 )
 
-// FarmSiblingSuffixes returns the suffixes of every sibling a farm lifecycle leaves next to its deploy folder: the transition intents and folders and the parked original.
+// FarmSiblingSuffixes returns the pending transition siblings and parked original next to a farm's deploy folder.
 func FarmSiblingSuffixes() []string {
 	return []string{activatingSuffix, applyingSuffix, stagingSuffix, oldFarmSuffix, farmBackupSuffix}
+}
+
+// RetainedFarmSiblingSuffixes returns farm siblings that persist while a launched game may still use its deploy folder.
+func RetainedFarmSiblingSuffixes() []string {
+	return []string{RetainedSessionSiblingSuffix}
 }
 
 // isSentinelFile reports whether name is the sentinel or a temporary file of an interrupted atomic sentinel write.

@@ -197,5 +197,12 @@ func TestFarmSiblingSuffixesNameEveryLifecycleSibling(t *testing.T) {
 		if !want[dataPath+suffix] {
 			t.Errorf("suffix %q names no farm lifecycle sibling", suffix)
 		}
+		if suffix == RetainedSessionSiblingSuffix {
+			t.Error("retained launch ticket must not appear among pending farm transitions")
+		}
+	}
+	retained := RetainedFarmSiblingSuffixes()
+	if len(retained) != 1 || retained[0] != RetainedSessionSiblingSuffix {
+		t.Errorf("retained farm siblings = %v, want the launch ticket", retained)
 	}
 }

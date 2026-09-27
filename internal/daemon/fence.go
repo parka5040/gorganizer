@@ -73,6 +73,9 @@ func (s *session) reserveSharedOwned(gameID, op string) (sharedReservation, erro
 	if err := s.refuseWhenShuttingDown(op); err != nil {
 		return sharedReservation{}, err
 	}
+	if err := s.deferredForLocked(gameID, op); err != nil {
+		return sharedReservation{}, err
+	}
 	key := s.fenceKeyLocked(gameID)
 	holder := fenceHolder{op: op, gameID: gameID}
 	s.fenceMu.Lock()
@@ -146,6 +149,9 @@ func (s *session) pendingAdmissionLocked(gameID string, owner uint64) *dto.Opera
 // reserveExclusiveLocked takes the exclusive reservation for op once the daemon is not shutting down and no game on gameID's install root is pending recovery, mounted, running, root-deployed, or reserved; the caller holds s.mu for writing.
 func (s *session) reserveExclusiveLocked(gameID, op string) (func(), error) {
 	if err := s.refuseWhenShuttingDown(op); err != nil {
+		return nil, err
+	}
+	if err := s.deferredForLocked(gameID, op); err != nil {
 		return nil, err
 	}
 	key := s.fenceKeyLocked(gameID)
