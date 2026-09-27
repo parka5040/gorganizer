@@ -42,8 +42,13 @@ func TestActivationRecordsSteamBaseline(t *testing.T) {
 	if _, err := d.MountVFS("skyrimse", "Default"); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(paths, []string{install}) {
-		t.Errorf("read paths = %v; want %q", paths, install)
+	if len(paths) == 0 {
+		t.Errorf("Steam state was never read for %q", install)
+	}
+	for _, path := range paths {
+		if path != install {
+			t.Errorf("Steam state read path = %q; want %q", path, install)
+		}
 	}
 	baseline, err := d.mountMgrs["skyrimse"].StorefrontBaseline()
 	if err != nil || baseline == nil {

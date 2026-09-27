@@ -249,12 +249,17 @@ func rollbackActivation(dataPath, backupPath, intentPath string, original direct
 }
 
 // Deactivate captures new writes into Overwrite and restores Data.orig, leaving the farm intact if capture fails.
-func (m *MountManager) Deactivate() error { return m.deactivate(false) }
+func (m *MountManager) Deactivate() error { return m.deactivate(false, CaptureOptions{}) }
+
+// DeactivateWithOptions restores the original Data folder while routing Steam-changed output into preserved files.
+func (m *MountManager) DeactivateWithOptions(opts CaptureOptions) error {
+	return m.deactivate(false, opts)
+}
 
 // ForceDeactivate tears down the farm even if capture fails, discarding uncaptured files.
-func (m *MountManager) ForceDeactivate() error { return m.deactivate(true) }
+func (m *MountManager) ForceDeactivate() error { return m.deactivate(true, CaptureOptions{}) }
 
-func (m *MountManager) deactivate(force bool) error {
+func (m *MountManager) deactivate(force bool, opts CaptureOptions) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -286,7 +291,7 @@ func (m *MountManager) deactivate(force bool) error {
 		return fmt.Errorf("sentinel rejected: %w", vErr)
 	}
 
-	if m.overwriteRoot != "" {
+	if opts.PreserveInto == "" && m.overwriteRoot != "" {
 		moved, capErr := CaptureNewFiles(dataPath, m.overwriteRoot)
 		if capErr != nil {
 			if !force {
@@ -305,7 +310,7 @@ func (m *MountManager) deactivate(force bool) error {
 		return fmt.Errorf("checking original Data before teardown: %w", err)
 	}
 	slog.Info("tearing down materialized overlay", "path", dataPath)
-	if err := retireFarm(dataPath, backupPath, s, force); err != nil {
+	if err := retireFarm(dataPath, backupPath, s, force, opts); err != nil {
 		return m.retirementErrorLocked(dataPath, backupPath, backupID, err)
 	}
 
@@ -576,11 +581,11 @@ func (m *MountManager) AppliedLayers() []Layer {
 }
 
 // RecoverIfNeeded handles startup recovery via CleanupStale.
-func (m *MountManager) RecoverIfNeeded() (RecoveryOutcome, error) {
+func (m *MountManager) RecoverIfNeeded(capture ...CaptureOptions) (RecoveryOutcome, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	outcome, err := CleanupStale(m.gameDataPath)
+	outcome, err := CleanupStale(m.gameDataPath, capture...)
 	if err != nil {
 		return outcome, fmt.Errorf("recovering %s: %w", m.gameDataPath, err)
 	}

@@ -306,6 +306,9 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 		return 0, "", fenceErr
 	}
 	defer reservation.Release()
+	if err := es.s.steamAdmission(gameID); err != nil {
+		return 0, "", err
+	}
 
 	gc, ok := es.s.gameConfigSnapshot(gameID)
 	if !ok {
@@ -398,6 +401,9 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 		}
 	}
 
+	if err := es.s.steamAdmission(gameID); err != nil {
+		return 0, "", err
+	}
 	dataPath := mm.DataPath()
 	resolvedExePath := es.resolveDetectedExecutablePath(gameID, eff, mm, exe.ExePath)
 	modsDir := config.ModsDir(gameID)

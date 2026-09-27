@@ -362,8 +362,10 @@ func (ml *ModLoaderService) admitLoaderOp(ctx context.Context, gameID string) (*
 	var pendingGames []string
 	if err == nil {
 		spec.Farm = ml.s.loaderFarmGuardLocked(gameID, gameDir)
-		release, err = ml.s.reserveExclusiveLocked(gameID, dto.BusyOperationModLoader)
-		pendingGames = ml.s.loaderGamesAtLocked(gameDir)
+		if err = ml.s.steamAdmissionLocked(gameID, filepath.Join(gameDir, filepath.FromSlash(spec.Farm.DeployDir))); err == nil {
+			release, err = ml.s.reserveExclusiveLocked(gameID, dto.BusyOperationModLoader)
+			pendingGames = ml.s.loaderGamesAtLocked(gameDir)
+		}
 	}
 	ml.s.mu.Unlock()
 	if err != nil {

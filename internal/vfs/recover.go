@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -113,8 +114,12 @@ var renameActivationBackup = os.Rename
 const teardownCaptureFailureReason = "Gorganizer couldn't save files written during the last session, so it left the mod folder in place. Free some disk space, then restart Gorganizer."
 
 // CleanupStale heals dataPath after a prior daemon crash; returns Pending for ambiguous states.
-func CleanupStale(dataPath string) (RecoveryOutcome, error) {
+func CleanupStale(dataPath string, capture ...CaptureOptions) (RecoveryOutcome, error) {
 	var outcome RecoveryOutcome
+	var opts CaptureOptions
+	if len(capture) > 0 {
+		opts = capture[0]
+	}
 
 	resolved, err := filepath.Abs(dataPath)
 	if err != nil {
@@ -134,6 +139,25 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 		j, readErr := readDeactivationJournal(journalPath)
 		if readErr != nil {
 			return outcome, nil
+		}
+		if opts.PreserveInto != "" && j.Capture.PreserveInto == "" {
+			farm, exists, err := directoryAt(resolved)
+			if err != nil {
+				return outcome, fmt.Errorf("checking interrupted farm for preservation: %w", err)
+			}
+			if exists && farm == j.Farm {
+				j.Capture = opts
+				body, err := json.Marshal(j)
+				if err != nil {
+					return outcome, fmt.Errorf("encoding preservation decision: %w", err)
+				}
+				if _, err := atomicfile.WriteFileDurable(journalPath, body, 0644); err != nil {
+					return outcome, fmt.Errorf("updating preservation decision: %w", err)
+				}
+			} else {
+				outcome.Pending.Reason = "Steam changed after mod removal began. Check the retired farm before completing recovery."
+				return outcome, nil
+			}
 		}
 		if err := resumeFarmRetirement(resolved, backupPath, j, false); err != nil {
 			if errors.Is(err, ErrCaptureFailed) {
@@ -347,7 +371,7 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 			slog.Info("found valid overlay sentinel from prior run — restoring",
 				"path", resolved, "backup_path", s.BackupPath,
 				"prior_pid", s.ActivationPID, "started_at", s.ActivationStartedAt)
-			if s.SchemaVersion >= 2 && s.OverwriteRoot != "" {
+			if opts.PreserveInto == "" && s.SchemaVersion >= 2 && s.OverwriteRoot != "" {
 				if moved, capErr := CaptureNewFiles(resolved, s.OverwriteRoot); capErr != nil {
 					slog.Warn("recovery capture failed — refusing to destroy Data",
 						"path", resolved, "err", capErr)
@@ -364,7 +388,7 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 						"path", resolved, "count", moved, "overwrite_root", s.OverwriteRoot)
 				}
 			}
-			if err := retireFarm(resolved, backupPath, s, false); err != nil {
+			if err := retireFarm(resolved, backupPath, s, false, opts); err != nil {
 				if errors.Is(err, ErrCaptureFailed) {
 					outcome.Pending = &RecoveryPending{DataPath: resolved, BackupPath: backupPath, Reason: teardownCaptureFailureReason}
 					return outcome, nil
@@ -486,7 +510,7 @@ func reconcileApplyIntent(dataPath, backupPath, staging, oldFarm, applyPath stri
 }
 
 // RestoreFromBackup captures recorded farm writes and clears teardown markers during a confirmed restore.
-func RestoreFromBackup(dataPath string) error {
+func RestoreFromBackup(dataPath string, capture ...CaptureOptions) error {
 	resolved, err := filepath.Abs(dataPath)
 	if err != nil {
 		return fmt.Errorf("resolving %q: %w", dataPath, err)
@@ -494,6 +518,21 @@ func RestoreFromBackup(dataPath string) error {
 	backupPath := resolved + farmBackupSuffix
 	retired := retiredFarmPath(resolved)
 	journal := deactivationJournalPath(resolved)
+	var opts CaptureOptions
+	if len(capture) > 0 {
+		opts = capture[0]
+	}
+	if _, err := os.Lstat(journal); err == nil {
+		j, err := readDeactivationJournal(journal)
+		if err != nil {
+			return err
+		}
+		if j.Capture.PreserveInto != "" {
+			opts = j.Capture
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("checking deactivation journal: %w", err)
+	}
 	_, backupErr := os.Lstat(backupPath)
 	if backupErr != nil && !errors.Is(backupErr, os.ErrNotExist) {
 		return fmt.Errorf("checking backup %s: %w", backupPath, backupErr)
@@ -514,10 +553,10 @@ func RestoreFromBackup(dataPath string) error {
 		if journalErr != nil && !errors.Is(journalErr, os.ErrNotExist) || retiredErr != nil && !errors.Is(retiredErr, os.ErrNotExist) {
 			return fmt.Errorf("checking teardown markers: %w", errors.Join(journalErr, retiredErr))
 		}
-	} else if err := captureRetiringFarm(resolved); err != nil {
+	} else if err := captureRetiringFarm(resolved, resolved, opts); err != nil {
 		return err
 	}
-	if err := captureRetiringFarm(retired); err != nil {
+	if err := captureRetiringFarm(retired, resolved, opts); err != nil {
 		return err
 	}
 	if backupErr == nil {

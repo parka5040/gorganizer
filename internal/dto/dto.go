@@ -72,19 +72,39 @@ const (
 	VFSLifecycleStateRecoveryPending  VFSLifecycleState = 3
 )
 
+type SteamMaintenanceState int32
+
+const (
+	SteamMaintenanceUnspecified SteamMaintenanceState = 0
+	SteamMaintenanceNone        SteamMaintenanceState = 1
+	SteamMaintenanceBusy        SteamMaintenanceState = 2
+	SteamMaintenanceVerify      SteamMaintenanceState = 3
+	SteamMaintenanceUser        SteamMaintenanceState = 4
+)
+
+type PreservedBatchResult struct {
+	BatchID   string
+	CreatedAt string
+	FileCount int
+	Reason    string
+	Path      string
+}
+
 type VFSStatusResult struct {
-	Mounted         bool
-	GameID          string
-	ProfileName     string
-	MountPoint      string
-	EnabledModCount int
-	TotalFileCount  int
-	Dirty           bool
-	DesiredGen      uint64
-	AppliedGen      uint64
-	LifecycleState  VFSLifecycleState
-	LifecycleReason string
-	PendingRecovery *RecoveryPendingResult
+	Mounted          bool
+	GameID           string
+	ProfileName      string
+	MountPoint       string
+	EnabledModCount  int
+	TotalFileCount   int
+	Dirty            bool
+	DesiredGen       uint64
+	AppliedGen       uint64
+	LifecycleState   VFSLifecycleState
+	LifecycleReason  string
+	PendingRecovery  *RecoveryPendingResult
+	SteamMaintenance SteamMaintenanceState
+	PreservedBatches []PreservedBatchResult
 }
 
 type FileConflictResult struct {

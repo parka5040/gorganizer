@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/parka/gorganizer/internal/atomicfile"
 )
 
@@ -30,10 +32,16 @@ type deactivationJournal struct {
 	Farm          directoryIdentity `json:"farm"`
 	Backup        directoryIdentity `json:"backup"`
 	CreatedAt     time.Time         `json:"created_at"`
+	Capture       CaptureOptions    `json:"capture,omitempty"`
 }
 
 func deactivationJournalPath(dataPath string) string { return dataPath + deactivatingSuffix }
 func retiredFarmPath(dataPath string) string         { return dataPath + retiredSuffix }
+
+// RecoveryFarmCandidates returns the farm locations crash recovery can finish removing or restore to Data.
+func RecoveryFarmCandidates(dataPath string) []string {
+	return []string{retiredFarmPath(dataPath), oldFarmPath(dataPath), stagingDirPath(dataPath)}
+}
 
 // directoryAt reports the identity of a real directory without following a symlink.
 func directoryAt(path string) (directoryIdentity, bool, error) {
@@ -75,23 +83,46 @@ func readDeactivationJournal(path string) (*deactivationJournal, error) {
 		j.Backup.Dev == 0 || j.Backup.Ino == 0 || j.Farm == j.Backup || j.CreatedAt.IsZero() {
 		return nil, fmt.Errorf("invalid or unsupported deactivation journal")
 	}
+	if j.Capture.PreserveInto != "" &&
+		(!strings.HasSuffix(path, deactivatingSuffix) ||
+			j.Capture.PreserveInto != PreservedDir(strings.TrimSuffix(path, deactivatingSuffix)) ||
+			uuid.Validate(j.Capture.BatchID) != nil || j.Capture.Baseline == nil || j.Capture.Current == nil) {
+		return nil, fmt.Errorf("invalid preservation decision in deactivation journal")
+	}
 	return &j, nil
 }
 
 // captureRetiringFarm saves new writes from a recorded farm before it is removed.
-func captureRetiringFarm(farmDir string) error {
+func captureRetiringFarm(farmDir, dataPath string, opts CaptureOptions) error {
 	s, err := ReadSentinel(farmDir)
-	if err != nil || s.OverwriteRoot == "" {
+	if err != nil {
+		if opts.PreserveInto != "" {
+			if _, statErr := os.Lstat(farmDir); errors.Is(statErr, os.ErrNotExist) {
+				return nil
+			}
+			return fmt.Errorf("%w: reading farm before preservation: %w", ErrCaptureFailed, err)
+		}
 		return nil
 	}
-	if _, err := CaptureNewFilesInto(farmDir, s.OverwriteRoot, false, false); err != nil {
-		return fmt.Errorf("%w: saving writes from %s: %w", ErrCaptureFailed, farmDir, err)
+	if opts.PreserveInto != "" {
+		if err := preserveFarmOutput(farmDir, dataPath, s, opts); err != nil {
+			return err
+		}
+		if err := writeMaintenance(dataPath, s, opts); err != nil {
+			return fmt.Errorf("%w: saving Steam maintenance state: %w", ErrCaptureFailed, err)
+		}
+		return nil
+	}
+	if s.OverwriteRoot != "" {
+		if _, err := CaptureNewFilesInto(farmDir, s.OverwriteRoot, false, false); err != nil {
+			return fmt.Errorf("%w: saving writes from %s: %w", ErrCaptureFailed, farmDir, err)
+		}
 	}
 	return nil
 }
 
 // retireFarm records the directory identities before replacing the farm with the original Data directory.
-func retireFarm(dataPath, backupPath string, s *Sentinel, force bool) error {
+func retireFarm(dataPath, backupPath string, s *Sentinel, force bool, capture ...CaptureOptions) error {
 	if s == nil {
 		return fmt.Errorf("retiring farm: missing sentinel")
 	}
@@ -130,6 +161,9 @@ func retireFarm(dataPath, backupPath string, s *Sentinel, force bool) error {
 		Backup:        backup,
 		CreatedAt:     time.Now().UTC(),
 	}
+	if len(capture) > 0 {
+		j.Capture = capture[0]
+	}
 	body, err := json.Marshal(j)
 	if err != nil {
 		return fmt.Errorf("marshalling deactivation journal: %w", err)
@@ -156,7 +190,7 @@ func resumeFarmRetirement(dataPath, backupPath string, j *deactivationJournal, f
 		}
 		switch {
 		case dataExists && dataID == j.Farm && backupExists && backupID == j.Backup && !retiredExists:
-			if err := captureRetiringFarm(dataPath); err != nil {
+			if err := captureRetiringFarm(dataPath, dataPath, j.Capture); err != nil {
 				if !force {
 					return err
 				}
@@ -181,7 +215,7 @@ func resumeFarmRetirement(dataPath, backupPath string, j *deactivationJournal, f
 				return err
 			}
 		case dataExists && dataID == j.Backup && !backupExists && retiredExists && retiredID == j.Farm:
-			if err := captureRetiringFarm(retired); err != nil {
+			if err := captureRetiringFarm(retired, dataPath, j.Capture); err != nil {
 				if !force {
 					return err
 				}

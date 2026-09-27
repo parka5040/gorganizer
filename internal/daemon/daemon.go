@@ -285,6 +285,11 @@ func (d *Daemon) deactivateIdleFarms() {
 				"game", gameID)
 			continue
 		}
+		_, capture, err := d.steamCaptureLocked(gameID, mm.DataPath())
+		if err != nil {
+			slog.Warn("leaving VFS mounted on shutdown while Steam is active or unreadable", "game", gameID, "err", err)
+			continue
+		}
 		slog.Info("deactivating VFS on shutdown", "game", gameID)
 		if rootManager, ok := d.rootDeployMgrs[gameID]; ok {
 			if _, err := rootManager.Deactivate(); err != nil {
@@ -292,7 +297,7 @@ func (d *Daemon) deactivateIdleFarms() {
 				continue
 			}
 		}
-		if err := mm.Deactivate(); err != nil {
+		if err := mm.DeactivateWithOptions(capture); err != nil {
 			slog.Error("deactivation failed on shutdown", "game", gameID, "err", err)
 			gc, configErr := d.config.EffectiveGameConfig(gameID)
 			state := d.mountStates[gameID]

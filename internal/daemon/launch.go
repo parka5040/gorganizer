@@ -41,6 +41,9 @@ func (ls *LaunchService) LaunchGame(gameID string, useTool bool, profileName str
 		}
 	}
 
+	if err := ls.s.steamAdmission(gameID); err != nil {
+		return 0, err
+	}
 	if err := ls.loaderPreflight(gameID, mm, profileName); err != nil {
 		return 0, err
 	}
@@ -53,8 +56,8 @@ func (ls *LaunchService) LaunchGame(gameID string, useTool bool, profileName str
 		}
 	}
 
-	if mm.IsMounted() {
-		ls.s.logSteamState(gameID, "launch")
+	if err := ls.s.steamAdmission(gameID); err != nil {
+		return 0, err
 	}
 	if mm.IsMounted() && mm.IsDirty() {
 		if err := ls.refuseDirtyRunningFarm(gameID); err != nil {

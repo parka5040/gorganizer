@@ -1078,17 +1078,24 @@ func vfsLifecycleToProto(state dto.VFSLifecycleState) pb.VFSLifecycleState {
 
 func vfsStatusToProto(st *dto.VFSStatusResult) *pb.VFSStatus {
 	out := &pb.VFSStatus{
-		Mounted:         st.Mounted,
-		GameId:          st.GameID,
-		ProfileName:     st.ProfileName,
-		MountPoint:      st.MountPoint,
-		EnabledModCount: int32(st.EnabledModCount),
-		TotalFileCount:  int32(st.TotalFileCount),
-		Dirty:           st.Dirty,
-		DesiredGen:      st.DesiredGen,
-		AppliedGen:      st.AppliedGen,
-		LifecycleState:  vfsLifecycleToProto(st.LifecycleState),
-		LifecycleReason: st.LifecycleReason,
+		Mounted:          st.Mounted,
+		GameId:           st.GameID,
+		ProfileName:      st.ProfileName,
+		MountPoint:       st.MountPoint,
+		EnabledModCount:  int32(st.EnabledModCount),
+		TotalFileCount:   int32(st.TotalFileCount),
+		Dirty:            st.Dirty,
+		DesiredGen:       st.DesiredGen,
+		AppliedGen:       st.AppliedGen,
+		LifecycleState:   vfsLifecycleToProto(st.LifecycleState),
+		LifecycleReason:  st.LifecycleReason,
+		SteamMaintenance: pb.SteamMaintenanceState(st.SteamMaintenance),
+	}
+	for _, batch := range st.PreservedBatches {
+		out.PreservedBatches = append(out.PreservedBatches, &pb.PreservedBatch{
+			BatchId: batch.BatchID, CreatedAt: batch.CreatedAt,
+			FileCount: int32(batch.FileCount), Reason: batch.Reason, Path: batch.Path,
+		})
 	}
 	if pending := st.PendingRecovery; pending != nil {
 		out.PendingRecovery = &pb.RecoveryPending{
