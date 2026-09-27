@@ -84,8 +84,11 @@ func (md *ModService) RescanMod(gameID, modName string) (*dto.ModInfoResult, err
 	}, nil
 }
 
-// RenameMod atomically renames a mod folder and updates every profile's modlist.txt, refusing once shutdown began.
+// RenameMod renames a mod folder and its profile entries, rebuilding an active farm before returning.
 func (md *ModService) RenameMod(gameID, oldName, newName string) error {
+	if err := md.s.awaitRecovery(); err != nil {
+		return err
+	}
 	if err := md.s.refuseWhenShuttingDown("rename_mod"); err != nil {
 		return err
 	}
@@ -103,17 +106,11 @@ func (md *ModService) RenameMod(gameID, oldName, newName string) error {
 		return nil
 	}
 	defer md.s.lockMods(gameID, oldName, newName)()
-	renamed, err := md.renameModFolder(gameID, oldName, newName, src, filepath.Join(config.ModsDir(gameID), newName))
-	if renamed {
-		md.s.invalidateInstalledArchiveCache(gameID)
-		md.markMountedProfileDirty(gameID)
-	}
-	return err
+	return md.renameModWithFarm(gameID, oldName, newName, src, filepath.Join(config.ModsDir(gameID), newName))
 }
 
-// renameModFolder renames a mod folder and its entry in every profile modlist while holding the game's profile lock, reporting whether the folder moved.
+// renameModFolder renames a mod folder and its entry in every profile modlist, reporting whether the folder moved; the caller holds the profile lock.
 func (md *ModService) renameModFolder(gameID, oldName, newName, src, dst string) (bool, error) {
-	defer md.s.lockProfiles(gameID)()
 	profiles, err := md.s.profileMgr.List(gameID)
 	if err != nil {
 		return false, fmt.Errorf("listing profiles: %w", err)
@@ -130,14 +127,6 @@ func (md *ModService) renameModFolder(gameID, oldName, newName, src, dst string)
 		return false, fmt.Errorf("renaming mod folder: %w", err)
 	}
 
-	meta, _ := download.LoadModMetadata(dst)
-	if meta != nil {
-		meta.Folder = newName
-		if meta.Name == oldName {
-			meta.Name = newName
-		}
-		_ = download.SaveModMetadata(dst, meta)
-	}
 	return true, md.renameInModLists(gameID, profiles, oldName, newName)
 }
 
@@ -195,9 +184,8 @@ func (md *ModService) renameInModLists(gameID string, profiles []*profile.Profil
 	return firstErr
 }
 
-// dropFromModLists removes a mod from every profile modlist, refusing with ModInUseError when it is enabled and force is false.
-func (md *ModService) dropFromModLists(gameID, modName string, force bool) error {
-	defer md.s.lockProfiles(gameID)()
+// dropFromModListsLocked removes a mod from all profiles; the caller holds the profile lock.
+func (md *ModService) dropFromModListsLocked(gameID, modName string, force bool) error {
 	profiles, err := md.s.profileMgr.List(gameID)
 	if err != nil {
 		return fmt.Errorf("listing profiles: %w", err)
@@ -206,8 +194,7 @@ func (md *ModService) dropFromModLists(gameID, modName string, force bool) error
 	for _, p := range profiles {
 		_, entries, err := md.s.profileMgr.Load(gameID, p.Name)
 		if err != nil {
-			slog.Warn("could not read modlist.txt while removing a mod", "game", gameID, "profile", p.Name, "err", err)
-			continue
+			return fmt.Errorf("loading profile %q: %w", p.Name, err)
 		}
 		for _, e := range entries {
 			if e.Name == modName && e.Enabled {
@@ -223,7 +210,7 @@ func (md *ModService) dropFromModLists(gameID, modName string, force bool) error
 	for _, p := range profiles {
 		loaded, entries, err := md.s.profileMgr.Load(gameID, p.Name)
 		if err != nil {
-			continue
+			return fmt.Errorf("loading profile %q: %w", p.Name, err)
 		}
 		kept := entries[:0]
 		changed := false
@@ -238,14 +225,17 @@ func (md *ModService) dropFromModLists(gameID, modName string, force bool) error
 			continue
 		}
 		if err := md.s.profileMgr.Save(loaded, kept); err != nil {
-			slog.Warn("could not update modlist.txt while removing a mod", "game", gameID, "profile", p.Name, "err", err)
+			return fmt.Errorf("saving profile %q: %w", p.Name, err)
 		}
 	}
 	return nil
 }
 
-// UninstallMod removes a mod's install dir and strips it from every profile, refusing once shutdown began.
+// UninstallMod rebuilds an active farm without a mod before removing its folder and profile entries.
 func (md *ModService) UninstallMod(gameID, modName string, force bool) ([]string, error) {
+	if err := md.s.awaitRecovery(); err != nil {
+		return nil, err
+	}
 	if err := md.s.refuseWhenShuttingDown("uninstall_mod"); err != nil {
 		return nil, err
 	}
@@ -268,10 +258,6 @@ func (md *ModService) UninstallMod(gameID, modName string, force bool) ([]string
 		if err != nil {
 			return nil, fmt.Errorf("reading mod metadata: %w", err)
 		}
-	}
-
-	if err := md.dropFromModLists(gameID, modName, force); err != nil {
-		return nil, err
 	}
 
 	ownedSolely := map[string]bool{}
@@ -299,18 +285,12 @@ func (md *ModService) UninstallMod(gameID, modName string, force bool) ([]string
 		}
 	}
 
-	var removeErr error
-	for attempt := 0; attempt < 2; attempt++ {
-		if err := os.RemoveAll(modDir); err == nil {
-			removeErr = nil
-			break
-		} else {
-			removeErr = err
-			time.Sleep(100 * time.Millisecond)
-		}
+	applied, err := md.uninstallModWithFarm(gameID, modName, force)
+	if err != nil {
+		return nil, err
 	}
-	if removeErr != nil {
-		return nil, fmt.Errorf("removing mod folder: %w", removeErr)
+	if err := removeModFolder(modDir); err != nil {
+		return nil, err
 	}
 
 	var flagged []string
@@ -333,7 +313,9 @@ func (md *ModService) UninstallMod(gameID, modName string, force bool) ([]string
 
 	md.s.invalidateInstalledArchiveCache(gameID)
 
-	md.markMountedProfileDirty(gameID)
+	if !applied {
+		md.markMountedProfileDirty(gameID)
+	}
 	slog.Info("mod uninstalled", "game", gameID, "mod", modName, "archives_flagged", flagged)
 	return flagged, nil
 }

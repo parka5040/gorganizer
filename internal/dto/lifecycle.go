@@ -3,9 +3,11 @@ package dto
 import "fmt"
 
 const (
-	GameRunningOperationLaunch  = "launch"
-	GameRunningOperationApply   = "apply"
-	GameRunningOperationUnmount = "unmount"
+	GameRunningOperationLaunch    = "launch"
+	GameRunningOperationApply     = "apply"
+	GameRunningOperationUnmount   = "unmount"
+	GameRunningOperationUninstall = "uninstall"
+	GameRunningOperationRename    = "rename"
 )
 
 type ShuttingDownError struct {
@@ -29,6 +31,12 @@ type GameRunningError struct {
 func (e *GameRunningError) Error() string {
 	if e.Operation == GameRunningOperationUnmount {
 		return fmt.Sprintf("%s is still running, or was started less than two minutes ago, so its mods cannot be unmounted; close it first", e.GameID)
+	}
+	if e.Operation == GameRunningOperationUninstall {
+		return fmt.Sprintf("%s is still running, or was started less than two minutes ago, so a mod cannot be uninstalled; close the game first", e.GameID)
+	}
+	if e.Operation == GameRunningOperationRename {
+		return fmt.Sprintf("%s is still running, or was started less than two minutes ago, so a mod cannot be renamed; close the game first", e.GameID)
 	}
 	return fmt.Sprintf("%s is still running, or was started less than two minutes ago, so its pending mod changes cannot be applied (%s); close it first", e.GameID, e.Operation)
 }

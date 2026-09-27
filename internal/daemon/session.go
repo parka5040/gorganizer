@@ -62,9 +62,10 @@ type session struct {
 	profileLocks   map[string]*sync.Mutex
 	profileLocksMu sync.Mutex
 
-	reinstallFault func(step string) error
-	launchFault    func(step string) error
-	steamOpener    func(url string) (int, error)
+	reinstallFault         func(step string) error
+	modChangeRematerialize func(*vfs.MountManager) error
+	launchFault            func(step string) error
+	steamOpener            func(url string) (int, error)
 
 	activeGameID   string
 	activeGameIDMu sync.RWMutex
