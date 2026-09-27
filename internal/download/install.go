@@ -1,12 +1,14 @@
 package download
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 
@@ -436,7 +438,20 @@ func mergeTree(src, dst string) error {
 		if rel == "." {
 			return nil
 		}
+		if err := fsutil.CheckExistingPath(dst, rel); err != nil {
+			if errors.Is(err, fsutil.ErrExistingLink) || errors.Is(err, fsutil.ErrExistingNonDirectory) {
+				return &ArchiveRejectedError{Reason: ArchiveRejectedUnsafeEntry, Detail: rel}
+			}
+			return err
+		}
 		target := filepath.Join(dst, rel)
+		info, statErr := os.Lstat(target)
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return statErr
+		}
+		if statErr == nil && (d.IsDir() != info.IsDir() || !d.IsDir() && !info.Mode().IsRegular()) {
+			return &ArchiveRejectedError{Reason: ArchiveRejectedUnsafeEntry, Detail: rel}
+		}
 		if d.IsDir() {
 			return os.MkdirAll(target, 0755)
 		}
@@ -444,16 +459,25 @@ func mergeTree(src, dst string) error {
 		if err != nil {
 			return err
 		}
-		defer in.Close()
 		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			in.Close()
 			return err
 		}
-		out, err := os.Create(target)
+		out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644)
 		if err != nil {
+			in.Close()
+			if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EISDIR) {
+				return &ArchiveRejectedError{Reason: ArchiveRejectedUnsafeEntry, Detail: rel}
+			}
 			return err
 		}
-		defer out.Close()
 		_, err = io.Copy(out, in)
+		if closeErr := out.Close(); err == nil {
+			err = closeErr
+		}
+		if closeErr := in.Close(); err == nil {
+			err = closeErr
+		}
 		return err
 	})
 }

@@ -29,11 +29,11 @@ func (ts *TransferService) ExportInstance(ctx context.Context, req dto.ExportReq
 }
 
 // PreviewImport reads only an archive's manifest and reports collisions against the target instance.
-func (ts *TransferService) PreviewImport(gameID, archivePath string) (dto.ImportPreview, error) {
+func (ts *TransferService) PreviewImport(ctx context.Context, gameID, archivePath string) (dto.ImportPreview, error) {
 	if err := ts.validGame(gameID); err != nil {
 		return dto.ImportPreview{}, err
 	}
-	return transfer.Preview(gameID, archivePath)
+	return transfer.Preview(ctx, gameID, archivePath)
 }
 
 // ImportInstance waits for startup recovery within ctx, then applies an archive under the collision policy, refusing overwrites of mounted state.
@@ -49,7 +49,7 @@ func (ts *TransferService) ImportInstance(ctx context.Context, req dto.ImportReq
 		return dto.TransferSummary{}, err
 	}
 	defer release()
-	preview, err := transfer.Preview(req.GameID, req.ArchivePath)
+	preview, err := transfer.Preview(ctx, req.GameID, req.ArchivePath)
 	if err != nil {
 		return dto.TransferSummary{}, err
 	}

@@ -261,7 +261,7 @@ func TestExportSelection(t *testing.T) {
 	if sum.ModsExported != 1 || sum.ProfilesTransferred != 1 {
 		t.Errorf("summary = %+v, want 1 mod / 1 profile", sum)
 	}
-	preview, err := Preview(testGame, archive)
+	preview, err := Preview(context.Background(), testGame, archive)
 	if err != nil {
 		t.Fatalf("Preview: %v", err)
 	}

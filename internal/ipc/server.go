@@ -52,7 +52,7 @@ type ModLoaderController interface {
 
 type TransferController interface {
 	ExportInstance(ctx context.Context, req dto.ExportRequest, emit func(dto.TransferProgress)) (dto.TransferSummary, error)
-	PreviewImport(gameID, archivePath string) (dto.ImportPreview, error)
+	PreviewImport(ctx context.Context, gameID, archivePath string) (dto.ImportPreview, error)
 	ImportInstance(ctx context.Context, req dto.ImportRequest, emit func(dto.TransferProgress)) (dto.TransferSummary, error)
 }
 

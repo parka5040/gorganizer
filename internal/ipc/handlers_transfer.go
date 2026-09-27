@@ -29,8 +29,8 @@ func (s *gorganizerServer) ExportInstance(req *pb.ExportInstanceRequest, stream 
 	})
 }
 
-func (s *gorganizerServer) PreviewImport(_ context.Context, req *pb.PreviewImportRequest) (*pb.PreviewImportResponse, error) {
-	preview, err := s.ctrl.PreviewImport(req.GetGameId(), req.GetArchivePath())
+func (s *gorganizerServer) PreviewImport(ctx context.Context, req *pb.PreviewImportRequest) (*pb.PreviewImportResponse, error) {
+	preview, err := s.ctrl.PreviewImport(ctx, req.GetGameId(), req.GetArchivePath())
 	if err != nil {
 		return nil, grpcError(err)
 	}

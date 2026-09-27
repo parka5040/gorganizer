@@ -3,6 +3,7 @@ package transfer
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -50,7 +51,7 @@ func TestCompressionAutoDetect(t *testing.T) {
 			if err := os.WriteFile(path, tc.data, 0644); err != nil {
 				t.Fatalf("write: %v", err)
 			}
-			preview, err := Preview(testGame, path)
+			preview, err := Preview(context.Background(), testGame, path)
 			if err != nil {
 				t.Fatalf("Preview(%s): %v", tc.name, err)
 			}
