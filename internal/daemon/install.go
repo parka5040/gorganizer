@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -47,8 +49,8 @@ func (is *InstallService) StreamInstallEvents(ctx context.Context, gameID string
 // PreviewInstall extracts an archive into a daemon-cached tmpdir and returns a FOMOD plan or flat listing.
 func (is *InstallService) PreviewInstall(req dto.PreviewInstallRequest) (*dto.PreviewResult, error) {
 	gameID, archiveRelPath := req.GameID, req.ArchiveRelPath
-	if req.ExternalArchivePath != "" {
-		return nil, fmt.Errorf("previewing an archive outside the Downloads folder is not supported yet")
+	if (archiveRelPath == "") == (req.ExternalArchivePath == "") {
+		return nil, fmt.Errorf("exactly one of archive_rel_path or external_archive_path must be set")
 	}
 	if !is.s.gameConfigured(gameID) {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
@@ -57,35 +59,55 @@ func (is *InstallService) PreviewInstall(req dto.PreviewInstallRequest) (*dto.Pr
 		return nil, err
 	}
 	planner := layoutPlannerFor(gameID)
-	downloadsDir := config.DownloadsDir(gameID)
-	absArchive, err := archivePath(downloadsDir, archiveRelPath)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := os.Stat(absArchive); err != nil {
-		return nil, &ArchiveMissingError{GameID: gameID, Path: archiveRelPath}
+	entry := &previewEntry{GameID: gameID, ArchiveRelPath: archiveRelPath}
+	var absArchive string
+	if archiveRelPath != "" {
+		var err error
+		absArchive, err = archivePath(config.DownloadsDir(gameID), archiveRelPath)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := os.Stat(absArchive); err != nil {
+			return nil, &ArchiveMissingError{GameID: gameID, Path: archiveRelPath}
+		}
+	} else {
+		var err error
+		absArchive, entry.ExternalIdentity, err = resolveExternalArchive(req.ExternalArchivePath)
+		if err != nil {
+			return nil, err
+		}
+		entry.ExternalArchivePath = absArchive
 	}
 	budget := download.NewExtractBudget()
 	tmp, err := extractArchiveWithBudget(absArchive, budget)
 	if err != nil {
 		return nil, err
 	}
-	entry := &previewEntry{
-		GameID: gameID, ArchiveRelPath: archiveRelPath, ExtractRoot: tmp,
+	entry.ExtractRoot = tmp
+	cached := false
+	defer func() {
+		if !cached {
+			os.RemoveAll(tmp)
+		}
+	}()
+	if req.ExternalArchivePath != "" {
+		resolved, identity, err := resolveExternalArchive(req.ExternalArchivePath)
+		if err != nil || resolved != entry.ExternalArchivePath || identity != entry.ExternalIdentity {
+			return nil, &PreviewNotFoundError{}
+		}
 	}
 	out := &dto.PreviewResult{}
 	if planner != nil {
 		files, err := plannedPreviewFiles(planner, tmp)
 		if err != nil {
-			os.RemoveAll(tmp)
 			return nil, err
 		}
 		out.FlatFileList = files
 		out.PreviewID = is.s.previews.put(entry)
+		cached = true
 		return out, nil
 	}
 	if err := download.ExpandNestedFomods(tmp, budget); err != nil {
-		os.RemoveAll(tmp)
 		return nil, fmt.Errorf("expanding nested installers: %w", err)
 	}
 	if root, kind := download.FindFomodRootKind(tmp); kind != download.FomodKindNone {
@@ -94,11 +116,26 @@ func (is *InstallService) PreviewInstall(req dto.PreviewInstallRequest) (*dto.Pr
 		out.HasFomod = true
 		switch kind {
 		case download.FomodKindModuleConfig:
+			xmlBytes, err := moduleConfigBytes(root)
+			if err != nil {
+				return nil, err
+			}
+			name := filepath.Base(absArchive)
+			entry.RequiredFiles = requiredFomodFiles(xmlBytes)
 			out.Plan = &dto.FomodPlanResult{
-				ModuleName: filepath.Base(archiveRelPath),
-				ModulePath: root,
+				ModuleName: name, ModulePath: root, ModuleConfigXML: xmlBytes,
+				RequiredFiles: entry.RequiredFiles,
+			}
+			var doc struct {
+				Image struct {
+					Path string `xml:"path,attr"`
+				} `xml:"moduleImage"`
+			}
+			if xml.Unmarshal(xmlBytes, &doc) == nil && doc.Image.Path != "" {
+				out.Plan.ScreenshotData = previewScreenshotBytes(tmp, root, doc.Image.Path)
 			}
 		case download.FomodKindLegacyInfoOnly:
+			entry.LegacyInfoOnly = true
 			info := download.ParseLegacyFomodInfo(root)
 			out.Plan = &dto.FomodPlanResult{
 				ModuleName:     info.Name,
@@ -106,12 +143,23 @@ func (is *InstallService) PreviewInstall(req dto.PreviewInstallRequest) (*dto.Pr
 				LegacyInfoOnly: true,
 				Description:    info.Description,
 				ScreenshotPath: info.ScreenshotPath,
+				ScreenshotData: previewScreenshotBytes(tmp, root, info.ScreenshotPath),
 				Version:        info.Version,
 				Author:         info.Author,
 			}
 		}
 	} else {
-		contentRoot := download.FindContentRoot(tmp)
+		rel, ambiguous := download.DetectContentRoot(tmp, gameID)
+		entry.DetectedRoot = rel
+		out.DetectedRoot = rel
+		out.RootAmbiguous = ambiguous
+		roots, err := selectableContentRoots(tmp)
+		if err != nil {
+			return nil, err
+		}
+		entry.SelectableRoots = roots
+		out.SelectableRoots = roots
+		contentRoot := filepath.Join(tmp, filepath.FromSlash(rel))
 		_ = filepath.WalkDir(contentRoot, func(path string, de os.DirEntry, err error) error {
 			if err != nil || de.IsDir() {
 				return nil
@@ -124,6 +172,7 @@ func (is *InstallService) PreviewInstall(req dto.PreviewInstallRequest) (*dto.Pr
 		})
 	}
 	out.PreviewID = is.s.previews.put(entry)
+	cached = true
 	return out, nil
 }
 
@@ -234,12 +283,25 @@ func plannedPreviewFiles(planner download.LayoutPlanner, extractRoot string) ([]
 // previewMatchesRequest refuses a cached preview that was extracted for another game or another archive than the install request names.
 func previewMatchesRequest(pe *previewEntry, req dto.StartInstallRequest, absArchive string) error {
 	mismatch := &PreviewNotFoundError{PreviewID: req.PreviewID}
-	if pe.GameID != req.GameID || req.ArchiveRelPath == "" {
-		return fmt.Errorf("%w: preview was extracted for game %q archive %q", mismatch, pe.GameID, pe.ArchiveRelPath)
+	if pe.GameID != req.GameID {
+		return mismatch
+	}
+	if pe.ExternalArchivePath != "" {
+		if req.ExternalArchivePath == "" {
+			return mismatch
+		}
+		resolved, identity, err := resolveExternalArchive(req.ExternalArchivePath)
+		if err != nil || resolved != pe.ExternalArchivePath || identity != pe.ExternalIdentity {
+			return mismatch
+		}
+		return nil
+	}
+	if req.ArchiveRelPath == "" || req.ExternalArchivePath != "" {
+		return mismatch
 	}
 	previewArchive, err := archivePath(config.DownloadsDir(pe.GameID), pe.ArchiveRelPath)
 	if err != nil || previewArchive != absArchive {
-		return fmt.Errorf("%w: preview was extracted for archive %q", mismatch, pe.ArchiveRelPath)
+		return mismatch
 	}
 	return nil
 }
@@ -315,6 +377,13 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 	if (req.ArchiveRelPath == "") == (req.ExternalArchivePath == "") {
 		return "", 0, fmt.Errorf("exactly one of archive_rel_path or external_archive_path must be set")
 	}
+	planner := layoutPlannerFor(req.GameID)
+	if planner != nil && (req.FomodConfirmed || len(req.FomodSelectedFiles) > 0) {
+		return "", 0, download.ErrFomodNotSupportedForLayout
+	}
+	if req.SelectedRoot != "" && (req.PreviewID == "" || planner != nil) {
+		return "", 0, &UnsafePathError{Field: "selected_root"}
+	}
 
 	var absArchive string
 	var sidecar *download.ArchiveSidecar
@@ -326,15 +395,21 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 		if err != nil {
 			return "", 0, err
 		}
-		if _, err := os.Stat(absArchive); err != nil {
-			return "", 0, &ArchiveMissingError{GameID: req.GameID, Path: req.ArchiveRelPath}
+		if req.PreviewID == "" {
+			if _, err := os.Stat(absArchive); err != nil {
+				return "", 0, &ArchiveMissingError{GameID: req.GameID, Path: req.ArchiveRelPath}
+			}
 		}
 		sidecar, _ = download.LoadSidecar(absArchive)
 		indexRef.Path = filepath.Join("Downloads", req.ArchiveRelPath)
 	} else {
 		absArchive = req.ExternalArchivePath
-		if _, err := os.Stat(absArchive); err != nil {
-			return "", 0, fmt.Errorf("external archive not found: %w", err)
+		if req.PreviewID == "" {
+			var err error
+			absArchive, _, err = resolveExternalArchive(absArchive)
+			if err != nil {
+				return "", 0, err
+			}
 		}
 		indexRef.Path = absArchive
 	}
@@ -384,6 +459,9 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 	}
 
 	extractedRoot := extracted
+	var contentRoot string
+	var legacyFlatCopy bool
+	var selectedFiles = req.FomodSelectedFiles
 	if req.PreviewID != "" {
 		pe := is.s.previews.acquire(req.PreviewID)
 		if pe == nil {
@@ -393,9 +471,40 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 		if err := previewMatchesRequest(pe, req, absArchive); err != nil {
 			return "", 0, err
 		}
+		if req.ArchiveRelPath != "" {
+			if _, err := os.Stat(absArchive); err != nil {
+				return "", 0, &ArchiveMissingError{GameID: req.GameID, Path: req.ArchiveRelPath}
+			}
+		}
+		if pe.ExternalArchivePath != "" {
+			absArchive = pe.ExternalArchivePath
+			indexRef.Path = absArchive
+		}
 		extractedRoot = pe.ExtractRoot
-		if len(req.FomodSelectedFiles) > 0 && pe.ModuleRoot != "" {
+		if req.SelectedRoot != "" {
+			if pe.HasFomod || !slices.Contains(pe.SelectableRoots, req.SelectedRoot) {
+				return "", 0, &UnsafePathError{Field: "selected_root"}
+			}
+			contentRoot = filepath.Join(pe.ExtractRoot, filepath.FromSlash(req.SelectedRoot))
+		} else if !pe.HasFomod && planner == nil {
+			contentRoot = filepath.Join(pe.ExtractRoot, filepath.FromSlash(pe.DetectedRoot))
+		}
+		if pe.HasFomod && req.FomodConfirmed {
 			extractedRoot = pe.ModuleRoot
+			if pe.LegacyInfoOnly {
+				legacyFlatCopy = true
+				contentRoot = pe.ModuleRoot
+				selectedFiles = nil
+			} else if len(selectedFiles) == 0 {
+				selectedFiles = pe.RequiredFiles
+				if len(selectedFiles) == 0 {
+					return "", 0, download.ErrEmptyInstallSelection
+				}
+			}
+		} else if pe.HasFomod && len(selectedFiles) > 0 {
+			extractedRoot = pe.ModuleRoot
+		} else if !pe.HasFomod && len(selectedFiles) > 0 {
+			return "", 0, &UnsafePathError{Field: "fomod_selected_files"}
 		}
 	}
 
@@ -418,7 +527,7 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 	}
 
 	var fomodFiles []download.FomodFile
-	for _, f := range req.FomodSelectedFiles {
+	for _, f := range selectedFiles {
 		fomodFiles = append(fomodFiles, download.FomodFile{
 			Source: f.Source, Destination: f.Destination,
 			IsFolder: f.IsFolder, Priority: f.Priority,
@@ -426,15 +535,17 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 	}
 
 	installReq := download.InstallRequest{
-		GameID:             req.GameID,
-		ArchivePath:        absArchive,
-		ExtractedRoot:      extractedRoot,
-		Mode:               download.InstallMode(req.Mode),
-		TargetMod:          target,
-		SourceArchiveRef:   indexRef,
-		FomodSelectedFiles: fomodFiles,
-		ProgressSink:       sink,
-		Layout:             layoutPlannerFor(req.GameID),
+		GameID:              req.GameID,
+		ArchivePath:         absArchive,
+		ExtractedRoot:       extractedRoot,
+		ContentRoot:         contentRoot,
+		LegacyFomodFlatCopy: legacyFlatCopy,
+		Mode:                download.InstallMode(req.Mode),
+		TargetMod:           target,
+		SourceArchiveRef:    indexRef,
+		FomodSelectedFiles:  fomodFiles,
+		ProgressSink:        sink,
+		Layout:              planner,
 	}
 	if sidecar != nil {
 		installReq.DisplayName = sidecar.ModName

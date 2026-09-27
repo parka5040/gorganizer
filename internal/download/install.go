@@ -34,20 +34,22 @@ type InstallProgress struct {
 type ProgressSink func(InstallProgress)
 
 type InstallRequest struct {
-	GameID             string
-	ArchivePath        string
-	ExtractedRoot      string
-	Mode               InstallMode
-	TargetMod          string
-	SourceArchiveRef   SourceArchiveRef
-	DisplayName        string
-	Category           string
-	Version            string
-	ModPage            string
-	FomodSelectedFiles []FomodFile
-	ProgressSink       ProgressSink
-	InstallID          string
-	Layout             LayoutPlanner
+	GameID              string
+	ArchivePath         string
+	ExtractedRoot       string
+	ContentRoot         string
+	LegacyFomodFlatCopy bool
+	Mode                InstallMode
+	TargetMod           string
+	SourceArchiveRef    SourceArchiveRef
+	DisplayName         string
+	Category            string
+	Version             string
+	ModPage             string
+	FomodSelectedFiles  []FomodFile
+	ProgressSink        ProgressSink
+	InstallID           string
+	Layout              LayoutPlanner
 }
 
 type InstallResult struct {
@@ -127,8 +129,15 @@ func Install(req InstallRequest) (*InstallResult, error) {
 		}
 	}
 
-	if req.Layout == nil && len(req.FomodSelectedFiles) == 0 && HasFomodInstaller(extractRoot) {
+	if req.Layout == nil && len(req.FomodSelectedFiles) == 0 && !req.LegacyFomodFlatCopy && HasFomodInstaller(extractRoot) {
 		return nil, &installFomodMarker{Path: req.ArchivePath}
+	}
+	if req.Layout == nil && len(req.FomodSelectedFiles) > 0 {
+		moduleRoot, kind := FindFomodRootKind(extractRoot)
+		if kind == FomodKindNone {
+			return nil, fmt.Errorf("FOMOD selection requires an installer")
+		}
+		extractRoot = moduleRoot
 	}
 
 	var planned []PlannedCopy
@@ -168,7 +177,12 @@ func Install(req InstallRequest) (*InstallResult, error) {
 	case req.Layout != nil:
 		written, err = copyPlanned(extractRoot, stageDir, planned, req.InstallID, req.ProgressSink)
 	default:
-		written, err = copyFlatten(req.GameID, extractRoot, stageDir, req.InstallID, req.ProgressSink)
+		contentRoot := req.ContentRoot
+		if contentRoot == "" {
+			rel, _ := DetectContentRoot(extractRoot, req.GameID)
+			contentRoot = filepath.Join(extractRoot, filepath.FromSlash(rel))
+		}
+		written, err = copyFlatten(req.GameID, extractRoot, contentRoot, stageDir, req.InstallID, req.ProgressSink, req.LegacyFomodFlatCopy)
 	}
 	if err != nil {
 		emit(InstallProgress{Step: StageFailed, Error: err.Error()})
@@ -262,13 +276,20 @@ func IsCollisionMarker(err error) (string, bool) {
 }
 
 // copyFlatten replays the archive's content root into stage.
-func copyFlatten(gameID, extractRoot, stageDir, installID string, sink ProgressSink) ([]string, error) {
-	contentRoot := findContentRoot(extractRoot)
-	rootedOblivionRemastered := gameID == "oblivionremastered" && hasOblivionRemasteredRootMarkers(contentRoot)
-	resolvedContentRoot, err := filepath.EvalSymlinks(contentRoot)
+func copyFlatten(gameID, extractRoot, contentRoot, stageDir, installID string, sink ProgressSink, excludeFomod bool) ([]string, error) {
+	resolvedExtractRoot, err := filepath.EvalSymlinks(extractRoot)
 	if err != nil {
-		return nil, fmt.Errorf("resolving archive content root: %w", err)
+		return nil, fmt.Errorf("resolving archive extraction root: %w", err)
 	}
+	resolvedContentRoot, err := filepath.EvalSymlinks(contentRoot)
+	if err != nil || !fsutil.ContainedBy(resolvedExtractRoot, resolvedContentRoot) {
+		return nil, fmt.Errorf("archive content root resolves outside extraction root")
+	}
+	info, err := os.Stat(contentRoot)
+	if err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("archive content root is not a directory")
+	}
+	rootedOblivionRemastered := gameID == "oblivionremastered" && hasOblivionRemasteredRootMarkers(contentRoot)
 
 	var written []string
 	err = filepath.WalkDir(contentRoot, func(path string, d os.DirEntry, err error) error {
@@ -281,6 +302,9 @@ func copyFlatten(gameID, extractRoot, stageDir, installID string, sink ProgressS
 		}
 		if rel == "." {
 			return nil
+		}
+		if excludeFomod && strings.EqualFold(rel, "fomod") && d.IsDir() {
+			return filepath.SkipDir
 		}
 		installRel := routeOblivionRemasteredPath(rel, rootedOblivionRemastered)
 		dst := filepath.Join(stageDir, installRel)

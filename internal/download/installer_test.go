@@ -195,7 +195,7 @@ func TestCopyFlattenRejectsArchiveSymlinkEscape(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(extract, "escape.dll")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := copyFlatten("skyrimse", extract, stage, "test", nil); err == nil {
+	if _, err := copyFlatten("skyrimse", extract, extract, stage, "test", nil, false); err == nil {
 		t.Fatal("escaping archive symlink was accepted")
 	}
 }
