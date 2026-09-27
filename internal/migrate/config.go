@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 
@@ -135,13 +136,13 @@ func verifyPatchedConfig(j *journal) error {
 		}
 		return nil
 	}
-	var cfg config.Config
-	if err := json.Unmarshal(j.ConfigBefore, &cfg); err != nil {
+	cfg := config.DefaultConfig()
+	if err := json.Unmarshal(j.ConfigBefore, cfg); err != nil {
 		return fmt.Errorf("invalid settings preimage: %w", err)
 	}
 	changed := false
 	for _, item := range j.Items {
-		refs, err := configReferences(&cfg, item.Source, item.Destination)
+		refs, err := configReferences(cfg, item.Source, item.Destination)
 		if err != nil {
 			return err
 		}
@@ -150,11 +151,11 @@ func verifyPatchedConfig(j *journal) error {
 	if !changed && bytes.Equal(current, j.ConfigBefore) {
 		return nil
 	}
-	want, err := json.MarshalIndent(&cfg, "", "  ")
-	if err != nil {
-		return err
+	if !exists {
+		return fmt.Errorf("game settings changed during the move; settings were not overwritten")
 	}
-	if !exists || !bytes.Equal(current, want) {
+	actual := config.DefaultConfig()
+	if err := json.Unmarshal(current, actual); err != nil || !reflect.DeepEqual(actual, cfg) {
 		return fmt.Errorf("game settings changed during the move; settings were not overwritten")
 	}
 	return nil

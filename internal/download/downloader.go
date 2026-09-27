@@ -751,6 +751,8 @@ func (m *Manager) streamToFile(ctx context.Context, cdnURL, destPath string, res
 	}
 	if rangeTotal > 0 {
 		expected = rangeTotal
+	} else if resp.StatusCode == http.StatusPartialContent {
+		expected = rangeEnd + 1
 	}
 	state = m.update(dl, func(d *Download) {
 		d.BytesDownloaded = resumeFrom
@@ -861,6 +863,9 @@ func parseDownloadRange(value string, start int64) (int64, int64, error) {
 		return 0, 0, fmt.Errorf("invalid range end")
 	}
 	if totalText == "*" {
+		if end == math.MaxInt64 {
+			return 0, 0, fmt.Errorf("invalid range end")
+		}
 		return 0, end, nil
 	}
 	if totalText == "" || strings.Trim(totalText, "0123456789") != "" {
