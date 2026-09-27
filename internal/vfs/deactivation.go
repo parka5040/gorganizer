@@ -78,8 +78,20 @@ func readDeactivationJournal(path string) (*deactivationJournal, error) {
 	return &j, nil
 }
 
+// captureRetiringFarm saves new writes from a recorded farm before it is removed.
+func captureRetiringFarm(farmDir string) error {
+	s, err := ReadSentinel(farmDir)
+	if err != nil || s.OverwriteRoot == "" {
+		return nil
+	}
+	if _, err := CaptureNewFilesInto(farmDir, s.OverwriteRoot, false, false); err != nil {
+		return fmt.Errorf("%w: saving writes from %s: %w", ErrCaptureFailed, farmDir, err)
+	}
+	return nil
+}
+
 // retireFarm records the directory identities before replacing the farm with the original Data directory.
-func retireFarm(dataPath, backupPath string, s *Sentinel) error {
+func retireFarm(dataPath, backupPath string, s *Sentinel, force bool) error {
 	if s == nil {
 		return fmt.Errorf("retiring farm: missing sentinel")
 	}
@@ -128,11 +140,11 @@ func retireFarm(dataPath, backupPath string, s *Sentinel) error {
 	if err := deactivationStep(1); err != nil {
 		return err
 	}
-	return resumeFarmRetirement(dataPath, backupPath, j)
+	return resumeFarmRetirement(dataPath, backupPath, j, force)
 }
 
 // resumeFarmRetirement completes a recorded teardown after checking every sibling's directory identity.
-func resumeFarmRetirement(dataPath, backupPath string, j *deactivationJournal) error {
+func resumeFarmRetirement(dataPath, backupPath string, j *deactivationJournal, force bool) error {
 	retired := retiredFarmPath(dataPath)
 	parent := filepath.Dir(dataPath)
 	for {
@@ -144,6 +156,11 @@ func resumeFarmRetirement(dataPath, backupPath string, j *deactivationJournal) e
 		}
 		switch {
 		case dataExists && dataID == j.Farm && backupExists && backupID == j.Backup && !retiredExists:
+			if err := captureRetiringFarm(dataPath); err != nil {
+				if !force {
+					return err
+				}
+			}
 			if err := os.Rename(dataPath, retired); err != nil {
 				return fmt.Errorf("retiring Data: %w", err)
 			}
@@ -164,6 +181,11 @@ func resumeFarmRetirement(dataPath, backupPath string, j *deactivationJournal) e
 				return err
 			}
 		case dataExists && dataID == j.Backup && !backupExists && retiredExists && retiredID == j.Farm:
+			if err := captureRetiringFarm(retired); err != nil {
+				if !force {
+					return err
+				}
+			}
 			if err := removeRetiredFarm(retired); err != nil {
 				return fmt.Errorf("removing retired farm: %w", err)
 			}

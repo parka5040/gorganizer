@@ -101,6 +101,95 @@ func TestCrossDeviceCaptureSucceeds(t *testing.T) {
 	}
 }
 
+// TestCrossDeviceCaptureSyncsNewAncestorsBeforeUnlink checks nested destination directories are durable before source removal.
+func TestCrossDeviceCaptureSyncsNewAncestorsBeforeUnlink(t *testing.T) {
+	data, _, overwrite, _ := activatedCaptureFarm(t, nil)
+	src := filepath.Join(data, "Saves", "Character", "new.ess")
+	writeCaptureFile(t, src, "new save")
+	forceCaptureEXDEV(t)
+	originalSync := captureSyncDir
+	originalRemove := captureRemove
+	var events []string
+	captureSyncDir = func(dir string) error {
+		events = append(events, "sync "+dir)
+		return originalSync(dir)
+	}
+	captureRemove = func(path string) error {
+		events = append(events, "remove "+path)
+		return originalRemove(path)
+	}
+	t.Cleanup(func() {
+		captureSyncDir = originalSync
+		captureRemove = originalRemove
+	})
+	if moved, err := CaptureNewFiles(data, overwrite); moved != 1 || err != nil {
+		t.Fatalf("CaptureNewFiles = %d, %v; want one file", moved, err)
+	}
+	want := []string{
+		"sync " + filepath.Join(overwrite, "Saves", "Character"),
+		"sync " + filepath.Join(overwrite, "Saves"),
+		"sync " + overwrite,
+		"remove " + src,
+	}
+	if len(events) < len(want) || !slices.Equal(events[:len(want)], want) {
+		t.Errorf("events = %v; want prefix %v", events, want)
+	}
+}
+
+// TestCrossDeviceCaptureAncestorSyncFailureKeepsSource checks a failed directory sync never unlinks the farm copy.
+func TestCrossDeviceCaptureAncestorSyncFailureKeepsSource(t *testing.T) {
+	data, _, overwrite, _ := activatedCaptureFarm(t, nil)
+	src := filepath.Join(data, "Saves", "Character", "new.ess")
+	writeCaptureFile(t, src, "new save")
+	forceCaptureEXDEV(t)
+	originalSync := captureSyncDir
+	originalRemove := captureRemove
+	removed := false
+	captureSyncDir = func(dir string) error {
+		if dir == filepath.Join(overwrite, "Saves") {
+			return syscall.EIO
+		}
+		return originalSync(dir)
+	}
+	captureRemove = func(path string) error {
+		removed = true
+		return originalRemove(path)
+	}
+	t.Cleanup(func() {
+		captureSyncDir = originalSync
+		captureRemove = originalRemove
+	})
+	if moved, err := CaptureNewFiles(data, overwrite); moved != 0 || !errors.Is(err, ErrCaptureFailed) {
+		t.Fatalf("CaptureNewFiles = %d, %v; want sync failure", moved, err)
+	}
+	if removed || mustRead(t, src) != "new save" {
+		t.Errorf("source removed = %t; want intact save", removed)
+	}
+}
+
+// TestCaptureFailureSyncsCreatedDirectories checks an interrupted batch still flushes earlier destination directories.
+func TestCaptureFailureSyncsCreatedDirectories(t *testing.T) {
+	data, _, overwrite, _ := activatedCaptureFarm(t, nil)
+	writeCaptureFile(t, filepath.Join(data, "a", "first.txt"), "first")
+	writeCaptureFile(t, filepath.Join(data, "z", "second.txt"), "second")
+	if err := os.Symlink(t.TempDir(), filepath.Join(overwrite, "z")); err != nil {
+		t.Fatal(err)
+	}
+	original := captureSyncDir
+	var synced []string
+	captureSyncDir = func(dir string) error {
+		synced = append(synced, dir)
+		return original(dir)
+	}
+	t.Cleanup(func() { captureSyncDir = original })
+	if moved, err := CaptureNewFiles(data, overwrite); moved != 1 || !errors.Is(err, ErrCaptureFailed) {
+		t.Fatalf("CaptureNewFiles = %d, %v; want one move and failure", moved, err)
+	}
+	if !slices.Contains(synced, overwrite) || !slices.Contains(synced, filepath.Join(overwrite, "a")) {
+		t.Errorf("synced directories = %v; want new directory and its parent", synced)
+	}
+}
+
 // TestCaptureDetectsChangingSource checks inode, size and mtime changes retain the farm file.
 func TestCaptureDetectsChangingSource(t *testing.T) {
 	for _, tc := range []struct {

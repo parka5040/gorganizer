@@ -162,7 +162,7 @@ func CaptureNewFiles(dataDir, overwriteRoot string) (int, error) {
 var writeSuccessorSentinel = WriteSentinel
 
 // CaptureNewFilesInto moves files not owned by a verified farm manifest into targetRoot, using link counts for legacy farms and optionally relinking them.
-func CaptureNewFilesInto(dataDir, targetRoot string, relink bool, _ bool) (int, error) {
+func CaptureNewFilesInto(dataDir, targetRoot string, relink bool, _ bool) (moved int, retErr error) {
 	if targetRoot == "" {
 		return 0, nil
 	}
@@ -185,16 +185,22 @@ func CaptureNewFilesInto(dataDir, targetRoot string, relink bool, _ bool) (int, 
 	if err != nil {
 		return 0, fmt.Errorf("classifying farm %q: %w", dataDir, err)
 	}
-	moved := 0
 	dirs := make(map[string]struct{})
+	synced := false
+	defer func() {
+		if retErr != nil && !synced {
+			retErr = errors.Join(retErr, syncCaptureDirs(dirs))
+		}
+	}()
 	relinked := make(map[string]FarmManifestEntry)
 	for _, rel := range classification.Output {
 		farmPath := filepath.Join(dataDir, filepath.FromSlash(rel))
 		dst := filepath.Join(targetRoot, filepath.FromSlash(rel))
-		if err := prepareCaptureDestination(targetRoot, filepath.FromSlash(rel), dirs); err != nil {
+		created, err := prepareCaptureDestination(targetRoot, filepath.FromSlash(rel), dirs)
+		if err != nil {
 			return moved, err
 		}
-		if err := moveFile(farmPath, dst); err != nil {
+		if err := moveFile(farmPath, dst, created); err != nil {
 			return moved, fmt.Errorf("%w: moving captured file %q -> %q: %w", ErrCaptureFailed, farmPath, dst, err)
 		}
 		slog.Info("captured new file", "src", farmPath, "dst", dst, "relink", relink)
@@ -210,6 +216,7 @@ func CaptureNewFilesInto(dataDir, targetRoot string, relink bool, _ bool) (int, 
 			relinked[rel] = entry
 		}
 	}
+	synced = true
 	if err := syncCaptureDirs(dirs); err != nil {
 		return moved, err
 	}
@@ -260,9 +267,14 @@ func publishSuccessorManifest(dataDir string, s *Sentinel, manifest *FarmManifes
 	return nil
 }
 
-func captureLegacyFilesInto(dataDir, targetRoot string, relink bool) (int, error) {
-	moved := 0
+func captureLegacyFilesInto(dataDir, targetRoot string, relink bool) (moved int, retErr error) {
 	dirs := make(map[string]struct{})
+	synced := false
+	defer func() {
+		if retErr != nil && !synced {
+			retErr = errors.Join(retErr, syncCaptureDirs(dirs))
+		}
+	}()
 	walkErr := filepath.Walk(dataDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -292,10 +304,11 @@ func captureLegacyFilesInto(dataDir, targetRoot string, relink bool) (int, error
 			return nil
 		}
 		dst := filepath.Join(targetRoot, rel)
-		if err := prepareCaptureDestination(targetRoot, rel, dirs); err != nil {
+		created, err := prepareCaptureDestination(targetRoot, rel, dirs)
+		if err != nil {
 			return err
 		}
-		if err := moveFile(path, dst); err != nil {
+		if err := moveFile(path, dst, created); err != nil {
 			return fmt.Errorf("%w: moving captured file %q -> %q: %w", ErrCaptureFailed, path, dst, err)
 		}
 		slog.Info("captured new file", "src", path, "dst", dst, "relink", relink)
@@ -311,6 +324,7 @@ func captureLegacyFilesInto(dataDir, targetRoot string, relink bool) (int, error
 	if walkErr != nil {
 		return moved, walkErr
 	}
+	synced = true
 	return moved, syncCaptureDirs(dirs)
 }
 
@@ -334,15 +348,17 @@ func relinkCaptured(src, farmPath string) error {
 }
 
 var captureRename = os.Rename
+var captureRemove = os.Remove
 var captureCopy = atomicfile.CopyFileDurable
 var captureMkdirAll = os.MkdirAll
 var captureSyncDir = atomicfile.SyncDir
 
 // prepareCaptureDestination checks the target path and creates safe parent directories.
-func prepareCaptureDestination(root, rel string, dirs map[string]struct{}) error {
+func prepareCaptureDestination(root, rel string, dirs map[string]struct{}) (map[string]struct{}, error) {
+	created := make(map[string]struct{})
 	dst := filepath.Join(root, rel)
 	if err := fsutil.CheckExistingPath(root, rel); err != nil {
-		return fmt.Errorf("%w: unsafe capture destination %q: %w", ErrCaptureFailed, dst, err)
+		return nil, fmt.Errorf("%w: unsafe capture destination %q: %w", ErrCaptureFailed, dst, err)
 	}
 	parent := filepath.Dir(dst)
 	for dir := parent; ; dir = filepath.Dir(dir) {
@@ -351,28 +367,36 @@ func prepareCaptureDestination(root, rel string, dirs map[string]struct{}) error
 			break
 		}
 		if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("%w: checking destination directory %q: %w", ErrCaptureFailed, dir, err)
+			return nil, fmt.Errorf("%w: checking destination directory %q: %w", ErrCaptureFailed, dir, err)
 		}
+		created[dir] = struct{}{}
+		created[filepath.Dir(dir)] = struct{}{}
 		dirs[filepath.Dir(dir)] = struct{}{}
 		if filepath.Dir(dir) == dir {
-			return fmt.Errorf("%w: destination directory %q does not exist", ErrCaptureFailed, dir)
+			return nil, fmt.Errorf("%w: destination directory %q does not exist", ErrCaptureFailed, dir)
 		}
 	}
-	if err := captureMkdirAll(parent, 0755); err != nil {
-		return fmt.Errorf("%w: creating destination directory %q: %w", ErrCaptureFailed, parent, err)
+	mkdirErr := captureMkdirAll(parent, 0755)
+	for dir := range created {
+		if info, err := os.Lstat(dir); err == nil && info.IsDir() {
+			dirs[dir] = struct{}{}
+		}
+	}
+	if mkdirErr != nil {
+		return nil, fmt.Errorf("%w: creating destination directory %q: %w", ErrCaptureFailed, parent, mkdirErr)
 	}
 	if err := fsutil.CheckExistingPath(root, rel); err != nil {
-		return fmt.Errorf("%w: unsafe capture destination %q: %w", ErrCaptureFailed, dst, err)
+		return nil, fmt.Errorf("%w: unsafe capture destination %q: %w", ErrCaptureFailed, dst, err)
 	}
 	info, err := os.Lstat(dst)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("%w: checking capture destination %q: %w", ErrCaptureFailed, dst, err)
+		return nil, fmt.Errorf("%w: checking capture destination %q: %w", ErrCaptureFailed, dst, err)
 	}
 	if err == nil && !info.Mode().IsRegular() {
-		return fmt.Errorf("%w: capture destination %q is not a regular file", ErrCaptureFailed, dst)
+		return nil, fmt.Errorf("%w: capture destination %q is not a regular file", ErrCaptureFailed, dst)
 	}
 	dirs[parent] = struct{}{}
-	return nil
+	return created, nil
 }
 
 // syncCaptureDirs flushes capture destination directory entries before teardown.
@@ -389,16 +413,17 @@ func syncCaptureDirs(dirs map[string]struct{}) error {
 		}
 		return paths[i] < paths[j]
 	})
+	var syncErr error
 	for _, dir := range paths {
 		if err := captureSyncDir(dir); err != nil {
-			return fmt.Errorf("%w: syncing capture destination directory %q: %w", ErrCaptureFailed, dir, err)
+			syncErr = errors.Join(syncErr, fmt.Errorf("%w: syncing capture destination directory %q: %w", ErrCaptureFailed, dir, err))
 		}
 	}
-	return nil
+	return syncErr
 }
 
 // moveFile renames src to dst, falling back to a durable copy on EXDEV.
-func moveFile(src, dst string) error {
+func moveFile(src, dst string, created map[string]struct{}) error {
 	if err := captureRename(src, dst); err == nil {
 		return nil
 	} else if !errors.Is(err, syscall.EXDEV) {
@@ -426,7 +451,10 @@ func moveFile(src, dst string) error {
 	if !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
 		return fmt.Errorf("captured source %q changed during copy; source kept in farm", src)
 	}
-	if err := os.Remove(src); err != nil {
+	if err := syncCaptureDirs(created); err != nil {
+		return err
+	}
+	if err := captureRemove(src); err != nil {
 		return fmt.Errorf("removing copied source %q: %w", src, err)
 	}
 	return nil
