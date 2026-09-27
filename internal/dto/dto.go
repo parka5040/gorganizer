@@ -63,6 +63,15 @@ type SeparatorResult struct {
 	Collapsed   bool
 }
 
+type VFSLifecycleState int
+
+const (
+	VFSLifecycleStateUnspecified      VFSLifecycleState = 0
+	VFSLifecycleStateReady            VFSLifecycleState = 1
+	VFSLifecycleStateRecoveryDeferred VFSLifecycleState = 2
+	VFSLifecycleStateRecoveryPending  VFSLifecycleState = 3
+)
+
 type VFSStatusResult struct {
 	Mounted         bool
 	GameID          string
@@ -73,6 +82,8 @@ type VFSStatusResult struct {
 	Dirty           bool
 	DesiredGen      uint64
 	AppliedGen      uint64
+	LifecycleState  VFSLifecycleState
+	LifecycleReason string
 }
 
 type FileConflictResult struct {
@@ -367,11 +378,22 @@ type PluginLoadoutEntryResult struct {
 	Enabled  bool
 }
 
+type RecoveryKind int
+
+const (
+	RecoveryKindUnspecified RecoveryKind = 0
+	RecoveryKindData        RecoveryKind = 1
+	RecoveryKindModLoader   RecoveryKind = 2
+	RecoveryKindGameRoot    RecoveryKind = 3
+)
+
 type RecoveryPendingResult struct {
 	GameID     string
 	DataPath   string
 	BackupPath string
 	Reason     string
+	Kind       RecoveryKind
+	RecoveryID string
 }
 
 type ReadinessResult struct {

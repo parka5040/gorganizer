@@ -113,7 +113,7 @@ func TestFailedLoaderRecoveryBlocksMountLaunchAndLoaderUntilConfirmed(t *testing
 			t.Errorf("%s while loader recovery pending = %v", name, err)
 		}
 	}
-	if err := d.RestoreFromBackup("stardewvalley"); err == nil {
+	if err := d.RestoreFromBackup("stardewvalley", dto.RecoveryKindUnspecified, ""); err == nil {
 		t.Fatal("RestoreFromBackup succeeded while the fault remains")
 	}
 	if d.recoveryPendingFor("stardewvalley") == nil {
@@ -123,7 +123,7 @@ func TestFailedLoaderRecoveryBlocksMountLaunchAndLoaderUntilConfirmed(t *testing
 	if err := os.Remove(foreign); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.RestoreFromBackup("stardewvalley"); err != nil {
+	if err := d.RestoreFromBackup("stardewvalley", dto.RecoveryKindUnspecified, ""); err != nil {
 		t.Fatalf("RestoreFromBackup after removing the fault: %v", err)
 	}
 	if pending := d.recoveryPendingFor("stardewvalley"); pending != nil {
@@ -301,7 +301,7 @@ func TestRestoreFromBackupResolvesOneRecoveryPerConfirmation(t *testing.T) {
 	d.gamesAtPath[resolved] = []string{"stardewvalley"}
 	d.pendingRecoveriesMu.Unlock()
 
-	if err := d.RestoreFromBackup("stardewvalley"); err != nil {
+	if err := d.RestoreFromBackup("stardewvalley", dto.RecoveryKindUnspecified, ""); err != nil {
 		t.Fatalf("RestoreFromBackup: %v", err)
 	}
 	if _, _, recovers := engine.counts(); recovers != 1 {
@@ -348,10 +348,10 @@ func TestRestoreFromBackupReadsDaemonMapsUnderTheDaemonLock(t *testing.T) {
 	}()
 	for i := 0; i < 50; i++ {
 		d.registerLoaderPending([]string{"stardewvalley"}, install, errors.New("x"), d.publishRecoveryEvent)
-		if err := d.RestoreFromBackup("stardewvalley"); err != nil {
+		if err := d.RestoreFromBackup("stardewvalley", dto.RecoveryKindUnspecified, ""); err != nil {
 			t.Fatalf("RestoreFromBackup: %v", err)
 		}
-		_ = d.RestoreFromBackup("stardewvalley")
+		_ = d.RestoreFromBackup("stardewvalley", dto.RecoveryKindUnspecified, "")
 	}
 	close(stop)
 	<-writerDone

@@ -754,14 +754,17 @@ func (s *session) registerLoaderPending(gameIDs []string, gameDir string, cause 
 			DataPath:   gameDir,
 			BackupPath: filepath.Join(gameDir, smapi.BackupDir),
 			Reason:     loaderRecoveryPrefix + cause.Error(),
+			Kind:       dto.RecoveryKindModLoader,
 		}
 		s.pendingRecoveriesMu.Lock()
 		if s.loaderPendingRecoveries == nil {
 			s.loaderPendingRecoveries = make(map[string]*dto.RecoveryPendingResult)
 		}
+		pending = identifiedRecovery(s.loaderPendingRecoveries[gameID], pending)
 		s.loaderPendingRecoveries[gameID] = pending
 		s.pendingRecoveriesMu.Unlock()
 		publish(dto.StatusEventResult{RecoveryPending: pending})
+		s.publishRecoveryStatuses(gameID)
 	}
 }
 

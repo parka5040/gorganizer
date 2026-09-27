@@ -25,7 +25,41 @@ const (
 	guiStageRetention = 24 * time.Hour
 )
 
-// vfsStatus builds a VFSStatusResult from the mount's live generation counters.
+// recoveryLifecycleLocked returns the install's lifecycle state and a stable deferral reason; the caller holds s.mu.
+func (s *session) recoveryLifecycleLocked(gameID string) (dto.VFSLifecycleState, string) {
+	key := s.fenceKeyLocked(gameID)
+	s.pendingRecoveriesMu.Lock()
+	deferred, waiting := s.deferredRecoveries[key]
+	s.pendingRecoveriesMu.Unlock()
+	if waiting {
+		switch {
+		case strings.HasPrefix(deferred.reason, "a game process"):
+			return dto.VFSLifecycleStateRecoveryDeferred, "game_running"
+		case strings.HasPrefix(deferred.reason, "the game was launched"):
+			return dto.VFSLifecycleStateRecoveryDeferred, "launch_grace"
+		case strings.HasPrefix(deferred.reason, "the game process check"):
+			return dto.VFSLifecycleStateRecoveryDeferred, "process_scan_failed"
+		case deferred.reason == "the game launch record is invalid":
+			return dto.VFSLifecycleStateRecoveryDeferred, "launch_record_invalid"
+		case strings.HasPrefix(deferred.reason, "the game launch record could not be read"):
+			return dto.VFSLifecycleStateRecoveryDeferred, "launch_record_unreadable"
+		default:
+			return dto.VFSLifecycleStateRecoveryDeferred, "unknown"
+		}
+	}
+	if s.recoveryPendingFor(gameID) != nil {
+		return dto.VFSLifecycleStateRecoveryPending, ""
+	}
+	return dto.VFSLifecycleStateReady, ""
+}
+
+// unmountedVFSStatusLocked reports an install's lifecycle without an active mount; the caller holds s.mu.
+func (s *session) unmountedVFSStatusLocked(gameID string) *dto.VFSStatusResult {
+	state, reason := s.recoveryLifecycleLocked(gameID)
+	return &dto.VFSStatusResult{GameID: gameID, LifecycleState: state, LifecycleReason: reason}
+}
+
+// vfsStatus builds a VFSStatusResult from the mount's live generation counters and recovery lifecycle; the caller holds s.mu.
 func (vs *VFSService) vfsStatus(gameID string, gc config.GameConfig, profileName string, mm *vfs.MountManager, entries []mod.ModListEntry) *dto.VFSStatusResult {
 	enabled := 0
 	for _, e := range entries {
@@ -42,6 +76,7 @@ func (vs *VFSService) vfsStatus(gameID string, gc config.GameConfig, profileName
 		fileCount, _ = t.Stats()
 	}
 	applied, desired := mm.Generations()
+	state, reason := vs.s.recoveryLifecycleLocked(gameID)
 	return &dto.VFSStatusResult{
 		Mounted:         mm.IsMounted(),
 		GameID:          gameID,
@@ -52,6 +87,8 @@ func (vs *VFSService) vfsStatus(gameID string, gc config.GameConfig, profileName
 		Dirty:           mm.IsDirty(),
 		AppliedGen:      applied,
 		DesiredGen:      desired,
+		LifecycleState:  state,
+		LifecycleReason: reason,
 	}
 }
 
@@ -125,7 +162,7 @@ func (vs *VFSService) mountVFSOwned(gameID, profileName string, autoSwap bool, o
 			}
 			delete(vs.s.mountStates, conflict)
 			vs.s.setSteamLaunched(conflict, false)
-			vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: &dto.VFSStatusResult{GameID: conflict}})
+			vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: vs.s.unmountedVFSStatusLocked(conflict)})
 			if err := removeLaunchTicket(conflictMM.DataPath()); err != nil {
 				return nil, err
 			}
@@ -300,7 +337,7 @@ func (vs *VFSService) UnmountVFS(gameID string) error {
 	}
 	delete(vs.s.mountStates, gameID)
 	vs.s.setSteamLaunched(gameID, false)
-	vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: &dto.VFSStatusResult{GameID: gameID}})
+	vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: vs.s.unmountedVFSStatusLocked(gameID)})
 	return removeLaunchTicket(mm.DataPath())
 }
 
@@ -311,7 +348,7 @@ func (vs *VFSService) GetVFSStatus(gameID string) (*dto.VFSStatusResult, error) 
 
 	mm, ok := vs.s.mountMgrs[gameID]
 	if !ok {
-		return &dto.VFSStatusResult{GameID: gameID}, nil
+		return vs.s.unmountedVFSStatusLocked(gameID), nil
 	}
 	gc, err := vs.s.config.EffectiveGameConfig(gameID)
 	if err != nil {
@@ -334,11 +371,27 @@ func (vs *VFSService) GetVFSStatus(gameID string) (*dto.VFSStatusResult, error) 
 
 // RetryDeferredRecovery attempts to recover a game whose startup recovery was deferred until its install became idle.
 func (vs *VFSService) RetryDeferredRecovery(gameID string) error {
+	if !vs.s.gameConfigured(gameID) {
+		return fmt.Errorf("game %s: %w", gameID, os.ErrNotExist)
+	}
 	return vs.s.RetryDeferredRecovery(gameID)
 }
 
-// RestoreFromBackup resolves one pending recovery of gameID per confirmation, the mod-loader entry first, re-announcing any entry that remains, and refuses once shutdown began.
-func (vs *VFSService) RestoreFromBackup(gameID string) error {
+// publishRecoveryStatuses announces the current lifecycle of every game sharing an install.
+func (s *session) publishRecoveryStatuses(gameID string) {
+	s.mu.RLock()
+	key := s.fenceKeyLocked(gameID)
+	games := s.gamesOnFenceKeyLocked(gameID, key)
+	s.mu.RUnlock()
+	for _, id := range games {
+		if status, err := s.svc.vfs.GetVFSStatus(id); err == nil {
+			s.publishGuarded(dto.StatusEventResult{VFSStatus: status})
+		}
+	}
+}
+
+// RestoreFromBackup resolves one pending recovery whose kind and identity match the confirmation, or the current item for legacy callers.
+func (vs *VFSService) RestoreFromBackup(gameID string, expectedKind dto.RecoveryKind, recoveryID string) error {
 	if err := vs.s.refuseWhenShuttingDown("restore_from_backup"); err != nil {
 		return err
 	}
@@ -347,6 +400,26 @@ func (vs *VFSService) RestoreFromBackup(gameID string) error {
 	}
 	if err := vs.s.deferredFor(gameID, "restore_from_backup"); err != nil {
 		return err
+	}
+	release, err := vs.s.acquireRecoveryExclusive(gameID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	vs.s.mu.RLock()
+	current := vs.s.recoveryPendingFor(gameID)
+	vs.s.mu.RUnlock()
+	if current != nil && current.Kind != dto.RecoveryKindUnspecified && current.RecoveryID == "" {
+		vs.s.publishRecoveryEvent(dto.StatusEventResult{RecoveryPending: current})
+		return &dto.RecoveryStaleError{GameID: gameID}
+	}
+	if (expectedKind != dto.RecoveryKindUnspecified || recoveryID != "") &&
+		(current == nil || expectedKind != dto.RecoveryKindUnspecified && expectedKind != current.Kind ||
+			recoveryID != "" && recoveryID != current.RecoveryID) {
+		if current != nil {
+			vs.s.publishRecoveryEvent(dto.StatusEventResult{RecoveryPending: current})
+		}
+		return &dto.RecoveryStaleError{GameID: gameID}
 	}
 	loaderHandled, err := vs.s.retryLoaderRecovery(gameID)
 	if err != nil {
@@ -359,6 +432,8 @@ func (vs *VFSService) RestoreFromBackup(gameID string) error {
 		if remaining != nil {
 			vs.s.publishGuarded(dto.StatusEventResult{RecoveryPending: remaining})
 		}
+		vs.s.publishRecoveryStatuses(gameID)
+		release()
 		vs.s.replayDeferredLandings(gameID)
 		return nil
 	}
@@ -391,6 +466,8 @@ func (vs *VFSService) RestoreFromBackup(gameID string) error {
 		}
 		vs.s.pendingRecoveriesMu.Unlock()
 		vs.s.mu.RUnlock()
+		vs.s.publishRecoveryStatuses(gameID)
+		release()
 		vs.s.replayDeferredLandings(gameID)
 		return nil
 	}
@@ -430,6 +507,8 @@ func (vs *VFSService) RestoreFromBackup(gameID string) error {
 	for _, sibling := range siblings {
 		vs.s.publishGuarded(dto.StatusEventResult{Info: fmt.Sprintf("recovery resolved for %s", sibling)})
 	}
+	vs.s.publishRecoveryStatuses(gameID)
+	release()
 	vs.s.replayDeferredLandings(gameID)
 	return nil
 }
