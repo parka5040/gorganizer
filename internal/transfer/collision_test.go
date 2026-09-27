@@ -1,8 +1,11 @@
 package transfer
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -32,6 +35,98 @@ func readFileT(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(data)
+}
+
+func TestImportCanonicalizesProfileIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		policy    dto.CollisionPolicy
+		collision bool
+		finalName string
+	}{
+		{name: "plain", policy: dto.PolicyAbort, finalName: "Default"},
+		{name: "rename", policy: dto.PolicyRename, collision: true, finalName: "Default (2)"},
+		{name: "overwrite", policy: dto.PolicyOverwrite, collision: true, finalName: "Default"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			archive := filepath.Join(t.TempDir(), "forged.tar.zst")
+			setRoot(t, t.TempDir())
+			writeFileT(t, filepath.Join(config.ProfilesDir(testGame), "Default", "profile.json"),
+				`{"name":"../../escape","game_id":"othergame","created_at":"2026-01-02T03:04:05Z","use_custom_ini":true,"extra":{"custom":[1,true]}}`)
+			if _, err := Export(context.Background(), ExportOptions{GameID: testGame, OutputPath: archive}, nil); err != nil {
+				t.Fatal(err)
+			}
+			setRoot(t, t.TempDir())
+			if tc.collision {
+				writeFileT(t, filepath.Join(config.ProfilesDir(testGame), "Default", "profile.json"), `{"name":"Default","game_id":"skyrimse","extra":"original"}`)
+			}
+			sum, err := Import(context.Background(), ImportOptions{GameID: testGame, ArchivePath: archive, Policy: tc.policy}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sum.ProfilesTransferred != 1 {
+				t.Errorf("summary = %+v, want one imported profile", sum)
+			}
+			data := []byte(readFileT(t, filepath.Join(config.ProfilesDir(testGame), tc.finalName, "profile.json")))
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(data, &fields); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{
+				"name":           tc.finalName,
+				"game_id":        testGame,
+				"created_at":     "2026-01-02T03:04:05Z",
+				"use_custom_ini": "true",
+				"extra":          `{"custom":[1,true]}`,
+			}
+			for key, value := range want {
+				if key == "name" || key == "game_id" || key == "created_at" {
+					encoded, _ := json.Marshal(value)
+					value = string(encoded)
+				}
+				var compact bytes.Buffer
+				if err := json.Compact(&compact, fields[key]); err != nil || compact.String() != value {
+					t.Errorf("%s = %s, want %s (compact error: %v)", key, fields[key], value, err)
+				}
+			}
+			if tc.policy == dto.PolicyRename {
+				if sum.Renamed["Default"] != tc.finalName {
+					t.Errorf("rename summary = %+v", sum.Renamed)
+				}
+				if got := readFileT(t, filepath.Join(config.ProfilesDir(testGame), "Default", "profile.json")); !strings.Contains(got, "original") {
+					t.Errorf("original profile was replaced: %s", got)
+				}
+			}
+			assertNoStagingLeftovers(t)
+		})
+	}
+}
+
+func TestImportRejectsMalformedProfileBeforePublication(t *testing.T) {
+	for _, policy := range []dto.CollisionPolicy{dto.PolicyRename, dto.PolicyOverwrite} {
+		t.Run(fmt.Sprint(policy), func(t *testing.T) {
+			archive := filepath.Join(t.TempDir(), "malformed.tar.zst")
+			setRoot(t, t.TempDir())
+			writeFileT(t, filepath.Join(config.ProfilesDir(testGame), "Default", "profile.json"), `{"name":`)
+			if _, err := Export(context.Background(), ExportOptions{GameID: testGame, OutputPath: archive}, nil); err != nil {
+				t.Fatal(err)
+			}
+			setRoot(t, t.TempDir())
+			original := `{"name":"Default","game_id":"skyrimse"}`
+			path := filepath.Join(config.ProfilesDir(testGame), "Default", "profile.json")
+			writeFileT(t, path, original)
+			if _, err := Import(context.Background(), ImportOptions{GameID: testGame, ArchivePath: archive, Policy: policy}, nil); err == nil {
+				t.Fatal("Import accepted malformed profile.json")
+			}
+			if got := readFileT(t, path); got != original {
+				t.Errorf("original profile changed to %s", got)
+			}
+			if _, err := os.Lstat(filepath.Join(config.ProfilesDir(testGame), "Default (2)")); !os.IsNotExist(err) {
+				t.Errorf("malformed renamed profile was published: %v", err)
+			}
+			assertNoStagingLeftovers(t)
+		})
+	}
 }
 
 // TestImportPolicyAbort locks that ABORT fails before any write when a collision exists.

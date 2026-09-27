@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/dto"
@@ -442,32 +443,36 @@ func finalizeProfile(opts ImportOptions, name, staged string, summary *dto.Trans
 	}
 	defer unlock()
 	target := filepath.Join(config.ProfilesDir(opts.GameID), name)
-	if _, err := os.Stat(target); err == nil {
+	finalName := name
+	collision := profileExists(opts.GameID, name)
+	if collision {
 		switch opts.Policy {
 		case dto.PolicySkip:
 			summary.Skipped = append(summary.Skipped, name)
 			return nil
 		case dto.PolicyRename:
-			newName := renameCandidate(name, func(c string) bool {
+			finalName = renameCandidate(name, func(c string) bool {
 				return profileExists(opts.GameID, c)
 			})
-			relabelProfileJSON(staged, newName)
-			if err := os.Rename(staged, filepath.Join(config.ProfilesDir(opts.GameID), newName)); err != nil {
-				return fmt.Errorf("importing profile %q as %q: %w", name, newName, err)
-			}
-			summary.Renamed[name] = newName
-			summary.ProfilesTransferred++
-			return nil
+			target = filepath.Join(config.ProfilesDir(opts.GameID), finalName)
 		case dto.PolicyOverwrite:
-			if err := os.RemoveAll(target); err != nil {
-				return fmt.Errorf("replacing profile %q: %w", name, err)
-			}
 		default:
 			return &TransferCollisionError{Name: name}
 		}
 	}
+	if err := canonicalizeProfileJSON(staged, opts.GameID, finalName); err != nil {
+		return fmt.Errorf("preparing profile %q: %w", name, err)
+	}
+	if collision && opts.Policy == dto.PolicyOverwrite {
+		if err := os.RemoveAll(target); err != nil {
+			return fmt.Errorf("replacing profile %q: %w", name, err)
+		}
+	}
 	if err := os.Rename(staged, target); err != nil {
 		return fmt.Errorf("importing profile %q: %w", name, err)
+	}
+	if finalName != name {
+		summary.Renamed[name] = finalName
 	}
 	summary.ProfilesTransferred++
 	return nil
@@ -556,23 +561,38 @@ func relabelModMetadata(staged, oldName, newName string) {
 	_ = download.SaveModMetadata(staged, meta)
 }
 
-// relabelProfileJSON rewrites a staged profile.json name after a RENAME, best-effort.
-func relabelProfileJSON(staged, newName string) {
+// canonicalizeProfileJSON writes the final directory identity into staged profile.json.
+func canonicalizeProfileJSON(staged, gameID, name string) error {
 	path := filepath.Join(staged, "profile.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return
+		return fmt.Errorf("reading %s: %w", path, err)
 	}
-	var raw map[string]any
+	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return
+		return fmt.Errorf("parsing %s: %w", path, err)
 	}
-	raw["name"] = newName
+	if raw == nil {
+		return fmt.Errorf("parsing %s: expected a JSON object", path)
+	}
+	nameJSON, err := json.Marshal(name)
+	if err != nil {
+		return fmt.Errorf("encoding profile name: %w", err)
+	}
+	gameJSON, err := json.Marshal(gameID)
+	if err != nil {
+		return fmt.Errorf("encoding profile game ID: %w", err)
+	}
+	raw["name"] = nameJSON
+	raw["game_id"] = gameJSON
 	out, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
-		return
+		return fmt.Errorf("marshaling %s: %w", path, err)
 	}
-	_ = os.WriteFile(path, out, 0644)
+	if err := atomicfile.WriteFile(path, out, 0644); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
 }
 
 // renameCandidate returns "<base> (2)", "<base> (3)", ... skipping taken names.

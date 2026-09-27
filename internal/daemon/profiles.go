@@ -192,7 +192,10 @@ func (ps *ProfileService) ListSeparators(gameID, profileName string) ([]dto.Sepa
 	if err := validateProfileName(profileName); err != nil {
 		return nil, false, err
 	}
-	dir := ps.s.profileMgr.ProfileDir(gameID, profileName)
+	dir, err := ps.s.profileMgr.CheckedProfileDir(gameID, profileName)
+	if err != nil {
+		return nil, false, err
+	}
 	layout, err := separators.LoadLayout(dir)
 	if err != nil {
 		return nil, false, err
@@ -212,7 +215,10 @@ func (ps *ProfileService) SetSeparators(gameID, profileName string, seps []dto.S
 	if err := validateProfileName(profileName); err != nil {
 		return err
 	}
-	dir := ps.s.profileMgr.ProfileDir(gameID, profileName)
+	dir, err := ps.s.profileMgr.CheckedProfileDir(gameID, profileName)
+	if err != nil {
+		return err
+	}
 	out := make([]separators.Separator, len(seps))
 	for i, s := range seps {
 		out[i] = separators.Separator{

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/parka/gorganizer/internal/atomicfile"
+	"github.com/parka/gorganizer/internal/fsutil"
 	"github.com/parka/gorganizer/internal/mod"
 )
 
@@ -52,8 +53,43 @@ func (pm *Manager) ProfileDir(gameID, profileName string) string {
 	return filepath.Join(pm.dataDir, gameID, "profiles", profileName)
 }
 
+// CheckedProfileDir returns the path for a validated game and profile name.
+func (pm *Manager) CheckedProfileDir(gameID, profileName string) (string, error) {
+	if err := validateProfileIdentity(gameID, profileName); err != nil {
+		return "", err
+	}
+	return pm.ProfileDir(gameID, profileName), nil
+}
+
+// CheckedProfilesDir returns the profiles directory for a validated game ID.
+func (pm *Manager) CheckedProfilesDir(gameID string) (string, error) {
+	if err := validateProfileSegment(gameID); err != nil {
+		return "", err
+	}
+	return filepath.Join(pm.dataDir, gameID, "profiles"), nil
+}
+
+// validateProfileSegment rejects unsafe profile and game directory names.
+func validateProfileSegment(name string) error {
+	if fsutil.ValidateName(name) != nil || strings.HasPrefix(name, ".") {
+		return &IdentityInvalidError{Name: name}
+	}
+	return nil
+}
+
+// validateProfileIdentity checks both path segments of a profile directory.
+func validateProfileIdentity(gameID, profileName string) error {
+	if err := validateProfileSegment(gameID); err != nil {
+		return err
+	}
+	return validateProfileSegment(profileName)
+}
+
 // Load reads profile.json and modlist.txt, auto-creating a fresh profile when missing.
 func (pm *Manager) Load(gameID, profileName string) (*Profile, []mod.ModListEntry, error) {
+	if err := validateProfileIdentity(gameID, profileName); err != nil {
+		return nil, nil, err
+	}
 	dir := pm.ProfileDir(gameID, profileName)
 
 	profilePath := filepath.Join(dir, "profile.json")
@@ -76,6 +112,11 @@ func (pm *Manager) Load(gameID, profileName string) (*Profile, []mod.ModListEntr
 	if err := json.Unmarshal(profileData, &p); err != nil {
 		return nil, nil, fmt.Errorf("parsing profile %s: %w", profilePath, err)
 	}
+	if p.Name != profileName || p.GameID != gameID {
+		slog.Warn("profile.json identity differs from its directory", "game", gameID, "profile", profileName, "embedded_game", p.GameID, "embedded_profile", p.Name)
+	}
+	p.Name = profileName
+	p.GameID = gameID
 
 	modlistPath := filepath.Join(dir, "modlist.txt")
 	modlistFile, err := os.Open(modlistPath)
@@ -108,9 +149,18 @@ const OverwriteModName = "Overwrite"
 
 // Save writes profile.json and modlist.txt for a profile.
 func (pm *Manager) Save(p *Profile, entries []mod.ModListEntry) error {
+	if err := validateProfileIdentity(p.GameID, p.Name); err != nil {
+		return err
+	}
 	dir := pm.ProfileDir(p.GameID, p.Name)
+	if err := refuseSymlinkedProfileDir(dir); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating profile dir %s: %w", dir, err)
+	}
+	if err := refuseSymlinkedProfileDir(dir); err != nil {
+		return err
 	}
 
 	profileData, err := json.MarshalIndent(p, "", "  ")
@@ -142,7 +192,25 @@ func (pm *Manager) Save(p *Profile, entries []mod.ModListEntry) error {
 	return nil
 }
 
+// refuseSymlinkedProfileDir rejects profile directories that are symbolic links.
+func refuseSymlinkedProfileDir(dir string) error {
+	info, err := os.Lstat(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("checking profile dir %s: %w", dir, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("profile dir %s is a symlink", dir)
+	}
+	return nil
+}
+
 func (pm *Manager) List(gameID string) ([]*Profile, error) {
+	if err := validateProfileSegment(gameID); err != nil {
+		return nil, err
+	}
 	dir := filepath.Join(pm.dataDir, gameID, "profiles")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -154,15 +222,13 @@ func (pm *Manager) List(gameID string) ([]*Profile, error) {
 
 	var profiles []*Profile
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() || validateProfileSegment(entry.Name()) != nil {
 			continue
 		}
 		profilePath := filepath.Join(dir, entry.Name(), "profile.json")
 		data, err := os.ReadFile(profilePath)
 		if err != nil {
-			if !strings.HasPrefix(entry.Name(), ".") {
-				slog.Warn("skipping profile with an unreadable profile.json", "game", gameID, "profile", entry.Name(), "err", err)
-			}
+			slog.Warn("skipping profile with an unreadable profile.json", "game", gameID, "profile", entry.Name(), "err", err)
 			continue
 		}
 		var p Profile
@@ -170,12 +236,20 @@ func (pm *Manager) List(gameID string) ([]*Profile, error) {
 			slog.Warn("skipping profile with a corrupt profile.json", "game", gameID, "profile", entry.Name(), "err", err)
 			continue
 		}
+		if p.Name != entry.Name() || p.GameID != gameID {
+			slog.Warn("profile.json identity differs from its directory", "game", gameID, "profile", entry.Name(), "embedded_game", p.GameID, "embedded_profile", p.Name)
+		}
+		p.Name = entry.Name()
+		p.GameID = gameID
 		profiles = append(profiles, &p)
 	}
 	return profiles, nil
 }
 
 func (pm *Manager) Create(gameID, profileName string) (*Profile, error) {
+	if err := validateProfileIdentity(gameID, profileName); err != nil {
+		return nil, err
+	}
 	dir := pm.ProfileDir(gameID, profileName)
 	if _, err := os.Stat(dir); err == nil {
 		return nil, fmt.Errorf("profile %q already exists for %s", profileName, gameID)
@@ -193,6 +267,9 @@ func (pm *Manager) Create(gameID, profileName string) (*Profile, error) {
 }
 
 func (pm *Manager) Delete(gameID, profileName string) error {
+	if err := validateProfileIdentity(gameID, profileName); err != nil {
+		return err
+	}
 	dir := pm.ProfileDir(gameID, profileName)
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("deleting profile %s: %w", dir, err)
@@ -219,6 +296,9 @@ func (pm *Manager) LoadPluginOrder(gameID, profileName string) ([]string, error)
 }
 
 func (pm *Manager) loadPluginOrderUnlocked(gameID, profileName string) ([]string, error) {
+	if err := validateProfileIdentity(gameID, profileName); err != nil {
+		return nil, err
+	}
 	path := filepath.Join(pm.ProfileDir(gameID, profileName), pluginOrderFile)
 	f, err := os.Open(path)
 	if err != nil {
@@ -246,6 +326,9 @@ func (pm *Manager) loadPluginOrderUnlocked(gameID, profileName string) ([]string
 
 // SavePluginOrder applies legacy order-only updates without losing signed activation state.
 func (pm *Manager) SavePluginOrder(gameID, profileName string, filenames []string) error {
+	if err := validateProfileIdentity(gameID, profileName); err != nil {
+		return err
+	}
 	lock := pm.loadoutLock(gameID, profileName)
 	lock.Lock()
 	defer lock.Unlock()
@@ -323,6 +406,9 @@ func (pm *Manager) LoadPluginState(gameID, profileName string) (map[string]bool,
 }
 
 func (pm *Manager) loadPluginStateEntriesUnlocked(gameID, profileName string) ([]PluginLoadoutEntry, bool, error) {
+	if err := validateProfileIdentity(gameID, profileName); err != nil {
+		return nil, false, err
+	}
 	path := filepath.Join(pm.ProfileDir(gameID, profileName), pluginStateFile)
 	f, err := os.Open(path)
 	if err != nil {
@@ -400,6 +486,9 @@ func (pm *Manager) SavePluginLoadout(gameID, profileName string, entries []Plugi
 }
 
 func (pm *Manager) savePluginLoadoutUnlocked(gameID, profileName string, entries []PluginLoadoutEntry) error {
+	if err := validateProfileIdentity(gameID, profileName); err != nil {
+		return err
+	}
 	dir := pm.ProfileDir(gameID, profileName)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating profile dir %s: %w", dir, err)

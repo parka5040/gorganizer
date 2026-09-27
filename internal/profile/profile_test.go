@@ -1,6 +1,7 @@
 package profile
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,118 @@ import (
 
 	"github.com/parka/gorganizer/internal/mod"
 )
+
+func TestProfileIdentityComesFromDirectory(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	pm := NewManager(t.TempDir())
+	dir := pm.ProfileDir("skyrimse", "Default")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(`{"name":"other","game_id":"othergame","created_at":"2026-01-02T03:04:05Z","use_custom_ini":true}`)
+	if err := os.WriteFile(filepath.Join(dir, "profile.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".hidden", "bad\\name"} {
+		hidden := pm.ProfileDir("skyrimse", name)
+		if err := os.MkdirAll(hidden, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(hidden, "profile.json"), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(dir, pm.ProfileDir("skyrimse", "Linked")); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, _, err := pm.Load("skyrimse", "Default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err := pm.List("skyrimse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("List returned %d profiles, want one: %+v", len(listed), listed)
+	}
+	for _, p := range []*Profile{loaded, listed[0]} {
+		if p.Name != "Default" || p.GameID != "skyrimse" || p.CreatedAt.Format("2006-01-02T15:04:05Z") != "2026-01-02T03:04:05Z" || !p.UseCustomIni {
+			t.Errorf("profile = %+v, want directory identity and saved settings", p)
+		}
+	}
+}
+
+func TestProfileWritesRejectUnsafeNames(t *testing.T) {
+	for _, name := range []string{"..", "a/b", ".x", ""} {
+		for _, segment := range []string{"profile", "game"} {
+			t.Run(fmt.Sprintf("%s/%q", segment, name), func(t *testing.T) {
+				t.Setenv("HOME", t.TempDir())
+				root := t.TempDir()
+				pm := NewManager(root)
+				gameID, profileName := "skyrimse", "Default"
+				if segment == "game" {
+					gameID = name
+				} else {
+					profileName = name
+				}
+				checks := []struct {
+					name string
+					run  func() error
+				}{
+					{"Load", func() error { _, _, err := pm.Load(gameID, profileName); return err }},
+					{"Save", func() error { return pm.Save(&Profile{GameID: gameID, Name: profileName}, nil) }},
+					{"Create", func() error { _, err := pm.Create(gameID, profileName); return err }},
+					{"Delete", func() error { return pm.Delete(gameID, profileName) }},
+					{"List", func() error { _, err := pm.List(gameID); return err }},
+					{"CheckedProfileDir", func() error { _, err := pm.CheckedProfileDir(gameID, profileName); return err }},
+					{"CheckedProfilesDir", func() error { _, err := pm.CheckedProfilesDir(gameID); return err }},
+					{"SavePluginOrder", func() error { return pm.SavePluginOrder(gameID, profileName, []string{"A.esp"}) }},
+					{"SavePluginLoadout", func() error {
+						return pm.SavePluginLoadout(gameID, profileName, []PluginLoadoutEntry{{Filename: "A.esp", Enabled: true}})
+					}},
+					{"LoadPluginOrder", func() error { _, err := pm.LoadPluginOrder(gameID, profileName); return err }},
+					{"LoadPluginState", func() error { _, _, err := pm.LoadPluginState(gameID, profileName); return err }},
+					{"LoadPluginLoadoutSnapshot", func() error { _, _, err := pm.LoadPluginLoadoutSnapshot(gameID, profileName); return err }},
+				}
+				for _, check := range checks {
+					if (check.name == "List" || check.name == "CheckedProfilesDir") && segment != "game" {
+						continue
+					}
+					err := check.run()
+					var invalid *IdentityInvalidError
+					if !errors.As(err, &invalid) || invalid.Name != name {
+						t.Errorf("%s returned %v, want IdentityInvalidError for %q", check.name, err, name)
+					}
+				}
+				entries, err := os.ReadDir(root)
+				if err != nil || len(entries) != 0 {
+					t.Errorf("invalid identity created entries %v: %v", entries, err)
+				}
+			})
+		}
+	}
+}
+
+func TestSaveRefusesSymlinkedProfileDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	pm := NewManager(t.TempDir())
+	outside := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(pm.ProfileDir("skyrimse", "Linked")), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, pm.ProfileDir("skyrimse", "Linked")); err != nil {
+		t.Fatal(err)
+	}
+	if err := pm.Save(&Profile{GameID: "skyrimse", Name: "Linked"}, nil); err == nil {
+		t.Fatal("Save accepted a symlinked profile directory")
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("symlink destination contains %v: %v", entries, err)
+	}
+}
 
 func TestCreateAndLoad(t *testing.T) {
 	dir := t.TempDir()

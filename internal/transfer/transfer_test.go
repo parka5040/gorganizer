@@ -64,7 +64,7 @@ func buildInstance(t *testing.T) {
 
 	profDir := filepath.Join(config.ProfilesDir(testGame), "Default")
 	writeFileT(t, filepath.Join(profDir, "profile.json"),
-		"{\n  \"name\": \"Default\",\n  \"game_id\": \"skyrimse\",\n  \"created_at\": \"2026-01-02T03:04:05Z\"\n}")
+		"{\n  \"created_at\": \"2026-01-02T03:04:05Z\",\n  \"game_id\": \"skyrimse\",\n  \"name\": \"Default\"\n}")
 	writeFileT(t, filepath.Join(profDir, "modlist.txt"),
 		"# Gorganizer modlist — do not edit while daemon is running\n+Alpha Mod\n-Beta\n+Gamma\n")
 	writeFileT(t, filepath.Join(profDir, "plugin_order.txt"),
