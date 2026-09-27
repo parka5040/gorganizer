@@ -28,6 +28,7 @@ class FalloutPatchController;
 class GameSetupController;
 class ModLoaderController;
 class ModDependencyController;
+class SteamMaintenanceController;
 class SmapiModsWidget;
 
 class MainWindow : public QMainWindow {
@@ -103,6 +104,7 @@ private:
     GameSetupController* m_gameSetup = nullptr;
     ModLoaderController* m_modLoader = nullptr;
     ModDependencyController* m_modDependencies = nullptr;
+    SteamMaintenanceController* m_steamMaintenance = nullptr;
 
     QActionGroup* m_themeActions = nullptr;
     QActionGroup* m_appearanceActions = nullptr;
@@ -110,6 +112,8 @@ private:
     QAction* m_exportAction = nullptr;
     QAction* m_importAction = nullptr;
     QAction* m_unmountAction = nullptr;
+    QAction* m_steamHelpAction = nullptr;
+    QAction* m_pauseForSteamAction = nullptr;
     QAction* m_patch4GBAction = nullptr;
     QAction* m_installTtwAction = nullptr;
     QAction* m_iniEditorAction = nullptr;

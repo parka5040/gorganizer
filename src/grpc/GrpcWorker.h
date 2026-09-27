@@ -51,6 +51,10 @@ public slots:
     void doGetVfsStatus(const QString& gameId);
     // Reads gameId's VFS status and reports it, or the failure, under requestId.
     void doQueryVfsStatus(quint64 requestId, const QString& gameId);
+    void doSetSteamMaintenance(quint64 requestId, const QString& gameId, bool enabled, bool verificationConfirmed);
+    void doImportPreservedFiles(quint64 requestId, const QString& gameId, const QString& batchId,
+                                const QString& modName, const QStringList& relativePaths);
+    void doDeletePreservedBatch(quint64 requestId, const QString& gameId, const QString& batchId);
     void doRebuildVfs(const QString& gameId);
     void doRestoreFromBackup(const QString& gameId, GrpcRecoveryKind kind, const QString& recoveryId);
     void doRetryVfsRecovery(const QString& gameId);
@@ -125,6 +129,12 @@ signals:
     void vfsRecoveryRetried(const QString& gameId);
     void vfsStatusQueried(quint64 requestId, const GrpcVFSStatus& status);
     void vfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void steamMaintenanceSet(quint64 requestId, const GrpcVFSStatus& status);
+    void steamMaintenanceSetFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void preservedFilesImported(quint64 requestId, const QString& gameId, const QString& modName, int fileCount);
+    void preservedFilesImportFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void preservedBatchDeleted(quint64 requestId, const GrpcVFSStatus& status);
+    void preservedBatchDeleteFailed(quint64 requestId, const QString& gameId, const QString& error);
     void maintenanceUnmountFinished(quint64 requestId, const QString& gameId, bool ok, int grpcCode, const QString& error);
     void vfsRebuilt();
     void conflictsReceived(const std::vector<GrpcFileConflict>& conflicts);

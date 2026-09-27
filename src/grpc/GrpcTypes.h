@@ -129,6 +129,14 @@ struct GrpcShutdownPlanItem {
     QString retainedReason;
 };
 
+struct GrpcPreservedBatch {
+    QString batchId;
+    QString createdAt;
+    int fileCount = 0;
+    QString reason;
+    QString path;
+};
+
 struct GrpcVFSStatus {
     bool mounted = false;
     QString gameId;
@@ -142,6 +150,7 @@ struct GrpcVFSStatus {
     GrpcVFSLifecycleState lifecycleState = GrpcVFSLifecycleState::Unspecified;
     QString lifecycleReason;
     GrpcSteamMaintenanceState steamMaintenance = GrpcSteamMaintenanceState::Unspecified;
+    std::vector<GrpcPreservedBatch> preservedBatches;
     bool hasPendingRecovery = false;
     GrpcRecoveryPending pendingRecovery;
 };

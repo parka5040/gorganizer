@@ -79,6 +79,10 @@ signals:
     void profileChanged(const QString& profileName);
     void recoveryReviewRequested(const QString& gameId);
     void profileSwitchActivityChanged();
+    void steamHelpRequested();
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     // Rebuilds the managed-game list from a daemon detection pass (authoritative over local detection).
@@ -146,6 +150,7 @@ private:
     bool m_vfsMounted = false;
     bool m_hasModStatus = false;
     GrpcSteamMaintenanceState m_steamMaintenance = GrpcSteamMaintenanceState::Unspecified;
+    bool m_hasSavedSteamFiles = false;
     QHash<QString, GrpcVFSLifecycleState> m_lifecycleStates;
     quint64 m_autoMountQueryId = 0;
     QString m_retryGameId;

@@ -83,6 +83,10 @@ public:
     void getVfsStatus(const QString& gameId);
     // Queues a VFS status query on the unary worker and returns the id vfsStatusQueried or vfsStatusQueryFailed carries.
     quint64 queryVfsStatus(const QString& gameId);
+    quint64 setSteamMaintenance(const QString& gameId, bool enabled, bool verificationConfirmed);
+    quint64 importPreservedFiles(const QString& gameId, const QString& batchId,
+                                 const QString& modName, const QStringList& relativePaths);
+    quint64 deletePreservedBatch(const QString& gameId, const QString& batchId);
     void rebuildVfs(const QString& gameId);
     // Restores the pending recovery only when its kind and identity still match the confirmed item.
     void restoreFromBackup(const QString& gameId, GrpcRecoveryKind kind, const QString& recoveryId);
@@ -287,6 +291,12 @@ signals:
     void vfsRecoveryRetried(const QString& gameId);
     void vfsStatusQueried(quint64 requestId, const GrpcVFSStatus& status);
     void vfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void steamMaintenanceSet(quint64 requestId, const GrpcVFSStatus& status);
+    void steamMaintenanceSetFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void preservedFilesImported(quint64 requestId, const QString& gameId, const QString& modName, int fileCount);
+    void preservedFilesImportFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void preservedBatchDeleted(quint64 requestId, const GrpcVFSStatus& status);
+    void preservedBatchDeleteFailed(quint64 requestId, const QString& gameId, const QString& error);
     void maintenanceUnmountFinished(quint64 requestId, const QString& gameId, bool ok, int grpcCode, const QString& error);
     void vfsRebuilt();
 
@@ -406,6 +416,7 @@ private:
     quint64 m_nextModListRequestId = 0;
     quint64 m_nextDependencyRequestId = 0;
     quint64 m_nextVfsRequestId = 0;
+    quint64 m_nextSteamRequestId = 0;
     QString m_subscribedGame;
     QString m_pluginGame;
     QString m_pluginProfile;

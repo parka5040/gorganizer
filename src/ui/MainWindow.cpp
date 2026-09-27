@@ -14,6 +14,7 @@
 #include "GameSetupController.h"
 #include "ModLoaderController.h"
 #include "ModDependencyController.h"
+#include "SteamMaintenanceController.h"
 #include "ModDependencyText.h"
 #include "SmapiModsWidget.h"
 #include "SettingsDialog.h"
@@ -120,6 +121,8 @@ void MainWindow::setupUi()
     m_iniEditorAction = toolsMenu->addAction("INI &Editor...", this, &MainWindow::onOpenIniEditor);
     toolsMenu->addAction("E&xternal Tools...", this, &MainWindow::onOpenExecutables);
     m_unmountAction = toolsMenu->addAction("&Deactivate Mods…");
+    m_pauseForSteamAction = toolsMenu->addAction("Pause Mods for a Steam Update…");
+    m_steamHelpAction = toolsMenu->addAction("Steam Update Help…");
     m_patch4GBAction = toolsMenu->addAction("Patch Fallout to &4GB");
     m_patch4GBAction->setVisible(false);
     m_installTtwAction = toolsMenu->addAction("Install Tale of Two &Wastelands...");
@@ -230,6 +233,8 @@ void MainWindow::createControllers()
                                       m_modList, m_pluginList, m_downloadsLibrary, m_runButton,
                                       m_applyButton, m_unmountAction, m_statusInfo, statusBar(), this);
     m_modLoader = new ModLoaderController(m_grpc, m_session, m_smapiMenu, statusBar(), this);
+    m_steamMaintenance = new SteamMaintenanceController(m_grpc, m_session, m_steamHelpAction,
+                                                        m_pauseForSteamAction, statusBar(), this);
     m_launch = new LaunchController(m_config, m_grpc, m_session, m_modLoader, m_runButton, statusBar(), this);
     m_falloutPatch = new FalloutPatchController(m_grpc, m_session, m_runButton, m_patch4GBAction,
                                                 statusBar(), this);
@@ -256,6 +261,10 @@ void MainWindow::wireConnections()
             m_pluginList, &PluginListWidget::refresh);
     connect(m_downloadsLibrary, &DownloadsLibraryView::modInstalledFromDownload, this, [this] {
         if (m_session->activeGame().detected)
+            m_modList->loadForGame(m_session->activeGame(), m_session->currentProfile());
+    });
+    connect(m_steamMaintenance, &SteamMaintenanceController::modRecovered, this, [this](const QString& gameId) {
+        if (m_session->activeGame().detected && m_session->activeGame().shortName == gameId)
             m_modList->loadForGame(m_session->activeGame(), m_session->currentProfile());
     });
 
