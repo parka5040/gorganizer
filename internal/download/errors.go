@@ -107,3 +107,29 @@ type FomodReinstallUnsupportedError struct {
 func (e *FomodReinstallUnsupportedError) Error() string {
 	return fmt.Sprintf("mod %q was installed through a FOMOD installer and cannot be reinstalled automatically; reinstall it from its archive", e.Mod)
 }
+
+const (
+	ArchiveRejectedUnsafeEntry     = "unsafe_entry"
+	ArchiveRejectedNestedInstaller = "nested_installer"
+	ArchiveRejectedLimit           = "limit"
+	ArchiveRejectedDestination     = "destination"
+	ArchiveRejectedUnsupported     = "unsupported"
+)
+
+type ArchiveRejectedError struct {
+	Reason string
+	Detail string
+}
+
+// Error returns the reason the archive was refused and the offending detail.
+func (e *ArchiveRejectedError) Error() string {
+	if e.Detail == "" {
+		return fmt.Sprintf("archive rejected: %s", e.Reason)
+	}
+	return fmt.Sprintf("archive rejected: %s: %s", e.Reason, e.Detail)
+}
+
+// Unwrap reports ErrUnsafeArchive so callers matching the sentinel keep working.
+func (e *ArchiveRejectedError) Unwrap() error {
+	return ErrUnsafeArchive
+}

@@ -8,6 +8,7 @@ import (
 	"github.com/parka/gorganizer/internal/daemon"
 	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/dto"
+	"github.com/parka/gorganizer/internal/profile"
 	"github.com/parka/gorganizer/internal/smapi"
 	"github.com/parka/gorganizer/internal/tools"
 	"github.com/parka/gorganizer/internal/transfer"
@@ -57,6 +58,9 @@ func registeredTokenSamples() map[string]error {
 		tokenTransferPath:               &transfer.TransferPathError{Entry: "../evil"},
 		tokenTransferCollision:          &transfer.TransferCollisionError{Name: "SkyUI"},
 		tokenTransferOverwriteMounted:   &daemon.TransferOverwriteMountedError{Name: "SkyUI"},
+		tokenArchiveRejected:            &download.ArchiveRejectedError{Reason: download.ArchiveRejectedNestedInstaller, Detail: "...fomod"},
+		tokenBundleRejected:             &transfer.BundleRejectedError{Reason: transfer.BundleRejectedLink, Item: "mods/M/a"},
+		tokenProfileIdentityInvalid:     &profile.IdentityInvalidError{Name: "../.."},
 	}
 }
 

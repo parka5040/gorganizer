@@ -34,3 +34,22 @@ type TransferCollisionError struct {
 func (e *TransferCollisionError) Error() string {
 	return fmt.Sprintf("transfer_collision:name=%s", e.Name)
 }
+
+const (
+	BundleRejectedLink        = "link"
+	BundleRejectedSpecial     = "special_entry"
+	BundleRejectedProfileName = "profile_name"
+	BundleRejectedDuplicate   = "duplicate"
+	BundleRejectedLimit       = "limit"
+	BundleRejectedManifest    = "manifest"
+)
+
+type BundleRejectedError struct {
+	Reason string
+	Item   string
+}
+
+// Error returns the reason the export bundle was refused and the offending item.
+func (e *BundleRejectedError) Error() string {
+	return fmt.Sprintf("export bundle rejected: %s: %q", e.Reason, e.Item)
+}

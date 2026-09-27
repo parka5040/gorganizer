@@ -11,6 +11,7 @@ import (
 	"github.com/parka/gorganizer/internal/daemon"
 	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/dto"
+	"github.com/parka/gorganizer/internal/profile"
 	"github.com/parka/gorganizer/internal/smapi"
 	"github.com/parka/gorganizer/internal/tools"
 	"github.com/parka/gorganizer/internal/transfer"
@@ -59,6 +60,9 @@ const (
 	tokenTransferPath               = "transfer_path:"
 	tokenTransferCollision          = "transfer_collision:"
 	tokenTransferOverwriteMounted   = "transfer_overwrite_mounted:"
+	tokenArchiveRejected            = "archive_rejected:"
+	tokenBundleRejected             = "bundle_rejected:"
+	tokenProfileIdentityInvalid     = "profile_identity_invalid:"
 )
 
 var errorTokens = []string{
@@ -70,6 +74,7 @@ var errorTokens = []string{
 	tokenPreviewNotFound, tokenVFSMutex, tokenLinkedParentMissing, tokenTTWDrift, tokenPrefixMissing,
 	tokenSteamNotRunning, tokenTTWRequiresVanillaFNV, tokenXNVSEMissingForTTW, tokenFNV4GBNotAppliedForTTW,
 	tokenTransferGameMismatch, tokenTransferSchema, tokenTransferPath, tokenTransferCollision, tokenTransferOverwriteMounted,
+	tokenArchiveRejected, tokenBundleRejected, tokenProfileIdentityInvalid,
 }
 
 // MapError turns a structured error into a gRPC status; unrecognized errors pass through with ok=false.
@@ -270,6 +275,22 @@ func MapError(err error) (error, bool) {
 	if errors.As(err, &overwriteMounted) {
 		msg := tokenTransferOverwriteMounted + fmt.Sprintf("name=%s", overwriteMounted.Name)
 		return status.Error(codes.FailedPrecondition, msg), true
+	}
+	var archiveRejected *download.ArchiveRejectedError
+	if errors.As(err, &archiveRejected) {
+		return status.Error(codes.InvalidArgument, tokenArchiveRejected+"reason="+escapeTokenValue(archiveRejected.Reason)), true
+	}
+	if errors.Is(err, download.ErrUnsafeArchive) {
+		return status.Error(codes.InvalidArgument, tokenArchiveRejected+"reason="+download.ArchiveRejectedUnsafeEntry), true
+	}
+	var bundleRejected *transfer.BundleRejectedError
+	if errors.As(err, &bundleRejected) {
+		msg := tokenBundleRejected + fmt.Sprintf("reason=%s:item=%s", escapeTokenValue(bundleRejected.Reason), escapeTokenValue(bundleRejected.Item))
+		return status.Error(codes.InvalidArgument, msg), true
+	}
+	var profileIdentity *profile.IdentityInvalidError
+	if errors.As(err, &profileIdentity) {
+		return status.Error(codes.InvalidArgument, tokenProfileIdentityInvalid+"name="+escapeTokenValue(profileIdentity.Name)), true
 	}
 	return nil, false
 }

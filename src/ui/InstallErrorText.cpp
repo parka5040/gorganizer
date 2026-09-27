@@ -171,6 +171,23 @@ QString modLoaderUnavailableMessage(const QString& reason, const QString& gameId
     return text + QStringLiteral(" Repair it from Tools → SMAPI.");
 }
 
+// Returns the plain-language explanation for an archive refused by the daemon.
+QString archiveRejectedMessage(const QString& reason)
+{
+    if (reason == QLatin1String("nested_installer"))
+        return QStringLiteral("This archive contains an unsafe nested installer. Nothing was installed.");
+    if (reason == QLatin1String("limit"))
+        return QStringLiteral("This archive is too large or contains too many files to install safely. "
+                              "Nothing was installed.");
+    if (reason == QLatin1String("destination"))
+        return QStringLiteral("This download has an unsafe saved location. Download it again from Nexus Mods.");
+    if (reason == QLatin1String("unsupported"))
+        return QStringLiteral("This archive uses a format Gorganizer cannot open safely (for example a "
+                              "multi-part or encrypted RAR). Try a ZIP or 7z version of the mod.");
+    return QStringLiteral("This archive contains unsafe file names or links, so it was not installed. "
+                          "Nothing was changed.");
+}
+
 QString knownTokenMessage(const InstallError& parsed)
 {
     const QString& token = parsed.token;
@@ -231,6 +248,17 @@ QString knownTokenMessage(const InstallError& parsed)
             .arg(gameName(field("game"), QStringLiteral("The game")));
     if (token == QLatin1String("daemon_shutting_down"))
         return QStringLiteral("The gorganizer daemon is shutting down. Start gorganizer again to continue.");
+    if (token == QLatin1String("archive_rejected"))
+        return archiveRejectedMessage(field("reason"));
+    if (token == QLatin1String("bundle_rejected")) {
+        if (field("reason") == QLatin1String("limit"))
+            return QStringLiteral("This backup is larger than Gorganizer's safety limits, so nothing was imported. "
+                                  "Ask for a smaller export bundle.");
+        return QStringLiteral("This backup contains unsafe names or file links, so nothing was imported.");
+    }
+    if (token == QLatin1String("profile_identity_invalid"))
+        return QStringLiteral("The profile \"%1\" has an invalid name or folder, so it was not changed.")
+            .arg(field("name"));
     return QString();
 }
 
@@ -290,6 +318,9 @@ bool tokenValuesPercentEscaped(const QString& token)
         QStringLiteral("mod_dependencies_unsupported"),
         QStringLiteral("game_running"),
         QStringLiteral("daemon_shutting_down"),
+        QStringLiteral("archive_rejected"),
+        QStringLiteral("bundle_rejected"),
+        QStringLiteral("profile_identity_invalid"),
     };
     return escaped.contains(token);
 }
