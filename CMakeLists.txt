@@ -21,7 +21,7 @@ if(GORGANIZER_VERSION MATCHES "[\"\\\\\n\r]")
 endif()
 add_compile_definitions(GORGANIZER_VERSION="${GORGANIZER_VERSION}")
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
+find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Network)
 find_package(PkgConfig REQUIRED)
 # pkg_check_modules caches its results and never re-queries pkg-config.
 # A system upgrade that drops a library can leave the link line pointing
