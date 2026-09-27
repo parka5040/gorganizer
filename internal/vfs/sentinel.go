@@ -44,7 +44,7 @@ func FarmSiblingSuffixes() []string {
 
 // RetainedFarmSiblingSuffixes returns farm siblings that persist while a launched game may still use its deploy folder.
 func RetainedFarmSiblingSuffixes() []string {
-	return []string{RetainedSessionSiblingSuffix}
+	return []string{RetainedSessionSiblingSuffix, preservedSuffix, maintenanceSuffix}
 }
 
 var farmManifestName = regexp.MustCompile(`^\.gorganizer-farm-[0-9a-f-]{36}\.jsonl$`)

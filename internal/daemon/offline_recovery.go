@@ -7,6 +7,7 @@ import (
 
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/smapi"
+	"github.com/parka/gorganizer/internal/steam"
 	"github.com/parka/gorganizer/internal/vfs"
 )
 
@@ -38,7 +39,8 @@ func RecoverGameOffline(cfg *config.Config, gameID string) (OfflineRecoveryRepor
 	if dataSubpath == "" {
 		dataSubpath = "Data"
 	}
-	dataPath := filepath.Join(gc.InstallPath, dataSubpath)
+	s := &session{config: cfg, rootDeployMgrs: make(map[string]*vfs.RootDeploymentManager), readSteamAppState: steam.ReadAppState}
+	dataPath := filepath.Join(s.mountInstallPath(gc), dataSubpath)
 	var failures []error
 	loaderDeferred := false
 	if _, _, ok := loaderSpecFor(gameID); ok && loaderStatePresent(gc.InstallPath) {
@@ -51,7 +53,6 @@ func RecoverGameOffline(cfg *config.Config, gameID string) (OfflineRecoveryRepor
 		}
 	}
 
-	s := &session{config: cfg, rootDeployMgrs: make(map[string]*vfs.RootDeploymentManager)}
 	manager, rootErr := s.ensureRootDeploymentManager(gameID, gc)
 	if rootErr == nil {
 		var outcome vfs.RootRecoveryOutcome
@@ -66,11 +67,18 @@ func RecoverGameOffline(cfg *config.Config, gameID string) (OfflineRecoveryRepor
 		failures = append(failures, fmt.Errorf("recovering game-root files: %w", rootErr))
 	}
 
-	outcome, dataErr := vfs.CleanupStale(dataPath)
+	_, capture, steamErr := s.steamCaptureLocked(gameID, dataPath)
+	var outcome vfs.RecoveryOutcome
+	var dataErr error
+	if steamErr != nil {
+		report.Data.Pending = steamErr.Error()
+	} else {
+		outcome, dataErr = vfs.CleanupStale(dataPath, capture)
+	}
 	if dataErr != nil {
 		report.Data.Pending = dataErr.Error()
 		failures = append(failures, fmt.Errorf("recovering Data folder: %w", dataErr))
-	} else {
+	} else if steamErr == nil {
 		report.Data.Recovered = outcome.Restored || outcome.FuseUnmounted
 		if outcome.Pending != nil {
 			report.Data.Pending = outcome.Pending.Reason

@@ -67,10 +67,18 @@ func (s *session) pendingRecoveryForStatusLocked(gameID string) *dto.RecoveryPen
 // unmountedVFSStatusLocked reports an install's lifecycle without an active mount; the caller holds s.mu.
 func (s *session) unmountedVFSStatusLocked(gameID string) *dto.VFSStatusResult {
 	state, reason := s.recoveryLifecycleLocked(gameID)
-	return &dto.VFSStatusResult{
+	status := &dto.VFSStatusResult{
 		GameID: gameID, LifecycleState: state, LifecycleReason: reason,
 		PendingRecovery: s.pendingRecoveryForStatusLocked(gameID),
 	}
+	if gc, err := s.config.EffectiveGameConfig(gameID); err == nil {
+		subpath := gc.DataSubpath
+		if subpath == "" {
+			subpath = "Data"
+		}
+		status.SteamMaintenance, status.PreservedBatches = s.steamStatusLocked(gameID, filepath.Join(s.mountInstallPath(gc), subpath))
+	}
+	return status
 }
 
 // vfsStatus builds a VFSStatusResult from the mount's live generation counters and recovery lifecycle; the caller holds s.mu.
@@ -91,19 +99,22 @@ func (vs *VFSService) vfsStatus(gameID string, gc config.GameConfig, profileName
 	}
 	applied, desired := mm.Generations()
 	state, reason := vs.s.recoveryLifecycleLocked(gameID)
+	maintenance, batches := vs.s.steamStatusLocked(gameID, mm.DataPath())
 	return &dto.VFSStatusResult{
-		Mounted:         mm.IsMounted(),
-		GameID:          gameID,
-		ProfileName:     profileName,
-		MountPoint:      filepath.Join(gc.InstallPath, subpath),
-		EnabledModCount: enabled,
-		TotalFileCount:  fileCount,
-		Dirty:           mm.IsDirty(),
-		AppliedGen:      applied,
-		DesiredGen:      desired,
-		LifecycleState:  state,
-		LifecycleReason: reason,
-		PendingRecovery: vs.s.pendingRecoveryForStatusLocked(gameID),
+		Mounted:          mm.IsMounted(),
+		GameID:           gameID,
+		ProfileName:      profileName,
+		MountPoint:       filepath.Join(gc.InstallPath, subpath),
+		EnabledModCount:  enabled,
+		TotalFileCount:   fileCount,
+		Dirty:            mm.IsDirty(),
+		AppliedGen:       applied,
+		DesiredGen:       desired,
+		LifecycleState:   state,
+		LifecycleReason:  reason,
+		PendingRecovery:  vs.s.pendingRecoveryForStatusLocked(gameID),
+		SteamMaintenance: maintenance,
+		PreservedBatches: batches,
 	}
 }
 
@@ -148,6 +159,19 @@ func (vs *VFSService) mountVFSOwned(gameID, profileName string, autoSwap, retarg
 	}
 	defer release()
 
+	targetGC, err := vs.s.config.EffectiveGameConfig(gameID)
+	if err != nil {
+		return nil, err
+	}
+	targetSubpath := targetGC.DataSubpath
+	if targetSubpath == "" {
+		targetSubpath = "Data"
+	}
+	targetDataPath := filepath.Join(vs.s.mountInstallPath(targetGC), targetSubpath)
+	if err := vs.s.maintenanceRefusalLocked(gameID, targetDataPath); err != nil {
+		return nil, err
+	}
+
 	if conflict := vs.s.findMutexConflict(gameID); conflict != "" {
 		if !autoSwap {
 			return nil, &VFSMutexError{
@@ -168,13 +192,16 @@ func (vs *VFSService) mountVFSOwned(gameID, profileName string, autoSwap, retarg
 				return nil, err
 			}
 			conflictState := vs.s.mountStates[conflict]
+			_, capture, err := vs.s.steamCaptureLocked(conflict, conflictMM.DataPath())
+			if err != nil {
+				return nil, err
+			}
 			if rootManager, rootOK := vs.s.rootDeployMgrs[conflict]; rootOK {
 				if _, err := rootManager.Deactivate(); err != nil {
 					return nil, fmt.Errorf("auto-swap root deactivate of %s failed: %w", conflict, err)
 				}
 			}
-			vs.s.logSteamStateLocked(conflict, "auto-swap unmount")
-			if err := conflictMM.Deactivate(); err != nil {
+			if err := conflictMM.DeactivateWithOptions(capture); err != nil {
 				if restoreErr := vs.s.applyRootDeployment(conflict, conflictGC, conflictState.profileName); restoreErr != nil {
 					return nil, fmt.Errorf("auto-swap deactivate of %s failed: %v; restoring root deployment also failed: %w", conflict, err, restoreErr)
 				}
@@ -188,6 +215,9 @@ func (vs *VFSService) mountVFSOwned(gameID, profileName string, autoSwap, retarg
 			}
 			slog.Info("auto-swap: deactivated conflicting VFS", "deactivated", conflict, "now_activating", gameID)
 		}
+	}
+	if err := vs.s.steamAdmissionLocked(gameID, targetDataPath); err != nil {
+		return nil, err
 	}
 
 	gc, ok := vs.s.config.Games[gameID]
@@ -451,13 +481,16 @@ func (vs *VFSService) UnmountVFS(gameID string) error {
 		return err
 	}
 	state := vs.s.mountStates[gameID]
+	_, capture, err := vs.s.steamCaptureLocked(gameID, mm.DataPath())
+	if err != nil {
+		return err
+	}
 	if rootManager, rootOK := vs.s.rootDeployMgrs[gameID]; rootOK {
 		if _, err := rootManager.Deactivate(); err != nil {
 			return fmt.Errorf("deactivating game-root deployment: %w", err)
 		}
 	}
-	vs.s.logSteamStateLocked(gameID, "unmount")
-	if err := mm.Deactivate(); err != nil {
+	if err := mm.DeactivateWithOptions(capture); err != nil {
 		if restoreErr := vs.s.applyRootDeployment(gameID, gc, state.profileName); restoreErr != nil {
 			return fmt.Errorf("deactivating Data VFS failed: %v; restoring game-root deployment also failed: %w", err, restoreErr)
 		}
@@ -634,6 +667,11 @@ func (vs *VFSService) RestoreFromBackup(gameID string, expectedKind dto.Recovery
 		vs.s.mu.Unlock()
 		return &dto.GameRunningError{GameID: gameID, Operation: dto.GameRunningOperationUnmount}
 	}
+	_, capture, steamErr := vs.s.steamCaptureLocked(gameID, pending.DataPath)
+	if steamErr != nil {
+		vs.s.mu.Unlock()
+		return steamErr
+	}
 	manager := vs.s.rootDeployMgrs[gameID]
 	if manager != nil {
 		if _, err := manager.Deactivate(); err != nil {
@@ -641,7 +679,7 @@ func (vs *VFSService) RestoreFromBackup(gameID string, expectedKind dto.Recovery
 			return fmt.Errorf("deactivating game-root deployment before recovery: %w", err)
 		}
 	}
-	if err := vfs.RestoreFromBackup(pending.DataPath); err != nil {
+	if err := vfs.RestoreFromBackup(pending.DataPath, capture); err != nil {
 		if mounted && manager != nil {
 			state := vs.s.mountStates[gameID]
 			if _, restoreErr := manager.Apply(mm.AppliedLayers(), state.profileName); restoreErr != nil {
@@ -716,6 +754,9 @@ func (vs *VFSService) rebuildVFSOwned(gameID string, owner uint64) error {
 		return err
 	}
 	ms := vs.s.mountStates[gameID]
+	if err := vs.s.steamAdmissionLocked(gameID, mm.DataPath()); err != nil {
+		return err
+	}
 
 	_, entries, err := vs.s.profileMgr.Load(gameID, ms.profileName)
 	if err != nil {
@@ -737,7 +778,6 @@ func (vs *VFSService) rebuildVFSOwned(gameID string, owner uint64) error {
 		}
 		return err
 	}
-	vs.s.logSteamStateLocked(gameID, "apply")
 	if err := mm.ReMaterialize(); err != nil {
 		if _, restoreErr := rootManager.Apply(oldLayers, ms.profileName); restoreErr != nil {
 			return fmt.Errorf("re-materializing Data VFS failed: %v; restoring game-root deployment also failed: %w", err, restoreErr)

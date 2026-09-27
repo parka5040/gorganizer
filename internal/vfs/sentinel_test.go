@@ -209,7 +209,8 @@ func TestFarmSiblingSuffixesNameEveryLifecycleSibling(t *testing.T) {
 		}
 	}
 	retained := RetainedFarmSiblingSuffixes()
-	if len(retained) != 1 || retained[0] != RetainedSessionSiblingSuffix {
-		t.Errorf("retained farm siblings = %v, want the launch ticket", retained)
+	if len(retained) != 3 || retained[0] != RetainedSessionSiblingSuffix ||
+		retained[1] != preservedSuffix || retained[2] != maintenanceSuffix {
+		t.Errorf("retained farm siblings = %v, want launch ticket, preserved batches, and maintenance marker", retained)
 	}
 }

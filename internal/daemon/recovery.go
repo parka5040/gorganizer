@@ -276,7 +276,19 @@ func (s *session) recoverDataFarms(gameIDs []string) bool {
 	complete := true
 	for _, dataPath := range pathOrder {
 		gameIDs := pathToGames[dataPath]
-		outcome, err := managers[dataPath].RecoverIfNeeded()
+		s.mu.RLock()
+		_, capture, steamErr := s.steamCaptureLocked(gameIDs[0], dataPath)
+		s.mu.RUnlock()
+		var outcome vfs.RecoveryOutcome
+		var err error
+		if steamErr != nil {
+			outcome.Pending = &vfs.RecoveryPending{
+				DataPath: dataPath, BackupPath: managers[dataPath].BackupPath(),
+				Reason: "Steam is updating the game or its installation state cannot be read. Finish the update before restoring the original files.",
+			}
+		} else {
+			outcome, err = managers[dataPath].RecoverIfNeeded(capture)
+		}
 		if err != nil {
 			slog.Error("crash recovery failed", "data_path", dataPath, "games", gameIDs, "err", err)
 			complete = false

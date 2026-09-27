@@ -52,6 +52,11 @@ func (md *ModService) restoreModListsLocked(snapshots []modListSnapshot) error {
 
 // checkMountedModChangeLocked refuses farm changes while a game, launch, tool, or recovery could still use the old mod; the caller holds s.mu.
 func (md *ModService) checkMountedModChangeLocked(gameID, operation string) error {
+	if mm := md.s.mountMgrs[gameID]; mm != nil && mm.IsMounted() {
+		if err := md.s.steamAdmissionLocked(gameID, mm.DataPath()); err != nil {
+			return err
+		}
+	}
 	if md.s.recoveryPendingFor(gameID) != nil || md.s.refuseLoaderIntentLocked(gameID) != nil ||
 		md.s.pendingAdmissionLocked(gameID, 0) != nil || md.s.applyBusyLocked(gameID) || md.s.unmountRunningLocked(gameID) {
 		return &dto.GameRunningError{GameID: gameID, Operation: operation}
