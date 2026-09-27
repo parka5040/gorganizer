@@ -28,3 +28,28 @@ type GameRunningError struct {
 func (e *GameRunningError) Error() string {
 	return fmt.Sprintf("%s is still running, or was started less than two minutes ago, so its pending mod changes cannot be applied (%s); close it first", e.GameID, e.Operation)
 }
+
+type PluginStateError struct {
+	GameID string
+	Cause  error
+}
+
+// Error reports that the game's plugin list could not be prepared, so the game was not started.
+func (e *PluginStateError) Error() string {
+	return fmt.Sprintf("the plugin list for %s could not be prepared, so the game was not started: %v", e.GameID, e.Cause)
+}
+
+// Unwrap returns the underlying plugin-list failure.
+func (e *PluginStateError) Unwrap() error {
+	return e.Cause
+}
+
+type RecoveryDeferredError struct {
+	GameID    string
+	Operation string
+}
+
+// Error reports that an interrupted mod deployment waits for the game to close before it can be repaired.
+func (e *RecoveryDeferredError) Error() string {
+	return fmt.Sprintf("%s still has an interrupted mod deployment that is waiting for the game to close (%s)", e.GameID, e.Operation)
+}

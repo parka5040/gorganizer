@@ -256,6 +256,14 @@ QString knownTokenMessage(const InstallError& parsed)
                                   "Ask for a smaller export bundle.");
         return QStringLiteral("This backup contains unsafe names or file links, so nothing was imported.");
     }
+    if (token == QLatin1String("plugin_state_failed"))
+        return QStringLiteral("Gorganizer could not prepare the plugin list for %1, so the game was not started. "
+                              "Check that the disk is not full, then try again.")
+            .arg(gameName(field("game"), QStringLiteral("this game")));
+    if (token == QLatin1String("farm_recovery_deferred"))
+        return QStringLiteral("%1 still has an unfinished mod change from before. Gorganizer will finish it "
+                              "after the game closes. Close the game, then try again.")
+            .arg(gameName(field("game"), QStringLiteral("This game")));
     if (token == QLatin1String("install_selection_empty"))
         return QStringLiteral("No files are selected. Go back and choose at least one option to install.");
     if (token == QLatin1String("profile_identity_invalid"))
@@ -324,6 +332,8 @@ bool tokenValuesPercentEscaped(const QString& token)
         QStringLiteral("bundle_rejected"),
         QStringLiteral("profile_identity_invalid"),
         QStringLiteral("install_selection_empty"),
+        QStringLiteral("plugin_state_failed"),
+        QStringLiteral("farm_recovery_deferred"),
     };
     return escaped.contains(token);
 }

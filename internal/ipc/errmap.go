@@ -64,6 +64,8 @@ const (
 	tokenBundleRejected             = "bundle_rejected:"
 	tokenProfileIdentityInvalid     = "profile_identity_invalid:"
 	tokenInstallSelectionEmpty      = "install_selection_empty:"
+	tokenPluginStateFailed          = "plugin_state_failed:"
+	tokenFarmRecoveryDeferred       = "farm_recovery_deferred:"
 )
 
 var errorTokens = []string{
@@ -76,6 +78,7 @@ var errorTokens = []string{
 	tokenSteamNotRunning, tokenTTWRequiresVanillaFNV, tokenXNVSEMissingForTTW, tokenFNV4GBNotAppliedForTTW,
 	tokenTransferGameMismatch, tokenTransferSchema, tokenTransferPath, tokenTransferCollision, tokenTransferOverwriteMounted,
 	tokenArchiveRejected, tokenBundleRejected, tokenProfileIdentityInvalid, tokenInstallSelectionEmpty,
+	tokenPluginStateFailed, tokenFarmRecoveryDeferred,
 }
 
 // MapError turns a structured error into a gRPC status; unrecognized errors pass through with ok=false.
@@ -86,6 +89,15 @@ func MapError(err error) (error, bool) {
 	var shuttingDown *dto.ShuttingDownError
 	if errors.As(err, &shuttingDown) {
 		return status.Error(codes.Unavailable, tokenDaemonShuttingDown), true
+	}
+	var pluginState *dto.PluginStateError
+	if errors.As(err, &pluginState) {
+		return status.Error(codes.FailedPrecondition, tokenPluginStateFailed+"game="+escapeTokenValue(pluginState.GameID)), true
+	}
+	var deferred *dto.RecoveryDeferredError
+	if errors.As(err, &deferred) {
+		msg := tokenFarmRecoveryDeferred + fmt.Sprintf("game=%s:operation=%s", escapeTokenValue(deferred.GameID), escapeTokenValue(deferred.Operation))
+		return status.Error(codes.FailedPrecondition, msg), true
 	}
 	var running *dto.GameRunningError
 	if errors.As(err, &running) {

@@ -62,6 +62,8 @@ func registeredTokenSamples() map[string]error {
 		tokenBundleRejected:             &transfer.BundleRejectedError{Reason: transfer.BundleRejectedLink, Item: "mods/M/a"},
 		tokenProfileIdentityInvalid:     &profile.IdentityInvalidError{Name: "../.."},
 		tokenInstallSelectionEmpty:      download.ErrEmptyInstallSelection,
+		tokenPluginStateFailed:          &dto.PluginStateError{GameID: "skyrimse", Cause: fmt.Errorf("disk full")},
+		tokenFarmRecoveryDeferred:       &dto.RecoveryDeferredError{GameID: "skyrimse", Operation: "mount"},
 	}
 }
 
