@@ -387,13 +387,11 @@ void DownloadsLibraryView::actionInstall(const GrpcArchiveRow& row, bool forceNe
                                   modFolder, fileCount, err)) {
         if (parseInstallError(err).token == QLatin1String("fomod_required")
             && usesLocalDataRootInstall(m_game)) {
-            QString modsDir = GameInfo::modsDirPathFor(m_game.shortName);
-            QString archiveAbs = modsDir + "/Downloads/" + row.archiveRelPath;
             QString defaultModName = row.modName.isEmpty()
                 ? QFileInfo(row.fileArchiveName).completeBaseName()
                 : row.modName;
-            ModInstallDialog dlg(archiveAbs, modsDir, defaultModName, this);
-            dlg.setDaemonContext(m_grpc, m_game.shortName);
+            ModInstallDialog dlg(m_game.shortName, defaultModName, m_grpc,
+                                 ModInstallDialog::ArchiveSource::fromLibrary(row.archiveRelPath), this);
             connect(&dlg, &ModInstallDialog::fomodWizardOpened,
                     this, &DownloadsLibraryView::fomodWizardOpened);
             connect(&dlg, &ModInstallDialog::fomodWizardClosed,

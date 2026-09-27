@@ -24,7 +24,6 @@ add_library(gorganizer_ui STATIC
     SplashScreen.cpp
     ActivityLogPanel.cpp
     ModInstallDialog.cpp
-    InstallWorker.cpp
     FomodPlan.cpp
     FomodInstallerDialog.cpp
     IniEditorDialog.cpp
