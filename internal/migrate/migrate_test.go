@@ -2,6 +2,7 @@ package migrate
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/vfs"
 )
@@ -573,6 +575,65 @@ func TestConfigReferencesRewrittenWithPreimage(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Executables[0].ExtraRWPaths[1], gc.Executables[0].ExtraRWPaths[1]) {
 		t.Fatal("outside path changed")
+	}
+}
+
+// TestMigrationPatchesConfigWithoutLogLevel checks defaulted settings verify during a move and after a restart.
+func TestMigrationPatchesConfigWithoutLogLevel(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		boundary string
+	}{
+		{name: "complete"},
+		{name: "resume after config-patched", boundary: "config-patched"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			from, mods, _ := fixture(t)
+			put(t, filepath.Join(mods, "Overwrite", "save"), "save")
+			cfg, err := config.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			gc := cfg.Games["skyrimse"]
+			gc.Executables = []config.Executable{{ID: "tool", ExePath: filepath.Join(mods, "tool")}}
+			cfg.Games["skyrimse"] = gc
+			before, err := json.Marshal(struct {
+				Games map[string]config.GameConfig `json:"games"`
+			}{Games: cfg.Games})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(before, []byte("log_level")) {
+				t.Fatal("fixture contains log_level")
+			}
+			if err := atomicfile.WriteFile(configFilePath(), before, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stop := errors.New("injected crash")
+			err = Execute(planned(t, from), ExecuteOptions{AfterBoundary: func(phase string) error {
+				if phase == tc.boundary {
+					return stop
+				}
+				return nil
+			}})
+			if tc.boundary != "" {
+				if !errors.Is(err, stop) || !pathExists(journalPath()) {
+					t.Fatalf("interrupted migration = %v, journal exists = %t", err, pathExists(journalPath()))
+				}
+				if err := Resume(); err != nil {
+					t.Fatalf("resuming migration: %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("migrating without log_level: %v", err)
+			}
+			updated, err := config.Load()
+			if err != nil || updated.LogLevel != "info" || updated.Games["skyrimse"].Executables[0].ExePath != filepath.Join(config.XDGModsDir("skyrimse"), "tool") {
+				t.Fatalf("settings = %+v, %v", updated, err)
+			}
+			if pathExists(mods) || pathExists(journalPath()) {
+				t.Fatal("source or journal remains after migration")
+			}
+		})
 	}
 }
 

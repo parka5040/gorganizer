@@ -183,11 +183,15 @@ func TestLandedPartSizeMustMatchProgress(t *testing.T) {
 func TestResumeRejectsWrongRange(t *testing.T) {
 	for _, tc := range []struct {
 		name, contentRange string
+		contentLength      int64
 	}{
 		{name: "wrong start", contentRange: "bytes 2-9/10"},
 		{name: "missing range"},
 		{name: "short range", contentRange: "bytes 4-8/10"},
 		{name: "malformed range", contentRange: "bytes 4-x/10"},
+		{name: "end before start", contentRange: "bytes 4-3/*"},
+		{name: "length mismatch", contentRange: "bytes 4-9/*", contentLength: 5},
+		{name: "unknown total overflow", contentRange: "bytes 4-9223372036854775807/*"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			isolatedDownloadRoot(t)
@@ -204,7 +208,7 @@ func TestResumeRejectsWrongRange(t *testing.T) {
 					if tc.contentRange != "" {
 						h.Set("Content-Range", tc.contentRange)
 					}
-					return &http.Response{StatusCode: http.StatusPartialContent, Body: io.NopCloser(strings.NewReader("567890")), Header: h, Request: req}, nil
+					return &http.Response{StatusCode: http.StatusPartialContent, ContentLength: tc.contentLength, Body: io.NopCloser(strings.NewReader("567890")), Header: h, Request: req}, nil
 				}
 				if req.Header.Get("Range") != "" {
 					t.Errorf("retry sent Range = %q", req.Header.Get("Range"))
@@ -279,6 +283,64 @@ func TestRangeTotalDetectsTruncatedBody(t *testing.T) {
 	assertDownloadDidNotLand(t, m, dl, landed, "123456")
 	if state := m.snapshot(dl); state.BytesTotal != 10 || !strings.Contains(state.Error, "incomplete") {
 		t.Fatalf("download = %+v", state)
+	}
+}
+
+// TestUnknownTotalRangeEnforcesAdvertisedEnd keeps incomplete and oversized resumed parts retryable.
+func TestUnknownTotalRangeEnforcesAdvertisedEnd(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, wantPart, wantError string
+	}{
+		{name: "short", body: "4", wantPart: "abc4", wantError: "incomplete"},
+		{name: "overrun", body: "4567", wantPart: "abc", wantError: "exceeds expected total"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolatedDownloadRoot(t)
+			seedDownloadPart(t, "abc")
+			landed := 0
+			m, dl := durableDownloadManager(destinationTransport(func(req *http.Request) (*http.Response, error) {
+				if got := req.Header.Get("Range"); got != "bytes=3-" {
+					t.Errorf("Range = %q, want bytes=3-", got)
+				}
+				h := make(http.Header)
+				h.Set("Content-Range", "bytes 3-5/*")
+				return &http.Response{StatusCode: http.StatusPartialContent, ContentLength: -1, TransferEncoding: []string{"chunked"}, Body: io.NopCloser(strings.NewReader(tc.body)), Header: h, Request: req}, nil
+			}), &landed)
+			m.runPipeline(context.Background(), dl)
+			assertDownloadDidNotLand(t, m, dl, landed, tc.wantPart)
+			state := m.snapshot(dl)
+			if state.BytesTotal != 6 || !strings.Contains(state.Error, tc.wantError) {
+				t.Fatalf("download = %+v", state)
+			}
+			if _, err := m.RetryDownload(dl.ID, []string{dl.GameID}); err != nil || len(m.queued) != 1 {
+				t.Fatalf("retry = %+v, %v", m.queued, err)
+			}
+		})
+	}
+}
+
+// TestUnknownTotalRangeCompletes lands a resumed part with the exact advertised end.
+func TestUnknownTotalRangeCompletes(t *testing.T) {
+	isolatedDownloadRoot(t)
+	seedDownloadPart(t, "abc")
+	landed := 0
+	m, dl := durableDownloadManager(destinationTransport(func(req *http.Request) (*http.Response, error) {
+		if got := req.Header.Get("Range"); got != "bytes=3-" {
+			t.Errorf("Range = %q, want bytes=3-", got)
+		}
+		h := make(http.Header)
+		h.Set("Content-Range", "bytes 3-5/*")
+		return &http.Response{StatusCode: http.StatusPartialContent, ContentLength: -1, TransferEncoding: []string{"chunked"}, Body: io.NopCloser(strings.NewReader("456")), Header: h, Request: req}, nil
+	}), &landed)
+	m.runPipeline(context.Background(), dl)
+	archive, part := downloadPartPaths()
+	data, err := os.ReadFile(archive)
+	state := m.snapshot(dl)
+	if err != nil || string(data) != "abc456" || state.Status != StatusDownloaded || state.BytesDownloaded != 6 || state.BytesTotal != 6 || landed != 1 {
+		t.Fatalf("archive = %q, %v; download = %+v; landed = %d", data, err, state, landed)
+	}
+	if _, err := os.Lstat(part); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("part remains: %v", err)
 	}
 }
 
