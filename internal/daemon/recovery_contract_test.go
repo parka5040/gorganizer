@@ -138,6 +138,70 @@ func TestStaleRecoveryConfirmationRefused(t *testing.T) {
 	}
 }
 
+// TestRestoreFromBackupRefusesWhileGameRuns checks that every confirmed recovery leaves its files and pending identity intact if the game starts after the prompt.
+func TestRestoreFromBackupRefusesWhileGameRuns(t *testing.T) {
+	processRunning := func(_ *testing.T, d *Daemon, _ string) {
+		d.procScan = func(string) (bool, error) { return true, nil }
+	}
+	for _, tc := range []struct {
+		name    string
+		prepare func(*testing.T) (string, string)
+		block   func(*testing.T, *Daemon, string)
+	}{
+		{"data", func(t *testing.T) (string, string) {
+			install, data := ambiguousDataFixture(t)
+			return install, filepath.Join(data, "live.txt")
+		}, processRunning},
+		{"fresh launch record", func(t *testing.T) (string, string) {
+			install, data := ambiguousDataFixture(t)
+			return install, filepath.Join(data, "live.txt")
+		}, func(t *testing.T, d *Daemon, install string) {
+			if err := d.writeLaunchTicketForGame("stardewvalley", "Default", filepath.Join(install, "Mods")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"root", func(t *testing.T) (string, string) {
+			install := newStardewInstall(t)
+			path := filepath.Join(install, vfs.RootBackupDirName, "leftover")
+			writeFileContent(t, path, "root backup")
+			return install, path
+		}, processRunning},
+		{"loader", func(t *testing.T) (string, string) {
+			install := newStardewInstall(t)
+			writeFixture(t, filepath.Join(install, "StardewModdingAPI"))
+			writeLoaderIntent(t, install, "StardewModdingAPI", smapi.FileID{Dev: 1, Ino: 1})
+			return install, filepath.Join(install, smapi.IntentFile)
+		}, processRunning},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			install, retained := tc.prepare(t)
+			d := isolatedRecoveryDaemon(t, install)
+			d.mu.RLock()
+			pending := d.recoveryPendingFor("stardewvalley")
+			d.mu.RUnlock()
+			if pending == nil {
+				t.Fatal("fixture did not produce a pending recovery")
+			}
+			before, err := os.ReadFile(retained)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.block(t, d, install)
+			requireDeferred(t, d.RestoreFromBackup("stardewvalley", pending.Kind, pending.RecoveryID), "restore_from_backup")
+			after, err := os.ReadFile(retained)
+			if err != nil || string(after) != string(before) {
+				t.Fatalf("recovery changed %s: %v, before %q, after %q", retained, err, before, after)
+			}
+			d.mu.RLock()
+			remaining := d.recoveryPendingFor("stardewvalley")
+			d.mu.RUnlock()
+			if remaining == nil || remaining.RecoveryID != pending.RecoveryID {
+				t.Fatalf("pending identity changed: %+v", remaining)
+			}
+		})
+	}
+}
+
 // TestLegacyRestoreConfirmationStillWorks checks an unset kind and empty identity restore the current Data backup.
 func TestLegacyRestoreConfirmationStillWorks(t *testing.T) {
 	install, data := ambiguousDataFixture(t)

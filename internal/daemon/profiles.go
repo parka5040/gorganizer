@@ -109,7 +109,10 @@ func (ps *ProfileService) SetModList(gameID, profileName string, entries []dto.M
 		if err := mm.MarkDirty(layers); err != nil {
 			slog.Warn("VFS mark-dirty after modlist change failed", "game", gameID, "err", err)
 		} else {
-			ps.s.publishGuarded(dto.StatusEventResult{VFSStatus: ps.s.svc.vfs.vfsStatus(gameID, gc, profileName, mm, modEntries)})
+			ps.s.mu.RLock()
+			status := ps.s.svc.vfs.vfsStatus(gameID, gc, profileName, mm, modEntries)
+			ps.s.mu.RUnlock()
+			ps.s.publishGuarded(dto.StatusEventResult{VFSStatus: status})
 		}
 	}
 	return nil

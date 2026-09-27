@@ -535,6 +535,16 @@ func (vs *VFSService) RestoreFromBackup(gameID string, expectedKind dto.Recovery
 	}
 	defer release()
 	vs.s.mu.RLock()
+	key := vs.s.fenceKeyLocked(gameID)
+	vs.s.mu.RUnlock()
+	unit := vs.s.installRecoveryUnits()[key]
+	if unit == nil {
+		return fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
+	}
+	if reason := vs.s.recoveryIdle(unit); reason != "" {
+		return &dto.RecoveryDeferredError{GameID: gameID, Operation: "restore_from_backup"}
+	}
+	vs.s.mu.RLock()
 	current := vs.s.recoveryPendingFor(gameID)
 	vs.s.mu.RUnlock()
 	if current != nil && current.Kind != dto.RecoveryKindUnspecified && current.RecoveryID == "" {

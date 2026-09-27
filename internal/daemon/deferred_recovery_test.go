@@ -284,6 +284,59 @@ func TestDeferredRecoveryDoesNotBlockOtherGames(t *testing.T) {
 	}
 }
 
+// TestStartupRecoveryRechecksBeforeEachInstall checks a newly running game defers its install and leaves another install free to recover.
+func TestStartupRecoveryRechecksBeforeEachInstall(t *testing.T) {
+	original, games, install, dataPath := sessionFarmFixture(t)
+	other := newSkyrimGames(t)
+	for id, gc := range other {
+		games[id] = gc
+		original.mu.Lock()
+		original.config.Games[id] = gc
+		original.ensureMountManager(id, gc)
+		original.mu.Unlock()
+	}
+	if _, err := original.MountVFS("skyrimse", "Default"); err != nil {
+		t.Fatal(err)
+	}
+	var running atomic.Bool
+	var scans atomic.Int32
+	d, err := newWithClock(configWithGames(games), time.Now, func(root string) (bool, error) {
+		if root == install {
+			if scans.Add(1) > 1 {
+				return running.Load(), nil
+			}
+		}
+		return false, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(d.Shutdown)
+	if err := d.deferredFor(depsGame, "recovery"); err != nil {
+		t.Fatalf("classification unexpectedly deferred the game: %v", err)
+	}
+	running.Store(true)
+	d.RecoverAll()
+	if scans.Load() < 2 {
+		t.Fatal("recovery did not rescan the install")
+	}
+	for _, path := range []string{filepath.Join(dataPath, vfs.SentinelFilename), filepath.Join(install, "session-root.txt"), dataPath + ".orig"} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("startup changed the running install at %s: %v", path, err)
+		}
+	}
+	requireDeferred(t, d.deferredFor(depsGame, "mount"), "mount")
+	status, err := d.GetVFSStatus(depsGame)
+	if err != nil || status.LifecycleState != dto.VFSLifecycleStateRecoveryDeferred || status.LifecycleReason != "game_running" {
+		t.Fatalf("status = %+v (%v), want game-running deferral", status, err)
+	}
+	waitForLifecycle(t, d, dto.VFSLifecycleStateRecoveryDeferred)
+	otherData := filepath.Join(other["skyrimse"].InstallPath, "Data")
+	if _, err := os.Lstat(filepath.Join(otherData, vfs.SentinelFilename)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("other install did not recover: %v", err)
+	}
+}
+
 // configWithGames creates a fresh config from a test's isolated game installations.
 func configWithGames(games map[string]config.GameConfig) *config.Config {
 	cfg := config.DefaultConfig()

@@ -21,7 +21,10 @@ const (
 
 // RunningIn reports whether a process listed under procRoot, other than the caller, runs from dir or is Steam's launch wrapper for one of appIDs.
 func RunningIn(procRoot, dir string, appIDs []int) (bool, error) {
-	root := filepath.Clean(dir)
+	root, err := filepath.Abs(dir)
+	if err != nil {
+		return false, fmt.Errorf("resolving game install %s: %w", dir, err)
+	}
 	resolved, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return false, fmt.Errorf("resolving game install %s: %w", root, err)
