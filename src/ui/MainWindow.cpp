@@ -213,6 +213,7 @@ void MainWindow::setupUi()
     setCentralWidget(central);
 
     m_statusInfo = new QLabel;
+    m_statusInfo->setTextFormat(Qt::PlainText);
     statusBar()->addWidget(m_statusInfo, 1);
 
     m_connectionIndicator = new ConnectionIndicator(m_grpc);

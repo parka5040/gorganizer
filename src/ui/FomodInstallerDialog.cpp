@@ -66,6 +66,7 @@ FomodInstallerDialog::FomodInstallerDialog(const FomodPlan& plan, QWidget* paren
 
     auto* outer = new QVBoxLayout(this);
 
+    m_titleLabel->setTextFormat(Qt::PlainText);
     m_titleLabel->setStyleSheet("font-weight: bold; font-size: 14pt; padding: 4px;");
     outer->addWidget(m_titleLabel);
 
@@ -102,7 +103,9 @@ void FomodInstallerDialog::buildPages()
         if (!m_plan.author.isEmpty())   meta << QString("Author: %1").arg(m_plan.author);
         if (!m_plan.version.isEmpty())  meta << QString("Version: %1").arg(m_plan.version);
         if (!meta.isEmpty()) {
-            auto* metaLbl = new QLabel(meta.join("    "));
+            auto* metaLbl = new QLabel;
+            metaLbl->setTextFormat(Qt::PlainText);
+            metaLbl->setText(meta.join("    "));
             metaLbl->setObjectName("hintLabel");
             layout->addWidget(metaLbl);
         }

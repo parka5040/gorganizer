@@ -41,6 +41,7 @@ ModInstallDialog::ModInstallDialog(const QString& archivePath,
     auto* layout = new QVBoxLayout(this);
 
     m_statusLabel = new QLabel("Extracting archive...");
+    m_statusLabel->setTextFormat(Qt::PlainText);
     m_statusLabel->setStyleSheet("font-weight: bold;");
     layout->addWidget(m_statusLabel);
 

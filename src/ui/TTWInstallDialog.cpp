@@ -1,6 +1,7 @@
 #include "TTWInstallDialog.h"
 #include "Dialogs.h"
 #include "InstallErrorText.h"
+#include "ModDependencyText.h"
 
 #include <QApplication>
 #include <QButtonGroup>
@@ -596,6 +597,7 @@ QWidget* TTWInstallDialog::buildRunPage()
     lay->addWidget(m_runProgress);
 
     m_runStatusLine = new QLabel(QStringLiteral("…waiting for installer to start"));
+    m_runStatusLine->setTextFormat(Qt::PlainText);
     m_runStatusLine->setWordWrap(true);
     m_runStatusLine->setStyleSheet("font-weight: bold;");
     lay->addWidget(m_runStatusLine);
@@ -665,7 +667,7 @@ void TTWInstallDialog::onRunInstaller()
     m_runStatusLine->setText("Starting installer...");
     m_runElapsedLabel->setText(
         QString("<b>Elapsed:</b> 00:00 — installer is starting (id <code>%1</code>).")
-            .arg(id));
+            .arg(id.toHtmlEscaped()));
     appendLog(QString("[%1] installer started").arg(id));
     if (m_runTicker) m_runTicker->start();
 }
@@ -738,13 +740,13 @@ void TTWInstallDialog::onDaemonInfo(const QString& info)
             m_runProgress->setValue(100);
             m_runStatusLine->setText(QString("Done. %1").arg(payload));
             m_runElapsedLabel->setText(
-                QString("<b>Install complete.</b> %1").arg(payload));
+                QString("<b>Install complete.</b> %1").arg(payload.toHtmlEscaped()));
         } else {
             m_runProgress->setRange(0, 100);
             m_runProgress->setValue(0);
             m_runStatusLine->setText(QString("Failed. %1").arg(payload));
             m_runElapsedLabel->setText(
-                QString("<b>Install failed.</b> %1 — see log above.").arg(payload));
+                QString("<b>Install failed.</b> %1 — see log above.").arg(payload.toHtmlEscaped()));
             m_runStartBtn->setVisible(true);
             m_runStartBtn->setEnabled(true);
             m_runCancelBtn->setEnabled(false);
@@ -925,7 +927,7 @@ void TTWInstallDialog::populateLauncherCandidates()
             item->setFont(f);
             tip = "Recommended.\n" + tip;
         }
-        item->setToolTip(tip);
+        item->setToolTip(plainToolTip(tip));
         m_launcherList->addItem(item);
         ++rowsAdded;
     };

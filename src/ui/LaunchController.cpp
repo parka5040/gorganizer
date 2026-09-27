@@ -218,22 +218,22 @@ void LaunchController::onGameLaunchFailed(const QString& error)
 
     if (parsed.token == QLatin1String("fnv4gb_not_applied_for_ttw")) {
         dialogs::warn(m_parentWindow, "Patch FalloutNV.exe to 4GB",
-            "<p><b>FalloutNV.exe is not LAA-patched.</b> TTW's merged data "
-            "set exceeds FNV's 2&nbsp;GiB memory cap within seconds of the "
+            "FalloutNV.exe is not LAA-patched. TTW's merged data "
+            "set exceeds FNV's 2 GiB memory cap within seconds of the "
             "main menu — that's the \"music plays, then crash\" you just "
-            "saw.</p>"
-            "<p>Run <b>Tools &#x2192; Patch Fallout to 4GB</b> first, then "
-            "try launching again.</p>");
+            "saw.\n\n"
+            "Run Tools → Patch Fallout to 4GB first, then "
+            "try launching again.");
         m_session->refreshStatusInfo();
         return;
     }
 
     if (parsed.token == QLatin1String("xnvse_missing_for_ttw")) {
         dialogs::warn(m_parentWindow, "xNVSE Required",
-            "<p>TTW launches via <b>nvse_loader.exe</b>, but xNVSE's runtime "
-            "DLLs are not installed in the FNV directory.</p>"
-            "<p>Open the Run combo and choose <b>Install xNVSE...</b>, then "
-            "try launching again.</p>");
+            "TTW launches via nvse_loader.exe, but xNVSE's runtime "
+            "DLLs are not installed in the FNV directory.\n\n"
+            "Open the Run combo and choose Install xNVSE..., then "
+            "try launching again.");
         m_session->refreshStatusInfo();
         return;
     }
