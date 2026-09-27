@@ -1,4 +1,5 @@
 #include "ModListWidget.h"
+#include "ModListSaveQueue.h"
 #include "ModListRowDelegate.h"
 #include "ThemeManager.h"
 #include "Dialogs.h"
@@ -206,6 +207,7 @@ QStringList ModListWidget::defaultCategories()
 ModListWidget::ModListWidget(GrpcClient* grpc, QWidget* parent)
     : QWidget(parent)
     , m_grpc(grpc)
+    , m_saveQueue(new ModListSaveQueue(grpc, this))
 {
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -273,8 +275,9 @@ ModListWidget::ModListWidget(GrpcClient* grpc, QWidget* parent)
             this, &ModListWidget::onSelectionChanged);
     connect(m_grpc, &GrpcClient::modListRequestReceived, this, &ModListWidget::onProfileModListReceived);
     connect(m_grpc, &GrpcClient::modListRequestFailed, this, &ModListWidget::onProfileModListFailed);
-    connect(m_grpc, &GrpcClient::modListSaved, this, &ModListWidget::onModListSaved);
-    connect(m_grpc, &GrpcClient::modListSaveFailed, this, &ModListWidget::onModListSaveFailed);
+    connect(m_saveQueue, &ModListSaveQueue::saveSucceeded, this, &ModListWidget::onModListSaved);
+    connect(m_saveQueue, &ModListSaveQueue::saveFailed, this, &ModListWidget::onModListSaveFailed);
+    connect(m_saveQueue, &ModListSaveQueue::drained, this, &ModListWidget::onModListSavesDrained);
     connect(m_grpc, &GrpcClient::connected, this, &ModListWidget::requestProfileModList);
 
     layout->addWidget(m_view);
@@ -314,7 +317,20 @@ void ModListWidget::loadForGame(const GameInfo& game)
 
 void ModListWidget::loadForGame(const GameInfo& game, const QString& profileName)
 {
-    if (game.shortName != m_gameId || profileName != m_profileName) {
+    const QString gameId = game.detected ? game.shortName : QString();
+    const QString newProfile = game.detected ? profileName : QString();
+    const QString modsDir = game.detected ? GameInfo::modsDirPathFor(gameId) : QString();
+    if (gameId != m_gameId || newProfile != m_profileName || modsDir != m_modsDir) {
+        m_saveQueue->setContext(gameId, newProfile, modsDir);
+        m_gameId = gameId;
+        m_profileName = newProfile;
+        m_modsDir = modsDir;
+        m_profileRetryTimer->stop();
+        m_profileListRequestId = 0;
+        m_profileListPending = false;
+        m_enableSaves.clear();
+        m_restoringSavedProfile = false;
+        m_savedProfileRestored = false;
         clearDependencyReport();
         dropProfileAdoption();
     }
@@ -334,10 +350,6 @@ void ModListWidget::loadForGame(const GameInfo& game, const QString& profileName
         return;
     }
 
-    m_gameId = game.shortName;
-    m_profileName = profileName;
-
-    m_modsDir = GameInfo::modsDirPathFor(m_gameId);
     updateEditLock();
 
     m_placeholder->hide();
@@ -527,12 +539,8 @@ void ModListWidget::onModelDataChanged(const QModelIndex& topLeft, const QModelI
         if (m_profileAdopted)
             m_profileFlags.insert(m_mods[modIdx].folder, enabled);
 
-        if (!m_gameId.isEmpty() && !m_profileName.isEmpty()) {
-            ++m_editSerial;
-            const std::vector<GrpcModListEntry> entries = toggleEntries();
-            noteSentModList(entries);
-            m_grpc->setModList(m_gameId, m_profileName, entries);
-        }
+        if (!m_gameId.isEmpty() && !m_profileName.isEmpty())
+            submitModList(toggleEntries());
 
         emit modToggled();
     }
@@ -681,6 +689,15 @@ void ModListWidget::noteSentModList(const std::vector<GrpcModListEntry>& entries
     }
 }
 
+quint64 ModListWidget::submitModList(const std::vector<GrpcModListEntry>& entries)
+{
+    ++m_editSerial;
+    noteSentModList(entries);
+    m_savedProfileRestored = false;
+    updateEditLock();
+    return m_saveQueue->submit(entries);
+}
+
 void ModListWidget::requestProfileModList()
 {
     m_profileRetryTimer->stop();
@@ -745,15 +762,23 @@ void ModListWidget::updateEditLock()
     m_model->setEditable(!blocked);
     m_addSeparatorBtn->setEnabled(!blocked);
     if (failed) {
-        m_profileStateLabel->setText(QStringLiteral("Couldn't load this profile. Mod changes are disabled."));
+        m_profileStateLabel->setText(m_restoringSavedProfile
+            ? QStringLiteral("Couldn't reload the saved profile. Try again.")
+            : QStringLiteral("Couldn't load this profile. Mod changes are disabled."));
         m_profileStateLabel->setToolTip(plainToolTip(m_profileLoadError));
+    } else if (m_restoringSavedProfile) {
+        m_profileStateLabel->setText(QStringLiteral("Couldn't save your mod choices. Reloading the saved profile…"));
+        m_profileStateLabel->setToolTip(QString());
+    } else if (m_savedProfileRestored) {
+        m_profileStateLabel->setText(QStringLiteral("Saved mod choices restored."));
+        m_profileStateLabel->setToolTip(QString());
     } else if (blocked) {
         m_profileStateLabel->setText(QStringLiteral("Loading profile…"));
         m_profileStateLabel->setToolTip(QStringLiteral("Checkboxes, drag-and-drop and separator moves are available "
                                                        "once the profile's mod list has loaded from the gorganizer "
                                                        "daemon."));
     }
-    m_profileStateLabel->setVisible(blocked);
+    m_profileStateLabel->setVisible(blocked || m_restoringSavedProfile || m_savedProfileRestored);
     m_profileRetryButton->setVisible(failed);
 }
 
@@ -769,7 +794,7 @@ void ModListWidget::onProfileModListReceived(quint64 requestId, const QString& g
         requestProfileModList();
         return;
     }
-    if (isInteracting()) {
+    if (isInteracting() || !m_saveQueue->isIdle()) {
         m_profileListPending = true;
         return;
     }
@@ -788,7 +813,7 @@ void ModListWidget::refreshView()
 
 bool ModListWidget::adoptModList(const std::vector<GrpcModListEntry>& entries)
 {
-    if (m_gameId.isEmpty() || m_modsDir.isEmpty() || isInteracting())
+    if (m_gameId.isEmpty() || m_modsDir.isEmpty() || isInteracting() || !m_saveQueue->isIdle())
         return false;
     m_reloadPending = false;
     m_profileListPending = false;
@@ -826,11 +851,16 @@ bool ModListWidget::adoptModList(const std::vector<GrpcModListEntry>& entries)
     for (const auto& meta : scanned)
         m_profileOrder.insert(meta.folder, parseHexIndex(meta.trueIndex) / kTrueIndexStep);
     m_profileAdopted = true;
-    updateEditLock();
     const bool unchanged = sameRows(m_mods, scanned);
     m_mods = std::move(scanned);
     if (!unchanged)
         refreshView();
+    if (m_restoringSavedProfile) {
+        m_restoringSavedProfile = false;
+        m_savedProfileRestored = true;
+    }
+    updateEditLock();
+    emit modListReadyForEnable();
     return true;
 }
 
@@ -853,12 +883,17 @@ void ModListWidget::applyEnabledFlags(const QStringList& folders, bool enabled)
     m_updatingModel = false;
 }
 
+bool ModListWidget::readyForDependencyEnable() const
+{
+    return m_profileAdopted && !m_restoringSavedProfile && !isInteracting() && m_saveQueue->isIdle();
+}
+
 quint64 ModListWidget::enableModsInProfile(const std::vector<GrpcModListEntry>& authoritative, const QStringList& names,
                                            QStringList* changedOut)
 {
     if (changedOut)
         changedOut->clear();
-    if (m_gameId.isEmpty() || m_profileName.isEmpty() || names.isEmpty())
+    if (!readyForDependencyEnable() || m_gameId.isEmpty() || m_profileName.isEmpty() || names.isEmpty())
         return 0;
     QSet<QString> wanted;
     for (const auto& name : names) {
@@ -896,9 +931,7 @@ quint64 ModListWidget::enableModsInProfile(const std::vector<GrpcModListEntry>& 
     if (changed.isEmpty())
         return 0;
     applyEnabledFlags(changed, true);
-    ++m_editSerial;
-    noteSentModList(batch);
-    const quint64 requestId = m_grpc->setModListTracked(m_gameId, m_profileName, batch);
+    const quint64 requestId = submitModList(batch);
     m_enableSaves.insert(requestId, EnableSave{m_gameId, m_profileName, m_modsDir, changed, m_editSerial});
     if (changedOut)
         *changedOut = changed;
@@ -906,23 +939,37 @@ quint64 ModListWidget::enableModsInProfile(const std::vector<GrpcModListEntry>& 
     return requestId;
 }
 
-void ModListWidget::onModListSaved(quint64 requestId, const QString&, const QString&)
+void ModListWidget::onModListSaved(quint64 requestId)
 {
     m_enableSaves.remove(requestId);
 }
 
-void ModListWidget::onModListSaveFailed(quint64 requestId, const QString&, const QString&, const QString&)
+void ModListWidget::onModListSaveFailed(quint64 requestId)
 {
     const auto it = m_enableSaves.constFind(requestId);
-    if (it == m_enableSaves.constEnd())
-        return;
-    const EnableSave save = it.value();
-    m_enableSaves.erase(it);
-    if (save.gameId != m_gameId || save.profileName != m_profileName || save.modsDir != m_modsDir)
-        return;
-    if (m_editSerial == save.editSerial)
-        applyEnabledFlags(save.folders, false);
+    if (it != m_enableSaves.constEnd()) {
+        const EnableSave save = it.value();
+        m_enableSaves.erase(it);
+        if (save.gameId == m_gameId && save.profileName == m_profileName && save.modsDir == m_modsDir
+            && m_editSerial == save.editSerial)
+            applyEnabledFlags(save.folders, false);
+    }
+    if (requestId == 0)
+        m_enableSaves.clear();
+    m_restoringSavedProfile = true;
+    m_savedProfileRestored = false;
+    dropProfileAdoption();
     requestProfileModList();
+}
+
+void ModListWidget::onModListSavesDrained()
+{
+    if (m_profileListPending && !isInteracting()) {
+        requestProfileModList();
+        return;
+    }
+    if (readyForDependencyEnable())
+        emit modListReadyForEnable();
 }
 
 void ModListWidget::setDependencyReport(const GrpcModDependencyReport& report)
@@ -1615,7 +1662,7 @@ QHash<QString, std::vector<int>> ModListWidget::hiddenModsBySeparator() const
     return hidden;
 }
 
-// Persists the current row order: true mode via setModList, visual mode via metadata index stamping.
+// Saves the priority row order through the queue or stamps visual indices into mod metadata.
 void ModListWidget::persistRowOrder()
 {
     if (m_updatingModel || editsBlocked()) return;
@@ -1634,9 +1681,7 @@ void ModListWidget::persistRowOrder()
             e.priority = r;
             entries.push_back(std::move(e));
         }
-        ++m_editSerial;
-        noteSentModList(entries);
-        m_grpc->setModList(m_gameId, m_profileName, entries);
+        submitModList(entries);
         return;
     }
 
@@ -1709,9 +1754,7 @@ void ModListWidget::persistRowOrder()
     persistSeparators();
 
     if (m_collapsedSeparatorView && !m_gameId.isEmpty() && !m_profileName.isEmpty()) {
-        ++m_editSerial;
-        noteSentModList(collapsedEntries);
-        m_grpc->setModList(m_gameId, m_profileName, collapsedEntries);
+        submitModList(collapsedEntries);
     }
 }
 

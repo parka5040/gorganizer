@@ -66,6 +66,8 @@ private slots:
     void onModListPersisted();
     // Restarts an enable job that waited for the mod list's context menu or dialog to close.
     void onListInteractionFinished();
+    // Restarts an enable job after the mod list finishes saving or reloads its saved state.
+    void onModListReadyForEnable();
     void onConnected();
     // Forgets every in-flight request once the client stopped its workers, since no answer can arrive any more.
     void onWorkersStopped();
@@ -101,7 +103,7 @@ private:
     };
 
     struct EnableJob {
-        enum class Stage { Loading, WaitingForList, Saving, Acknowledging };
+        enum class Stage { Loading, WaitingForList, WaitingForSaves, Saving, Acknowledging };
         Stage stage = Stage::Loading;
         quint64 generation = 0;
         QString gameId;

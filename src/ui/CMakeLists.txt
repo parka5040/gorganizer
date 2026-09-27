@@ -9,6 +9,7 @@ add_library(gorganizer_ui STATIC
     SetupWizard.cpp
     GameSelectorWidget.cpp
     ModListWidget.cpp
+    ModListSaveQueue.cpp
     ModListModel.cpp
     ModListRowDelegate.cpp
     PluginListWidget.cpp
