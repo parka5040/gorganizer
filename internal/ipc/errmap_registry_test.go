@@ -156,6 +156,7 @@ func TestMapErrorGameRunningEscapesItsValues(t *testing.T) {
 		want string
 	}{
 		{&dto.GameRunningError{GameID: "stardewvalley", Operation: dto.GameRunningOperationLaunch}, "game_running:game=stardewvalley:operation=launch"},
+		{&dto.GameRunningError{GameID: "skyrimse", Operation: dto.GameRunningOperationMount}, "game_running:game=skyrimse:operation=mount"},
 		{fmt.Errorf("apply: %w", &dto.GameRunningError{GameID: "skyrimse", Operation: dto.GameRunningOperationApply}), "game_running:game=skyrimse:operation=apply"},
 		{&dto.GameRunningError{GameID: "stardewvalley", Operation: dto.GameRunningOperationUnmount}, "game_running:game=stardewvalley:operation=unmount"},
 		{&dto.GameRunningError{GameID: "skyrimse", Operation: dto.GameRunningOperationReinstall}, "game_running:game=skyrimse:operation=reinstall"},

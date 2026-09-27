@@ -282,7 +282,11 @@ func (d *Daemon) shutdownRetentionReasonLocked(gameID string) string {
 	flagged, launchedAt := d.steamLaunchesAmong(games)
 	if filepath.IsAbs(key) {
 		running, err := d.processRunningIn(key, d.steamAppIDsLocked(games))
-		if err == nil && running {
+		if err != nil {
+			slog.Warn("scanning processes before shutdown failed; retaining farm", "game", gameID, "path", key, "err", err)
+			return "game_running"
+		}
+		if running {
 			return "game_running"
 		}
 	}

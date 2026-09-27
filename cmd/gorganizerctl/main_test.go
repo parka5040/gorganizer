@@ -13,6 +13,7 @@ import (
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/instancelock"
 	"github.com/parka/gorganizer/internal/smapi"
+	"github.com/parka/gorganizer/internal/steam"
 	"github.com/parka/gorganizer/internal/testsafe"
 	"github.com/parka/gorganizer/internal/vfs"
 )
@@ -74,6 +75,152 @@ func recoverFixture(t *testing.T) (recoveryDeps, string, string, *bytes.Buffer, 
 	}
 	var stdout, stderr bytes.Buffer
 	return recoveryDeps{procRoot: procRoot, out: &stdout, errOut: &stderr}, install, filepath.Join(install, "Data"), &stdout, &stderr
+}
+
+// steamRecoveryFixture creates a mounted disposable farm with an outdated Steam baseline and a new loose file.
+func steamRecoveryFixture(t *testing.T, known bool) (recoveryDeps, string, string, *bytes.Buffer, *bytes.Buffer) {
+	t.Helper()
+	deps, _, _, stdout, stderr := recoverFixture(t)
+	steamapps := filepath.Join(t.TempDir(), "steamapps")
+	install := filepath.Join(steamapps, "common", "Skyrim Special Edition")
+	dataPath := filepath.Join(install, "Data")
+	if err := os.MkdirAll(dataPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataPath, "original.esm"), []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(steamapps, "appmanifest_489830.acf")
+	body := `"AppState" { "appid" "489830" "installdir" "Skyrim Special Edition" "buildid" "123" "StateFlags" "4" "UpdateResult" "0" "LastUpdated" "100" "InstalledDepots" { "111" { "manifest" "456" } } }`
+	if err := os.WriteFile(manifest, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state, err := steam.ReadAppState(install, 489830)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mm := vfs.NewMountManager(dataPath, filepath.Join(t.TempDir(), "Overwrite"), "skyrimse")
+	mm.SetStorefrontBaseline(&vfs.StorefrontSnapshot{
+		Store: "steam", AppID: state.AppID, BuildID: state.BuildID,
+		StateFlags: state.StateFlags, UpdateResult: state.UpdateResult,
+		LastUpdated: state.LastUpdated, DepotFingerprint: state.DepotFingerprint,
+		CapturedAt: time.Now().UTC(),
+	})
+	if err := mm.Activate([]vfs.Layer{{Name: "__base__", RootPath: dataPath, Enabled: true}}, "Default"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataPath, "new.esp"), []byte("steam output"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, []byte(strings.Replace(body, `"buildid" "123"`, `"buildid" "124"`, 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if known {
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		gc := cfg.Games["skyrimse"]
+		gc.InstallPath = install
+		cfg.Games["skyrimse"] = gc
+		if err := cfg.Save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return deps, dataPath, manifest, stdout, stderr
+}
+
+// TestRecoverDataPathPreservesSteamChanges checks both Data-only commands retain Steam's loose output after a changed build.
+func TestRecoverDataPathPreservesSteamChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func([]string, recoveryDeps) int
+	}{
+		{"recover", runRecoverWith},
+		{"recover-confirm", runRecoverConfirmWith},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, dataPath, _, stdout, stderr := steamRecoveryFixture(t, true)
+			if code := tc.run([]string{"--data-path", dataPath}, deps); code != 0 {
+				t.Fatalf("exit = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+			}
+			if body, err := os.ReadFile(filepath.Join(dataPath, "original.esm")); err != nil || string(body) != "original" {
+				t.Fatalf("original Data = %q, %v", body, err)
+			}
+			batches, err := vfs.ListPreservedBatches(dataPath)
+			if err != nil || len(batches) != 1 {
+				t.Fatalf("preserved Steam output = %+v, %v", batches, err)
+			}
+			if body, err := os.ReadFile(filepath.Join(batches[0].Path, "files", "new.esp")); err != nil || string(body) != "steam output" {
+				t.Fatalf("preserved new file = %q, %v", body, err)
+			}
+			marker, err := vfs.ReadMaintenance(dataPath)
+			if err != nil || marker == nil || marker.Reason != "verify" {
+				t.Fatalf("maintenance marker = %+v, %v", marker, err)
+			}
+		})
+	}
+}
+
+// TestRecoverDataPathWaitsForSteam checks that both Data-only commands leave the farm intact while Steam is busy.
+func TestRecoverDataPathWaitsForSteam(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func([]string, recoveryDeps) int
+	}{
+		{"recover", runRecoverWith},
+		{"recover-confirm", runRecoverConfirmWith},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, dataPath, manifest, _, stderr := steamRecoveryFixture(t, true)
+			body, err := os.ReadFile(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(manifest, []byte(strings.Replace(string(body), `"StateFlags" "4"`, `"StateFlags" "2"`, 1)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if code := tc.run([]string{"--data-path", dataPath}, deps); code != 2 {
+				t.Fatalf("exit = %d, want 2; stderr = %q", code, stderr.String())
+			}
+			if _, err := vfs.ReadSentinel(dataPath); err != nil {
+				t.Fatalf("farm changed: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dataPath, "new.esp")); err != nil {
+				t.Fatalf("farm output changed: %v", err)
+			}
+		})
+	}
+}
+
+// TestRecoverDataPathUnknownGameWithBaselineRefused checks neither offline command changes an unrecognized Steam-backed farm.
+func TestRecoverDataPathUnknownGameWithBaselineRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func([]string, recoveryDeps) int
+	}{
+		{"recover", runRecoverWith},
+		{"recover-confirm", runRecoverConfirmWith},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, dataPath, _, _, stderr := steamRecoveryFixture(t, false)
+			if code := tc.run([]string{"--data-path", dataPath}, deps); code != 2 {
+				t.Fatalf("exit = %d, want 2; stderr = %q", code, stderr.String())
+			}
+			if got := stderr.String(); got != "This folder belongs to a game Gorganizer does not know. Use gorganizerctl recover --game <id>.\n" {
+				t.Fatalf("refusal = %q", got)
+			}
+			if _, err := vfs.ReadSentinel(dataPath); err != nil {
+				t.Fatalf("farm changed: %v", err)
+			}
+			if _, err := os.Stat(dataPath + ".orig"); err != nil {
+				t.Fatalf("backup changed: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dataPath, "new.esp")); err != nil {
+				t.Fatalf("farm output changed: %v", err)
+			}
+		})
+	}
 }
 
 // TestRecoverRefusesWhileDaemonHoldsLock checks that a held instance lock leaves an interrupted farm untouched.

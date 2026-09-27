@@ -75,15 +75,14 @@ func (ts *TransferService) ImportInstance(ctx context.Context, req dto.ImportReq
 	return summary, ierr
 }
 
-// refuseMountedOverwrites rejects OVERWRITE of the mounted profile or of any mod it has enabled.
+// refuseMountedOverwrites rejects overwriting the mounted profile or a mod used by its farm or root deployment.
 func (ts *TransferService) refuseMountedOverwrites(req dto.ImportRequest, preview dto.ImportPreview) error {
+	defer ts.s.lockProfiles(req.GameID)()
 	ts.s.mu.RLock()
+	defer ts.s.mu.RUnlock()
 	mm, hasMM := ts.s.mountMgrs[req.GameID]
 	ms, hasMS := ts.s.mountStates[req.GameID]
-	ts.s.mu.RUnlock()
-	if !hasMM || !hasMS || !mm.IsMounted() {
-		return nil
-	}
+	mountedProfile := hasMM && hasMS && mm.IsMounted()
 
 	selectedMod := selectionSet(req.ModFolders)
 	selectedProfile := selectionSet(req.ProfileNames)
@@ -94,7 +93,7 @@ func (ts *TransferService) refuseMountedOverwrites(req dto.ImportRequest, previe
 		return req.Policy
 	}
 
-	if req.Policy == dto.PolicyOverwrite {
+	if mountedProfile && req.Policy == dto.PolicyOverwrite {
 		for _, p := range preview.Profiles {
 			if !p.Collision || (selectedProfile != nil && !selectedProfile[p.Name]) {
 				continue
@@ -105,21 +104,15 @@ func (ts *TransferService) refuseMountedOverwrites(req dto.ImportRequest, previe
 		}
 	}
 
-	_, entries, err := ts.s.profileMgr.Load(req.GameID, ms.profileName)
-	if err != nil {
-		return fmt.Errorf("loading mounted profile %q: %w", ms.profileName, err)
-	}
-	enabled := map[string]bool{}
-	for _, e := range entries {
-		if e.Enabled {
-			enabled[e.Name] = true
-		}
-	}
 	for _, m := range preview.Mods {
-		if !m.Collision || (selectedMod != nil && !selectedMod[m.Folder]) {
+		if !m.Collision || (selectedMod != nil && !selectedMod[m.Folder]) || policyFor(m.Folder) != dto.PolicyOverwrite {
 			continue
 		}
-		if policyFor(m.Folder) == dto.PolicyOverwrite && enabled[m.Folder] {
+		used, err := ts.s.svc.mods.mountedModUsedLocked(req.GameID, m.Folder)
+		if err != nil {
+			return err
+		}
+		if used {
 			return &TransferOverwriteMountedError{Name: m.Folder}
 		}
 	}

@@ -39,7 +39,7 @@ func RecoverGameOffline(cfg *config.Config, gameID string) (OfflineRecoveryRepor
 	if dataSubpath == "" {
 		dataSubpath = "Data"
 	}
-	s := &session{config: cfg, rootDeployMgrs: make(map[string]*vfs.RootDeploymentManager), readSteamAppState: steam.ReadAppState}
+	s := &session{config: cfg, rootDeployMgrs: make(map[string]*vfs.RootDeploymentManager)}
 	dataPath := filepath.Join(s.mountInstallPath(gc), dataSubpath)
 	var failures []error
 	loaderDeferred := false
@@ -67,7 +67,7 @@ func RecoverGameOffline(cfg *config.Config, gameID string) (OfflineRecoveryRepor
 		failures = append(failures, fmt.Errorf("recovering game-root files: %w", rootErr))
 	}
 
-	_, capture, steamErr := s.steamCaptureLocked(gameID, dataPath)
+	capture, steamErr := OfflineSteamCapture(cfg, gameID, dataPath)
 	var outcome vfs.RecoveryOutcome
 	var dataErr error
 	if steamErr != nil {
@@ -109,6 +109,16 @@ func RecoverGameOffline(cfg *config.Config, gameID string) (OfflineRecoveryRepor
 		}
 	}
 	return report, errors.Join(failures...)
+}
+
+// OfflineSteamCapture chooses the same Steam-aware Data capture policy as configured-game recovery.
+func OfflineSteamCapture(cfg *config.Config, gameID, dataPath string) (vfs.CaptureOptions, error) {
+	if cfg == nil || gameID == "" {
+		return vfs.CaptureOptions{}, fmt.Errorf("a configured game is required to check Steam before recovery")
+	}
+	s := &session{config: cfg, readSteamAppState: steam.ReadAppState}
+	_, capture, err := s.steamCaptureLocked(gameID, dataPath)
+	return capture, err
 }
 
 // recoverOfflineLoader resolves a pending SMAPI loader transaction and reports whether it changed anything.

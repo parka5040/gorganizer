@@ -1,6 +1,10 @@
 package daemon
 
-import "github.com/parka/gorganizer/internal/procscan"
+import (
+	"log/slog"
+
+	"github.com/parka/gorganizer/internal/procscan"
+)
 
 var processTableRoot = "/proc"
 
@@ -11,6 +15,7 @@ func (s *session) processRunningIn(dir string, appIDs []int) (bool, error) {
 	}
 	running, err := procscan.RunningIn(processTableRoot, dir, appIDs)
 	if err != nil {
+		slog.Warn("scanning game processes failed; treating install as running", "path", dir, "err", err)
 		return true, nil
 	}
 	return running, nil

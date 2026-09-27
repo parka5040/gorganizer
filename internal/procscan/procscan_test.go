@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -100,8 +101,12 @@ func TestRunningInReportsUnreadableProcess(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(entry, "exe"), []byte("not a link"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	info, err := os.Stat(entry)
+	if err != nil || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Getuid()) {
+		t.Fatalf("fake process ownership = %v, %v; want the current user", info, err)
+	}
 	if _, err := RunningIn(procRoot, install, nil); err == nil {
-		t.Error("scan accepted an unreadable process executable")
+		t.Error("same-user process with an unreadable executable was reported as idle")
 	}
 }
 

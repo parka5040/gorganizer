@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -8,6 +10,7 @@ import (
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/dto"
 	"github.com/parka/gorganizer/internal/steam"
+	"github.com/parka/gorganizer/internal/vfs"
 )
 
 // newShutdownTestDaemon builds an isolated daemon with an injected idle process scan.
@@ -139,6 +142,30 @@ func TestShutdownPlanMatchesTeardown(t *testing.T) {
 	}
 }
 
+// TestShutdownRetainsFarmWhenProcessScanFails checks both the plan and teardown leave the Data farm intact when process status is unknown.
+func TestShutdownRetainsFarmWhenProcessScanFails(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	install := newStardewInstall(t)
+	d := newShutdownTestDaemon(t, map[string]config.GameConfig{
+		"stardewvalley": {Name: "Stardew Valley", InstallPath: install, DataSubpath: "Mods", SteamAppID: 413150},
+	})
+	if _, err := d.MountVFS("stardewvalley", "Default"); err != nil {
+		t.Fatal(err)
+	}
+	d.procScan = func(string) (bool, error) { return false, errors.New("process table unavailable") }
+	plan := d.GetShutdownPlan()
+	if len(plan) != 1 || plan[0].WillUnmount || plan[0].RetainedReason != "game_running" {
+		t.Fatalf("shutdown plan = %+v, want retained for unknown process state", plan)
+	}
+	d.deactivateIdleFarms()
+	if !d.mountMgrs["stardewvalley"].IsMounted() {
+		t.Fatal("shutdown removed a farm after a failed process scan")
+	}
+	if _, err := os.Stat(filepath.Join(install, "Mods", vfs.SentinelFilename)); err != nil {
+		t.Fatalf("farm sentinel after shutdown: %v", err)
+	}
+}
+
 // TestShutdownPlanDoesNotClearSteamFlags checks repeated plan queries leave stale launch flags and timestamps untouched.
 func TestShutdownPlanDoesNotClearSteamFlags(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
@@ -181,12 +208,12 @@ func TestShutdownReportsRetainedFarms(t *testing.T) {
 		"stardewvalley": {Name: "Stardew Valley", InstallPath: first, DataSubpath: "Mods", SteamAppID: 413150},
 		"skyrimse":      {Name: "Skyrim Special Edition", InstallPath: second, DataSubpath: "Data", SteamAppID: 489830},
 	})
-	d.procScan = func(path string) (bool, error) { return path == first, nil }
 	for _, gameID := range []string{"stardewvalley", "skyrimse"} {
 		if _, err := d.MountVFS(gameID, "Default"); err != nil {
 			t.Fatal(err)
 		}
 	}
+	d.procScan = func(path string) (bool, error) { return path == first, nil }
 	t.Cleanup(func() {
 		d.mu.Lock()
 		for _, mm := range d.mountMgrs {
