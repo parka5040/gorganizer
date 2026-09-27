@@ -226,12 +226,25 @@ func (m *MountManager) deactivate(force bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	dataPath := m.gameDataPath
+	backupPath := dataPath + m.backupSuffix
+	journalPath := deactivationJournalPath(dataPath)
+	if _, err := os.Lstat(journalPath); err == nil {
+		j, err := readDeactivationJournal(journalPath)
+		if err != nil {
+			return fmt.Errorf("reading unfinished mod removal: %w", err)
+		}
+		if err := resumeFarmRetirement(dataPath, backupPath, j, force); err != nil {
+			return m.retirementErrorLocked(dataPath, backupPath, j.Backup, err)
+		}
+		m.clearMountedLocked()
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("checking unfinished mod removal: %w", err)
+	}
 	if !m.mounted {
 		return ErrNotMounted
 	}
-
-	dataPath := m.gameDataPath
-	backupPath := dataPath + m.backupSuffix
 
 	s, err := ReadSentinel(dataPath)
 	if err != nil {
@@ -255,20 +268,40 @@ func (m *MountManager) deactivate(force bool) error {
 		}
 	}
 
+	backupID, _, err := directoryAt(backupPath)
+	if err != nil {
+		return fmt.Errorf("checking original Data before teardown: %w", err)
+	}
 	slog.Info("tearing down materialized overlay", "path", dataPath)
-	if err := retireFarm(dataPath, backupPath, s); err != nil {
-		return fmt.Errorf("restoring %s from %s: %w", dataPath, backupPath, err)
+	if err := retireFarm(dataPath, backupPath, s, force); err != nil {
+		return m.retirementErrorLocked(dataPath, backupPath, backupID, err)
 	}
 
+	m.clearMountedLocked()
+	slog.Info("VFS deactivated and data directory restored", "path", dataPath)
+	return nil
+}
+
+// clearMountedLocked clears the manager's active farm state after Data has been restored.
+func (m *MountManager) clearMountedLocked() {
 	m.tree = nil
 	m.layers = nil
 	m.appliedLayers = nil
+	m.profileName = ""
 	m.mounted = false
 	m.desiredGen = 0
 	m.appliedGen = 0
+}
 
-	slog.Info("VFS deactivated and data directory restored", "path", dataPath)
-	return nil
+// retirementErrorLocked reports unfinished cleanup and clears the mount state once the original is live.
+func (m *MountManager) retirementErrorLocked(dataPath, backupPath string, backupID directoryIdentity, cause error) error {
+	dataID, dataExists, dataErr := directoryAt(dataPath)
+	_, backupExists, backupErr := directoryAt(backupPath)
+	if dataErr == nil && backupErr == nil && dataExists && dataID == backupID && backupID.Dev != 0 && !backupExists {
+		m.clearMountedLocked()
+		return fmt.Errorf("Gorganizer restored the original files, but cleanup will finish on the next unmount or restart: %w", cause)
+	}
+	return fmt.Errorf("restoring %s from %s: %w", dataPath, backupPath, errors.Join(cause, dataErr, backupErr))
 }
 
 // MarkDirty updates the in-memory desired layout and advances desiredGen without touching the on-disk farm.

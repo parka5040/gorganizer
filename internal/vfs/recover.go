@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/parka/gorganizer/internal/atomicfile"
 )
 
 type FuseMountInfo struct {
@@ -108,6 +110,8 @@ func unescapeMountinfoField(s string) string {
 
 var renameActivationBackup = os.Rename
 
+const teardownCaptureFailureReason = "Gorganizer couldn't save files written during the last session, so it left the mod folder in place. Free some disk space, then restart Gorganizer."
+
 // CleanupStale heals dataPath after a prior daemon crash; returns Pending for ambiguous states.
 func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 	var outcome RecoveryOutcome
@@ -131,7 +135,11 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 		if readErr != nil {
 			return outcome, nil
 		}
-		if err := resumeFarmRetirement(resolved, backupPath, j); err != nil {
+		if err := resumeFarmRetirement(resolved, backupPath, j, false); err != nil {
+			if errors.Is(err, ErrCaptureFailed) {
+				outcome.Pending.Reason = teardownCaptureFailureReason
+				return outcome, nil
+			}
 			if errors.Is(err, errDeactivationMismatch) {
 				return outcome, nil
 			}
@@ -356,7 +364,11 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 						"path", resolved, "count", moved, "overwrite_root", s.OverwriteRoot)
 				}
 			}
-			if err := retireFarm(resolved, backupPath, s); err != nil {
+			if err := retireFarm(resolved, backupPath, s, false); err != nil {
+				if errors.Is(err, ErrCaptureFailed) {
+					outcome.Pending = &RecoveryPending{DataPath: resolved, BackupPath: backupPath, Reason: teardownCaptureFailureReason}
+					return outcome, nil
+				}
 				return outcome, fmt.Errorf("retiring crashed overlay at %s: %w", resolved, err)
 			}
 			slog.Info("overlay crash recovery complete", "path", resolved)
@@ -473,23 +485,62 @@ func reconcileApplyIntent(dataPath, backupPath, staging, oldFarm, applyPath stri
 	return nil, nil
 }
 
-// RestoreFromBackup performs the user-confirmed rm -rf Data, mv Data.orig → Data.
+// RestoreFromBackup captures recorded farm writes and clears teardown markers during a confirmed restore.
 func RestoreFromBackup(dataPath string) error {
 	resolved, err := filepath.Abs(dataPath)
 	if err != nil {
 		return fmt.Errorf("resolving %q: %w", dataPath, err)
 	}
 	backupPath := resolved + farmBackupSuffix
-	if _, err := os.Stat(backupPath); err != nil {
-		return fmt.Errorf("RestoreFromBackup: no backup at %s: %w", backupPath, err)
+	retired := retiredFarmPath(resolved)
+	journal := deactivationJournalPath(resolved)
+	_, backupErr := os.Lstat(backupPath)
+	if backupErr != nil && !errors.Is(backupErr, os.ErrNotExist) {
+		return fmt.Errorf("checking backup %s: %w", backupPath, backupErr)
 	}
-	slog.Info("RestoreFromBackup: removing Data/", "path", resolved)
-	if err := os.RemoveAll(resolved); err != nil {
-		return fmt.Errorf("removing %s: %w", resolved, err)
+	if errors.Is(backupErr, os.ErrNotExist) {
+		data, exists, err := directoryAt(resolved)
+		if err != nil || !exists || data.Dev == 0 {
+			return fmt.Errorf("RestoreFromBackup: no backup at %s: %w", backupPath, os.ErrNotExist)
+		}
+		if _, err := ReadSentinel(resolved); !errors.Is(err, ErrSentinelMissing) {
+			return fmt.Errorf("RestoreFromBackup: no original backup at %s", backupPath)
+		}
+		_, journalErr := os.Lstat(journal)
+		_, retiredErr := os.Lstat(retired)
+		if errors.Is(journalErr, os.ErrNotExist) && errors.Is(retiredErr, os.ErrNotExist) {
+			return fmt.Errorf("RestoreFromBackup: no backup at %s: %w", backupPath, os.ErrNotExist)
+		}
+		if journalErr != nil && !errors.Is(journalErr, os.ErrNotExist) || retiredErr != nil && !errors.Is(retiredErr, os.ErrNotExist) {
+			return fmt.Errorf("checking teardown markers: %w", errors.Join(journalErr, retiredErr))
+		}
+	} else if err := captureRetiringFarm(resolved); err != nil {
+		return err
 	}
-	slog.Info("RestoreFromBackup: renaming backup", "from", backupPath, "to", resolved)
-	if err := os.Rename(backupPath, resolved); err != nil {
-		return fmt.Errorf("renaming %s to %s: %w", backupPath, resolved, err)
+	if err := captureRetiringFarm(retired); err != nil {
+		return err
+	}
+	if backupErr == nil {
+		slog.Info("RestoreFromBackup: removing Data/", "path", resolved)
+		if err := os.RemoveAll(resolved); err != nil {
+			return fmt.Errorf("removing %s: %w", resolved, err)
+		}
+		slog.Info("RestoreFromBackup: renaming backup", "from", backupPath, "to", resolved)
+		if err := os.Rename(backupPath, resolved); err != nil {
+			return fmt.Errorf("renaming %s to %s: %w", backupPath, resolved, err)
+		}
+		if err := atomicfile.SyncDir(filepath.Dir(resolved)); err != nil {
+			return fmt.Errorf("syncing restored Data: %w", err)
+		}
+	}
+	if err := removeRetiredFarm(retired); err != nil {
+		return fmt.Errorf("removing retired farm: %w", err)
+	}
+	if err := atomicfile.SyncDir(filepath.Dir(resolved)); err != nil {
+		return fmt.Errorf("syncing removed retired farm: %w", err)
+	}
+	if err := atomicfile.RemoveDurable(journal); err != nil {
+		return fmt.Errorf("removing deactivation journal: %w", err)
 	}
 	slog.Info("RestoreFromBackup: complete", "path", resolved)
 	return nil

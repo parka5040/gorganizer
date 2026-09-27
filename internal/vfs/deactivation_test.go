@@ -121,6 +121,39 @@ func TestDeactivateCrashMatrix(t *testing.T) {
 	}
 }
 
+// TestResumedTeardownCapturesLateOutput checks both farm locations preserve writes made after a teardown interruption.
+func TestResumedTeardownCapturesLateOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		step int
+	}{
+		{"Data before retirement", 1},
+		{"retired farm before removal", 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, overwrite, mm := teardownFixture(t)
+			stopped := stopDeactivationAt(t, tc.step)
+			if err := mm.Deactivate(); !errors.Is(err, stopped) {
+				t.Fatalf("Deactivate = %v, want interruption", err)
+			}
+			deactivationStep = func(int) error { return nil }
+			farm := data
+			if tc.step == 3 {
+				farm = retiredFarmPath(data)
+			}
+			mustFile(t, filepath.Join(farm, "Saves", "late.ess"), "late session output")
+			outcome, err := CleanupStale(data)
+			if err != nil || !outcome.Restored || outcome.Pending != nil {
+				t.Fatalf("CleanupStale = %+v, %v; want restored", outcome, err)
+			}
+			if got := mustRead(t, filepath.Join(overwrite, "Saves", "late.ess")); got != "late session output" {
+				t.Errorf("late output = %q", got)
+			}
+			assertTeardownRestored(t, data, overwrite)
+		})
+	}
+}
+
 // TestPartialRetiredFarmRemovalRecoversWithoutPrompt checks a partly removed farm keeps its recorded directory identity.
 func TestPartialRetiredFarmRemovalRecoversWithoutPrompt(t *testing.T) {
 	data, overwrite, mm := teardownFixture(t)
@@ -299,7 +332,7 @@ func TestRetiredFarmIdentityMismatchIsPending(t *testing.T) {
 	}
 }
 
-// TestForceDeactivateAfterFailedCaptureUsesJournal checks forced teardown can resume when capture was refused.
+// TestForceDeactivateAfterFailedCaptureUsesJournal checks recovery does not inherit force consent after a crash.
 func TestForceDeactivateAfterFailedCaptureUsesJournal(t *testing.T) {
 	data, overwrite, mm := teardownFixture(t)
 	if err := os.Symlink(t.TempDir(), filepath.Join(overwrite, "Saves")); err != nil {
@@ -311,16 +344,126 @@ func TestForceDeactivateAfterFailedCaptureUsesJournal(t *testing.T) {
 	}
 	deactivationStep = func(int) error { return nil }
 	outcome, err := CleanupStale(data)
+	if err != nil || outcome.Pending == nil || outcome.Restored {
+		t.Fatalf("CleanupStale = %+v, %v; want capture pending", outcome, err)
+	}
+	if got := mustRead(t, filepath.Join(retiredFarmPath(data), "Saves", "new.ess")); got != "new save" {
+		t.Errorf("uncaptured save = %q", got)
+	}
+	if err := os.Remove(filepath.Join(overwrite, "Saves")); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err = CleanupStale(data)
 	if err != nil || !outcome.Restored || outcome.Pending != nil {
-		t.Fatalf("CleanupStale = %+v, %v; want restored without prompt", outcome, err)
+		t.Fatalf("retry CleanupStale = %+v, %v; want restored", outcome, err)
+	}
+	assertTeardownRestored(t, data, overwrite)
+}
+
+// TestResumedTeardownCaptureFailureKeepsFarm checks a failed late capture leaves the recorded farm for retry.
+func TestResumedTeardownCaptureFailureKeepsFarm(t *testing.T) {
+	for _, step := range []int{1, 3} {
+		t.Run(string(rune('0'+step)), func(t *testing.T) {
+			data, overwrite, mm := teardownFixture(t)
+			stopped := stopDeactivationAt(t, step)
+			if err := mm.Deactivate(); !errors.Is(err, stopped) {
+				t.Fatalf("Deactivate = %v, want interruption", err)
+			}
+			deactivationStep = func(int) error { return nil }
+			farm := data
+			if step == 3 {
+				farm = retiredFarmPath(data)
+			}
+			mustFile(t, filepath.Join(farm, "late.ess"), "late output")
+			if err := os.Symlink(t.TempDir(), filepath.Join(overwrite, "late.ess")); err != nil {
+				t.Fatal(err)
+			}
+			outcome, err := CleanupStale(data)
+			if err != nil || outcome.Pending == nil || !strings.Contains(outcome.Pending.Reason, "couldn't save files") {
+				t.Fatalf("CleanupStale = %+v, %v; want capture pending", outcome, err)
+			}
+			if got := mustRead(t, filepath.Join(farm, "late.ess")); got != "late output" {
+				t.Errorf("late output in farm = %q", got)
+			}
+			if _, err := os.Lstat(deactivationJournalPath(data)); err != nil {
+				t.Errorf("journal lost: %v", err)
+			}
+		})
+	}
+}
+
+// TestRecoveryTeardownCaptureFailureIsPending checks a write after the journal is recorded prevents startup removal.
+func TestRecoveryTeardownCaptureFailureIsPending(t *testing.T) {
+	data, overwrite, _ := teardownFixture(t)
+	original := deactivationStep
+	deactivationStep = func(step int) error {
+		if step == 1 {
+			mustFile(t, filepath.Join(data, "late.ess"), "late output")
+			if err := os.Symlink(t.TempDir(), filepath.Join(overwrite, "late.ess")); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	t.Cleanup(func() { deactivationStep = original })
+	outcome, err := CleanupStale(data)
+	if err != nil || outcome.Pending == nil || outcome.Pending.Reason != teardownCaptureFailureReason {
+		t.Fatalf("CleanupStale = %+v, %v; want capture pending", outcome, err)
+	}
+	if got := mustRead(t, filepath.Join(data, "late.ess")); got != "late output" {
+		t.Errorf("late output in farm = %q", got)
+	}
+	if _, err := os.Lstat(deactivationJournalPath(data)); err != nil {
+		t.Errorf("journal missing: %v", err)
+	}
+}
+
+// TestDeactivateResumesPartialTeardown checks an unmount retry finishes a recorded removal while the manager is live.
+func TestDeactivateResumesPartialTeardown(t *testing.T) {
+	data, overwrite, mm := teardownFixture(t)
+	original := removeRetiredFarm
+	failed := errors.New("one-time removal failure")
+	calls := 0
+	removeRetiredFarm = func(path string) error {
+		calls++
+		if calls == 1 {
+			return failed
+		}
+		return original(path)
+	}
+	t.Cleanup(func() { removeRetiredFarm = original })
+	if err := mm.Deactivate(); !errors.Is(err, failed) {
+		t.Fatalf("first Deactivate = %v, want removal failure", err)
+	}
+	mustFile(t, filepath.Join(retiredFarmPath(data), "Saves", "late.ess"), "late output")
+	if err := mm.Deactivate(); err != nil {
+		t.Fatalf("retry Deactivate: %v", err)
+	}
+	if mm.IsMounted() || calls != 2 {
+		t.Errorf("manager mounted = %t, removal calls = %d; want unmounted, two calls", mm.IsMounted(), calls)
+	}
+	if got := mustRead(t, filepath.Join(overwrite, "Saves", "late.ess")); got != "late output" {
+		t.Errorf("late output = %q", got)
+	}
+	assertTeardownRestored(t, data, overwrite)
+}
+
+// TestFailedRetirementAfterRestoreClearsMountedState checks a restored original is never reported as a live farm.
+func TestFailedRetirementAfterRestoreClearsMountedState(t *testing.T) {
+	data, _, mm := teardownFixture(t)
+	original := removeRetiredFarm
+	failed := errors.New("retired farm removal failure")
+	removeRetiredFarm = func(string) error { return failed }
+	t.Cleanup(func() { removeRetiredFarm = original })
+	err := mm.Deactivate()
+	if !errors.Is(err, failed) || !strings.Contains(err.Error(), "next unmount or restart") {
+		t.Fatalf("Deactivate = %v, want retryable cleanup error", err)
+	}
+	if mm.IsMounted() {
+		t.Error("manager still reports a mounted farm after restoring Data")
 	}
 	if got := mustRead(t, filepath.Join(data, "Skyrim.esm")); got != "original master\x00bytes" {
-		t.Errorf("original master = %q", got)
-	}
-	for _, path := range []string{retiredFarmPath(data), deactivationJournalPath(data), filepath.Join(data, "Saves", "new.ess")} {
-		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("forced teardown left %s: %v", path, err)
-		}
+		t.Errorf("restored original = %q", got)
 	}
 }
 
@@ -354,6 +497,88 @@ func TestLegacyDeactivationJournalNoFarmID(t *testing.T) {
 				t.Errorf("original = %q", got)
 			}
 		})
+	}
+}
+
+// TestRestoreFromBackupClearsTeardownMarkers checks confirmation captures both farm locations before removing markers.
+func TestRestoreFromBackupClearsTeardownMarkers(t *testing.T) {
+	for _, step := range []int{1, 2} {
+		t.Run(string(rune('0'+step)), func(t *testing.T) {
+			data, overwrite, mm := teardownFixture(t)
+			stopped := stopDeactivationAt(t, step)
+			if err := mm.Deactivate(); !errors.Is(err, stopped) {
+				t.Fatalf("Deactivate = %v, want interruption", err)
+			}
+			farm := data
+			if step == 2 {
+				farm = retiredFarmPath(data)
+			}
+			mustFile(t, filepath.Join(farm, "late.ess"), "late output")
+			journalPath := deactivationJournalPath(data)
+			journal, err := readDeactivationJournal(journalPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			journal.Farm.Ino++
+			body, err := json.Marshal(journal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(journalPath, body, 0644); err != nil {
+				t.Fatal(err)
+			}
+			outcome, err := CleanupStale(data)
+			if err != nil || outcome.Pending == nil {
+				t.Fatalf("CleanupStale = %+v, %v; want mismatch prompt", outcome, err)
+			}
+			if err := RestoreFromBackup(data); err != nil {
+				t.Fatalf("RestoreFromBackup: %v", err)
+			}
+			if got := mustRead(t, filepath.Join(overwrite, "late.ess")); got != "late output" {
+				t.Errorf("captured late output = %q", got)
+			}
+			assertTeardownRestored(t, data, overwrite)
+		})
+	}
+}
+
+// TestRestoreFromBackupWithOnlyMarkersLeft checks confirmation cleans up a teardown after Data.orig was restored.
+func TestRestoreFromBackupWithOnlyMarkersLeft(t *testing.T) {
+	data, overwrite, mm := teardownFixture(t)
+	stopped := stopDeactivationAt(t, 3)
+	if err := mm.Deactivate(); !errors.Is(err, stopped) {
+		t.Fatalf("Deactivate = %v, want interruption", err)
+	}
+	mustFile(t, filepath.Join(retiredFarmPath(data), "Saves", "late.ess"), "late output")
+	if err := RestoreFromBackup(data); err != nil {
+		t.Fatalf("RestoreFromBackup with only markers: %v", err)
+	}
+	if got := mustRead(t, filepath.Join(overwrite, "Saves", "late.ess")); got != "late output" {
+		t.Errorf("captured late output = %q", got)
+	}
+	assertTeardownRestored(t, data, overwrite)
+}
+
+// TestRestoreFromBackupCaptureFailureLeavesMarkers checks confirmation never removes a farm it could not capture.
+func TestRestoreFromBackupCaptureFailureLeavesMarkers(t *testing.T) {
+	data, overwrite, mm := teardownFixture(t)
+	stopped := stopDeactivationAt(t, 3)
+	if err := mm.Deactivate(); !errors.Is(err, stopped) {
+		t.Fatalf("Deactivate = %v, want interruption", err)
+	}
+	farm := retiredFarmPath(data)
+	mustFile(t, filepath.Join(farm, "late.ess"), "late output")
+	if err := os.Symlink(t.TempDir(), filepath.Join(overwrite, "late.ess")); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreFromBackup(data); !errors.Is(err, ErrCaptureFailed) {
+		t.Fatalf("RestoreFromBackup = %v, want capture failure", err)
+	}
+	if got := mustRead(t, filepath.Join(farm, "late.ess")); got != "late output" {
+		t.Errorf("late output in farm = %q", got)
+	}
+	if _, err := os.Lstat(deactivationJournalPath(data)); err != nil {
+		t.Errorf("journal removed: %v", err)
 	}
 }
 
