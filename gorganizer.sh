@@ -17,10 +17,9 @@
 #   setup                 Detect distro, install build deps via system PM.
 #   doctor                Check build and runtime dependencies without changes.
 #   build [--rebuild]     Build only. --rebuild forces a clean rebuild.
-#   update [--restart]    Pull latest from origin/main, rebuild, re-register.
-#                         Refuses to run if the working tree is dirty or not
-#                         a git checkout. User config and *_Mods/ are
-#                         preserved. --restart reminds you to reopen a running session.
+#   update [--restart]    Update this branch from its own source, rebuild, and
+#                         re-register. --restart only reminds you to reopen a
+#                         running session; it never stops Gorganizer.
 #   register              (Re-)install desktop file + icon + nxm:// handler.
 #   unregister            Reverse `register`.
 #   nxm <URI>             Open Gorganizer if needed and add a Nexus Mods download.
@@ -113,10 +112,10 @@ Subcommands:
   setup                 Detect distro, install build deps via system PM.
   doctor                Check build and runtime dependencies without changes.
   build [--rebuild]     Build only. --rebuild forces a clean rebuild.
-  update [--restart]    Pull latest from origin/main, rebuild, re-register.
-                        Refuses to run if the working tree is dirty or not
-                        a git checkout. User config and *_Mods/ are
-                        preserved. --restart reminds you to reopen a running session.
+  update [--restart]    Update this branch from its own source and rebuild.
+                        Refuses to run if you have uncommitted changes.
+                        Your mods and settings are preserved. --restart only
+                        reminds you to reopen; it never stops Gorganizer.
   register              (Re-)install desktop file + icon + nxm:// handler.
   unregister            Reverse \`register\`.
   nxm <URI>             Open Gorganizer if needed and add a Nexus Mods download.
@@ -878,74 +877,102 @@ cmd_nxm() {
 
 # --- update ----------------------------------------------------------------
 
+update_migration_reminder() {
+    local status
+    if [ -x "$CTL_BIN" ] && status="$("$CTL_BIN" migrate-data --status 2>/dev/null)" \
+       && [ "$status" = pending ]; then
+        log "Open Gorganizer to finish moving your mods."
+    fi
+}
+
 cmd_update() {
-    # In-place update of an existing checkout. Pulls origin/main, forces a
-    # clean rebuild and refreshes the desktop entry (Exec= path may have moved
-    # under the user). User config under
-    # $CONFIG_DIR and mod data under each <Game>_Mods/ tree are never
-    # touched here — git pull only changes tracked files.
+    local restart=false branch upstream remote old_sha old_short new_sha
     while [ $# -gt 0 ]; do
         case "$1" in
-            --restart) shift ;;
+            --restart) restart=true; shift ;;
             *) err "Unknown option: $1"; return 2 ;;
         esac
     done
 
     if ! command -v git >/dev/null 2>&1; then
         err "git not found in PATH; can't update."
-        exit 1
+        return 1
     fi
     if [ ! -d "$SCRIPT_DIR/.git" ]; then
         err "$SCRIPT_DIR is not a git checkout."
         err "Re-clone the repo to update:"
         err "    git clone https://github.com/parka5040/gorganizer ~/gorganizer"
-        exit 1
+        return 1
     fi
 
-    # Refuse to clobber local edits — they're the user's, not ours to merge.
     if ! git -C "$SCRIPT_DIR" diff --quiet HEAD -- 2>/dev/null \
        || [ -n "$(git -C "$SCRIPT_DIR" status --porcelain)" ]; then
         err "Working tree has uncommitted changes:"
         git -C "$SCRIPT_DIR" status -s >&2
         err "Stash or commit them, then re-run \`./gorganizer.sh update\`."
-        exit 1
+        return 1
     fi
 
-    local old_sha new_sha
-    old_sha=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD)
-
-    log "Fetching origin..."
-    if ! git -C "$SCRIPT_DIR" fetch --quiet origin; then
-        err "git fetch failed."
-        exit 1
+    if ! branch="$(git -C "$SCRIPT_DIR" symbolic-ref --quiet --short HEAD)"; then
+        err "This copy of Gorganizer is not on a branch, so it cannot be updated automatically."
+        return 1
+    fi
+    if ! upstream="$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref '@{u}' 2>/dev/null)" \
+       || ! remote="$(git -C "$SCRIPT_DIR" config --get "branch.$branch.remote")"; then
+        err "This branch has no update source. Ask whoever set it up, or re-download Gorganizer."
+        return 1
     fi
 
-    log "Pulling --ff-only..."
-    if ! git -C "$SCRIPT_DIR" pull --ff-only --quiet origin main; then
-        err "Non-fast-forward (or other) pull failure. Resolve manually:"
-        err "    cd $SCRIPT_DIR && git pull"
-        exit 1
+    old_sha="$(git -C "$SCRIPT_DIR" rev-parse HEAD)"
+    old_short="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD)"
+    if ! git -C "$SCRIPT_DIR" fetch --quiet "$remote"; then
+        err "Could not check for updates. Nothing was changed."
+        return 1
     fi
-
-    new_sha=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD)
-    if [ "$old_sha" = "$new_sha" ]; then
-        ok "Already on the latest commit ($new_sha)."
+    if ! git -C "$SCRIPT_DIR" merge-base --is-ancestor HEAD "$upstream"; then
+        err "Your copy has changes that are not in the update source. Nothing was changed."
+        return 1
+    fi
+    if [ "$old_sha" = "$(git -C "$SCRIPT_DIR" rev-parse "$upstream")" ]; then
+        if ! needs_build; then
+            ok "Gorganizer is already up to date ($old_short)."
+            update_migration_reminder
+            return 0
+        fi
     else
-        ok "Updated $old_sha -> $new_sha:"
-        git -C "$SCRIPT_DIR" log --oneline "${old_sha}..${new_sha}" || true
+        if ! git -C "$SCRIPT_DIR" merge --ff-only --quiet "$upstream"; then
+            err "Could not install the update. Your previous version is still available."
+            return 1
+        fi
+        new_sha="$(git -C "$SCRIPT_DIR" rev-parse HEAD)"
+        ok "New in this update:"
+        git -C "$SCRIPT_DIR" log --format='  %s' "${old_sha}..${new_sha}"
     fi
 
-    log "Rebuilding from clean..."
-    do_build force || exit 1
-
-    log "Refreshing desktop entry..."
-    cmd_register || warn "Desktop registration reported issues."
-
-    if pgrep -u "$(id -u)" -x gorganizerd >/dev/null 2>&1; then
-        warn "Close Gorganizer and open it again to use the update."
+    if ! do_build force; then
+        if [ -n "${new_sha:-}" ]; then
+            if ! git -C "$SCRIPT_DIR" reset --keep "$old_sha"; then
+                err "The update could not be built or rolled back. Your installed Gorganizer has not changed; ask whoever set it up for help."
+                return 1
+            fi
+        fi
+        err "The update was downloaded but could not be built, so Gorganizer stayed on the previous version ($old_short). Your mods and settings were not touched."
+        return 1
     fi
 
-    ok "Update complete."
+    if ! cmd_register; then
+        warn "Could not refresh the application menu entry. Gorganizer was updated."
+    fi
+
+    if [ -x "$CTL_BIN" ] && "$CTL_BIN" ping >/dev/null 2>&1; then
+        ok "Update installed. It will be used next time you open Gorganizer."
+        if $restart; then
+            log "Close Gorganizer and open it again to use the new version now."
+        fi
+    else
+        ok "Update installed."
+    fi
+    update_migration_reminder
 }
 
 # --- setup -----------------------------------------------------------------
