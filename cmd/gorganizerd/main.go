@@ -14,6 +14,7 @@ import (
 	pb "github.com/parka/gorganizer/api/proto"
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/daemon"
+	"github.com/parka/gorganizer/internal/instancelock"
 	"github.com/parka/gorganizer/internal/ipc"
 	"github.com/parka/gorganizer/internal/transfer"
 	"google.golang.org/grpc"
@@ -68,7 +69,7 @@ func main() {
 		sock = *socketPath
 	}
 
-	releaseLock, err := acquireSingleInstanceLock()
+	releaseLock, err := instancelock.Acquire()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
