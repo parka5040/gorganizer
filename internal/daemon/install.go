@@ -373,9 +373,11 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 	if err := is.s.refuseWhenShuttingDown("install"); err != nil {
 		return "", 0, err
 	}
-	if err := is.s.deferredFor(req.GameID, "install"); err != nil {
+	release, err := is.s.acquireShared(req.GameID, "install")
+	if err != nil {
 		return "", 0, err
 	}
+	defer release()
 	if !is.s.gameConfigured(req.GameID) {
 		return "", 0, fmt.Errorf("%w: %s", config.ErrInvalidGameID, req.GameID)
 	}

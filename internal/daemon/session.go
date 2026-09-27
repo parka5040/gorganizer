@@ -49,6 +49,9 @@ type session struct {
 	rootPendingRecoveries   map[string]*dto.RecoveryPendingResult
 	loaderPendingRecoveries map[string]*dto.RecoveryPendingResult
 	deferredRecoveries      map[string]deferredRecovery
+	heldLandings            map[string][]heldLanding
+	replayPending           map[string]bool
+	replayRunning           map[string]bool
 	gamesAtPath             map[string][]string
 	pendingRecoveriesMu     sync.Mutex
 

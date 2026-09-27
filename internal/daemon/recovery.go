@@ -61,15 +61,22 @@ func (s *session) RecoverAll() {
 	defer s.setReadinessStep("recovery complete", func(r *dto.ReadinessResult) { r.RecoveryDone = true })
 	defer s.signalRecoveryReady()
 
-	deferredLoaders := s.recoverModLoaders()
-	s.recoverRootDeployments()
-	s.recoverDataFarms()
-	heldLoaders := s.retryDeferredLoaderRecovery(deferredLoaders)
-	s.deactivateOrphanedRootDeployments(heldLoaders)
-	for _, gameID := range s.recoverableGameIDs() {
+	ids := s.recoverableGameIDs()
+	s.recoverUnits(ids)
+	for _, gameID := range ids {
 		s.sweepOrphanStageDirs(gameID)
 	}
 	s.sweepStaleExtractions()
+}
+
+// recoverUnits runs the startup recovery sequence for the selected games, returning false if an interrupted transaction still needs another attempt.
+func (s *session) recoverUnits(ids []string) bool {
+	deferredLoaders := s.recoverLoaderGames(ids, false)
+	rootOK := s.recoverRootDeployments(ids)
+	dataOK := s.recoverDataFarms(ids)
+	heldLoaders := s.retryDeferredLoaderRecovery(deferredLoaders)
+	orphanOK := s.deactivateOrphanedRootDeployments(ids, heldLoaders)
+	return rootOK && dataOK && orphanOK && len(heldLoaders) == 0
 }
 
 // configuredGameIDs returns the configured game IDs, sorted, read under s.mu.
@@ -89,16 +96,13 @@ type rootRecoveryUnit struct {
 	gameIDs []string
 }
 
-// rootRecoveryUnits resolves, under s.mu, the distinct root deployment managers of the configured games with the games sharing each.
-func (s *session) rootRecoveryUnits() []rootRecoveryUnit {
+// rootRecoveryUnits resolves the distinct root deployment managers of the selected games with the games sharing each.
+func (s *session) rootRecoveryUnits(gameIDs []string) []rootRecoveryUnit {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var units []rootRecoveryUnit
 	index := map[*vfs.RootDeploymentManager]int{}
-	ids := make([]string, 0, len(s.config.Games))
-	for gameID := range s.config.Games {
-		ids = append(ids, gameID)
-	}
+	ids := append([]string(nil), gameIDs...)
 	sort.Strings(ids)
 	for _, gameID := range ids {
 		gameConfig, err := s.config.EffectiveGameConfig(gameID)
@@ -127,15 +131,17 @@ func (s *session) rootRecoveryUnits() []rootRecoveryUnit {
 	return units
 }
 
-// recoverRootDeployments finishes interrupted game-root transactions outside s.mu and registers a pending recovery for every game sharing a deployment that drifted.
-func (s *session) recoverRootDeployments() {
-	for _, unit := range s.rootRecoveryUnits() {
-		if len(unit.gameIDs) == 0 || s.deferredFor(unit.gameIDs[0], "recovery") != nil {
+// recoverRootDeployments finishes interrupted game-root transactions for selected games and registers pending recoveries for drift.
+func (s *session) recoverRootDeployments(ids []string) bool {
+	complete := true
+	for _, unit := range s.rootRecoveryUnits(ids) {
+		if len(unit.gameIDs) == 0 {
 			continue
 		}
 		outcome, err := unit.manager.Recover()
 		if err != nil {
 			slog.Error("game-root crash recovery failed", "games", unit.gameIDs, "err", err)
+			complete = false
 			continue
 		}
 		if outcome.Pending == nil {
@@ -155,21 +161,22 @@ func (s *session) recoverRootDeployments() {
 			s.publishRecoveryEvent(dto.StatusEventResult{RecoveryPending: pending})
 		}
 	}
+	return complete
 }
 
-// recoverDataFarms heals each distinct Data path once outside s.mu and registers a pending recovery for every game sharing a path whose state is ambiguous.
-func (s *session) recoverDataFarms() {
+// recoverDataFarms heals each selected Data path once outside s.mu and registers a pending recovery for ambiguous state.
+func (s *session) recoverDataFarms(gameIDs []string) bool {
 	s.mu.RLock()
 	pathToGames := map[string][]string{}
 	managers := map[string]*vfs.MountManager{}
 	pathOrder := []string{}
-	ids := make([]string, 0, len(s.mountMgrs))
-	for gameID := range s.mountMgrs {
-		ids = append(ids, gameID)
-	}
+	ids := append([]string(nil), gameIDs...)
 	sort.Strings(ids)
 	for _, gameID := range ids {
 		mm := s.mountMgrs[gameID]
+		if mm == nil {
+			continue
+		}
 		dataPath := mm.DataPath()
 		resolved, err := filepath.Abs(dataPath)
 		if err != nil {
@@ -183,21 +190,13 @@ func (s *session) recoverDataFarms() {
 	}
 	s.mu.RUnlock()
 
+	complete := true
 	for _, dataPath := range pathOrder {
 		gameIDs := pathToGames[dataPath]
-		deferred := false
-		for _, gameID := range gameIDs {
-			if s.deferredFor(gameID, "recovery") != nil {
-				deferred = true
-				break
-			}
-		}
-		if deferred {
-			continue
-		}
 		outcome, err := managers[dataPath].RecoverIfNeeded()
 		if err != nil {
 			slog.Error("crash recovery failed", "data_path", dataPath, "games", gameIDs, "err", err)
+			complete = false
 			continue
 		}
 		if outcome.Restored {
@@ -222,12 +221,14 @@ func (s *session) recoverDataFarms() {
 			"data_path", dataPath, "games", gameIDs, "reason", pending.Reason)
 		s.publishRecoveryEvent(dto.StatusEventResult{RecoveryPending: pending})
 	}
+	return complete
 }
 
-// deactivateOrphanedRootDeployments removes, following the root deployment's own restore rules, a committed game-root deployment that remains after recovery while none of the games sharing it is mounted or pending recovery and no mod-loader transaction lock is still held on its install.
-func (s *session) deactivateOrphanedRootDeployments(heldLoaderDirs map[string]bool) {
-	for _, unit := range s.rootRecoveryUnits() {
-		if len(unit.gameIDs) == 0 || s.deferredFor(unit.gameIDs[0], "recovery") != nil {
+// deactivateOrphanedRootDeployments removes orphaned root deployments of selected games when no farm, pending recovery or loader transaction still uses them.
+func (s *session) deactivateOrphanedRootDeployments(ids []string, heldLoaderDirs map[string]bool) bool {
+	complete := true
+	for _, unit := range s.rootRecoveryUnits(ids) {
+		if len(unit.gameIDs) == 0 {
 			continue
 		}
 		if s.rootDeploymentInUse(unit.gameIDs) {
@@ -240,6 +241,7 @@ func (s *session) deactivateOrphanedRootDeployments(heldLoaderDirs map[string]bo
 		manifest, err := unit.manager.ActiveManifest()
 		if err != nil {
 			slog.Warn("checking a game-root deployment after recovery failed", "games", unit.gameIDs, "err", err)
+			complete = false
 			continue
 		}
 		if manifest == nil {
@@ -249,11 +251,13 @@ func (s *session) deactivateOrphanedRootDeployments(heldLoaderDirs map[string]bo
 		if err != nil {
 			slog.Error("deactivating a game-root deployment left by an unmounted farm failed; loader changes stay refused until it is removed",
 				"games", unit.gameIDs, "err", err)
+			complete = false
 			continue
 		}
 		slog.Warn("deactivated a game-root deployment left by an unmounted farm", "games", unit.gameIDs,
 			"links_removed", stats.LinksRemoved, "backups_restored", stats.BackupsRestored)
 	}
+	return complete
 }
 
 // rootDeploymentInUse reports whether any of gameIDs is mounted or has a pending recovery, so its root deployment must stay.

@@ -36,6 +36,11 @@ type Daemon struct {
 	*ModDependencyService
 }
 
+// RetryDeferredRecovery attempts an immediate deferred recovery through the VFS service.
+func (d *Daemon) RetryDeferredRecovery(gameID string) error {
+	return d.VFSService.RetryDeferredRecovery(gameID)
+}
+
 // New creates a Daemon from configuration with all subsystems initialized.
 func New(cfg *config.Config) (*Daemon, error) {
 	return newWithClock(cfg, time.Now)
@@ -72,6 +77,9 @@ func newWithClock(cfg *config.Config, now func() time.Time, scans ...func(string
 		rootPendingRecoveries:   make(map[string]*dto.RecoveryPendingResult),
 		loaderPendingRecoveries: make(map[string]*dto.RecoveryPendingResult),
 		deferredRecoveries:      make(map[string]deferredRecovery),
+		heldLandings:            make(map[string][]heldLanding),
+		replayPending:           make(map[string]bool),
+		replayRunning:           make(map[string]bool),
 		gamesAtPath:             make(map[string][]string),
 		nexusUsers:              nexusClientUserValidator{},
 		now:                     now,
@@ -138,7 +146,7 @@ func newWithClock(cfg *config.Config, now func() time.Time, scans ...func(string
 	if cfg.NexusAPIKey != "" {
 		nexus := download.NewNexusClient(cfg.NexusAPIKey)
 		d.downloadMgr = download.NewManager(nexus, 3, d.managerHooks())
-		d.downloadMgr.RehydrateLedger(gameIDs)
+		d.downloadMgr.RehydrateLedger(d.configuredGameIDs())
 	}
 
 	d.mu.Lock()
@@ -167,6 +175,7 @@ var shutdownLaunchDeadline = 30 * time.Second
 func (d *Daemon) Run(stopIPC func()) error {
 	d.setReadinessStep("socket bound", func(r *dto.ReadinessResult) { r.SocketReady = true })
 	go d.warmupAsync()
+	d.goBackground("deferred recovery", d.retryDeferredRecoveriesLoop)
 
 	<-d.shutdownCh
 
@@ -260,7 +269,8 @@ func (d *Daemon) deactivateIdleFarms() {
 		if !mm.IsMounted() {
 			continue
 		}
-		if d.teardownBusyLocked(gameID) || d.sharedHeldLocked(gameID, dto.BusyOperationLaunch, dto.BusyOperationTool) {
+		if d.deferredForLocked(gameID, "shutdown") != nil || d.exclusiveHeld(d.fenceKeyLocked(gameID)) ||
+			d.teardownBusyLocked(gameID) || d.sharedHeldLocked(gameID, dto.BusyOperationLaunch, dto.BusyOperationTool) {
 			slog.Warn("leaving VFS mounted on shutdown; a launch may still be using it — recovery will restore on next start",
 				"game", gameID)
 			continue

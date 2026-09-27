@@ -192,6 +192,32 @@ func (s *session) reserveExclusiveLocked(gameID, op string) (func(), error) {
 	return func() { once.Do(func() { s.releaseExclusive(key, holder) }) }, nil
 }
 
+// acquireRecoveryExclusive reserves an install for a deferred recovery without requiring its old farm or root deployment to be idle.
+func (s *session) acquireRecoveryExclusive(gameID string) (func(), error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.refuseWhenShuttingDown("recovery"); err != nil {
+		return nil, err
+	}
+	key := s.fenceKeyLocked(gameID)
+	holder := fenceHolder{op: "recovery", gameID: gameID}
+	s.fenceMu.Lock()
+	defer s.fenceMu.Unlock()
+	if exclusive, ok := s.fenceExclusive[key]; ok {
+		return nil, &dto.OperationBusyError{GameID: gameID, Operation: exclusive.op, Holder: exclusive.gameID}
+	}
+	if holders := s.fenceShared[key]; len(holders) > 0 {
+		first := firstFenceHolder(holders)
+		return nil, &dto.OperationBusyError{GameID: gameID, Operation: first.op, Holder: first.gameID}
+	}
+	if s.fenceExclusive == nil {
+		s.fenceExclusive = make(map[string]fenceHolder)
+	}
+	s.fenceExclusive[key] = holder
+	var once sync.Once
+	return func() { once.Do(func() { s.releaseExclusive(key, holder) }) }, nil
+}
+
 // requireInstallIdleLocked refuses while a process runs from the install root key, or a Steam launch on it is younger than steamLaunchGrace, and clears older Steam-launch flags once no such process exists; the caller holds s.mu.
 func (s *session) requireInstallIdleLocked(gameID, key string, games []string) error {
 	if holder := s.runningHolderLocked(gameID, key, games); holder != "" {

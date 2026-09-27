@@ -332,6 +332,11 @@ func (vs *VFSService) GetVFSStatus(gameID string) (*dto.VFSStatusResult, error) 
 	return vs.vfsStatus(gameID, gc, profileName, mm, entries), nil
 }
 
+// RetryDeferredRecovery attempts to recover a game whose startup recovery was deferred until its install became idle.
+func (vs *VFSService) RetryDeferredRecovery(gameID string) error {
+	return vs.s.RetryDeferredRecovery(gameID)
+}
+
 // RestoreFromBackup resolves one pending recovery of gameID per confirmation, the mod-loader entry first, re-announcing any entry that remains, and refuses once shutdown began.
 func (vs *VFSService) RestoreFromBackup(gameID string) error {
 	if err := vs.s.refuseWhenShuttingDown("restore_from_backup"); err != nil {
@@ -354,6 +359,7 @@ func (vs *VFSService) RestoreFromBackup(gameID string) error {
 		if remaining != nil {
 			vs.s.publishGuarded(dto.StatusEventResult{RecoveryPending: remaining})
 		}
+		vs.s.replayDeferredLandings(gameID)
 		return nil
 	}
 	vs.s.pendingRecoveriesMu.Lock()
@@ -385,6 +391,7 @@ func (vs *VFSService) RestoreFromBackup(gameID string) error {
 		}
 		vs.s.pendingRecoveriesMu.Unlock()
 		vs.s.mu.RUnlock()
+		vs.s.replayDeferredLandings(gameID)
 		return nil
 	}
 	vs.s.mu.RLock()
@@ -423,6 +430,7 @@ func (vs *VFSService) RestoreFromBackup(gameID string) error {
 	for _, sibling := range siblings {
 		vs.s.publishGuarded(dto.StatusEventResult{Info: fmt.Sprintf("recovery resolved for %s", sibling)})
 	}
+	vs.s.replayDeferredLandings(gameID)
 	return nil
 }
 
