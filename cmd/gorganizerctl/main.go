@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/daemon"
@@ -190,7 +191,7 @@ func withOfflineRecovery(deps recoveryDeps, gameID, dataPath string, recoverFn f
 		return 1
 	}
 	running, err := procscan.RunningIn(deps.procRoot, target.installPath, target.appIDs)
-	if running || err != nil {
+	if running || err != nil || daemon.LaunchTicketBlocksRecovery(target.dataPath, time.Now()) != "" {
 		fmt.Fprintf(deps.errOut, "%s is running. Close the game, then run this command again. Nothing was changed.\n", target.name)
 		return 1
 	}
@@ -199,6 +200,13 @@ func withOfflineRecovery(deps recoveryDeps, gameID, dataPath string, recoverFn f
 
 // resolveRecoveryTarget finds the game's install and Steam app IDs from config or the existing Steam discovery fallback.
 func resolveRecoveryTarget(gameID, dataPath string) (recoveryTarget, error) {
+	if dataPath != "" {
+		absolute, err := filepath.Abs(dataPath)
+		if err != nil {
+			return recoveryTarget{}, fmt.Errorf("resolving Data folder: %w", err)
+		}
+		dataPath = absolute
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return recoveryTarget{}, fmt.Errorf("reading game settings: %w", err)

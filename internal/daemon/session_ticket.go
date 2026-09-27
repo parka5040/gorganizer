@@ -121,55 +121,61 @@ func (s *session) installRecoveryUnits() map[string]*installRecoveryUnit {
 	return units
 }
 
+// LaunchTicketBlocksRecovery reports why a game launch record prevents recovery of its install.
+func LaunchTicketBlocksRecovery(dataPath string, now time.Time) string {
+	data, err := os.ReadFile(dataPath + sessionTicketSuffix)
+	if errors.Is(err, fs.ErrNotExist) {
+		return ""
+	}
+	if err != nil {
+		return "the game launch record could not be read: " + err.Error()
+	}
+	var ticket launchTicket
+	if json.Unmarshal(data, &ticket) != nil || ticket.SchemaVersion != sessionTicketVersion || ticket.LaunchedAt.IsZero() {
+		return "the game launch record is invalid"
+	}
+	if now.Sub(ticket.LaunchedAt) < steamLaunchGrace {
+		return "the game was launched less than two minutes ago"
+	}
+	return ""
+}
+
 // recoveryIdle checks the process table and launch tickets of an install without holding the daemon lock.
 func (s *session) recoveryIdle(unit *installRecoveryUnit) string {
 	if !filepath.IsAbs(unit.key) {
 		return ""
 	}
 	running, err := s.processRunningIn(unit.key, unit.appIDs)
-	reason := ""
-	switch {
-	case err != nil:
-		reason = "the game process check failed: " + err.Error()
-	case running:
-		reason = "a game process may still be running"
-	default:
-		for _, dataPath := range unit.dataPaths {
-			data, readErr := os.ReadFile(dataPath + sessionTicketSuffix)
-			if errors.Is(readErr, fs.ErrNotExist) {
-				continue
-			}
-			if readErr != nil {
-				reason = "the game launch record could not be read: " + readErr.Error()
-				break
-			}
-			var ticket launchTicket
-			if json.Unmarshal(data, &ticket) != nil || ticket.SchemaVersion != sessionTicketVersion || ticket.LaunchedAt.IsZero() {
-				reason = "the game launch record is invalid"
-				break
-			}
-			if s.clock().Sub(ticket.LaunchedAt) < steamLaunchGrace {
-				reason = "the game was launched less than two minutes ago"
-				break
-			}
+	if err != nil {
+		return "the game process check failed: " + err.Error()
+	}
+	if running {
+		return "a game process may still be running"
+	}
+	for _, dataPath := range unit.dataPaths {
+		if reason := LaunchTicketBlocksRecovery(dataPath, s.clock()); reason != "" {
+			return reason
 		}
 	}
-	return reason
+	return ""
+}
+
+// deferRecovery records an install's current refusal to recover and its affected games.
+func (s *session) deferRecovery(unit *installRecoveryUnit, reason string) {
+	s.pendingRecoveriesMu.Lock()
+	s.deferredRecoveries[unit.key] = deferredRecovery{
+		gameIDs: append([]string(nil), unit.gameIDs...), reason: reason, detectedAt: s.clock(),
+	}
+	s.pendingRecoveriesMu.Unlock()
+	slog.Warn("startup recovery deferred; leaving game mods and deployment untouched", "games", unit.gameIDs, "install", unit.key, "reason", reason)
 }
 
 // classifyStartupRecoveries records physical installs whose game or fresh launch ticket may still be running before constructor recovery touches any mod files.
 func (s *session) classifyStartupRecoveries() {
 	for _, unit := range s.installRecoveryUnits() {
-		reason := s.recoveryIdle(unit)
-		if reason == "" {
-			continue
+		if reason := s.recoveryIdle(unit); reason != "" {
+			s.deferRecovery(unit, reason)
 		}
-		s.pendingRecoveriesMu.Lock()
-		s.deferredRecoveries[unit.key] = deferredRecovery{
-			gameIDs: append([]string(nil), unit.gameIDs...), reason: reason, detectedAt: s.clock(),
-		}
-		s.pendingRecoveriesMu.Unlock()
-		slog.Warn("startup recovery deferred; leaving game mods and deployment untouched", "games", unit.gameIDs, "install", unit.key, "reason", reason)
 	}
 }
 

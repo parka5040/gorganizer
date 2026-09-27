@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/instancelock"
@@ -117,6 +119,102 @@ func TestRecoverRefusesWhileGameRuns(t *testing.T) {
 				t.Fatalf("backup was changed: %v", err)
 			}
 		})
+	}
+}
+
+// TestRecoverRelativeDataPathDetectsRunningGame checks a relative Data path still matches an absolute process path for both offline commands.
+func TestRecoverRelativeDataPathDetectsRunningGame(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func([]string, recoveryDeps) int
+	}{
+		{"recover", runRecoverWith},
+		{"recover-confirm", runRecoverConfirmWith},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, install, dataPath, _, stderr := recoverFixture(t)
+			if err := os.Mkdir(dataPath+".orig", 0o755); err != nil {
+				t.Fatal(err)
+			}
+			pidDir := filepath.Join(deps.procRoot, "4242")
+			if err := os.Mkdir(pidDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for link, target := range map[string]string{"cwd": install, "exe": filepath.Join(install, "game")} {
+				if err := os.Symlink(target, filepath.Join(pidDir, link)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			workingDir, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			relative, err := filepath.Rel(workingDir, dataPath)
+			if err != nil || filepath.IsAbs(relative) {
+				t.Fatalf("relative path = %q (%v)", relative, err)
+			}
+			if code := tc.run([]string{"--data-path", relative}, deps); code != 1 {
+				t.Fatalf("exit = %d, want 1 (stderr = %q)", code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "Skyrim Special Edition is running.") {
+				t.Fatalf("refusal = %q", stderr.String())
+			}
+			if _, err := os.Stat(dataPath + ".orig"); err != nil {
+				t.Fatalf("backup was changed: %v", err)
+			}
+		})
+	}
+}
+
+// TestOfflineRecoveryHonoursLaunchTicket checks recent, invalid and unreadable launch records block offline recovery without changing Data.
+func TestOfflineRecoveryHonoursLaunchTicket(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		ticket     string
+		unreadable bool
+	}{
+		{name: "fresh", ticket: fmt.Sprintf(`{"schema_version":1,"launched_at":%q}`, time.Now().UTC().Format(time.RFC3339Nano))},
+		{name: "invalid", ticket: `{"schema_version":0}`},
+		{name: "unreadable", unreadable: true},
+	} {
+		for _, command := range []struct {
+			name string
+			run  func([]string, recoveryDeps) int
+		}{
+			{"recover game", runRecoverWith},
+			{"recover Data", runRecoverWith},
+			{"recover-confirm", runRecoverConfirmWith},
+		} {
+			t.Run(tc.name+"/"+command.name, func(t *testing.T) {
+				deps, _, dataPath, _, stderr := recoverFixture(t)
+				if err := os.Mkdir(dataPath+".orig", 0o755); err != nil {
+					t.Fatal(err)
+				}
+				ticketPath := dataPath + vfs.RetainedSessionSiblingSuffix
+				if tc.unreadable {
+					if err := os.Mkdir(ticketPath, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(ticketPath, []byte(tc.ticket), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				args := []string{"--data-path", dataPath}
+				if command.name == "recover game" {
+					args = []string{"--game", "skyrimse"}
+				}
+				if code := command.run(args, deps); code != 1 {
+					t.Fatalf("exit = %d, want 1 (stderr = %q)", code, stderr.String())
+				}
+				if !strings.Contains(stderr.String(), "Skyrim Special Edition is running. Close the game") {
+					t.Fatalf("refusal = %q", stderr.String())
+				}
+				for _, path := range []string{dataPath + ".orig", dataPath + vfs.RetainedSessionSiblingSuffix} {
+					if _, err := os.Stat(path); err != nil {
+						t.Fatalf("recovery changed %s: %v", path, err)
+					}
+				}
+			})
+		}
 	}
 }
 

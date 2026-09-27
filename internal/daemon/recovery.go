@@ -64,9 +64,44 @@ func (s *session) RecoverAll() {
 	defer s.signalRecoveryReady()
 
 	ids := s.recoverableGameIDs()
-	s.recoverUnits(ids)
-	for _, gameID := range ids {
-		s.sweepOrphanStageDirs(gameID)
+	selected := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		selected[id] = true
+	}
+	units := s.installRecoveryUnits()
+	keys := make([]string, 0, len(units))
+	for key := range units {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		unit := units[key]
+		var games []string
+		for _, id := range unit.gameIDs {
+			if selected[id] {
+				games = append(games, id)
+			}
+		}
+		if len(games) == 0 {
+			continue
+		}
+		release, err := s.acquireRecoveryExclusive(games[0])
+		if err != nil {
+			s.deferRecovery(unit, "recovery is busy: "+err.Error())
+			s.publishRecoveryStatuses(games[0])
+			continue
+		}
+		if reason := s.recoveryIdle(unit); reason != "" {
+			s.deferRecovery(unit, reason)
+			s.publishRecoveryStatuses(games[0])
+			release()
+			continue
+		}
+		s.recoverUnits(games)
+		for _, id := range games {
+			s.sweepOrphanStageDirs(id)
+		}
+		release()
 	}
 	s.sweepStaleExtractions()
 }

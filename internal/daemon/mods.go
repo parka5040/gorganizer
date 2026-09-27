@@ -153,7 +153,10 @@ func (md *ModService) markMountedProfileDirty(gameID string) {
 	}
 	layers := md.s.svc.vfs.buildLayers(gameID, gc, entries)
 	if err := mm.MarkDirty(layers); err == nil {
-		md.s.publishGuarded(dto.StatusEventResult{VFSStatus: md.s.svc.vfs.vfsStatus(gameID, gc, ms.profileName, mm, entries)})
+		md.s.mu.RLock()
+		status := md.s.svc.vfs.vfsStatus(gameID, gc, ms.profileName, mm, entries)
+		md.s.mu.RUnlock()
+		md.s.publishGuarded(dto.StatusEventResult{VFSStatus: status})
 	}
 }
 

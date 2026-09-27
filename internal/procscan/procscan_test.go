@@ -67,6 +67,28 @@ func TestScanProcessesInMatchesExecutablesAndWorkingDirectoriesInsideTheInstall(
 	}
 }
 
+// TestRunningInResolvesRelativeInstallPath checks the scanner matches absolute process paths against a relative install root.
+func TestRunningInResolvesRelativeInstallPath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	install := filepath.Join(t.TempDir(), "Game")
+	if err := os.Mkdir(install, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	procRoot := t.TempDir()
+	fakeProcess(t, procRoot, "101", filepath.Join(install, "game"), install)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(cwd, install)
+	if err != nil || filepath.IsAbs(relative) {
+		t.Fatalf("relative install = %q (%v)", relative, err)
+	}
+	if running, err := RunningIn(procRoot, relative, nil); err != nil || !running {
+		t.Fatalf("RunningIn = %t (%v), want running", running, err)
+	}
+}
+
 // TestRunningInReportsUnreadableProcess checks that unexpected process-entry errors refuse the scan.
 func TestRunningInReportsUnreadableProcess(t *testing.T) {
 	install := t.TempDir()

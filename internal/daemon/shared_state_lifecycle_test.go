@@ -65,6 +65,58 @@ func lifecycleStopped(stop <-chan struct{}) bool {
 	}
 }
 
+// TestModListStatusRaceWithConfigure checks that mounted mod-list status publication reads configuration under the daemon lock.
+func TestModListStatusRaceWithConfigure(t *testing.T) {
+	d, _, _, _ := sessionFarmFixture(t)
+	install := t.TempDir()
+	lifecycleRunWorkers(t, func(stop <-chan struct{}) error {
+		for i := range 150 {
+			if lifecycleStopped(stop) {
+				return nil
+			}
+			if err := d.ConfigureGame("status-writer", fmt.Sprintf("Writer %d", i), 0, install, "Data"); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, func(stop <-chan struct{}) error {
+		for i := range 400 {
+			if lifecycleStopped(stop) {
+				return nil
+			}
+			if err := d.SetModList("stardewvalley", "Default", []dto.ModListEntryResult{{ModName: "SessionMod", Enabled: i%2 == 0}}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// TestMountedModDirtyStatusRaceWithConfigure checks that the uninstall dirty helper publishes status under the daemon lock.
+func TestMountedModDirtyStatusRaceWithConfigure(t *testing.T) {
+	d, _, _, _ := sessionFarmFixture(t)
+	install := t.TempDir()
+	lifecycleRunWorkers(t, func(stop <-chan struct{}) error {
+		for i := range 150 {
+			if lifecycleStopped(stop) {
+				return nil
+			}
+			if err := d.ConfigureGame("status-writer", fmt.Sprintf("Writer %d", i), 0, install, "Data"); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, func(stop <-chan struct{}) error {
+		for range 400 {
+			if lifecycleStopped(stop) {
+				return nil
+			}
+			d.svc.mods.markMountedProfileDirty("stardewvalley")
+		}
+		return nil
+	})
+}
+
 func TestGetConflictsConcurrentConfigureGame(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	install := filepath.Join(t.TempDir(), "game")
