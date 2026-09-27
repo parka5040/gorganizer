@@ -110,11 +110,7 @@ func (fv *FNV4GBService) Install4GBPatcher(gameID string) (dto.FNV4GBInstallResu
 			"and click Download with Manager to trigger an NXM download)", err, fnv4gbModID)
 	}
 
-	archiveName := details.FileName
-	if archiveName == "" {
-		archiveName = fmt.Sprintf("fnv4gb-linux-%d.archive", fnv4gbFileID)
-	}
-	archivePath := filepath.Join(tmpDir, archiveName)
+	archivePath := fnv4gbArchivePath(tmpDir)
 	if err := streamTo(cdnURL, archivePath); err != nil {
 		return zero, fmt.Errorf("downloading FNV4GB archive: %w", err)
 	}
@@ -157,6 +153,11 @@ func (fv *FNV4GBService) Install4GBPatcher(gameID string) (dto.FNV4GBInstallResu
 		PatcherExePath: resolvedPatcherPath,
 		Version:        details.Version,
 	}, nil
+}
+
+// fnv4gbArchivePath returns the locally named patcher archive destination.
+func fnv4gbArchivePath(tmpDir string) string {
+	return filepath.Join(tmpDir, fmt.Sprintf("fnv4gb-%d.archive", fnv4gbFileID))
 }
 
 // Get4GBPatchStatus reports whether the game's FalloutNV.exe has been 4GB-patched by Gorganizer.

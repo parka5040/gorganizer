@@ -356,6 +356,9 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 			if !selProfiles[name] || skipProfiles[name] {
 				continue
 			}
+			if rest == name+"/profile.json" && hdr.Size > 1<<20 {
+				return summary, &BundleRejectedError{Reason: BundleRejectedLimit, Item: name + "/profile.json"}
+			}
 			if _, err := extractEntry(ctx, tr, hdr, stageProfiles, strings.TrimPrefix(clean, "profiles/"), limits.fileBytes, remainingPayload, copyBuffer); err != nil {
 				return summary, err
 			}
@@ -612,9 +615,24 @@ func relabelModMetadata(staged, oldName, newName string) {
 // canonicalizeProfileJSON writes the final directory identity into staged profile.json.
 func canonicalizeProfileJSON(staged, gameID, name string) error {
 	path := filepath.Join(staged, "profile.json")
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	defer file.Close()
+	stat, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("checking %s: %w", path, err)
+	}
+	if stat.Size() > 1<<20 {
+		return &BundleRejectedError{Reason: BundleRejectedLimit, Item: filepath.Base(staged) + "/profile.json"}
+	}
+	data, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	if len(data) > 1<<20 {
+		return &BundleRejectedError{Reason: BundleRejectedLimit, Item: filepath.Base(staged) + "/profile.json"}
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
