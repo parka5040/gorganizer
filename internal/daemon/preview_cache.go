@@ -6,15 +6,22 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/parka/gorganizer/internal/dto"
 )
 
 type previewEntry struct {
-	GameID         string
-	ArchiveRelPath string
-	ExtractRoot    string
-	CreatedAt      time.Time
-	HasFomod       bool
-	ModuleRoot     string
+	GameID              string
+	ArchiveRelPath      string
+	ExternalArchivePath string
+	ExternalIdentity    archiveIdentity
+	ExtractRoot         string
+	CreatedAt           time.Time
+	HasFomod            bool
+	LegacyInfoOnly      bool
+	ModuleRoot          string
+	RequiredFiles       []dto.FomodFileResult
+	SelectableRoots     []string
+	DetectedRoot        string
 
 	leases       int
 	pendingEvict bool
