@@ -49,6 +49,8 @@ func main() {
 		os.Exit(runNXM(args))
 	case "recover":
 		os.Exit(runRecover(args))
+	case "uninstall":
+		os.Exit(runUninstall(args))
 	case "recover-confirm":
 		os.Exit(runRecoverConfirm(args))
 	case "export":
@@ -131,7 +133,7 @@ Subcommands:
   bug-report [--out DIR]        Save a private, redacted report to attach yourself.
   wait-ready [--timeout 60s]   Wait for startup to finish.
   stop [--timeout 46s]         Ask Gorganizer to stop and wait for it to exit.
-  migrate-data --from <path> [--dry-run [--json]] [--yes]
+  migrate-data --from <path> [--dry-run [--json|--list]] [--yes]
                                Move mods and downloads to your personal data folder.
   migrate-data --status        Print none or pending for an interrupted move.
   migrate-data --resume        Finish an interrupted move.
@@ -143,6 +145,9 @@ Subcommands:
   recover --data-path <path>   Check only the specified Data folder.
   recover-confirm --data-path <path>
                                Restore a Data backup after inspecting it.
+  uninstall [--keep-data|--purge [--forget-missing-games]] [--yes]
+                               Restore all installed games, then remove Gorganizer.
+  uninstall --check            Check that all games are already restored.
   export --game <id> --out <file>
                                Export the game's instance via the daemon.
                                Optional: --mods a,b  --profiles p1,p2

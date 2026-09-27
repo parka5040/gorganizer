@@ -111,6 +111,40 @@ func TestMigrateDataJSONDryRun(t *testing.T) {
 	}
 }
 
+// TestMigrateDataListDryRun prints only real owned source folders and changes nothing.
+func TestMigrateDataListDryRun(t *testing.T) {
+	from, mods, deps, out, errOut := migrateFixture(t)
+	if code := runMigrateDataWith([]string{"--from", from, "--dry-run", "--list"}, deps); code != 0 || out.String() != mods+"\n" || errOut.Len() != 0 {
+		t.Fatalf("list = %d, output = %q, error = %q", code, out.String(), errOut.String())
+	}
+	if body, err := os.ReadFile(filepath.Join(mods, "Downloads", "archive.zip")); err != nil || string(body) != "archive" {
+		t.Errorf("source changed: %q, %v", body, err)
+	}
+	out.Reset()
+	if code := runMigrateDataWith([]string{"--from", from, "--dry-run", "--list", "--count"}, deps); code != 2 || out.Len() != 0 {
+		t.Errorf("conflicting output formats = %d, output = %q", code, out.String())
+	}
+}
+
+// TestMigrateDataListRejectsUnsafeNames refuses newline-delimited paths and linked source folders.
+func TestMigrateDataListRejectsUnsafeNames(t *testing.T) {
+	var out bytes.Buffer
+	if err := printMigrationSources(&out, []string{filepath.Join(t.TempDir(), "Unsafe\n_Mods")}, false, true); err == nil || out.Len() != 0 {
+		t.Errorf("newline source = %q, %v", out.String(), err)
+	}
+	from, mods, deps, listed, _ := migrateFixture(t)
+	outside := t.TempDir()
+	if err := os.RemoveAll(mods); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, mods); err != nil {
+		t.Fatal(err)
+	}
+	if code := runMigrateDataWith([]string{"--from", from, "--dry-run", "--list"}, deps); code == 0 || listed.Len() != 0 {
+		t.Errorf("linked source = %d, output = %q", code, listed.String())
+	}
+}
+
 // TestMigrateDataStatus checks journal presence without taking the daemon lock or changing files.
 func TestMigrateDataStatus(t *testing.T) {
 	_, _, deps, out, errOut := migrateFixture(t)

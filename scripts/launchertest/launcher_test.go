@@ -134,7 +134,7 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	repo := filepath.Clean(filepath.Join(cwd, "../.."))
-	for _, name := range []string{"gorganizer.sh", "scripts/deploy-check.sh"} {
+	for _, name := range []string{"gorganizer.sh", "cleaner.sh", "scripts/deploy-check.sh"} {
 		data, err := os.ReadFile(filepath.Join(repo, name))
 		if err != nil {
 			t.Fatal(err)

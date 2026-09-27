@@ -25,10 +25,11 @@
 #   unregister            Reverse `register`.
 #   nxm <URI>             Open Gorganizer if needed and add a Nexus Mods download.
 #   import --from PATH    Move old *_Mods/ folders to the personal data folder.
-#   uninstall [--purge]   After closing Gorganizer and restoring games, unregister
-#                         and delete build artifacts. User data is preserved.
-#                         --purge additionally removes config, profiles,
-#                         caches, and the daemon log.
+#   uninstall [--keep-data|--purge [--forget-missing-games]] [--yes]
+#                         Restore every game before removing Gorganizer.
+#                         Mods, downloads, settings and profiles stay by default.
+#                         --purge requires a second confirmation to delete them.
+#   uninstall --check     Check games without restoring or deleting anything.
 #   --rebuild             Compatibility alias for `build --rebuild`.
 #   --version, -v         Print version and exit.
 #   --help, -h            Show this message.
@@ -120,10 +121,11 @@ Subcommands:
   unregister            Reverse \`register\`.
   nxm <URI>             Open Gorganizer if needed and add a Nexus Mods download.
   import --from PATH    Move old *_Mods/ folders to your personal data folder.
-  uninstall [--purge]   After closing Gorganizer and restoring games, unregister
-                        and delete build artifacts. User data is preserved.
-                        --purge additionally removes config, profiles,
-                        caches, and the daemon log.
+  uninstall [--keep-data|--purge [--forget-missing-games]] [--yes]
+                        Restore every game before removing Gorganizer.
+                        Mods, downloads, settings and profiles stay by default.
+                        --purge requires a second confirmation to delete them.
+  uninstall --check     Check games without restoring or deleting anything.
   --rebuild             Compatibility alias for \`build --rebuild\`.
   --version, -v         Print version and exit.
   --help, -h            Show this message.
@@ -996,54 +998,68 @@ cmd_doctor() {
 
 # --- uninstall -------------------------------------------------------------
 
-cmd_uninstall() {
-    local purge=false
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --purge) purge=true; shift ;;
-            *) err "Unknown option: $1"; return 2 ;;
+uninstall_validate_build_paths() {
+    local path ancestor kind uid
+    uid="$(id -u)"
+    for path in "$SCRIPT_DIR/build" "$SCRIPT_DIR/.build-staging" "$SCRIPT_DIR/CMakeFiles" "$SCRIPT_DIR/.tools" \
+        "$DAEMON_BIN" "$CTL_BIN" "$SCRIPT_DIR/.build-fingerprint" \
+        "$SCRIPT_DIR/api/proto/gorganizer.pb.go" "$SCRIPT_DIR/api/proto/gorganizer_grpc.pb.go"; do
+        ancestor="${path%/*}"
+        while [ "$ancestor" != / ]; do
+            if [ -L "$ancestor" ] || [ ! -d "$ancestor" ]; then
+                err "Cannot safely remove build files: $ancestor is not a real folder. Nothing was removed."
+                return 1
+            fi
+            ancestor="${ancestor%/*}"
+            [ -n "$ancestor" ] || ancestor=/
+        done
+        [ -e "$path" ] || [ -L "$path" ] || continue
+        kind=-f
+        case "$path" in
+            "$SCRIPT_DIR/build"|"$SCRIPT_DIR/.build-staging"|"$SCRIPT_DIR/CMakeFiles"|"$SCRIPT_DIR/.tools") kind=-d ;;
         esac
+        if [ -L "$path" ] || [ "$(stat -c %u -- "$path")" != "$uid" ] || [ ! "$kind" "$path" ]; then
+            err "Cannot safely remove build files: $path is not an owned build artifact. Nothing was removed."
+            return 1
+        fi
     done
+}
 
-    if pgrep -u "$(id -u)" -x gorganizerd >/dev/null 2>&1; then
-        err "Close Gorganizer first (or run ./gorganizer.sh stop), then run uninstall again."
+cmd_uninstall() {
+    local mods_json="" mods_list="" mods_checked=false
+    if [ ! -x "$CTL_BIN" ]; then
+        err "Gorganizer's maintenance tool is missing, so nothing was removed. Rebuild with ./gorganizer.sh, then run uninstall again."
         return 1
     fi
-    verify_games_restored || return 1
-
-    # Remove desktop entry, NXM handler, icon, mime registration.
-    cmd_unregister
-
-    # Always-on: blow away build artifacts. The whole point of `uninstall`
-    # is to leave nothing executable behind that the launcher could still
-    # find via PATH or a stale .desktop somewhere else.
-    if [ -e "$DAEMON_BIN" ] || [ -e "$CTL_BIN" ] || [ -d "$SCRIPT_DIR/build" ]; then
-        make clean >/dev/null 2>&1 || true
-        rm -rf "$SCRIPT_DIR/build"
-        rm -f "$DAEMON_BIN" "$CTL_BIN"
-        ok "Build artifacts removed."
-    fi
-
-    # User data is preserved by default — config, profiles, downloads,
-    # and the daemon log are exactly what the user wants to keep across
-    # a reinstall. --purge is the explicit nuke option.
-    local user_dirs=("$CONFIG_DIR" "$DATA_DIR" "${XDG_STATE_HOME:-$HOME/.local/state}/gorganizer")
-    if $purge; then
-        for d in "${user_dirs[@]}"; do
-            [ -e "$d" ] && rm -rf "$d" && log "Purged $d"
-        done
-    else
-        local kept=()
-        for d in "${user_dirs[@]}"; do [ -e "$d" ] && kept+=("$d"); done
-        if [ ${#kept[@]} -gt 0 ]; then
-            log "User data preserved (run with --purge to remove):"
-            for d in "${kept[@]}"; do echo "    $d" >&2; done
+    for option in "$@"; do
+        if [ "$option" = --check ]; then
+            "$CTL_BIN" uninstall "$@"
+            return $?
+        fi
+    done
+    uninstall_validate_build_paths || return 1
+    if mods_json="$("$CTL_BIN" migrate-data --from "$SCRIPT_DIR" --dry-run --json)"; then
+        if command -v jq >/dev/null 2>&1; then
+            if mods_list="$(printf '%s\n' "$mods_json" | jq -r 'if (.sources | type) == "array" and all(.sources[]; type == "string" and (index("\n") | not) and (index("\r") | not) and (index("\u0000") | not)) then .sources[] else error("invalid sources") end')"; then
+                mods_checked=true
+            fi
+        elif mods_list="$("$CTL_BIN" migrate-data --from "$SCRIPT_DIR" --dry-run --list)"; then
+            mods_checked=true
         fi
     fi
-
-    echo ""
-    log "Any old ${BOLD}*_Mods/${RESET} folders in $SCRIPT_DIR are left untouched."
-    warn "Check for old in-checkout mods before deleting this folder. Mods in your personal data folder are preserved."
+    "$CTL_BIN" uninstall "$@" || return $?
+    uninstall_validate_build_paths || return 1
+    if $mods_checked; then
+        if [ -n "$mods_list" ]; then
+            warn "Your mods are still inside this folder: ${mods_list//$'\n'/, }. Move them with ./gorganizer.sh import --from \"$SCRIPT_DIR\" before you delete it, or they will be lost."
+        fi
+    else
+        warn "Your mods may still be inside this folder. Move them with ./gorganizer.sh import --from \"$SCRIPT_DIR\" before you delete it, or they will be lost."
+    fi
+    rm -rf -- "$SCRIPT_DIR/build" "$SCRIPT_DIR/.build-staging" "$SCRIPT_DIR/CMakeFiles" "$SCRIPT_DIR/.tools"
+    rm -f -- "$DAEMON_BIN" "$CTL_BIN" "$SCRIPT_DIR/.build-fingerprint" \
+        "$SCRIPT_DIR/api/proto/gorganizer.pb.go" "$SCRIPT_DIR/api/proto/gorganizer_grpc.pb.go"
+    ok "Build artifacts removed."
     ok "Uninstalled."
 }
 

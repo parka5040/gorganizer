@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/parka/gorganizer/internal/config"
@@ -39,13 +40,18 @@ func runMigrateDataWith(args []string, deps migrateDeps) int {
 	dryRun := fs.Bool("dry-run", false, "show changes without moving")
 	jsonOutput := fs.Bool("json", false, "print the dry-run plan as JSON")
 	countOutput := fs.Bool("count", false, "print how many old folders the dry run found")
+	listOutput := fs.Bool("list", false, "print validated old folders, one per line")
 	yes := fs.Bool("yes", false, "confirm move without a prompt")
 	resume := fs.Bool("resume", false, "finish an interrupted move")
 	status := fs.Bool("status", false, "check for an unfinished move")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *countOutput {
+	if *listOutput && (*countOutput || *jsonOutput) {
+		fmt.Fprintln(deps.errOut, "Choose --list without --count or --json.")
+		return 2
+	}
+	if *countOutput || *listOutput {
 		*jsonOutput = true
 	}
 	if len(fs.Args()) != 0 || *jsonOutput && !*dryRun || *resume && (*status || *from != "" || *dryRun || *yes || *jsonOutput) || *status && (*from != "" || *dryRun || *yes || *jsonOutput) || !*resume && !*status && *from == "" {
@@ -103,7 +109,7 @@ func runMigrateDataWith(args []string, deps migrateDeps) int {
 				fmt.Fprintln(deps.errOut, "An unfinished move needs to be resumed first.")
 				return 2
 			}
-			if err := printMigrationSources(deps.out, sources, *countOutput); err != nil {
+			if err := printMigrationSources(deps.out, sources, *countOutput, *listOutput); err != nil {
 				fmt.Fprintf(deps.errOut, "Cannot show the move: %v\n", err)
 				return 1
 			}
@@ -152,7 +158,7 @@ func runMigrateDataWith(args []string, deps migrateDeps) int {
 		for _, item := range plan.Items {
 			sources = append(sources, item.Source)
 		}
-		if err := printMigrationSources(deps.out, sources, *countOutput); err != nil {
+		if err := printMigrationSources(deps.out, sources, *countOutput, *listOutput); err != nil {
 			fmt.Fprintf(deps.errOut, "Cannot show the move: %v\n", err)
 			return 1
 		}
@@ -189,11 +195,32 @@ func runMigrateDataWith(args []string, deps migrateDeps) int {
 	return 0
 }
 
-// printMigrationSources prints the detected old folders as JSON, or only their number when count is set.
-func printMigrationSources(out io.Writer, sources []string, count bool) error {
+// printMigrationSources prints detected old folders as JSON, a count, or validated paths.
+func printMigrationSources(out io.Writer, sources []string, count, list bool) error {
 	if count {
 		_, err := fmt.Fprintln(out, len(sources))
 		return err
+	}
+	if list {
+		for _, source := range sources {
+			if !filepath.IsAbs(source) || filepath.Clean(source) != source || strings.ContainsAny(source, "\n\r\x00") {
+				return fmt.Errorf("invalid old folder path: %q", source)
+			}
+			info, err := os.Lstat(source)
+			if err != nil {
+				return fmt.Errorf("checking old folder %s: %w", source, err)
+			}
+			owner, ok := info.Sys().(*syscall.Stat_t)
+			if !info.IsDir() || !ok || int(owner.Uid) != os.Getuid() {
+				return fmt.Errorf("old folder is not a real owned directory: %s", source)
+			}
+		}
+		for _, source := range sources {
+			if _, err := fmt.Fprintln(out, source); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	return json.NewEncoder(out).Encode(struct {
 		Sources []string `json:"sources"`
