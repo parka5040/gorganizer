@@ -6,15 +6,18 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/dto"
 	"github.com/parka/gorganizer/internal/httpx"
 )
@@ -47,9 +50,17 @@ type Download struct {
 	cancel context.CancelFunc
 }
 
+type archivePart interface {
+	Write([]byte) (int, error)
+	Truncate(int64) error
+	Sync() error
+	Close() error
+}
+
 type Manager struct {
 	nexus        URLResolver
 	httpClient   *http.Client
+	openPart     func(string, string, bool) (archivePart, error)
 	mu           sync.RWMutex
 	active       map[string]*Download
 	queued       []*Download
@@ -508,6 +519,7 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 		return
 	}
 
+	restartFromZero := state.ArchiveRel != "" && state.BytesDownloaded == 0
 	archiveFilename := pickArchiveFilename(fileDetails, cdnURL, link)
 	folder := fmt.Sprintf("%d_%s", link.ModID, SanitizeForFolder(modName))
 	if strings.TrimSpace(modName) == "" {
@@ -536,6 +548,9 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 		m.fail(dl, err)
 		return
 	}
+	if restartFromZero {
+		resumeFrom = 0
+	}
 	state = m.update(dl, func(d *Download) { d.BytesDownloaded = resumeFrom })
 
 	_ = UpsertLedgerEntry(LedgerEntry{
@@ -547,7 +562,8 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 	})
 
 	if err := m.streamToFile(ctx, cdnURL, partPath, resumeFrom, dl); err != nil {
-		if errors.Is(err, context.Canceled) {
+		var saveErr *ArchiveSaveError
+		if errors.Is(err, context.Canceled) && !errors.As(err, &saveErr) {
 			state = m.update(dl, func(d *Download) {
 				d.Status = StatusCancelled
 				d.Error = "cancelled"
@@ -574,13 +590,21 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 		m.fail(dl, err)
 		return
 	}
-	if _, err := partSize(partPath, state.ArchiveRel); err != nil {
+	partBytes, err := partSize(partPath, state.ArchiveRel)
+	if err != nil {
 		m.fail(dl, err)
+		return
+	}
+	if partBytes != state.BytesDownloaded || state.BytesTotal > 0 && partBytes != state.BytesTotal {
+		m.fail(dl, fmt.Errorf("%w: incomplete archive part", ErrDownloadFailed))
 		return
 	}
 	if err := os.Rename(partPath, archivePath); err != nil {
 		m.fail(dl, fmt.Errorf("renaming .part: %w", err))
 		return
+	}
+	if err := atomicfile.SyncDir(filepath.Dir(archivePath)); err != nil {
+		slog.Warn("syncing download directory failed", "err", err)
 	}
 
 	relArchive := state.ArchiveRel
@@ -628,8 +652,8 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 		"archive", archivePath, "bytes", state.BytesDownloaded)
 }
 
-// streamToFile GETs cdnURL with optional resume Range header and writes to destPath.
-func (m *Manager) streamToFile(ctx context.Context, cdnURL, destPath string, resumeFrom int64, dl *Download) error {
+// streamToFile GETs cdnURL with optional resume Range header and saves a complete part.
+func (m *Manager) streamToFile(ctx context.Context, cdnURL, destPath string, resumeFrom int64, dl *Download) (result error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cdnURL, nil)
 	if err != nil {
 		return redactHTTPError(err)
@@ -641,36 +665,83 @@ func (m *Manager) streamToFile(ctx context.Context, cdnURL, destPath string, res
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrDownloadFailed, redactHTTPError(err))
 	}
+	if resumeFrom > 0 && resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		resp.Body.Close()
+		req.Header.Del("Range")
+		resumeFrom = 0
+		resp, err = m.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrDownloadFailed, redactHTTPError(err))
+		}
+	}
 	defer resp.Body.Close()
 	state := m.snapshot(dl)
-
+	var rangeTotal, rangeEnd int64
 	switch resp.StatusCode {
 	case http.StatusOK:
 		if resumeFrom > 0 {
 			slog.Warn("server ignored Range header; restarting from 0", "url", redactURL(cdnURL))
-			resumeFrom = 0
-			state = m.update(dl, func(d *Download) { d.BytesDownloaded = 0 })
 		}
+		resumeFrom = 0
 	case http.StatusPartialContent:
+		if resumeFrom == 0 {
+			return fmt.Errorf("%w: unexpected partial response", ErrDownloadFailed)
+		}
+		rangeTotal, rangeEnd, err = parseDownloadRange(resp.Header.Get("Content-Range"), resumeFrom)
+		if err == nil && resp.ContentLength > 0 && resp.ContentLength-1 != rangeEnd-resumeFrom {
+			err = fmt.Errorf("range length does not match response length")
+		}
+		if err != nil {
+			m.update(dl, func(d *Download) { d.BytesDownloaded, d.BytesTotal = 0, 0 })
+			return fmt.Errorf("%w: invalid Content-Range: %w", ErrDownloadFailed, err)
+		}
 	default:
 		return fmt.Errorf("%w: HTTP %d", ErrDownloadFailed, resp.StatusCode)
 	}
 
-	if cl := resp.ContentLength; cl > 0 {
-		state = m.update(dl, func(d *Download) { d.BytesTotal = cl + resumeFrom })
+	expected := int64(-1)
+	if resp.ContentLength > 0 || resp.ContentLength == 0 && resp.Header.Get("Content-Length") == "0" {
+		if resp.ContentLength > math.MaxInt64-resumeFrom {
+			return fmt.Errorf("%w: invalid response length", ErrDownloadFailed)
+		}
+		expected = resp.ContentLength + resumeFrom
 	}
+	if rangeTotal > 0 {
+		expected = rangeTotal
+	}
+	state = m.update(dl, func(d *Download) {
+		d.BytesDownloaded = resumeFrom
+		d.BytesTotal = 0
+		if expected >= 0 {
+			d.BytesTotal = expected
+		}
+	})
 
 	if err := checkArchiveFolder(destPath, state.ArchiveRel); err != nil {
 		return err
 	}
-	out, err := openArchivePart(destPath, state.ArchiveRel, resumeFrom > 0)
+	open := m.openPart
+	if open == nil {
+		open = func(path, rel string, appendData bool) (archivePart, error) {
+			return openArchivePart(path, rel, appendData)
+		}
+	}
+	out, err := open(destPath, state.ArchiveRel, resumeFrom > 0)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() {
+		if err := out.Close(); err != nil {
+			var saveErr *ArchiveSaveError
+			if errors.As(result, &saveErr) {
+				result = saveErr.Err
+			}
+			result = &ArchiveSaveError{Err: errors.Join(result, fmt.Errorf("closing archive part: %w", err))}
+		}
+	}()
 	if resumeFrom == 0 {
 		if err := out.Truncate(0); err != nil {
-			return fmt.Errorf("truncating archive part: %w", err)
+			return &ArchiveSaveError{Err: fmt.Errorf("truncating archive part: %w", err)}
 		}
 	}
 
@@ -682,10 +753,22 @@ func (m *Manager) streamToFile(ctx context.Context, cdnURL, destPath string, res
 		}
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
-			if _, writeErr := out.Write(buf[:n]); writeErr != nil {
-				return writeErr
+			if expected >= 0 && int64(n) > expected-state.BytesDownloaded {
+				return fmt.Errorf("%w: response exceeds expected total", ErrDownloadFailed)
 			}
-			state = m.update(dl, func(d *Download) { d.BytesDownloaded += int64(n) })
+			for written := 0; written < n; {
+				count, writeErr := out.Write(buf[written:n])
+				if count > 0 {
+					written += count
+					state = m.update(dl, func(d *Download) { d.BytesDownloaded += int64(count) })
+				}
+				if writeErr != nil {
+					return &ArchiveSaveError{Err: fmt.Errorf("writing archive part: %w", writeErr)}
+				}
+				if written < n {
+					return &ArchiveSaveError{Err: fmt.Errorf("writing archive part: %w", io.ErrShortWrite)}
+				}
+			}
 			m.emitProgress(state)
 			if time.Since(lastLedger) > time.Second {
 				lastLedger = time.Now()
@@ -699,12 +782,52 @@ func (m *Manager) streamToFile(ctx context.Context, cdnURL, destPath string, res
 			}
 		}
 		if readErr != nil {
-			if readErr == io.EOF {
-				return nil
+			if readErr != io.EOF {
+				if expected >= 0 && state.BytesDownloaded < expected {
+					return fmt.Errorf("%w: incomplete: %w", ErrDownloadFailed, redactHTTPError(readErr))
+				}
+				return fmt.Errorf("%w: reading response: %w", ErrDownloadFailed, redactHTTPError(readErr))
 			}
-			return readErr
+			if expected >= 0 && state.BytesDownloaded != expected {
+				return fmt.Errorf("%w: incomplete", ErrDownloadFailed)
+			}
+			if err := out.Sync(); err != nil {
+				return &ArchiveSaveError{Err: fmt.Errorf("syncing archive part: %w", err)}
+			}
+			return nil
 		}
 	}
+}
+
+// parseDownloadRange checks that a partial response covers the requested suffix.
+func parseDownloadRange(value string, start int64) (int64, int64, error) {
+	bounds, totalText, ok := strings.Cut(value, "/")
+	if !ok || !strings.HasPrefix(bounds, "bytes ") {
+		return 0, 0, fmt.Errorf("missing byte range")
+	}
+	first, last, ok := strings.Cut(strings.TrimPrefix(bounds, "bytes "), "-")
+	if !ok || first == "" || last == "" || strings.Trim(first, "0123456789") != "" || strings.Trim(last, "0123456789") != "" {
+		return 0, 0, fmt.Errorf("invalid byte bounds")
+	}
+	from, err := strconv.ParseInt(first, 10, 64)
+	if err != nil || from != start {
+		return 0, 0, fmt.Errorf("unexpected range start")
+	}
+	end, err := strconv.ParseInt(last, 10, 64)
+	if err != nil || end < from {
+		return 0, 0, fmt.Errorf("invalid range end")
+	}
+	if totalText == "*" {
+		return 0, end, nil
+	}
+	if totalText == "" || strings.Trim(totalText, "0123456789") != "" {
+		return 0, 0, fmt.Errorf("invalid range total")
+	}
+	total, err := strconv.ParseInt(totalText, 10, 64)
+	if err != nil || total <= 0 || end != total-1 {
+		return 0, 0, fmt.Errorf("invalid range total")
+	}
+	return total, end, nil
 }
 
 func (m *Manager) fail(dl *Download, err error) {
@@ -713,7 +836,12 @@ func (m *Manager) fail(dl *Download, err error) {
 		d.Error = err.Error()
 	})
 	m.emitProgress(state)
-	slog.Error("download failed", "id", state.ID, "err", err)
+	var saveErr *ArchiveSaveError
+	if errors.As(err, &saveErr) {
+		slog.Error("download failed", "id", state.ID, "err", redactHTTPError(saveErr.Err))
+	} else {
+		slog.Error("download failed", "id", state.ID, "err", err)
+	}
 	_ = UpsertLedgerEntry(LedgerEntry{
 		ID: state.ID, GameID: state.GameID, NXMURI: state.NXMURI,
 		GameSlug: state.GameSlug, ModID: state.ModID, FileID: state.FileID,

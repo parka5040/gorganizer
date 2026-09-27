@@ -22,6 +22,20 @@ var (
 	ErrEmptyInstallSelection      = errors.New("download: the installer selection contains no files")
 )
 
+type ArchiveSaveError struct {
+	Err error
+}
+
+// Error returns a retry instruction for an archive that could not be saved.
+func (e *ArchiveSaveError) Error() string {
+	return "The download could not be saved completely. Check free space and choose Retry."
+}
+
+// Unwrap returns the underlying archive write failure.
+func (e *ArchiveSaveError) Unwrap() error {
+	return e.Err
+}
+
 type NXMExpiredError struct {
 	URI string
 }
