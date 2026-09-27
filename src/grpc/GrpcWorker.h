@@ -51,7 +51,8 @@ public slots:
     // Reads gameId's VFS status and reports it, or the failure, under requestId.
     void doQueryVfsStatus(quint64 requestId, const QString& gameId);
     void doRebuildVfs(const QString& gameId);
-    void doRestoreFromBackup(const QString& gameId);
+    void doRestoreFromBackup(const QString& gameId, GrpcRecoveryKind kind, const QString& recoveryId);
+    void doRetryVfsRecovery(const QString& gameId);
 
     void doGetConflicts(const QString& gameId, const QString& profileName);
 
@@ -115,6 +116,7 @@ signals:
     void vfsMounted(const GrpcVFSStatus& status);
     void vfsUnmounted();
     void vfsStatusReceived(const GrpcVFSStatus& status);
+    void vfsRecoveryRetried(const QString& gameId);
     void vfsStatusQueried(quint64 requestId, const GrpcVFSStatus& status);
     void vfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error);
     void maintenanceUnmountFinished(quint64 requestId, const QString& gameId, bool ok, int grpcCode, const QString& error);
@@ -140,8 +142,7 @@ signals:
     void streamEnded(int kind, quint64 generation, int statusCode);
     void daemonError(const QString& error);
     void daemonInfo(const QString& info);
-    void recoveryPending(const QString& gameId, const QString& dataPath,
-                         const QString& backupPath, const QString& reason);
+    void recoveryPending(const GrpcRecoveryPending& recovery);
 
     void pluginStatusSnapshot(quint64 generation, const std::vector<GrpcPluginStatus>& plugins);
     void pluginStatusUpdate(quint64 generation, const GrpcPluginStatus& plugin);

@@ -108,6 +108,10 @@ struct GrpcProfile {
     QString createdAt;
 };
 
+enum class GrpcVFSLifecycleState { Unspecified, Ready, RecoveryDeferred, RecoveryPending };
+
+enum class GrpcRecoveryKind { Unspecified, Data, ModLoader, GameRoot };
+
 struct GrpcVFSStatus {
     bool mounted = false;
     QString gameId;
@@ -116,6 +120,19 @@ struct GrpcVFSStatus {
     int enabledModCount = 0;
     int totalFileCount = 0;
     bool dirty = false;
+    uint64_t desiredGen = 0;
+    uint64_t appliedGen = 0;
+    GrpcVFSLifecycleState lifecycleState = GrpcVFSLifecycleState::Unspecified;
+    QString lifecycleReason;
+};
+
+struct GrpcRecoveryPending {
+    QString gameId;
+    QString dataPath;
+    QString backupPath;
+    QString reason;
+    GrpcRecoveryKind kind = GrpcRecoveryKind::Unspecified;
+    QString recoveryId;
 };
 
 struct GrpcFileConflict {

@@ -87,6 +87,48 @@ GrpcModLoaderState modLoaderStateFromProto(gorganizer::v1::ModLoaderState s)
     }
 }
 
+GrpcVFSLifecycleState vfsLifecycleFromProto(gorganizer::v1::VFSLifecycleState state)
+{
+    switch (state) {
+    case gorganizer::v1::VFS_LIFECYCLE_STATE_READY:
+        return GrpcVFSLifecycleState::Ready;
+    case gorganizer::v1::VFS_LIFECYCLE_STATE_RECOVERY_DEFERRED:
+        return GrpcVFSLifecycleState::RecoveryDeferred;
+    case gorganizer::v1::VFS_LIFECYCLE_STATE_RECOVERY_PENDING:
+        return GrpcVFSLifecycleState::RecoveryPending;
+    default:
+        return GrpcVFSLifecycleState::Unspecified;
+    }
+}
+
+GrpcRecoveryKind recoveryKindFromProto(gorganizer::v1::RecoveryKind kind)
+{
+    switch (kind) {
+    case gorganizer::v1::RECOVERY_KIND_DATA:
+        return GrpcRecoveryKind::Data;
+    case gorganizer::v1::RECOVERY_KIND_MOD_LOADER:
+        return GrpcRecoveryKind::ModLoader;
+    case gorganizer::v1::RECOVERY_KIND_GAME_ROOT:
+        return GrpcRecoveryKind::GameRoot;
+    default:
+        return GrpcRecoveryKind::Unspecified;
+    }
+}
+
+gorganizer::v1::RecoveryKind recoveryKindToProto(GrpcRecoveryKind kind)
+{
+    switch (kind) {
+    case GrpcRecoveryKind::Data:
+        return gorganizer::v1::RECOVERY_KIND_DATA;
+    case GrpcRecoveryKind::ModLoader:
+        return gorganizer::v1::RECOVERY_KIND_MOD_LOADER;
+    case GrpcRecoveryKind::GameRoot:
+        return gorganizer::v1::RECOVERY_KIND_GAME_ROOT;
+    default:
+        return gorganizer::v1::RECOVERY_KIND_UNSPECIFIED;
+    }
+}
+
 GrpcModLoaderStatus modLoaderStatusFromProto(const gorganizer::v1::ModLoaderStatus& s)
 {
     GrpcModLoaderStatus out;
@@ -469,6 +511,10 @@ GrpcVFSStatus GrpcWorker::vfsStatusFromProto(const gorganizer::v1::VFSStatus& s)
         .enabledModCount = s.enabled_mod_count(),
         .totalFileCount = s.total_file_count(),
         .dirty = s.dirty(),
+        .desiredGen = s.desired_gen(),
+        .appliedGen = s.applied_gen(),
+        .lifecycleState = vfsLifecycleFromProto(s.lifecycle_state()),
+        .lifecycleReason = QString::fromStdString(s.lifecycle_reason()),
     };
 }
 
@@ -736,13 +782,26 @@ void GrpcWorker::doUnmountVfsForMaintenance(quint64 requestId, const QString& ga
     emit maintenanceUnmountFinished(requestId, gameId, true, GrpcStatusOk, QString());
 }
 
-void GrpcWorker::doRestoreFromBackup(const QString& gameId)
+void GrpcWorker::doRestoreFromBackup(const QString& gameId, GrpcRecoveryKind kind, const QString& recoveryId)
 {
     gorganizer::v1::RestoreFromBackupRequest req;
     req.set_game_id(gameId.toStdString());
+    req.set_expected_kind(recoveryKindToProto(kind));
+    req.set_recovery_id(recoveryId.toStdString());
     gorganizer::v1::RestoreFromBackupResponse resp;
     if (!call("RestoreFromBackup", &Stub::RestoreFromBackup, req, resp)) return;
     emit daemonInfo(QString("Recovery resolved for %1.").arg(gameId));
+    doGetVfsStatus(gameId);
+}
+
+void GrpcWorker::doRetryVfsRecovery(const QString& gameId)
+{
+    gorganizer::v1::RetryVFSRecoveryRequest req;
+    req.set_game_id(gameId.toStdString());
+    gorganizer::v1::VFSStatus resp;
+    if (!call("RetryVFSRecovery", &Stub::RetryVFSRecovery, req, resp, std::chrono::seconds(30))) return;
+    emit vfsStatusReceived(vfsStatusFromProto(resp));
+    emit vfsRecoveryRetried(gameId);
 }
 
 void GrpcWorker::doGetVfsStatus(const QString& gameId)
@@ -917,11 +976,14 @@ void GrpcWorker::doStartWatching(quint64 generation)
             break;
         case gorganizer::v1::StatusEvent::kRecoveryPending: {
             const auto& rp = event.recovery_pending();
-            emit recoveryPending(
+            emit recoveryPending(GrpcRecoveryPending{
                 QString::fromStdString(rp.game_id()),
                 QString::fromStdString(rp.data_path()),
                 QString::fromStdString(rp.backup_path()),
-                QString::fromStdString(rp.reason()));
+                QString::fromStdString(rp.reason()),
+                recoveryKindFromProto(rp.kind()),
+                QString::fromStdString(rp.recovery_id()),
+            });
             break;
         }
         case gorganizer::v1::StatusEvent::kDependencyWarning: {

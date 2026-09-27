@@ -84,8 +84,9 @@ public:
     // Queues a VFS status query on the unary worker and returns the id vfsStatusQueried or vfsStatusQueryFailed carries.
     quint64 queryVfsStatus(const QString& gameId);
     void rebuildVfs(const QString& gameId);
-    // Destructive recovery; only call after user confirms via recovery-pending modal.
-    void restoreFromBackup(const QString& gameId);
+    // Restores the pending recovery only when its kind and identity still match the confirmed item.
+    void restoreFromBackup(const QString& gameId, GrpcRecoveryKind kind, const QString& recoveryId);
+    void retryVfsRecovery(const QString& gameId);
 
     void getConflicts(const QString& gameId, const QString& profileName);
 
@@ -280,6 +281,7 @@ signals:
     void vfsMounted(const GrpcVFSStatus& status);
     void vfsUnmounted();
     void vfsStatusReceived(const GrpcVFSStatus& status);
+    void vfsRecoveryRetried(const QString& gameId);
     void vfsStatusQueried(quint64 requestId, const GrpcVFSStatus& status);
     void vfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error);
     void maintenanceUnmountFinished(quint64 requestId, const QString& gameId, bool ok, int grpcCode, const QString& error);
@@ -309,9 +311,7 @@ signals:
     void daemonError(const QString& error);
     void daemonInfo(const QString& info);
     void dependencyWarning(const GrpcDependencyWarning& warning);
-    // Daemon found ambiguous Data state at startup; UI shows a modal and may call restoreFromBackup.
-    void recoveryPending(const QString& gameId, const QString& dataPath,
-                         const QString& backupPath, const QString& reason);
+    void recoveryPending(const GrpcRecoveryPending& recovery);
 
     void nexusAPIKeySet(bool valid, const QString& errorMessage);
 
