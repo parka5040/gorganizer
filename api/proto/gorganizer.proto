@@ -117,6 +117,9 @@ service Gorganizer {
   rpc GetProfileIniStatus(GetProfileIniStatusRequest) returns (ProfileIniStatus);
   rpc ListIniTweaks(ListIniTweaksRequest) returns (ListIniTweaksResponse);
   rpc SetIniTweak(SetIniTweakRequest) returns (IniTweakState);
+  // ApplyProfileIniFiles copies the profile's INIs into the game's settings
+  // folder now, regardless of the profile's "use custom INIs" setting.
+  rpc ApplyProfileIniFiles(ApplyProfileIniFilesRequest) returns (ApplyProfileIniFilesResponse);
 
   // Game launch (with optional script extender)
   rpc LaunchGame(LaunchGameRequest) returns (LaunchGameResponse);
@@ -1331,7 +1334,27 @@ message SaveProfileIniFileRequest {
   string filename = 3;
   string content = 4;
 }
-message SaveProfileIniFileResponse {}
+message SaveProfileIniFileResponse {
+  // outcome distinguishes a save that was also applied to the game from one
+  // that was saved to the profile only; apply_error explains a failed apply.
+  IniSaveOutcome outcome = 1;
+  string apply_error = 2;
+}
+
+enum IniSaveOutcome {
+  INI_SAVE_OUTCOME_UNSPECIFIED = 0;
+  INI_SAVE_OUTCOME_SAVED = 1;
+  INI_SAVE_OUTCOME_SAVED_AND_APPLIED = 2;
+  INI_SAVE_OUTCOME_SAVED_APPLY_FAILED = 3;
+}
+
+message ApplyProfileIniFilesRequest {
+  string game_id = 1;
+  string profile_name = 2;
+}
+message ApplyProfileIniFilesResponse {
+  int32 applied_file_count = 1;
+}
 
 message SetProfileIniEnabledRequest {
   string game_id = 1;
