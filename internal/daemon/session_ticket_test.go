@@ -206,7 +206,7 @@ func TestLaunchWritesAndUnmountRemovesTicket(t *testing.T) {
 func TestConstructorRecoverySkipsDeferredInstalls(t *testing.T) {
 	_, games, install, dataPath := sessionFarmFixture(t)
 	modsDir := config.ModsDir("stardewvalley")
-	intent := reinstallIntent{SchemaVersion: reinstallIntentVersion, Mod: "SessionMod", Stage: reinstallStagePrefix + "interrupted", Old: reinstallOldPrefix + "interrupted"}
+	intent := reinstallIntent{SchemaVersion: 1, Mod: "SessionMod", Stage: reinstallStagePrefix + "interrupted", Old: reinstallOldPrefix + "interrupted"}
 	intentPath := filepath.Join(modsDir, reinstallIntentPrefix+"interrupted"+reinstallIntentSuffix)
 	if err := writeReinstallIntent(intentPath, intent); err != nil {
 		t.Fatal(err)

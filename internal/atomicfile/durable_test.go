@@ -12,6 +12,47 @@ import (
 	"testing"
 )
 
+// TestSyncFilesystemRequiresRealDirectory checks that only a real staging directory can be flushed.
+func TestSyncFilesystemRequiresRealDirectory(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	dir := filepath.Join(root, "stage")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(root, "file")
+	if err := os.WriteFile(file, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{"directory", dir, false},
+		{"file", file, true},
+		{"symlink", link, true},
+		{"missing", filepath.Join(root, "missing"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := SyncFilesystem(tc.path); (err != nil) != tc.wantErr {
+				t.Errorf("SyncFilesystem = %v, want error %v", err, tc.wantErr)
+			}
+		})
+	}
+	identity, err := Identity(dir)
+	if err != nil || identity.Ino == 0 {
+		t.Errorf("stage identity = %+v, %v", identity, err)
+	}
+	if _, err := Identity(link); err == nil {
+		t.Error("symlink has a real-directory identity")
+	}
+}
+
 // TestWriteFileDurableOutcomes checks publication outcomes and destination bytes on each failure.
 func TestWriteFileDurableOutcomes(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())

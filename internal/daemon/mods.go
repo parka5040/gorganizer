@@ -100,18 +100,27 @@ func (md *ModService) RenameMod(gameID, oldName, newName string) error {
 	if !md.s.gameConfigured(gameID) {
 		return fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
-	src, err := resolveExistingModDir(gameID, oldName)
-	if err != nil {
+	if err := download.ValidateTargetModName(oldName); err != nil {
 		return err
 	}
 	if err := download.ValidateTargetModName(newName); err != nil {
 		return err
 	}
+	defer md.s.lockMods(gameID, oldName, newName)()
+	modsDir := config.ModsDir(gameID)
+	for _, name := range []string{oldName, newName} {
+		if err := checkModReplacement(modsDir, name); err != nil {
+			return err
+		}
+	}
+	src, err := resolveExistingModDir(gameID, oldName)
+	if err != nil {
+		return err
+	}
 	if oldName == newName {
 		return nil
 	}
-	defer md.s.lockMods(gameID, oldName, newName)()
-	return md.renameModWithFarm(gameID, oldName, newName, src, filepath.Join(config.ModsDir(gameID), newName))
+	return md.renameModWithFarm(gameID, oldName, newName, src, filepath.Join(modsDir, newName))
 }
 
 // renameModFolder renames a mod folder and its entry in every profile modlist, reporting whether the folder moved; the caller holds the profile lock.
@@ -255,8 +264,7 @@ func (md *ModService) UninstallMod(gameID, modName string, force bool) ([]string
 	if !md.s.gameConfigured(gameID) {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
-	modDir, err := resolveExistingModDir(gameID, modName)
-	if err != nil {
+	if err := download.ValidateTargetModName(modName); err != nil {
 		return nil, err
 	}
 	unlockMods := md.s.lockMods(gameID, modName)
@@ -265,7 +273,11 @@ func (md *ModService) UninstallMod(gameID, modName string, force bool) ([]string
 			unlockMods()
 		}
 	}()
-	if err := requireRealModDir(gameID, modName, modDir); err != nil {
+	if err := checkModReplacement(config.ModsDir(gameID), modName); err != nil {
+		return nil, err
+	}
+	modDir, err := resolveExistingModDir(gameID, modName)
+	if err != nil {
 		return nil, err
 	}
 	meta, err := download.LoadModMetadata(modDir)

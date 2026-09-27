@@ -129,6 +129,7 @@ func TestReinstallDoubleRenameFailureIsRecoveredAtStartup(t *testing.T) {
 }
 
 func TestReinstallRecoveryReapsOrphans(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	d := newStardewDaemon(t)
 	modsDir := config.ModsDir("skyrimse")
 	writeTestModMetadata := func(dir, folder string) {
@@ -163,7 +164,10 @@ func TestReinstallRecoveryReapsOrphans(t *testing.T) {
 		t.Errorf("restored Lost = %v, want %v", got, lostSnapshot)
 	}
 	if _, err := os.Lstat(presentOld); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("previous copy of a present mod: %v, want removed", err)
+		t.Errorf("previous copy of a present mod: %v, want moved to recovered folder", err)
+	}
+	if got := snapshotTree(t, filepath.Join(modsDir, ".gorganizer-recovered-present-token")); !reflect.DeepEqual(got, presentSnapshot) {
+		t.Errorf("preserved previous copy = %v, want %v", got, presentSnapshot)
 	}
 	if got := snapshotTree(t, filepath.Join(modsDir, "Present")); !reflect.DeepEqual(got, presentSnapshot) {
 		t.Errorf("present mod changed: %v, want %v", got, presentSnapshot)

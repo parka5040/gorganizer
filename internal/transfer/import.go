@@ -54,6 +54,7 @@ type ImportOptions struct {
 	ProfileNames       []string
 	LockMod            func(name string) func()
 	LockProfiles       func() func()
+	CheckReplacement   func(root, name string) error
 }
 
 // ReadManifest opens an archive and returns its validated manifest without extracting anything.
@@ -541,6 +542,17 @@ func checkStagedRoot(path, item string) error {
 	return nil
 }
 
+// checkImportReplacement refuses a name reserved by a pending journal before any import policy acts on it.
+func checkImportReplacement(opts ImportOptions, root, name string) error {
+	if err := CheckPendingReplacement(root, name); err != nil {
+		return err
+	}
+	if opts.CheckReplacement != nil {
+		return opts.CheckReplacement(root, name)
+	}
+	return nil
+}
+
 // finalizeMod moves one staged mod into ModsDir, applying the collision policy under the install lock.
 func finalizeMod(opts ImportOptions, folder, staged string, policy dto.CollisionPolicy, summary *dto.TransferSummary) error {
 	unlock := func() {}
@@ -549,7 +561,11 @@ func finalizeMod(opts ImportOptions, folder, staged string, policy dto.Collision
 	}
 	defer unlock()
 
-	target := filepath.Join(config.ModsDir(opts.GameID), folder)
+	root := config.ModsDir(opts.GameID)
+	if err := checkImportReplacement(opts, root, folder); err != nil {
+		return err
+	}
+	target := filepath.Join(root, folder)
 	if _, err := os.Stat(target); err == nil {
 		switch policy {
 		case dto.PolicySkip:
@@ -559,6 +575,9 @@ func finalizeMod(opts ImportOptions, folder, staged string, policy dto.Collision
 			newName := renameCandidate(folder, func(c string) bool {
 				return modFolderExists(opts.GameID, c)
 			})
+			if err := checkImportReplacement(opts, root, newName); err != nil {
+				return err
+			}
 			if err := relabelModMetadata(staged, folder, newName); err != nil {
 				return fmt.Errorf("preparing mod %q: %w", folder, err)
 			}
@@ -608,7 +627,11 @@ func finalizeProfile(opts ImportOptions, name, staged string, summary *dto.Trans
 		unlock = opts.LockProfiles()
 	}
 	defer unlock()
-	target := filepath.Join(config.ProfilesDir(opts.GameID), name)
+	root := config.ProfilesDir(opts.GameID)
+	if err := checkImportReplacement(opts, root, name); err != nil {
+		return err
+	}
+	target := filepath.Join(root, name)
 	finalName := name
 	collision := profileExists(opts.GameID, name)
 	if collision {
@@ -620,7 +643,10 @@ func finalizeProfile(opts ImportOptions, name, staged string, summary *dto.Trans
 			finalName = renameCandidate(name, func(c string) bool {
 				return profileExists(opts.GameID, c)
 			})
-			target = filepath.Join(config.ProfilesDir(opts.GameID), finalName)
+			if err := checkImportReplacement(opts, root, finalName); err != nil {
+				return err
+			}
+			target = filepath.Join(root, finalName)
 		case dto.PolicyOverwrite:
 		default:
 			return &TransferCollisionError{Name: name}
