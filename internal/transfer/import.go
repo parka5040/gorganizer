@@ -22,7 +22,27 @@ import (
 	"github.com/parka/gorganizer/internal/profile"
 )
 
+type importLimits struct {
+	entries       int64
+	fileBytes     int64
+	payloadBytes  int64
+	streamBytes   int64
+	manifestBytes int64
+}
+
+// defaultImportLimits returns the maximum sizes accepted from an import bundle.
+func defaultImportLimits() importLimits {
+	return importLimits{
+		entries:       500_000,
+		fileBytes:     8 << 30,
+		payloadBytes:  32 << 30,
+		streamBytes:   40 << 30,
+		manifestBytes: 64 << 20,
+	}
+}
+
 type ImportOptions struct {
+	limits             *importLimits
 	GameID             string
 	ArchivePath        string
 	Policy             dto.CollisionPolicy
@@ -40,43 +60,47 @@ func ReadManifest(gameID, archivePath string) (*Manifest, error) {
 		return nil, err
 	}
 	defer closer()
-	return readManifestEntry(tr, gameID)
+	m, _, err := readManifestEntry(tr, gameID, defaultImportLimits().manifestBytes)
+	return m, err
 }
 
-// readManifestEntry consumes the first tar entry, requiring a valid manifest for gameID.
-func readManifestEntry(tr *tar.Reader, gameID string) (*Manifest, error) {
+// readManifestEntry consumes the first tar entry, requiring a size-bounded valid manifest for gameID.
+func readManifestEntry(tr *tar.Reader, gameID string, maxBytes int64) (*Manifest, int64, error) {
 	hdr, err := tr.Next()
 	if err != nil {
-		return nil, fmt.Errorf("reading archive: %w", err)
+		return nil, 0, fmt.Errorf("reading archive: %w", err)
 	}
 	if err := validateEntryType(hdr); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if hdr.Name != manifestEntryName || (hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA) {
-		return nil, &TransferPathError{Entry: hdr.Name}
+		return nil, 0, &TransferPathError{Entry: hdr.Name}
 	}
-	data, err := io.ReadAll(io.LimitReader(tr, 64<<20))
+	if hdr.Size < 0 || hdr.Size > maxBytes {
+		return nil, 0, &BundleRejectedError{Reason: BundleRejectedLimit, Item: manifestEntryName}
+	}
+	data, err := io.ReadAll(io.LimitReader(tr, hdr.Size))
 	if err != nil {
-		return nil, fmt.Errorf("reading manifest: %w", err)
+		return nil, 0, fmt.Errorf("reading manifest: %w", err)
 	}
 	m, err := DecodeManifest(data)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if m.SchemaVersion < 1 || m.SchemaVersion > SchemaVersion {
-		return nil, &TransferSchemaError{Version: m.SchemaVersion}
+		return nil, 0, &TransferSchemaError{Version: m.SchemaVersion}
 	}
 	if m.GameID != gameID {
-		return nil, &TransferGameMismatchError{Want: gameID, Got: m.GameID}
+		return nil, 0, &TransferGameMismatchError{Want: gameID, Got: m.GameID}
 	}
 	seenMods := make([]string, 0, len(m.Mods))
 	for _, me := range m.Mods {
 		if err := download.ValidateTargetModName(me.Folder); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		for _, folder := range seenMods {
 			if strings.EqualFold(folder, me.Folder) {
-				return nil, &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: me.Folder}
+				return nil, 0, &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: me.Folder}
 			}
 		}
 		seenMods = append(seenMods, me.Folder)
@@ -84,14 +108,14 @@ func readManifestEntry(tr *tar.Reader, gameID string) (*Manifest, error) {
 	seenProfiles := map[string]bool{}
 	for _, name := range m.Profiles {
 		if err := validateImportedProfileName(name); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if seenProfiles[name] {
-			return nil, &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: name}
+			return nil, 0, &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: name}
 		}
 		seenProfiles[name] = true
 	}
-	return m, nil
+	return m, hdr.Size, nil
 }
 
 // validateImportedProfileName rejects unsafe or reserved profile names from a bundle.
@@ -153,16 +177,25 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 		emit = func(dto.TransferProgress) {}
 	}
 
-	tr, closer, err := openArchiveReader(opts.ArchivePath)
+	limits := defaultImportLimits()
+	if opts.limits != nil {
+		limits = *opts.limits
+	}
+	tr, stream, closer, err := openArchiveReaderWithLimit(opts.ArchivePath, limits.streamBytes)
 	if err != nil {
 		return summary, err
 	}
 	defer closer()
 
-	manifest, err := readManifestEntry(tr, opts.GameID)
+	manifest, manifestSize, err := readManifestEntry(tr, opts.GameID, limits.manifestBytes)
 	if err != nil {
 		return summary, err
 	}
+	if limits.entries < 1 || manifestSize > limits.payloadBytes {
+		return summary, &BundleRejectedError{Reason: BundleRejectedLimit, Item: manifestEntryName}
+	}
+	entryCount := int64(1)
+	payloadBytes := manifestSize
 	if err := validateCollisionPolicy(opts.Policy); err != nil {
 		return summary, err
 	}
@@ -208,7 +241,11 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 			skipMods[me.Folder] = true
 			continue
 		}
-		bytesTotal += me.TotalBytes
+		if me.TotalBytes > limits.payloadBytes-bytesTotal {
+			bytesTotal = limits.payloadBytes
+		} else if me.TotalBytes > 0 {
+			bytesTotal += me.TotalBytes
+		}
 	}
 	skipProfiles := map[string]bool{}
 	for _, name := range manifest.Profiles {
@@ -257,6 +294,7 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 		manifestProfiles[name] = true
 	}
 	seenEntries := map[string]byte{}
+	copyBuffer := make([]byte, 1<<20)
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -269,6 +307,11 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 		if err != nil {
 			return summary, fmt.Errorf("reading archive: %w", err)
 		}
+		stream.item = hdr.Name
+		if entryCount >= limits.entries {
+			return summary, &BundleRejectedError{Reason: BundleRejectedLimit, Item: hdr.Name}
+		}
+		entryCount++
 		prefix, rest, err := splitEntryName(hdr.Name)
 		if err != nil {
 			return summary, err
@@ -276,6 +319,11 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 		if err := validateEntryType(hdr); err != nil {
 			return summary, err
 		}
+		remainingPayload := limits.payloadBytes - payloadBytes
+		if hdr.Size < 0 || hdr.Size > remainingPayload || (hdr.Typeflag != tar.TypeDir && hdr.Size > limits.fileBytes) {
+			return summary, &BundleRejectedError{Reason: BundleRejectedLimit, Item: hdr.Name}
+		}
+		payloadBytes += hdr.Size
 		if (prefix == "overwrite" && !manifest.IncludesOverwrite) || (prefix == "gamesettings" && !manifest.IncludesGameSettings) {
 			return summary, &BundleRejectedError{Reason: BundleRejectedManifest, Item: hdr.Name}
 		}
@@ -294,7 +342,7 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 			if !selMods[folder] || skipMods[folder] {
 				continue
 			}
-			n, err := extractEntry(tr, hdr, stageMods, strings.TrimPrefix(clean, "mods/"))
+			n, err := extractEntry(ctx, tr, hdr, stageMods, strings.TrimPrefix(clean, "mods/"), limits.fileBytes, remainingPayload, copyBuffer)
 			if err != nil {
 				return summary, err
 			}
@@ -308,12 +356,12 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 			if !selProfiles[name] || skipProfiles[name] {
 				continue
 			}
-			if _, err := extractEntry(tr, hdr, stageProfiles, strings.TrimPrefix(clean, "profiles/")); err != nil {
+			if _, err := extractEntry(ctx, tr, hdr, stageProfiles, strings.TrimPrefix(clean, "profiles/"), limits.fileBytes, remainingPayload, copyBuffer); err != nil {
 				return summary, err
 			}
 			progress("extract", clean)
 		case "overwrite":
-			if _, err := extractEntry(tr, hdr, filepath.Join(stageMods, "__overwrite__"), rest); err != nil {
+			if _, err := extractEntry(ctx, tr, hdr, filepath.Join(stageMods, "__overwrite__"), rest, limits.fileBytes, remainingPayload, copyBuffer); err != nil {
 				return summary, err
 			}
 			progress("extract", clean)
@@ -321,7 +369,7 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 			if rest != gsBase {
 				return summary, &TransferPathError{Entry: hdr.Name}
 			}
-			if _, err := extractEntry(tr, hdr, filepath.Join(stageMods, "__gamesettings__"), rest); err != nil {
+			if _, err := extractEntry(ctx, tr, hdr, filepath.Join(stageMods, "__gamesettings__"), rest, limits.fileBytes, remainingPayload, copyBuffer); err != nil {
 				return summary, err
 			}
 		default:
