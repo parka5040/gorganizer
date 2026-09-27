@@ -10,6 +10,7 @@
 #include <QFileInfo>
 #include <QMetaType>
 #include <QThread>
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <unistd.h>
@@ -183,6 +184,7 @@ GrpcClient::GrpcClient(QObject* parent)
     : QObject(parent)
 {
     qRegisterMetaType<GrpcPreviewInstallResult>();
+    qRegisterMetaType<quint64>();
     m_connectionTimer = new QTimer(this);
     m_connectionTimer->setInterval(5000);
     connect(m_connectionTimer, &QTimer::timeout, this, &GrpcClient::onCheckConnection);
@@ -230,10 +232,46 @@ void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
     connect(worker, &GrpcWorker::installRequestFailed, this, &GrpcClient::installRequestFailed);
     connect(worker, &GrpcWorker::nexusAPIKeySet, this, &GrpcClient::nexusAPIKeySet);
     connect(worker, &GrpcWorker::vfsStatusChanged, this, &GrpcClient::vfsStatusChanged);
-    connect(worker, &GrpcWorker::archiveEventReceived, this, &GrpcClient::archiveEventReceived);
-    connect(worker, &GrpcWorker::installProgressEvent, this, &GrpcClient::installProgressEvent);
-    connect(worker, &GrpcWorker::pluginStatusSnapshot, this, &GrpcClient::pluginStatusSnapshot);
-    connect(worker, &GrpcWorker::pluginStatusUpdate, this, &GrpcClient::pluginStatusUpdate);
+    connect(worker, &GrpcWorker::archiveEventReceived, this, [this, generation](quint64 streamGeneration, const GrpcArchiveEvent& event) {
+        if (generation == m_connectionGeneration && streamGeneration == m_streamStates[GrpcWorker::StreamArchive].generation)
+            emit archiveEventReceived(event);
+    });
+    connect(worker, &GrpcWorker::installProgressEvent, this, [this, generation](quint64 streamGeneration, const GrpcInstallProgress& progress) {
+        if (generation == m_connectionGeneration && streamGeneration == m_streamStates[GrpcWorker::StreamInstall].generation)
+            emit installProgressEvent(progress);
+    });
+    connect(worker, &GrpcWorker::pluginStatusSnapshot, this, [this, generation](quint64 streamGeneration, const std::vector<GrpcPluginStatus>& plugins) {
+        if (generation == m_connectionGeneration && streamGeneration == m_streamStates[GrpcWorker::StreamPluginStatus].generation)
+            emit pluginStatusSnapshot(plugins);
+    });
+    connect(worker, &GrpcWorker::pluginStatusUpdate, this, [this, generation](quint64 streamGeneration, const GrpcPluginStatus& plugin) {
+        if (generation == m_connectionGeneration && streamGeneration == m_streamStates[GrpcWorker::StreamPluginStatus].generation)
+            emit pluginStatusUpdate(plugin);
+    });
+    connect(worker, &GrpcWorker::streamEventReceived, this, [this, generation](int kind, quint64 streamGeneration) {
+        if (generation != m_connectionGeneration || kind < GrpcWorker::StreamArchive || kind > GrpcWorker::StreamPluginStatus)
+            return;
+        auto& state = m_streamStates[kind];
+        if (state.generation != streamGeneration || state.receivedEvent) return;
+        state.receivedEvent = true;
+        state.retryMs = 1000;
+    });
+    connect(worker, &GrpcWorker::streamEnded, this, [this, generation](int kind, quint64 streamGeneration, int) {
+        if (generation != m_connectionGeneration || kind < GrpcWorker::StreamArchive || kind > GrpcWorker::StreamPluginStatus)
+            return;
+        auto& state = m_streamStates[kind];
+        if (state.generation != streamGeneration || !state.active) return;
+        state.active = false;
+        if (!isConnected()) return;
+        const int delay = state.retryMs;
+        state.retryMs = std::min(delay * 2, 30000);
+        QTimer::singleShot(delay, this, [this, generation, kind, streamGeneration] {
+            if (generation != m_connectionGeneration || !isConnected() ||
+                m_streamStates[kind].generation != streamGeneration || m_streamStates[kind].active)
+                return;
+            startStream(kind);
+        });
+    });
     connect(worker, &GrpcWorker::dependencyWarning, this, &GrpcClient::dependencyWarning);
     connect(worker, &GrpcWorker::daemonError, this, &GrpcClient::daemonError);
     connect(worker, &GrpcWorker::daemonInfo, this, &GrpcClient::daemonInfo);
@@ -262,7 +300,10 @@ void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
     connect(worker, &GrpcWorker::modDependencyFetchFailed, this, &GrpcClient::modDependencyFetchFailed);
     connect(worker, &GrpcWorker::dependencyEnableAcknowledged, this, &GrpcClient::dependencyEnableAcknowledged);
     connect(worker, &GrpcWorker::dependencyEnableAckFailed, this, &GrpcClient::dependencyEnableAckFailed);
-    connect(worker, &GrpcWorker::installCompletedHintReceived, this, &GrpcClient::installCompletedHintReceived);
+    connect(worker, &GrpcWorker::installCompletedHintReceived, this, [this, generation](quint64 streamGeneration, const GrpcInstallCompleted& event) {
+        if (generation == m_connectionGeneration && streamGeneration == m_streamStates[GrpcWorker::StreamInstall].generation)
+            emit installCompletedHintReceived(event);
+    });
     connect(worker, &GrpcWorker::rpcError, this, &GrpcClient::rpcError);
 }
 
@@ -316,6 +357,8 @@ void GrpcClient::disconnectFromDaemon()
     m_syncStub.reset();
     m_channel.reset();
     m_transferActive = false;
+    m_watchStarted = false;
+    for (auto& state : m_streamStates) state.active = false;
 
     if (m_connected) {
         m_connected = false;
@@ -333,9 +376,12 @@ void GrpcClient::onCheckConnection()
     bool nowConnected = (state == GRPC_CHANNEL_READY);
     if (nowConnected && !m_connected) {
         m_connected = true;
+        resumeSubscriptions();
         emit connected();
+        emit resubscribed();
     } else if (!nowConnected && m_connected) {
         m_connected = false;
+        m_watchStarted = false;
         emit disconnected();
     }
 }
@@ -673,45 +719,91 @@ quint64 GrpcClient::ackDependencyEnable(const QString& gameId, const QString& ba
 
 void GrpcClient::startWatching()
 {
-    postTo(watchWorker(), &GrpcWorker::doStartWatching);
+    if (!watchWorker() || m_watchStarted) return;
+    m_watchStarted = true;
+    watchWorker()->setStreamGeneration(++m_watchGeneration);
+    postTo(watchWorker(), &GrpcWorker::doStartWatching, m_watchGeneration);
 }
 
 void GrpcClient::stopWatching()
 {
-    if (watchWorker()) watchWorker()->stop();
+    m_watchStarted = false;
+    if (watchWorker()) watchWorker()->setStreamGeneration(++m_watchGeneration);
+}
+
+void GrpcClient::cancelStream(int kind)
+{
+    static_assert(RoleInstall == RoleArchive + GrpcWorker::StreamInstall);
+    static_assert(RolePluginStatus == RoleArchive + GrpcWorker::StreamPluginStatus);
+    auto& state = m_streamStates[kind];
+    ++state.generation;
+    state.active = false;
+    state.retryMs = 1000;
+    state.receivedEvent = false;
+    auto* worker = m_workers[RoleArchive + kind].worker;
+    if (worker) worker->setStreamGeneration(state.generation);
+}
+
+void GrpcClient::startStream(int kind)
+{
+    auto* worker = m_workers[RoleArchive + kind].worker;
+    if (!worker || !isConnected()) return;
+    if (kind == GrpcWorker::StreamPluginStatus) {
+        if (m_pluginGame.isEmpty() || m_pluginProfile.isEmpty()) return;
+    } else if (m_subscribedGame.isEmpty()) {
+        return;
+    }
+    auto& state = m_streamStates[kind];
+    state.active = true;
+    state.receivedEvent = false;
+    worker->setStreamGeneration(++state.generation);
+    if (kind == GrpcWorker::StreamArchive)
+        postTo(worker, &GrpcWorker::doStreamArchiveEvents, m_subscribedGame, state.generation);
+    else if (kind == GrpcWorker::StreamInstall)
+        postTo(worker, &GrpcWorker::doStreamInstallEvents, m_subscribedGame, state.generation);
+    else
+        postTo(worker, &GrpcWorker::doStreamPluginStatus, m_pluginGame, m_pluginProfile, state.generation);
+}
+
+void GrpcClient::resumeSubscriptions()
+{
+    for (int kind = GrpcWorker::StreamArchive; kind <= GrpcWorker::StreamPluginStatus; ++kind) {
+        cancelStream(kind);
+        startStream(kind);
+    }
 }
 
 void GrpcClient::subscribeEvents(const QString& gameId)
 {
-    if (gameId == m_subscribedGame && archiveWorker() && installWorker()) return;
-
-    if (archiveWorker()) archiveWorker()->cancelActiveStream();
-    if (installWorker()) installWorker()->cancelActiveStream();
+    if (gameId == m_subscribedGame && m_streamStates[GrpcWorker::StreamArchive].active &&
+        m_streamStates[GrpcWorker::StreamInstall].active) return;
     m_subscribedGame = gameId;
-    if (gameId.isEmpty()) return;
-
-    postTo(archiveWorker(), &GrpcWorker::doStreamArchiveEvents, gameId);
-    postTo(installWorker(), &GrpcWorker::doStreamInstallEvents, gameId);
+    cancelStream(GrpcWorker::StreamArchive);
+    cancelStream(GrpcWorker::StreamInstall);
+    startStream(GrpcWorker::StreamArchive);
+    startStream(GrpcWorker::StreamInstall);
 }
 
 void GrpcClient::unsubscribeEvents()
 {
-    if (archiveWorker()) archiveWorker()->cancelActiveStream();
-    if (installWorker()) installWorker()->cancelActiveStream();
     m_subscribedGame.clear();
+    cancelStream(GrpcWorker::StreamArchive);
+    cancelStream(GrpcWorker::StreamInstall);
 }
 
 void GrpcClient::subscribePluginStatus(const QString& gameId, const QString& profileName)
 {
-    if (!pluginStatusWorker()) return;
-    pluginStatusWorker()->cancelActiveStream();
-    if (gameId.isEmpty() || profileName.isEmpty()) return;
-    postTo(pluginStatusWorker(), &GrpcWorker::doStreamPluginStatus, gameId, profileName);
+    m_pluginGame = gameId;
+    m_pluginProfile = profileName;
+    cancelStream(GrpcWorker::StreamPluginStatus);
+    startStream(GrpcWorker::StreamPluginStatus);
 }
 
 void GrpcClient::unsubscribePluginStatus()
 {
-    if (pluginStatusWorker()) pluginStatusWorker()->cancelActiveStream();
+    m_pluginGame.clear();
+    m_pluginProfile.clear();
+    cancelStream(GrpcWorker::StreamPluginStatus);
 }
 
 void GrpcClient::setNexusAPIKey(const QString& apiKey)
@@ -1629,7 +1721,9 @@ bool GrpcClient::health(GrpcReadiness& out, QString& errorOut)
     out.lastInitStep = QString::fromStdString(resp.last_init_step());
     if (!m_connected) {
         m_connected = true;
+        resumeSubscriptions();
         emit connected();
+        emit resubscribed();
     }
     return true;
 }

@@ -314,6 +314,13 @@ void GrpcWorker::cancelActiveStream()
     if (m_streamCtx) m_streamCtx->TryCancel();
 }
 
+void GrpcWorker::setStreamGeneration(quint64 generation)
+{
+    std::lock_guard<std::mutex> lk(m_streamMu);
+    m_streamGeneration.store(generation);
+    if (m_streamCtx) m_streamCtx->TryCancel();
+}
+
 template <typename Req, typename Resp, typename Method>
 grpc::Status GrpcWorker::invoke(Method method, const Req& req, Resp& resp,
                                 std::chrono::milliseconds deadline)
@@ -338,14 +345,21 @@ bool GrpcWorker::call(const char* rpcName, Method method, const Req& req, Resp& 
 
 template <typename Req, typename Ev, typename Dispatch>
 grpc::Status GrpcWorker::runStream(std::unique_ptr<grpc::ClientReader<Ev>> (Stub::*method)(grpc::ClientContext*, const Req&),
-                                   const Req& req, Dispatch dispatch)
+                                   const Req& req, Dispatch dispatch, quint64 generation)
 {
     grpc::ClientContext ctx;
     ScopedCtxRegistration reg(m_streamMu, m_streamCtx, ctx);
+    if (m_stopped.load() || (generation && m_streamGeneration.load() != generation))
+        return grpc::Status(grpc::StatusCode::CANCELLED, "stream cancelled");
     auto reader = ((*m_stub).*method)(&ctx, req);
     Ev event;
-    while (!m_stopped.load() && reader->Read(&event))
+    while (!m_stopped.load() && reader->Read(&event)) {
+        if (generation && m_streamGeneration.load() != generation) {
+            ctx.TryCancel();
+            break;
+        }
         dispatch(event);
+    }
     if (m_stopped.load()) ctx.TryCancel();
     return reader->Finish();
 }
@@ -887,7 +901,7 @@ void GrpcWorker::doShutdownDaemon()
     invoke(&Stub::Shutdown, req, resp, std::chrono::seconds(3));
 }
 
-void GrpcWorker::doStartWatching()
+void GrpcWorker::doStartWatching(quint64 generation)
 {
     gorganizer::v1::WatchStatusRequest req;
     runStream(&Stub::WatchStatus, req, [this](const gorganizer::v1::StatusEvent& event) {
@@ -922,14 +936,14 @@ void GrpcWorker::doStartWatching()
         default:
             break;
         }
-    });
+    }, generation);
 }
 
-void GrpcWorker::doStreamArchiveEvents(const QString& gameId)
+void GrpcWorker::doStreamArchiveEvents(const QString& gameId, quint64 generation)
 {
     gorganizer::v1::StreamArchiveEventsRequest req;
     req.set_game_id(gameId.toStdString());
-    runStream(&Stub::StreamArchiveEvents, req, [this](const gorganizer::v1::ArchiveEvent& event) {
+    auto status = runStream(&Stub::StreamArchiveEvents, req, [this, generation](const gorganizer::v1::ArchiveEvent& event) {
         GrpcArchiveEvent out;
         switch (event.event_case()) {
         case gorganizer::v1::ArchiveEvent::kDownloadProgress:
@@ -947,26 +961,33 @@ void GrpcWorker::doStreamArchiveEvents(const QString& gameId)
         default:
             return;
         }
-        emit archiveEventReceived(out);
-    });
+        emit streamEventReceived(StreamArchive, generation);
+        emit archiveEventReceived(generation, out);
+    }, generation);
+    if (!m_stopped.load() && m_streamGeneration.load() == generation)
+        emit streamEnded(StreamArchive, generation, static_cast<int>(status.error_code()));
 }
 
-void GrpcWorker::doStreamInstallEvents(const QString& gameId)
+void GrpcWorker::doStreamInstallEvents(const QString& gameId, quint64 generation)
 {
     gorganizer::v1::StreamInstallEventsRequest req;
     req.set_game_id(gameId.toStdString());
-    runStream(&Stub::StreamInstallEvents, req, [this](const gorganizer::v1::InstallEvent& event) {
+    auto status = runStream(&Stub::StreamInstallEvents, req, [this, generation](const gorganizer::v1::InstallEvent& event) {
         switch (event.event_case()) {
         case gorganizer::v1::InstallEvent::kInstallProgress:
-            emit installProgressEvent(installProgressFromProto(event.install_progress()));
+            emit streamEventReceived(StreamInstall, generation);
+            emit installProgressEvent(generation, installProgressFromProto(event.install_progress()));
             break;
         case gorganizer::v1::InstallEvent::kInstallCompleted:
-            emit installCompletedHintReceived(installCompletedFromProto(event.install_completed()));
+            emit streamEventReceived(StreamInstall, generation);
+            emit installCompletedHintReceived(generation, installCompletedFromProto(event.install_completed()));
             break;
         default:
             break;
         }
-    });
+    }, generation);
+    if (!m_stopped.load() && m_streamGeneration.load() == generation)
+        emit streamEnded(StreamInstall, generation, static_cast<int>(status.error_code()));
 }
 
 void GrpcWorker::doExportInstance(const QString& gameId, const QString& outputPath,
@@ -1003,12 +1024,12 @@ void GrpcWorker::doImportInstance(const QString& gameId, const QString& archiveP
     runTransferStream(&Stub::ImportInstance, req);
 }
 
-void GrpcWorker::doStreamPluginStatus(const QString& gameId, const QString& profileName)
+void GrpcWorker::doStreamPluginStatus(const QString& gameId, const QString& profileName, quint64 generation)
 {
     gorganizer::v1::StreamPluginStatusRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
-    runStream(&Stub::StreamPluginStatus, req, [this](const gorganizer::v1::PluginStatusEvent& event) {
+    auto status = runStream(&Stub::StreamPluginStatus, req, [this, generation](const gorganizer::v1::PluginStatusEvent& event) {
         switch (event.event_case()) {
         case gorganizer::v1::PluginStatusEvent::kSnapshot: {
             std::vector<GrpcPluginStatus> items;
@@ -1016,16 +1037,20 @@ void GrpcWorker::doStreamPluginStatus(const QString& gameId, const QString& prof
             for (const auto& p : event.snapshot().plugins()) {
                 items.push_back(pluginStatusFromProto(p));
             }
-            emit pluginStatusSnapshot(items);
+            emit streamEventReceived(StreamPluginStatus, generation);
+            emit pluginStatusSnapshot(generation, items);
             break;
         }
         case gorganizer::v1::PluginStatusEvent::kUpdate:
-            emit pluginStatusUpdate(pluginStatusFromProto(event.update().plugin()));
+            emit streamEventReceived(StreamPluginStatus, generation);
+            emit pluginStatusUpdate(generation, pluginStatusFromProto(event.update().plugin()));
             break;
         default:
             break;
         }
-    });
+    }, generation);
+    if (!m_stopped.load() && m_streamGeneration.load() == generation)
+        emit streamEnded(StreamPluginStatus, generation, static_cast<int>(status.error_code()));
 }
 
 // Queries the game's mod-loader status, allowing the longer network deadline when the latest release is resolved too.

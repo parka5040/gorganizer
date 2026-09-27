@@ -258,6 +258,7 @@ public:
 signals:
     void connected();
     void disconnected();
+    void resubscribed();
     // Reports that disconnectFromDaemon stopped every worker, so no queued request will be answered any more.
     void workersStopped();
     void connectionError(const QString& error);
@@ -395,6 +396,17 @@ private:
     quint64 m_nextDependencyRequestId = 0;
     quint64 m_nextVfsRequestId = 0;
     QString m_subscribedGame;
+    QString m_pluginGame;
+    QString m_pluginProfile;
+    struct StreamState {
+        quint64 generation = 0;
+        bool active = false;
+        int retryMs = 1000;
+        bool receivedEvent = false;
+    };
+    std::array<StreamState, 3> m_streamStates{};
+    quint64 m_watchGeneration = 0;
+    bool m_watchStarted = false;
 
     GrpcWorker* unaryWorker() const { return m_workers[RoleUnary].worker; }
     GrpcWorker* watchWorker() const { return m_workers[RoleWatch].worker; }
@@ -409,6 +421,9 @@ private:
 
     std::string socketTarget() const;
     void connectWorkerSignals(GrpcWorker* worker);
+    void startStream(int kind);
+    void cancelStream(int kind);
+    void resumeSubscriptions();
     quint64 postInstall(const QString& gameId, const QString& archiveRelPath,
                         const QString& externalArchivePath, GrpcInstallMode mode,
                         const QString& targetMod, const QString& previewId,
