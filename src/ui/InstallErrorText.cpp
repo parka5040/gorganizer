@@ -72,6 +72,8 @@ QString gameRunningAction(const QString& operation)
         return QStringLiteral("merge files into this mod");
     if (operation == QLatin1String("retarget"))
         return QStringLiteral("switch to another profile");
+    if (operation == QLatin1String("mount"))
+        return QStringLiteral("activate its mods");
     return QString();
 }
 
