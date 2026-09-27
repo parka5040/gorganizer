@@ -39,6 +39,10 @@ func TestStartInstallValidatesTargetMod(t *testing.T) {
 		{name: "merge symlinked mod", mode: dto.InstallMergeIntoMod, target: "Linked"},
 		{name: "merge file", mode: dto.InstallMergeIntoMod, target: "NotADir"},
 		{name: "merge valid", mode: dto.InstallMergeIntoMod, target: "Existing", wantFolder: "Existing"},
+		{name: "replace hidden", mode: dto.InstallReplaceMod, target: ".hidden"},
+		{name: "replace symlinked mod", mode: dto.InstallReplaceMod, target: "Linked"},
+		{name: "replace file", mode: dto.InstallReplaceMod, target: "NotADir"},
+		{name: "replace valid", mode: dto.InstallReplaceMod, target: "Existing", wantFolder: "Existing"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

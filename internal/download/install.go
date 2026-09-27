@@ -47,6 +47,7 @@ type InstallRequest struct {
 	TargetMod           string
 	RecordModName       string
 	SourceArchiveRef    SourceArchiveRef
+	DeferIndexUpdate    bool
 	DisplayName         string
 	Category            string
 	Version             string
@@ -253,7 +254,7 @@ func Install(req InstallRequest) (*InstallResult, error) {
 	}
 
 	relFromDownloads := strings.TrimPrefix(ref.Path, "Downloads/")
-	if relFromDownloads != ref.Path {
+	if relFromDownloads != ref.Path && !req.DeferIndexUpdate {
 		if err := SetUninstalled(req.GameID, relFromDownloads, false); err != nil {
 			slog.Warn("updating download index failed", "err", err)
 		}
