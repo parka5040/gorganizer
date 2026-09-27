@@ -1674,6 +1674,10 @@ message PreviewImportResponse {
   repeated TransferProfileEntry profiles = 6;
   bool includes_overwrite = 7;
   bool includes_game_settings = 8;
+  // Opaque identity of the archive file that was previewed (device, inode,
+  // size and change times). Pass it back as
+  // ImportInstanceRequest.expected_archive_identity.
+  string archive_identity = 9;
 }
 
 message ImportInstanceRequest {
@@ -1684,6 +1688,9 @@ message ImportInstanceRequest {
   map<string, TransferCollisionPolicy> mod_policy_overrides = 4;
   repeated string mod_folders = 5;    // empty = all mods in the archive
   repeated string profile_names = 6;  // empty = all profiles in the archive
+  // When set, the import is refused unless the opened archive still has this
+  // PreviewImportResponse.archive_identity; nothing is changed on refusal.
+  string expected_archive_identity = 7;
 }
 
 message TransferProgress {
