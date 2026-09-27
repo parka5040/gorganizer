@@ -218,6 +218,10 @@ ModListWidget::ModListWidget(GrpcClient* grpc, QWidget* parent)
     m_profileStateLabel->setObjectName("hintLabel");
     m_profileStateLabel->hide();
     headerRow->addWidget(m_profileStateLabel);
+    m_profileRetryButton = new QPushButton("Retry");
+    m_profileRetryButton->hide();
+    headerRow->addWidget(m_profileRetryButton);
+    connect(m_profileRetryButton, &QPushButton::clicked, this, &ModListWidget::requestProfileModList);
     headerRow->addStretch();
 
     m_visualCheck = new QCheckBox("Separator View");
@@ -310,7 +314,7 @@ void ModListWidget::loadForGame(const GameInfo& game)
 
 void ModListWidget::loadForGame(const GameInfo& game, const QString& profileName)
 {
-    if (game.shortName != m_gameId || profileName != m_profileName || !showsModDependencies(game)) {
+    if (game.shortName != m_gameId || profileName != m_profileName) {
         clearDependencyReport();
         dropProfileAdoption();
     }
@@ -334,12 +338,12 @@ void ModListWidget::loadForGame(const GameInfo& game, const QString& profileName
     m_profileName = profileName;
 
     m_modsDir = GameInfo::modsDirPathFor(m_gameId);
+    updateEditLock();
 
     m_placeholder->hide();
     m_view->show();
 
     scanModsFolder();
-    updateEditLock();
 }
 
 void ModListWidget::scanModsFolder()
@@ -497,7 +501,7 @@ void ModListWidget::showConflictDetailsForMod(const QString& modName)
     dlg->show();
 }
 
-// Persists a checkbox toggle to metadata.yaml and pushes the full mod list to the daemon.
+// Sends a checkbox toggle with the profile's full mod list to the daemon.
 void ModListWidget::onModelDataChanged(const QModelIndex& topLeft, const QModelIndex&,
                                        const QList<int>& roles)
 {
@@ -523,9 +527,6 @@ void ModListWidget::onModelDataChanged(const QModelIndex& topLeft, const QModelI
         if (m_profileAdopted)
             m_profileFlags.insert(m_mods[modIdx].folder, enabled);
 
-        QString metaPath = m_modsDir + "/" + r.folder + "/metadata.yaml";
-        ModCatalog::patchMetadataField(metaPath, "enabled", enabled ? "true" : "false");
-
         if (!m_gameId.isEmpty() && !m_profileName.isEmpty()) {
             ++m_editSerial;
             const std::vector<GrpcModListEntry> entries = toggleEntries();
@@ -541,14 +542,21 @@ std::vector<GrpcModListEntry> ModListWidget::toggleEntries() const
 {
     std::vector<GrpcModListEntry> entries;
     if (!m_visualMode) {
-        entries.reserve(m_model->rowCount());
-        for (int rr = 0; rr < m_model->rowCount(); ++rr) {
-            const ModListRow& mr = m_model->rowAt(rr);
-            if (mr.kind != RowKindMod) continue;
+        entries.reserve(m_mods.size());
+        std::vector<int> idx(m_mods.size());
+        for (size_t i = 0; i < m_mods.size(); ++i) idx[i] = int(i);
+        std::stable_sort(idx.begin(), idx.end(), [this](int a, int b) {
+            quint64 ka = parseHexIndex(m_mods[a].trueIndex);
+            quint64 kb = parseHexIndex(m_mods[b].trueIndex);
+            if (ka == 0 && kb == 0) return a < b;
+            if (ka == 0) return false;
+            if (kb == 0) return true;
+            return ka < kb;
+        });
+        for (int i : idx) {
             GrpcModListEntry e;
-            e.modName = mr.folder;
-            if (e.modName.isEmpty()) e.modName = mr.name;
-            e.enabled = mr.checked;
+            e.modName = m_mods[i].folder;
+            e.enabled = m_mods[i].enabled;
             e.priority = int(entries.size());
             entries.push_back(std::move(e));
         }
@@ -595,7 +603,7 @@ void ModListWidget::reloadMods()
 
 void ModListWidget::reloadAfterFailedSave(const GameInfo& game, const QString& profileName)
 {
-    if (!showsModDependencies(game) || game.shortName != m_gameId || profileName != m_profileName) {
+    if (game.shortName != m_gameId || profileName != m_profileName) {
         loadForGame(game, profileName);
         return;
     }
@@ -615,8 +623,13 @@ void ModListWidget::rescanCatalog()
 std::vector<ModMetadata> ModListWidget::scanCatalog() const
 {
     std::vector<ModMetadata> scanned = ModCatalog::scan(m_modsDir);
-    if (!m_profileAdopted)
+    if (!m_profileAdopted) {
+        for (auto& meta : scanned) {
+            meta.enabled = false;
+            meta.trueIndex.clear();
+        }
         return scanned;
+    }
     quint64 next = 1;
     for (auto it = m_profileOrder.cbegin(); it != m_profileOrder.cend(); ++it)
         next = std::max(next, it.value() + 1);
@@ -680,7 +693,7 @@ void ModListWidget::requestProfileModList()
 
 void ModListWidget::sendProfileModListRequest()
 {
-    if (!showsModDependencies(m_activeGame) || m_gameId.isEmpty() || m_profileName.isEmpty())
+    if (m_gameId.isEmpty() || m_profileName.isEmpty())
         return;
     m_profileListPending = false;
     m_profileListSerial = m_editSerial;
@@ -693,7 +706,7 @@ void ModListWidget::onProfileModListFailed(quint64 requestId, const QString& gam
     if (requestId == 0 || requestId != m_profileListRequestId)
         return;
     m_profileListRequestId = 0;
-    if (gameId != m_gameId || profileName != m_profileName || !showsModDependencies(m_activeGame))
+    if (gameId != m_gameId || profileName != m_profileName)
         return;
     if (m_profileRetryAttempts < kProfileListRetries) {
         m_profileRetryTimer->start(kProfileListRetryBaseMs << m_profileRetryAttempts);
@@ -715,35 +728,33 @@ void ModListWidget::dropProfileAdoption()
     m_profileAdopted = false;
     m_profileFlags.clear();
     m_profileOrder.clear();
+    m_profileLoadFailed = false;
+    m_profileLoadError.clear();
     updateEditLock();
 }
 
 bool ModListWidget::editsBlocked() const
 {
-    return showsModDependencies(m_activeGame) && !m_gameId.isEmpty() && !m_profileName.isEmpty()
-        && !m_profileAdopted && !m_profileLoadFailed;
+    return !m_gameId.isEmpty() && !m_profileName.isEmpty() && !m_profileAdopted;
 }
 
 void ModListWidget::updateEditLock()
 {
     const bool blocked = editsBlocked();
-    const bool failed = showsModDependencies(m_activeGame) && !m_gameId.isEmpty() && !m_profileAdopted
-        && m_profileLoadFailed;
+    const bool failed = blocked && m_profileLoadFailed;
     m_model->setEditable(!blocked);
     m_addSeparatorBtn->setEnabled(!blocked);
-    if (blocked) {
+    if (failed) {
+        m_profileStateLabel->setText(QStringLiteral("Couldn't load this profile. Mod changes are disabled."));
+        m_profileStateLabel->setToolTip(plainToolTip(m_profileLoadError));
+    } else if (blocked) {
         m_profileStateLabel->setText(QStringLiteral("Loading profile…"));
         m_profileStateLabel->setToolTip(QStringLiteral("Checkboxes, drag-and-drop and separator moves are available "
                                                        "once the profile's mod list has loaded from the gorganizer "
                                                        "daemon."));
-    } else if (failed) {
-        m_profileStateLabel->setText(QStringLiteral("Profile mod list not loaded"));
-        m_profileStateLabel->setToolTip(plainToolTip(
-            QStringLiteral("gorganizer could not read the mod list of profile \"%1\" from the daemon, so the "
-                           "checkboxes show each mod's saved flag.\n\n%2")
-                .arg(m_profileName, m_profileLoadError)));
     }
-    m_profileStateLabel->setVisible(blocked || failed);
+    m_profileStateLabel->setVisible(blocked);
+    m_profileRetryButton->setVisible(failed);
 }
 
 void ModListWidget::onProfileModListReceived(quint64 requestId, const QString& gameId, const QString& profileName,
@@ -752,7 +763,7 @@ void ModListWidget::onProfileModListReceived(quint64 requestId, const QString& g
     if (requestId == 0 || requestId != m_profileListRequestId)
         return;
     m_profileListRequestId = 0;
-    if (gameId != m_gameId || profileName != m_profileName || !showsModDependencies(m_activeGame))
+    if (gameId != m_gameId || profileName != m_profileName)
         return;
     if (m_editSerial != m_profileListSerial) {
         requestProfileModList();
@@ -897,23 +908,7 @@ quint64 ModListWidget::enableModsInProfile(const std::vector<GrpcModListEntry>& 
 
 void ModListWidget::onModListSaved(quint64 requestId, const QString&, const QString&)
 {
-    const auto it = m_enableSaves.constFind(requestId);
-    if (it == m_enableSaves.constEnd())
-        return;
-    const EnableSave save = it.value();
-    m_enableSaves.erase(it);
-    const bool loaded = save.gameId == m_gameId && save.profileName == m_profileName && save.modsDir == m_modsDir;
-    for (const auto& folder : save.folders) {
-        if (loaded) {
-            const auto meta = std::find_if(m_mods.begin(), m_mods.end(),
-                                           [&folder](const ModMetadata& m) { return m.folder == folder; });
-            if (meta == m_mods.end() || !meta->enabled)
-                continue;
-        }
-        const QString metaPath = save.modsDir + "/" + folder + "/metadata.yaml";
-        if (QFile::exists(metaPath))
-            ModCatalog::patchMetadataField(metaPath, "enabled", "true");
-    }
+    m_enableSaves.remove(requestId);
 }
 
 void ModListWidget::onModListSaveFailed(quint64 requestId, const QString&, const QString&, const QString&)

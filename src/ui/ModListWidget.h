@@ -60,7 +60,7 @@ public:
     bool containsMod(const QString& folder) const;
     // Rescans the mod folders without re-reading separators, deferring until the current interaction ends.
     void reloadMods();
-    // Reloads the list after a failed mod-list save, first forgetting a manifest list's adopted profile state so the unsaved change cannot survive.
+    // Reloads the list after a failed mod-list save and re-adopts the profile's mod list.
     void reloadAfterFailedSave(const GameInfo& game, const QString& profileName);
     // Rescans the mod folders and adopts the profile's modlist, showing every mod the list lacks as disabled; false when the list is busy or not loaded.
     bool adoptModList(const std::vector<GrpcModListEntry>& entries);
@@ -98,12 +98,12 @@ private slots:
     // Adopts the answer to the list's own modlist request once no menu or dialog is open.
     void onProfileModListReceived(quint64 requestId, const QString& gameId, const QString& profileName,
                                   const std::vector<GrpcModListEntry>& entries);
-    // Retries a failed modlist request of the list with backoff, and gives up after the last attempt so edits are possible again.
+    // Retries a failed modlist request with backoff and keeps edits locked after the last attempt.
     void onProfileModListFailed(quint64 requestId, const QString& gameId, const QString& profileName,
                                 const QString& error);
     // Sends the next modlist request after a failed one.
     void onProfileRetryTimeout();
-    // Writes the enabled flag of the mods a dependency enable saved into their metadata.yaml.
+    // Clears the tracking state of a saved dependency enable.
     void onModListSaved(quint64 requestId, const QString& gameId, const QString& profileName);
     // Reverts the flags of a failed dependency enable and re-reads the profile's modlist.
     void onModListSaveFailed(quint64 requestId, const QString& gameId, const QString& profileName,
@@ -112,7 +112,7 @@ private slots:
 private:
     friend class ModListTreeView;
     void scanModsFolder();
-    // Builds the SetModList entries of a checkbox toggle, in display order in the flat view and in load order in the separator view.
+    // Builds the SetModList entries of a checkbox toggle in the profile's load order.
     std::vector<GrpcModListEntry> toggleEntries() const;
     // Rescans the mod catalog without re-reading separators.
     void rescanCatalog();
@@ -120,13 +120,13 @@ private:
     std::vector<ModMetadata> scanCatalog() const;
     // Records the order of a modlist the list sends as the loaded profile's order once its modlist was adopted.
     void noteSentModList(const std::vector<GrpcModListEntry>& entries);
-    // Requests the loaded profile's modlist for games whose list mirrors it, which the list adopts when it arrives, restarting the retry budget.
+    // Requests the loaded profile's modlist and restarts the retry budget.
     void requestProfileModList();
-    // Sends one modlist request for the loaded profile when the game's list mirrors it.
+    // Sends one modlist request for the loaded profile.
     void sendProfileModListRequest();
     // Forgets the adopted profile modlist, its enabled flags and its order.
     void dropProfileAdoption();
-    // Reports whether a manifest list still waits for its profile's modlist, so toggles and reorders would push unrelated flags.
+    // Reports whether the loaded profile's modlist has not been adopted.
     bool editsBlocked() const;
     // Locks or unlocks checkboxes, dragging and separator edits and shows the profile loading state.
     void updateEditLock();
@@ -173,6 +173,7 @@ private:
     QCheckBox* m_visualCheck = nullptr;
     QPushButton* m_addSeparatorBtn = nullptr;
     QLabel* m_profileStateLabel = nullptr;
+    QPushButton* m_profileRetryButton = nullptr;
     QTimer* m_profileRetryTimer = nullptr;
 
     std::vector<GrpcFileConflict> m_conflicts;
