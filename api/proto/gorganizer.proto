@@ -1041,6 +1041,15 @@ message Readiness {
   bool recovery_done = 2;    // crash recovery has finished for all games
   bool games_warmed = 3;     // initial DetectGames + per-game warmup completed
   string last_init_step = 4; // human-readable string for the splash subtitle
+  // Identity of the answering daemon process: a random ID chosen at start,
+  // its PID, its version string, and a compatibility epoch the GUI and
+  // launcher compare before relying on newer RPCs. stopping is true once
+  // shutdown began (new work is refused).
+  string instance_id = 5;
+  int32 pid = 6;
+  string version = 7;
+  int32 api_epoch = 8;
+  bool stopping = 9;
 }
 
 // --- Game settings ---
