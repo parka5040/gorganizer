@@ -4,6 +4,7 @@
 #include <grpcpp/grpcpp.h>
 #include <chrono>
 #include <mutex>
+#include <utility>
 
 namespace gorganizer {
 
@@ -293,7 +294,8 @@ GrpcInstallCompleted installCompletedFromProto(const gorganizer::v1::InstallComp
 }
 
 GrpcWorker::GrpcWorker(std::shared_ptr<grpc::Channel> channel)
-    : m_stub(gorganizer::v1::Gorganizer::NewStub(channel))
+    : m_channel(std::move(channel))
+    , m_stub(gorganizer::v1::Gorganizer::NewStub(m_channel))
 {
 }
 
