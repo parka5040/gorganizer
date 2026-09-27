@@ -101,6 +101,22 @@ GrpcVFSLifecycleState vfsLifecycleFromProto(gorganizer::v1::VFSLifecycleState st
     }
 }
 
+GrpcSteamMaintenanceState steamMaintenanceFromProto(gorganizer::v1::SteamMaintenanceState state)
+{
+    switch (state) {
+    case gorganizer::v1::STEAM_MAINTENANCE_STATE_NONE:
+        return GrpcSteamMaintenanceState::None;
+    case gorganizer::v1::STEAM_MAINTENANCE_STATE_STEAM_BUSY:
+        return GrpcSteamMaintenanceState::SteamBusy;
+    case gorganizer::v1::STEAM_MAINTENANCE_STATE_VERIFY_REQUIRED:
+        return GrpcSteamMaintenanceState::VerifyRequired;
+    case gorganizer::v1::STEAM_MAINTENANCE_STATE_USER_REQUESTED:
+        return GrpcSteamMaintenanceState::UserRequested;
+    default:
+        return GrpcSteamMaintenanceState::Unspecified;
+    }
+}
+
 GrpcRecoveryKind recoveryKindFromProto(gorganizer::v1::RecoveryKind kind)
 {
     switch (kind) {
@@ -515,6 +531,7 @@ GrpcVFSStatus GrpcWorker::vfsStatusFromProto(const gorganizer::v1::VFSStatus& s)
         .appliedGen = s.applied_gen(),
         .lifecycleState = vfsLifecycleFromProto(s.lifecycle_state()),
         .lifecycleReason = QString::fromStdString(s.lifecycle_reason()),
+        .steamMaintenance = steamMaintenanceFromProto(s.steam_maintenance()),
     };
     if (s.has_pending_recovery()) {
         const auto& pending = s.pending_recovery();

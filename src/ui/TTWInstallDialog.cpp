@@ -189,12 +189,9 @@ QWidget* TTWInstallDialog::buildBackendPage()
     m_radioWine = new QRadioButton(
         "Official TTW Install.exe under Wine — 40 min – several hours");
     m_radioWine->setToolTip(
-        "Closed-source Windows installer. Requires .NET 4.8, vcrun2022, etc.\n"
-        "in your Fallout: New Vegas Proton prefix. Steam must be running.");
+        "Requires Windows support components for Fallout: New Vegas. Steam must be running.");
     auto* wineNote = new QLabel(
-        "<small>Requires .NET Framework 4.8, Visual C++ 2015–2022 redistributables, "
-        "and other components in your Fallout: New Vegas Proton prefix. Steam "
-        "must be running.</small>");
+        "<small>Requires Windows support components for Fallout: New Vegas. Steam must be running.</small>");
     wineNote->setTextFormat(Qt::RichText);
     wineNote->setWordWrap(true);
 

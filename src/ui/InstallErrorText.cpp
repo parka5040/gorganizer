@@ -81,14 +81,14 @@ QString modLoaderBusyReason(const QString& operation, const QString& subject, co
         return QStringLiteral("Another SMAPI change is in progress for %1. Wait for it to finish, then try again.")
             .arg(subject);
     if (operation == QLatin1String("mounted"))
-        return QStringLiteral("%1 has active mods. Choose Tools → Unmount Mods, then try again.").arg(subject);
+        return QStringLiteral("%1 has active mods. Choose Tools → Deactivate Mods, then try again.").arg(subject);
     if (operation == QLatin1String("running") || operation == QLatin1String("launch"))
         return QStringLiteral("%1 is running. Close the game, then try again.").arg(subjectTitle);
     if (operation == QLatin1String("tool"))
         return QStringLiteral("A tool started from gorganizer is running for %1. Close it, then try again.")
             .arg(subject);
     if (operation == QLatin1String("root_deployment"))
-        return QStringLiteral("%1 has active mods in its game folder. Choose Tools → Unmount Mods, then try again.")
+        return QStringLiteral("%1 has active mods in its game folder. Choose Tools → Deactivate Mods, then try again.")
             .arg(subject);
     if (operation == QLatin1String("mount") || operation == QLatin1String("unmount")
         || operation == QLatin1String("apply"))
@@ -131,7 +131,7 @@ QString modLoaderFailedMessage(const QString& reason)
         return QStringLiteral("A file in the game folder points to an unsafe location. Check the game files, "
                               "then try again.");
     if (reason == QLatin1String("farm_mounted"))
-        return QStringLiteral("This game has active mods. Choose Tools → Unmount Mods, then try again.");
+        return QStringLiteral("This game has active mods. Choose Tools → Deactivate Mods, then try again.");
     if (reason == QLatin1String("stage_incomplete"))
         return QStringLiteral("The SMAPI installer did not finish preparing all its files. Try again later.");
     if (reason == QLatin1String("stage_unexpected"))
@@ -217,7 +217,7 @@ QString knownTokenMessage(const InstallError& parsed)
     if (token == QLatin1String("fomod_required"))
         return QStringLiteral("This archive needs its FOMOD installer, which is not available for this game.");
     if (token == QLatin1String("mod_mounted"))
-        return QStringLiteral("\"%1\" is part of the active mods. Choose \"Unmount Mods\", then try again.")
+        return QStringLiteral("\"%1\" is part of the active mods. Choose \"Deactivate Mods\", then try again.")
             .arg(field("mod"));
     if (token == QLatin1String("fomod_reinstall_unsupported"))
         return QStringLiteral("\"%1\" was installed through a FOMOD installer and cannot be reinstalled "
@@ -334,7 +334,7 @@ QString knownTokenMessage(const InstallError& parsed)
     if (token == QLatin1String("ttw_requires_vanilla_fnv"))
         return QStringLiteral("Deactivate Fallout: New Vegas mods before installing Tale of Two Wastelands.");
     if (token == QLatin1String("xnvse_missing_for_ttw"))
-        return QStringLiteral("Install xNVSE from the menu beside Run, then try again.");
+        return QStringLiteral("Use the menu beside Run to install the script extender.");
     if (token == QLatin1String("fnv4gb_not_applied_for_ttw"))
         return QStringLiteral("Choose Tools → Patch Fallout to 4GB, then try again.");
     if (token == QLatin1String("transfer_game_mismatch"))

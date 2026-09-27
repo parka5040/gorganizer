@@ -61,7 +61,7 @@ MainWindow::MainWindow(AppConfig& config, GrpcClient* grpc, QWidget* parent)
     m_session->loadManagedGames();
 
     if (m_grpc->isConnected()) {
-        statusBar()->showMessage("Daemon connected", 3000);
+        statusBar()->showMessage("Gorganizer's background service connected", 3000);
         m_grpc->detectGames();
         m_grpc->startWatching();
     }
@@ -119,7 +119,7 @@ void MainWindow::setupUi()
     auto* toolsMenu = menuBar()->addMenu("&Tools");
     m_iniEditorAction = toolsMenu->addAction("INI &Editor...", this, &MainWindow::onOpenIniEditor);
     toolsMenu->addAction("E&xternal Tools...", this, &MainWindow::onOpenExecutables);
-    m_unmountAction = toolsMenu->addAction("&Unmount Mods (restore vanilla Data)");
+    m_unmountAction = toolsMenu->addAction("&Deactivate Mods…");
     m_patch4GBAction = toolsMenu->addAction("Patch Fallout to &4GB");
     m_patch4GBAction->setVisible(false);
     m_installTtwAction = toolsMenu->addAction("Install Tale of Two &Wastelands...");
@@ -304,12 +304,12 @@ void MainWindow::wireConnections()
             m_gameSetup, &GameSetupController::onInstallTTW);
 
     connect(m_grpc, &GrpcClient::connected, this, [this] {
-        statusBar()->showMessage("Daemon connected", 3000);
+        statusBar()->showMessage("Gorganizer's background service connected", 3000);
         m_grpc->detectGames();
         m_grpc->startWatching();
     });
     connect(m_grpc, &GrpcClient::disconnected, this, [this] {
-        statusBar()->showMessage("Background service disconnected. Run is unavailable until it reconnects.");
+        statusBar()->showMessage("Gorganizer's background service disconnected. Run is unavailable until it reconnects.");
     });
 
     connect(m_grpc, &GrpcClient::installRequestCompleted, this, &MainWindow::onInstallRequestCompleted);
@@ -332,20 +332,21 @@ void MainWindow::closeEvent(QCloseEvent* event)
     QStringList paragraphs;
     if (!loaderOperation.isEmpty()) {
         const QString consequence = m_daemonOwned
-            ? QStringLiteral("Quitting gorganizer also stops the gorganizer daemon it started, which interrupts the "
-                             "operation. The daemon rolls an unfinished SMAPI change back the next time it starts.")
-            : QStringLiteral("The gorganizer daemon keeps running and finishes the operation or rolls it back, but "
-                             "gorganizer cannot report the result.");
-        paragraphs.append(QStringLiteral("%1 is still in progress.\n\n%2 The mods are not mounted again "
-                                         "automatically.").arg(loaderOperation, consequence));
+            ? QStringLiteral("Gorganizer also stops the background service it started. The service rolls an "
+                             "unfinished SMAPI change back the next time it starts.")
+            : QStringLiteral("Gorganizer's background service keeps running and finishes the operation or rolls "
+                             "it back, but Gorganizer cannot report the result.");
+        paragraphs.append(QStringLiteral("%1 is still in progress.\n\nQuitting may interrupt this operation. "
+                                         "Keep Gorganizer open until it finishes.\n\n%2 The mods will not be "
+                                         "activated again automatically.").arg(loaderOperation, consequence));
     }
     if (m_pendingExternalInstall) {
         const QString consequence = m_daemonOwned
-            ? QStringLiteral("Quitting gorganizer also stops the gorganizer daemon it started, which interrupts the "
-                             "install.")
-            : QStringLiteral("The gorganizer daemon keeps running and finishes the install, but gorganizer cannot "
-                             "report the result.");
-        paragraphs.append(QStringLiteral("Installing \"%1\" is still in progress.\n\n%2")
+            ? QStringLiteral("Gorganizer also stops the background service it started, which interrupts the install.")
+            : QStringLiteral("Gorganizer's background service keeps running and finishes the install, but "
+                             "Gorganizer cannot report the result.");
+        paragraphs.append(QStringLiteral("Installing \"%1\" is still in progress.\n\nQuitting may interrupt "
+                                         "this operation. Keep Gorganizer open until it finishes.\n\n%2")
                               .arg(m_pendingExternalInstall->name, consequence));
     }
     const bool interrupted = !paragraphs.isEmpty();
@@ -376,7 +377,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
             }
             if (!m_daemonOwned && !items.empty()) {
                 paragraphs.append(QStringLiteral("Gorganizer's background service keeps running after this window closes, "
-                                                 "so your mods stay active until you choose Unmount Mods."));
+                                                 "so your mods stay active until you choose Deactivate Mods."));
             }
         }
     }
@@ -422,7 +423,7 @@ void MainWindow::onInstallMod()
     const bool localInstall = usesLocalDataRootInstall(game);
     if (!localInstall) {
         if (!game.capabilitiesKnown) {
-            dialogs::info(this, "Install Mod", "Waiting for the gorganizer daemon — try again in a moment.");
+            dialogs::info(this, "Install Mod", "Waiting for Gorganizer's background service — try again in a moment.");
             return;
         }
         if (m_pendingExternalInstall) {
@@ -430,7 +431,7 @@ void MainWindow::onInstallMod()
             return;
         }
         if (!m_grpc->isConnected()) {
-            dialogs::warn(this, "Install Mod", "The daemon must be running to install mods for this game.");
+            dialogs::warn(this, "Install Mod", "Gorganizer's background service must be running to install mods for this game.");
             return;
         }
     }
@@ -496,7 +497,7 @@ void MainWindow::startExternalInstall(const PendingExternalInstall& request)
         return;
     }
     if (!m_grpc->isConnected()) {
-        dialogs::warn(this, "Install Mod", "The daemon must be running to install mods for this game.");
+        dialogs::warn(this, "Install Mod", "Gorganizer's background service must be running to install mods for this game.");
         return;
     }
     PendingExternalInstall pending = request;
@@ -633,7 +634,7 @@ void MainWindow::onOpenExecutables()
         return;
     }
     if (!m_grpc->isConnected()) {
-        dialogs::warn(this, "External Tools", "The daemon must be running.");
+        dialogs::warn(this, "External Tools", "Gorganizer's background service must be running.");
         return;
     }
     const GameInfo& game = m_session->activeGame();

@@ -257,10 +257,8 @@ void RunButtonWidget::syncRunLabel()
                 m_runBtn->setText(QString("Run %1").arg(m_game.name));
             if (modLoaderStateIs(GrpcModLoaderStateUnsupportedBuild))
                 m_runBtn->setToolTip(kUnsupportedBuildTip);
-            else if (managesSmapi(m_game))
-                m_runBtn->setToolTip("Launch through Steam; enabled mods are deployed into the game's Mods folder first.");
             else
-                m_runBtn->setToolTip("Launch through Steam; the mod hardlink farm + plugins.txt are deployed first.");
+                m_runBtn->setToolTip("Apply pending mod changes, then launch the game through Steam.");
             break;
         case TargetTool:
             m_runBtn->setText(t.label);

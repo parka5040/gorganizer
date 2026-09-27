@@ -109,6 +109,7 @@ struct GrpcProfile {
 };
 
 enum class GrpcVFSLifecycleState { Unspecified, Ready, RecoveryDeferred, RecoveryPending };
+enum class GrpcSteamMaintenanceState { Unspecified, None, SteamBusy, VerifyRequired, UserRequested };
 
 enum class GrpcRecoveryKind { Unspecified, Data, ModLoader, GameRoot };
 
@@ -140,6 +141,7 @@ struct GrpcVFSStatus {
     uint64_t appliedGen = 0;
     GrpcVFSLifecycleState lifecycleState = GrpcVFSLifecycleState::Unspecified;
     QString lifecycleReason;
+    GrpcSteamMaintenanceState steamMaintenance = GrpcSteamMaintenanceState::Unspecified;
     bool hasPendingRecovery = false;
     GrpcRecoveryPending pendingRecovery;
 };
