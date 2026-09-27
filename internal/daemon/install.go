@@ -370,7 +370,15 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 	if target == "" {
 		return "", 0, fmt.Errorf("could not determine target mod folder")
 	}
-	if err := download.ValidateTargetModName(target); err != nil {
+	if req.Mode == dto.InstallMergeIntoMod {
+		if _, err := resolveExistingModDir(req.GameID, target); err != nil {
+			var missing *ModNotFoundError
+			if errors.As(err, &missing) {
+				return "", 0, &download.InvalidTargetModError{Name: target, Reason: "merge target is not an existing mod folder"}
+			}
+			return "", 0, err
+		}
+	} else if err := download.ValidateTargetModName(target); err != nil {
 		return "", 0, err
 	}
 

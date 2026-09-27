@@ -675,9 +675,7 @@ func AppendSourceArchive(modDir, modName string, ref SourceArchiveRef, displayNa
 	if err != nil {
 		return err
 	}
-	if m.Folder == "" {
-		m.Folder = modName
-	}
+	m.Folder = modName
 	if m.Name == "" {
 		if displayName != "" {
 			m.Name = displayName

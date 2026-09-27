@@ -37,8 +37,15 @@ func (md *ModService) ReinstallMod(gameID, modName string) (int, int, int, error
 	if err := md.s.awaitRecovery(); err != nil {
 		return 0, 0, 0, err
 	}
+	if err := md.s.refuseWhenShuttingDown("reinstall"); err != nil {
+		return 0, 0, 0, err
+	}
 	if !md.s.gameConfigured(gameID) {
 		return 0, 0, 0, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
+	}
+	modDir, err := resolveExistingModDir(gameID, modName)
+	if err != nil {
+		return 0, 0, 0, err
 	}
 	release, err := md.s.acquireShared(gameID, dto.BusyOperationReinstall)
 	if err != nil {
@@ -46,13 +53,6 @@ func (md *ModService) ReinstallMod(gameID, modName string) (int, int, int, error
 	}
 	defer release()
 	if err := checkInstallLayout(gameID); err != nil {
-		return 0, 0, 0, err
-	}
-	if err := download.ValidateTargetModName(modName); err != nil {
-		return 0, 0, 0, err
-	}
-	modDir, err := resolveModDir(gameID, modName)
-	if err != nil {
 		return 0, 0, 0, err
 	}
 	defer md.s.lockMods(gameID, modName)()
@@ -91,24 +91,6 @@ func (md *ModService) ReinstallMod(gameID, modName string) (int, int, int, error
 	md.s.invalidateInstalledArchiveCache(gameID)
 	slog.Info("mod reinstalled", "game", gameID, "mod", modName, "archives", len(sources), "files", fileCount)
 	return len(sources), 0, fileCount, nil
-}
-
-// requireRealModDir returns ModNotFoundError for a missing mod folder and refuses a symlink or non-directory in its place.
-func requireRealModDir(gameID, modName, modDir string) error {
-	info, err := os.Lstat(modDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &ModNotFoundError{GameID: gameID, Name: modName}
-		}
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return &download.InvalidTargetModError{Name: modName, Reason: "mod folder is a symlink"}
-	}
-	if !info.IsDir() {
-		return &download.InvalidTargetModError{Name: modName, Reason: "mod folder is not a directory"}
-	}
-	return nil
 }
 
 // refuseMountedReinstall refuses a reinstall of a mod enabled in the game's mounted profile or linked into its applied farm, holding the game's profile lock.

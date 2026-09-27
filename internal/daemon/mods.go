@@ -92,15 +92,15 @@ func (md *ModService) RenameMod(gameID, oldName, newName string) error {
 	if !md.s.gameConfigured(gameID) {
 		return fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
-	if oldName == newName {
-		return nil
-	}
-	src, err := resolveModDir(gameID, oldName)
+	src, err := resolveExistingModDir(gameID, oldName)
 	if err != nil {
 		return err
 	}
 	if err := download.ValidateTargetModName(newName); err != nil {
 		return err
+	}
+	if oldName == newName {
+		return nil
 	}
 	defer md.s.lockMods(gameID, oldName, newName)()
 	renamed, err := md.renameModFolder(gameID, oldName, newName, src, filepath.Join(config.ModsDir(gameID), newName))
@@ -118,14 +118,13 @@ func (md *ModService) renameModFolder(gameID, oldName, newName, src, dst string)
 	if err != nil {
 		return false, fmt.Errorf("listing profiles: %w", err)
 	}
-	if _, err := os.Stat(src); err != nil {
-		if os.IsNotExist(err) {
-			return false, &ModNotFoundError{GameID: gameID, Name: oldName}
-		}
+	if err := requireRealModDir(gameID, oldName, src); err != nil {
 		return false, err
 	}
-	if _, err := os.Stat(dst); err == nil {
+	if _, err := os.Lstat(dst); err == nil {
 		return false, &ModCollisionError{Name: newName}
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("checking rename target: %w", err)
 	}
 	if err := os.Rename(src, dst); err != nil {
 		return false, fmt.Errorf("renaming mod folder: %w", err)
@@ -245,105 +244,6 @@ func (md *ModService) dropFromModLists(gameID, modName string, force bool) error
 	return nil
 }
 
-// UninstallModAsync is the async wrapper used for huge mod folders.
-func (md *ModService) UninstallModAsync(gameID, modName string, force bool) ([]string, error) {
-	flagged, modDir, err := md.uninstallModSync(gameID, modName, force)
-	if err != nil || modDir == "" {
-		return flagged, err
-	}
-	go func() {
-		var removeErr error
-		for attempt := 0; attempt < 2; attempt++ {
-			if rerr := os.RemoveAll(modDir); rerr == nil {
-				removeErr = nil
-				break
-			} else {
-				removeErr = rerr
-				time.Sleep(100 * time.Millisecond)
-			}
-		}
-		if removeErr != nil {
-			slog.Warn("UninstallModAsync: removeall failed", "mod", modName, "err", removeErr)
-			return
-		}
-		slog.Info("UninstallModAsync: removeall complete", "mod", modName)
-		md.s.invalidateInstalledArchiveCache(gameID)
-	}()
-	return flagged, nil
-}
-
-// uninstallModSync is the shared bookkeeping path for UninstallMod and UninstallModAsync.
-func (md *ModService) uninstallModSync(gameID, modName string, force bool) ([]string, string, error) {
-	if err := md.s.refuseWhenShuttingDown("uninstall_mod"); err != nil {
-		return nil, "", err
-	}
-	if !md.s.gameConfigured(gameID) {
-		return nil, "", fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
-	}
-	modDir, err := resolveModDir(gameID, modName)
-	if err != nil {
-		return nil, "", err
-	}
-	meta, err := download.LoadModMetadata(modDir)
-	if err != nil || meta == nil || (len(meta.SourceArchives) == 0 && meta.Name == "") {
-		if _, statErr := os.Stat(modDir); os.IsNotExist(statErr) {
-			return nil, "", &ModNotFoundError{GameID: gameID, Name: modName}
-		}
-		if err != nil {
-			return nil, "", fmt.Errorf("reading mod metadata: %w", err)
-		}
-	}
-
-	if err := md.dropFromModLists(gameID, modName, force); err != nil {
-		return nil, "", err
-	}
-
-	ownedSolely := map[string]bool{}
-	if meta != nil {
-		for _, sa := range meta.SourceArchives {
-			ownedSolely[sa.Path] = true
-		}
-	}
-	if len(ownedSolely) > 0 {
-		modsDir := config.ModsDir(gameID)
-		entries, _ := os.ReadDir(modsDir)
-		for _, ent := range entries {
-			if !ent.IsDir() || ent.Name() == "Downloads" || ent.Name() == modName {
-				continue
-			}
-			other, err := download.LoadModMetadata(filepath.Join(modsDir, ent.Name()))
-			if err != nil || other == nil {
-				continue
-			}
-			for _, sa := range other.SourceArchives {
-				if ownedSolely[sa.Path] {
-					ownedSolely[sa.Path] = false
-				}
-			}
-		}
-	}
-
-	var flagged []string
-	for archivePath, solo := range ownedSolely {
-		if !solo {
-			continue
-		}
-		rel := strings.TrimPrefix(archivePath, "Downloads/")
-		if err := download.SetUninstalled(gameID, rel, true); err != nil {
-			slog.Warn("setting archive uninstalled flag failed", "path", archivePath, "err", err)
-			continue
-		}
-		flagged = append(flagged, rel)
-		if row, err := md.s.svc.archives.buildArchiveRow(gameID, rel); err == nil {
-			md.s.archiveBus.Publish(gameID, dto.ArchiveEventResult{
-				GameID: gameID, RowChanged: row,
-			})
-		}
-	}
-
-	return flagged, modDir, nil
-}
-
 // UninstallMod removes a mod's install dir and strips it from every profile, refusing once shutdown began.
 func (md *ModService) UninstallMod(gameID, modName string, force bool) ([]string, error) {
 	if err := md.s.refuseWhenShuttingDown("uninstall_mod"); err != nil {
@@ -352,9 +252,12 @@ func (md *ModService) UninstallMod(gameID, modName string, force bool) ([]string
 	if !md.s.gameConfigured(gameID) {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
-	defer md.s.lockMods(gameID, modName)()
-	modDir, err := resolveModDir(gameID, modName)
+	modDir, err := resolveExistingModDir(gameID, modName)
 	if err != nil {
+		return nil, err
+	}
+	defer md.s.lockMods(gameID, modName)()
+	if err := requireRealModDir(gameID, modName, modDir); err != nil {
 		return nil, err
 	}
 	meta, err := download.LoadModMetadata(modDir)

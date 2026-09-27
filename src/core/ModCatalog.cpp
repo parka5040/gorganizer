@@ -2,6 +2,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QSaveFile>
 #include <QTextStream>
 
@@ -55,7 +56,6 @@ ModMetadata ModCatalog::readMetadata(const QString& yamlPath)
         QString val = stripQuotes(line.mid(colon + 1));
 
         if (key == "name")            meta.name = val;
-        else if (key == "folder")     meta.folder = val;
         else if (key == "installed")  meta.installed = val;
         else if (key == "source_archive") meta.sourceArchive = val;
         else if (key == "nexus_url")  meta.nexusUrl = val;
@@ -134,7 +134,7 @@ std::vector<ModMetadata> ModCatalog::scan(const QString& modsDir)
     for (const auto& dirName : entries) {
         if (dirName == "Downloads" || dirName.startsWith('.'))
             continue;
-        if (dirName == kOverwriteModName)
+        if (dirName == kOverwriteModName || QFileInfo(dir.filePath(dirName)).isSymLink())
             continue;
         QString metaPath = modsDir + "/" + dirName + "/metadata.yaml";
         ModMetadata meta;
@@ -145,8 +145,7 @@ std::vector<ModMetadata> ModCatalog::scan(const QString& modsDir)
             meta.folder = dirName;
             meta.enabled = true;
         }
-        if (meta.folder.isEmpty())
-            meta.folder = dirName;
+        meta.folder = dirName;
         if (meta.name.isEmpty())
             meta.name = dirName;
 
