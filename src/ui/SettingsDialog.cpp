@@ -18,6 +18,7 @@
 #include <QDir>
 #include <QStandardPaths>
 #include <QCoreApplication>
+#include <unistd.h>
 
 namespace gorganizer {
 
@@ -83,8 +84,9 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
 
     auto* socketLabel = new QLabel;
     const char* xdg = std::getenv("XDG_RUNTIME_DIR");
-    QString socketPath = xdg ? QString("%1/gorganizer/gorganizer.sock").arg(xdg)
-                             : QString("/tmp/gorganizer/gorganizer.sock");
+    QString socketPath = xdg && xdg[0]
+        ? QString::fromUtf8(xdg) + "/gorganizer/gorganizer.sock"
+        : QDir::tempPath() + "/gorganizer-" + QString::number(getuid()) + "/gorganizer.sock";
     socketLabel->setText(socketPath);
     socketLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     form->addRow("Daemon Socket:", socketLabel);

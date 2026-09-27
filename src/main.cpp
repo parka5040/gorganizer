@@ -16,6 +16,7 @@
 #include <QMessageBox>
 #include <cstdio>
 #include <cstring>
+#include <unistd.h>
 
 #ifndef GORGANIZER_VERSION
 #define GORGANIZER_VERSION "dev"
@@ -46,11 +47,13 @@ static QString findDaemonBinary()
     return {};
 }
 
+// Return the daemon socket path for the current user.
 static QString socketPath()
 {
     const char* xdg = std::getenv("XDG_RUNTIME_DIR");
-    QString dir = xdg ? QString::fromUtf8(xdg) : QDir::tempPath();
-    return dir + "/gorganizer/gorganizer.sock";
+    if (xdg && xdg[0])
+        return QString::fromUtf8(xdg) + "/gorganizer/gorganizer.sock";
+    return QDir::tempPath() + "/gorganizer-" + QString::number(getuid()) + "/gorganizer.sock";
 }
 
 int main(int argc, char* argv[])

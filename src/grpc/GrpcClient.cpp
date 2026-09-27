@@ -4,11 +4,13 @@
 #include "gorganizer.grpc.pb.h"
 
 #include <grpcpp/grpcpp.h>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QThread>
 #include <chrono>
 #include <cstdlib>
+#include <unistd.h>
 
 namespace gorganizer {
 
@@ -24,6 +26,15 @@ struct GrpcSyncStub {
 };
 
 namespace {
+
+// Return the daemon socket path for the current user.
+QString socketPath()
+{
+    const char* xdg = std::getenv("XDG_RUNTIME_DIR");
+    if (xdg && xdg[0])
+        return QString::fromUtf8(xdg) + "/gorganizer/gorganizer.sock";
+    return QDir::tempPath() + "/gorganizer-" + QString::number(getuid()) + "/gorganizer.sock";
+}
 
 template <typename Req, typename Resp, typename Method>
 grpc::Status invokeUnary(GrpcSyncStub* stub, Method method, const Req& req, Resp& resp,
@@ -224,9 +235,7 @@ GrpcClient::~GrpcClient()
 
 std::string GrpcClient::socketTarget() const
 {
-    const char* xdgRuntime = std::getenv("XDG_RUNTIME_DIR");
-    std::string dir = xdgRuntime ? xdgRuntime : "/tmp";
-    return "unix://" + dir + "/gorganizer/gorganizer.sock";
+    return "unix://" + socketPath().toStdString();
 }
 
 void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
@@ -750,9 +759,7 @@ bool GrpcClient::shutdownDaemonSync(int rpcTimeoutMs, int pollTimeoutMs, QString
         errorOut = QString::fromStdString(s.error_message());
     }
 
-    const char* xdgRuntime = std::getenv("XDG_RUNTIME_DIR");
-    QString sockPath = QString::fromUtf8(xdgRuntime ? xdgRuntime : "/tmp")
-                       + "/gorganizer/gorganizer.sock";
+    QString sockPath = socketPath();
     QElapsedTimer t;
     t.start();
     while (t.elapsed() < pollTimeoutMs) {

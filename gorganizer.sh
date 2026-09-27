@@ -13,19 +13,20 @@
 #                         Does NOT launch the GUI — start it from your app
 #                         menu, or run `./gorganizer.sh launch`.
 #   launch                Start the daemon + GUI. Used by the desktop entry.
+#   stop                  Ask the running daemon to shut down safely.
 #   setup                 Detect distro, install build deps via system PM.
 #   doctor                Check build and runtime dependencies without changes.
 #   build [--rebuild]     Build only. --rebuild forces a clean rebuild.
 #   update [--restart]    Pull latest from origin/main, rebuild, re-register.
 #                         Refuses to run if the working tree is dirty or not
 #                         a git checkout. User config and *_Mods/ are
-#                         preserved. --restart bounces a running daemon.
+#                         preserved. --restart reminds you to reopen a running session.
 #   register              (Re-)install desktop file + icon + nxm:// handler.
 #   unregister            Reverse `register`.
 #   nxm <URI>             One-shot: forward an nxm:// URL to the running daemon.
 #   import [--from PATH]  Migrate legacy *_Mods/ folders into this clone.
-#   uninstall [--purge]   Remove the application: stop daemon, unregister,
-#                         delete build artifacts. User data is preserved.
+#   uninstall [--purge]   After closing Gorganizer and restoring games, unregister
+#                         and delete build artifacts. User data is preserved.
 #                         --purge additionally removes config, profiles,
 #                         caches, and the daemon log.
 #   --rebuild             Compatibility alias for `build --rebuild`.
@@ -35,6 +36,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+# shellcheck source=scripts/deploy-check.sh
+. "$SCRIPT_DIR/scripts/deploy-check.sh"
 
 # --- version ---------------------------------------------------------------
 # The VERSION file at the repo root is the single source of truth. The
@@ -65,9 +68,13 @@ GUI_BIN="$SCRIPT_DIR/build/src/gorganizer"
 ICON_SRC="$SCRIPT_DIR/resources/icons/tmp_logo.png"
 
 # Runtime — must match internal/config/paths.go and singleton.go.
-RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}/gorganizer"
+if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    RUNTIME_DIR="${XDG_RUNTIME_DIR%/}/gorganizer"
+else
+    RUNTIME_DIR="${TMPDIR:-/tmp}"
+    RUNTIME_DIR="${RUNTIME_DIR%/}/gorganizer-$(id -u)"
+fi
 SOCKET_PATH="$RUNTIME_DIR/gorganizer.sock"
-LOCK_PATH="$RUNTIME_DIR/gorganizerd.lock"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/gorganizer"
 DAEMON_LOG="$STATE_DIR/gorganizerd.log"
 
@@ -130,19 +137,20 @@ Subcommands:
                         Does NOT launch the GUI — start it from your app
                         menu, or run \`./gorganizer.sh launch\`.
   launch                Start the daemon + GUI (used by the desktop entry).
+  stop                  Ask the running daemon to shut down safely.
   setup                 Detect distro, install build deps via system PM.
   doctor                Check build and runtime dependencies without changes.
   build [--rebuild]     Build only. --rebuild forces a clean rebuild.
   update [--restart]    Pull latest from origin/main, rebuild, re-register.
                         Refuses to run if the working tree is dirty or not
                         a git checkout. User config and *_Mods/ are
-                        preserved. --restart bounces a running daemon.
+                        preserved. --restart reminds you to reopen a running session.
   register              (Re-)install desktop file + icon + nxm:// handler.
   unregister            Reverse \`register\`.
   nxm <URI>             One-shot: forward an nxm:// URL to the running daemon.
   import [--from PATH]  Migrate legacy *_Mods/ folders into this clone.
-  uninstall [--purge]   Remove the application: stop daemon, unregister,
-                        delete build artifacts. User data is preserved.
+  uninstall [--purge]   After closing Gorganizer and restoring games, unregister
+                        and delete build artifacts. User data is preserved.
                         --purge additionally removes config, profiles,
                         caches, and the daemon log.
   --rebuild             Compatibility alias for \`build --rebuild\`.
@@ -787,41 +795,55 @@ cmd_import() {
 }
 
 # --- daemon lifecycle ------------------------------------------------------
-# This is the orphan-daemon fix from the old launcher. internal/ipc/server.go
-# unconditionally os.Remove()s the socket on bind, so without explicit kill
-# of the prior daemon, every restart leaves an orphan. Don't simplify.
 
-kill_stale_daemons() {
-    if ! pgrep -x gorganizerd >/dev/null; then
-        return 0
-    fi
-    log "Terminating stale gorganizerd process(es)..."
-    pkill -TERM -x gorganizerd 2>/dev/null || true
-    local i
-    for i in $(seq 1 30); do
-        pgrep -x gorganizerd >/dev/null || break
+wait_for_pid_exit() {
+    local pid="$1" seconds="$2" i
+    for ((i = 0; i < seconds * 10; i++)); do
+        kill -0 "$pid" 2>/dev/null || return 0
         sleep 0.1
     done
-    if pgrep -x gorganizerd >/dev/null; then
-        warn "Stubborn daemons, SIGKILL"
-        pkill -KILL -x gorganizerd 2>/dev/null || true
-        sleep 0.3
+    ! kill -0 "$pid" 2>/dev/null
+}
+
+cmd_stop() {
+    local pids pid
+    pids="$(pgrep -u "$(id -u)" -x gorganizerd || true)"
+    if [ -z "$pids" ]; then
+        log "Gorganizer is not running."
+        return 0
     fi
-    rm -f "$SOCKET_PATH" "$LOCK_PATH"
+    while IFS= read -r pid; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done <<< "$pids"
+    while IFS= read -r pid; do
+        wait_for_pid_exit "$pid" 46 || true
+    done <<< "$pids"
+    if pgrep -u "$(id -u)" -x gorganizerd >/dev/null 2>&1; then
+        warn "Gorganizer is still finishing. Try again in a minute."
+        return 1
+    fi
+    ok "Gorganizer stopped."
 }
 
 DAEMON_PID=""
 start_daemon() {
     mkdir -p "$RUNTIME_DIR" "$STATE_DIR"
-    : > "$DAEMON_LOG"
+    local i
+    for i in 3 2; do
+        if [ -e "$DAEMON_LOG.$((i - 1))" ]; then
+            mv -f "$DAEMON_LOG.$((i - 1))" "$DAEMON_LOG.$i"
+        fi
+    done
+    if [ -e "$DAEMON_LOG" ]; then
+        mv -f "$DAEMON_LOG" "$DAEMON_LOG.1"
+    fi
 
     # GORGANIZER_ROOT pins per-game mod folders to the project dir
     # (e.g. ./FalloutNV_Mods/) instead of ~/.local/share/gorganizer/...
     GORGANIZER_ROOT="$SCRIPT_DIR" \
-        "$DAEMON_BIN" --log-level info >"$DAEMON_LOG" 2>&1 &
+        "$DAEMON_BIN" --log-level info >>"$DAEMON_LOG" 2>&1 &
     DAEMON_PID=$!
 
-    local i
     for i in $(seq 1 50); do
         if [ -S "$SOCKET_PATH" ]; then
             ok "Daemon up (pid $DAEMON_PID, log: $DAEMON_LOG)"
@@ -845,16 +867,10 @@ stop_daemon_trap() {
     if [ -n "${DAEMON_PID:-}" ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
         log "Shutting down daemon (pid $DAEMON_PID)..."
         kill -TERM "$DAEMON_PID" 2>/dev/null || true
-        local i
-        for i in $(seq 1 50); do
-            kill -0 "$DAEMON_PID" 2>/dev/null || break
-            sleep 0.1
-        done
-        if kill -0 "$DAEMON_PID" 2>/dev/null; then
-            kill -KILL "$DAEMON_PID" 2>/dev/null || true
+        if ! wait_for_pid_exit "$DAEMON_PID" 46; then
+            warn "Gorganizer's background service is still finishing up. It will exit on its own; please don't shut down your computer for a minute."
         fi
     fi
-    rm -f "$SOCKET_PATH" "$LOCK_PATH"
     exit "$rc"
 }
 
@@ -936,7 +952,21 @@ cmd_install() {
 
 # --- launch ----------------------------------------------------------------
 
+notify_user() {
+    warn "$1"
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send --app-name=Gorganizer "Gorganizer" "$1" >/dev/null 2>&1 || true
+    fi
+}
+
 cmd_launch() {
+    local existing_daemon
+    existing_daemon="$(pgrep -u "$(id -u)" -x gorganizerd | head -n 1 || true)"
+    if [ -n "$existing_daemon" ] && pgrep -u "$(id -u)" -x gorganizer >/dev/null 2>&1; then
+        notify_user "Gorganizer is already open. Switch to its window."
+        return 1
+    fi
+
     # Argv carryover from the desktop entry: an nxm:// URI may be passed
     # along when the user clicks a Nexus "Mod manager download" button
     # while the GUI is already up. The GUI itself forwards URIs through
@@ -962,8 +992,15 @@ cmd_launch() {
     log "  Log:       $DAEMON_LOG"
     echo ""
 
-    kill_stale_daemons
-    start_daemon
+    if [ -n "$existing_daemon" ]; then
+        # A background service without a window (for example after the GUI
+        # crashed) is adopted: the GUI connects to it and it is stopped
+        # safely when this session ends. It is never killed.
+        log "Reusing the running background service (pid $existing_daemon)."
+        DAEMON_PID="$existing_daemon"
+    else
+        start_daemon
+    fi
 
     # GUI as a backgrounded child + `wait`. Three reasons:
     #   * `exec "$GUI_BIN"` would replace this shell, so EXIT/INT/TERM
@@ -1011,14 +1048,13 @@ cmd_nxm() {
 
 cmd_update() {
     # In-place update of an existing checkout. Pulls origin/main, forces a
-    # clean rebuild, refreshes the desktop entry (Exec= path may have moved
-    # under the user) and bounces a running daemon. User config under
+    # clean rebuild and refreshes the desktop entry (Exec= path may have moved
+    # under the user). User config under
     # $CONFIG_DIR and mod data under each <Game>_Mods/ tree are never
     # touched here — git pull only changes tracked files.
-    local restart=false
     while [ $# -gt 0 ]; do
         case "$1" in
-            --restart) restart=true; shift ;;
+            --restart) shift ;;
             *) err "Unknown option: $1"; return 2 ;;
         esac
     done
@@ -1073,16 +1109,8 @@ cmd_update() {
     log "Refreshing desktop entry..."
     cmd_register || warn "Desktop registration reported issues."
 
-    if pgrep -x gorganizerd >/dev/null 2>&1; then
-        if [ "$restart" = true ]; then
-            log "Restarting daemon..."
-            kill_stale_daemons
-            start_daemon
-            ok "Daemon restarted."
-        else
-            warn "A daemon is running on the old build."
-            warn "Re-run with --restart, or quit the GUI and rerun \`./gorganizer.sh launch\`."
-        fi
+    if pgrep -u "$(id -u)" -x gorganizerd >/dev/null 2>&1; then
+        warn "Close Gorganizer and open it again to use the update."
     fi
 
     ok "Update complete."
@@ -1147,18 +1175,11 @@ cmd_uninstall() {
         esac
     done
 
-    # Stop daemon first.
-    if pgrep -x gorganizerd >/dev/null 2>&1; then
-        log "Stopping running gorganizerd..."
-        pkill -TERM -x gorganizerd 2>/dev/null || true
-        local i
-        for i in $(seq 1 30); do
-            pgrep -x gorganizerd >/dev/null 2>&1 || break
-            sleep 0.1
-        done
-        pkill -KILL -x gorganizerd 2>/dev/null || true
-        rm -f "$SOCKET_PATH" "$LOCK_PATH"
+    if pgrep -u "$(id -u)" -x gorganizerd >/dev/null 2>&1; then
+        err "Close Gorganizer first (or run ./gorganizer.sh stop), then run uninstall again."
+        return 1
     fi
+    verify_games_restored || return 1
 
     # Remove desktop entry, NXM handler, icon, mime registration.
     cmd_unregister
@@ -1192,7 +1213,7 @@ cmd_uninstall() {
 
     echo ""
     log "${BOLD}*_Mods/${RESET} folders in $SCRIPT_DIR are user data — left untouched."
-    log "To finish removal: ${BOLD}rm -rf $SCRIPT_DIR${RESET}"
+    warn "Your mods are still in $SCRIPT_DIR/*_Mods/ — move them somewhere safe before deleting this folder."
     ok "Uninstalled."
 }
 
@@ -1209,6 +1230,9 @@ case "${1:-}" in
         ;;
     launch)
         shift; cmd_launch "$@"
+        ;;
+    stop)
+        shift; cmd_stop "$@"
         ;;
     setup)
         shift; cmd_setup "$@"
