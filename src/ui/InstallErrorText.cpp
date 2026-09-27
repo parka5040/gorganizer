@@ -59,6 +59,22 @@ QString gameName(const QString& gameId, const QString& fallback)
     return fallback;
 }
 
+// gameRunningAction names the refused change for a game_running operation, or returns an empty string.
+QString gameRunningAction(const QString& operation)
+{
+    if (operation == QLatin1String("uninstall"))
+        return QStringLiteral("uninstall this mod");
+    if (operation == QLatin1String("rename"))
+        return QStringLiteral("rename this mod");
+    if (operation == QLatin1String("reinstall"))
+        return QStringLiteral("reinstall this mod");
+    if (operation == QLatin1String("merge"))
+        return QStringLiteral("merge files into this mod");
+    if (operation == QLatin1String("retarget"))
+        return QStringLiteral("switch to another profile");
+    return QString();
+}
+
 QString modLoaderBusyReason(const QString& operation, const QString& subject, const QString& subjectTitle)
 {
     if (operation == QLatin1String("modloader") || operation == QLatin1String("transaction"))
@@ -229,10 +245,16 @@ QString knownTokenMessage(const InstallError& parsed)
         return QStringLiteral("%1 does not use SMAPI mod requirements. Check the mod's page for what it needs.")
             .arg(gameName(field("game"), QStringLiteral("This game")));
     if (token == QLatin1String("game_running")) {
-        if (field("operation") == QLatin1String("unmount"))
+        const QString operation = field("operation");
+        if (operation == QLatin1String("unmount"))
             return QStringLiteral("%1 is still running, or was started less than two minutes ago, so its active "
                                   "mods cannot be turned off. Close the game, then try again.")
                 .arg(gameName(field("game"), QStringLiteral("The game")));
+        const QString action = gameRunningAction(operation);
+        if (!action.isEmpty())
+            return QStringLiteral("%1 is still running, or was started less than two minutes ago, so Gorganizer "
+                                  "cannot %2 while its mods are in use. Close the game, then try again.")
+                .arg(gameName(field("game"), QStringLiteral("The game")), action);
         return QStringLiteral("%1 is still running, or was started less than two minutes ago, so gorganizer "
                               "cannot apply your pending mod changes. Close the game, then press Run (or Apply) "
                               "again.")
