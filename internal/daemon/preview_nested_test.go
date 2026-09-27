@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"github.com/parka/gorganizer/internal/dto"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,7 +28,7 @@ func TestPreviewRejectsParentNestedFomod(t *testing.T) {
 	archive := filepath.Join(config.DownloadsDir("skyrimse"), "Nested.zip")
 	writeZipFiles(t, archive, map[string]string{"...fomod": "PK corrupt archive"})
 
-	_, err = d.PreviewInstall("skyrimse", "Nested.zip")
+	_, err = d.PreviewInstall(dto.PreviewInstallRequest{GameID: "skyrimse", ArchiveRelPath: "Nested.zip"})
 	var rejected *download.ArchiveRejectedError
 	if !errors.As(err, &rejected) || rejected.Reason != download.ArchiveRejectedNestedInstaller {
 		t.Fatalf("PreviewInstall error = %v, want nested_installer", err)
