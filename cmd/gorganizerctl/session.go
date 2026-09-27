@@ -181,11 +181,16 @@ func runSessionWith(args []string, deps sessionDeps) int {
 
 // acquireSessionLock holds an exclusive private flock until its release function runs.
 func acquireSessionLock() (func(), error) {
+	return acquireSessionFileLock("session.lock")
+}
+
+// acquireSessionFileLock holds a private runtime file lock until its release function runs.
+func acquireSessionFileLock(name string) (func(), error) {
 	dir := config.RuntimeDir()
 	if err := fsutil.EnsurePrivateDir(dir); err != nil {
 		return nil, fmt.Errorf("preparing runtime folder: %w", err)
 	}
-	path := filepath.Join(dir, "session.lock")
+	path := filepath.Join(dir, name)
 	fd, err := syscall.Open(path, syscall.O_CREAT|syscall.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("opening session lock: %w", err)

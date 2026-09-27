@@ -20,7 +20,7 @@ import (
 
 // TestMain runs the command tests with isolated directories and failing launcher shims.
 func TestMain(m *testing.M) {
-	if os.Getenv("FAKE_SESSION_DAEMON") == "1" || os.Getenv("FAKE_SESSION_SUPERVISOR") == "1" {
+	if os.Getenv("FAKE_SESSION_DAEMON") == "1" || os.Getenv("FAKE_SESSION_SUPERVISOR") == "1" || os.Getenv("FAKE_NXM_DAEMON") == "1" || os.Getenv("FAKE_NXM_SUPERVISOR") == "1" {
 		os.Exit(m.Run())
 	}
 	os.Exit(testsafe.RunWithSafeEnvironment(m))

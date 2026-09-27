@@ -89,6 +89,15 @@ int main(int argc, char* argv[])
     qunsetenv("QT_STYLE_OVERRIDE");
 
     QApplication app(argc, argv);
+    for (int i = 1; i < argc; ++i) {
+        QString arg = QString::fromUtf8(argv[i]);
+        if (arg.startsWith("nxm://")) {
+            QString ctl = findCtlBinary();
+            if (ctl.isEmpty() || !QProcess::startDetached(ctl, {QStringLiteral("nxm"), arg}))
+                qWarning("Gorganizer could not add this download. Open it from the menu and try again.");
+            return 0;
+        }
+    }
     bool supervised = qgetenv("GORGANIZER_SUPERVISED") == "1";
     if (!supervised) {
         QString ctl = findCtlBinary();
@@ -243,14 +252,6 @@ int main(int argc, char* argv[])
     wizardStatusBar = mainWindow.statusBar();
     if (wizardKeyAnswered)
         wizardStatusBar->showMessage(wizardKeyMessage, 10000);
-
-    for (int i = 1; i < argc; ++i) {
-        QString arg = QString::fromUtf8(argv[i]);
-        if (arg.startsWith("nxm://")) {
-            grpcClient.startDownload(arg);
-            break;
-        }
-    }
 
     int exitCode = app.exec();
 
