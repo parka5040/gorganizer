@@ -119,10 +119,13 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 			return fmt.Errorf("%w: %s is left from an unfinished mod removal", ErrBackupExists, leftover)
 		}
 	}
-
-	_ = os.RemoveAll(stagingDirPath(dataPath))
-	_ = os.RemoveAll(oldFarmPath(dataPath))
-	_ = RemoveIntent(applyingIntentPath(dataPath))
+	for _, leftover := range []string{stagingDirPath(dataPath), oldFarmPath(dataPath), applyingIntentPath(dataPath)} {
+		if _, err := os.Lstat(leftover); err == nil {
+			return fmt.Errorf("%w: %s is left from an unfinished mod change", ErrBackupExists, leftover)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("checking %s: %w", leftover, err)
+		}
+	}
 
 	if len(layers) > 0 && layers[0].Name == "__base__" {
 		layers[0].RootPath = backupPath
@@ -138,7 +141,7 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 		return fmt.Errorf("%w: %s is not a real directory", ErrDataDirMissing, dataPath)
 	}
 	intentPath := activatingIntentPath(dataPath)
-	if err := WriteIntent(intentPath, &ActivationIntent{
+	intent := &ActivationIntent{
 		SchemaVersion: CurrentIntentSchema,
 		Magic:         IntentMagic,
 		Kind:          IntentActivating,
@@ -149,7 +152,8 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 		BackupPath:    backupPath,
 		OverwriteRoot: m.overwriteRoot,
 		PID:           os.Getpid(),
-	}); err != nil {
+	}
+	if err := WriteIntent(intentPath, intent); err != nil {
 		return fmt.Errorf("writing activation intent: %w", err)
 	}
 
@@ -158,10 +162,24 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 		return errors.Join(fmt.Errorf("renaming %s to %s: %w", dataPath, backupPath, err), RemoveIntent(intentPath))
 	}
 	rollback := func(err error) error {
-		return errors.Join(err, rollbackActivation(dataPath, backupPath, intentPath, original))
+		return errors.Join(err, rollbackActivation(dataPath, backupPath, intentPath, original, intent.Farm))
 	}
 	if err := syncFarmParent(filepath.Dir(dataPath)); err != nil {
 		return rollback(fmt.Errorf("syncing renamed Data: %w", err))
+	}
+	if err := os.Mkdir(dataPath, 0755); err != nil {
+		return rollback(fmt.Errorf("creating farm Data: %w", err))
+	}
+	farm, exists, err := directoryAt(dataPath)
+	if err != nil || !exists || farm.Dev == 0 || farm.Ino == 0 {
+		return rollback(fmt.Errorf("checking new farm Data: %w", err))
+	}
+	intent.Farm = &farm
+	if err := syncFarmParent(filepath.Dir(dataPath)); err != nil {
+		return rollback(fmt.Errorf("syncing new farm Data: %w", err))
+	}
+	if err := WriteIntent(intentPath, intent); err != nil {
+		return rollback(fmt.Errorf("recording new farm Data: %w", err))
 	}
 
 	tree := NewMergedTree()
@@ -220,8 +238,8 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 	return nil
 }
 
-// rollbackActivation restores the recorded original directory and removes its intent only after syncing the rename.
-func rollbackActivation(dataPath, backupPath, intentPath string, original directoryIdentity) error {
+// rollbackActivation restores the recorded original directory after verifying the identity of any partial farm.
+func rollbackActivation(dataPath, backupPath, intentPath string, original directoryIdentity, farm *directoryIdentity) error {
 	backup, backupExists, err := directoryAt(backupPath)
 	if err != nil {
 		return fmt.Errorf("checking activation backup: %w", err)
@@ -233,11 +251,13 @@ func rollbackActivation(dataPath, backupPath, intentPath string, original direct
 	if err != nil {
 		return fmt.Errorf("checking partial Data: %w", err)
 	}
-	if dataExists && data == original {
-		return fmt.Errorf("Data still holds the recorded original directory")
-	}
-	if err := removeActivationData(dataPath); err != nil {
-		return fmt.Errorf("removing partial Data: %w", err)
+	if dataExists {
+		if farm == nil || farm.Dev == 0 || farm.Ino == 0 || data != *farm {
+			return errors.New(foreignActivationDataReason)
+		}
+		if err := removeActivationData(dataPath); err != nil {
+			return fmt.Errorf("removing partial Data: %w", err)
+		}
 	}
 	if err := renameActivationBackup(backupPath, dataPath); err != nil {
 		return fmt.Errorf("restoring original Data: %w", err)

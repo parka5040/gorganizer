@@ -107,7 +107,7 @@ func TestDeactivateCrashMatrix(t *testing.T) {
 				deactivationStep = func(int) error { return nil }
 				if step < 5 {
 					journal, err := readDeactivationJournal(deactivationJournalPath(data))
-					if err != nil || journal.SchemaVersion != 1 || journal.Magic != deactivationMagic || journal.GameID != "testgame" || journal.FarmID == "" {
+					if err != nil || journal.SchemaVersion != currentDeactivationSchema || journal.Magic != deactivationMagic || journal.GameID != "testgame" || journal.FarmID == "" {
 						t.Fatalf("record = %+v, %v", journal, err)
 					}
 				}
@@ -251,7 +251,7 @@ func TestDeactivationJournalMismatchIsPending(t *testing.T) {
 					if err := json.Unmarshal(body, &j); err != nil {
 						t.Fatal(err)
 					}
-					j.SchemaVersion = 2
+					j.SchemaVersion = currentDeactivationSchema + 1
 					body, err = json.Marshal(j)
 					if err != nil {
 						t.Fatal(err)
@@ -500,6 +500,40 @@ func TestLegacyDeactivationJournalNoFarmID(t *testing.T) {
 	}
 }
 
+// TestLegacyDeactivationJournalResumes upgrades an interrupted v1 retirement after safely capturing its farm.
+func TestLegacyDeactivationJournalResumes(t *testing.T) {
+	for _, step := range []int{1, 3} {
+		t.Run(string(rune('0'+step)), func(t *testing.T) {
+			data, overwrite, mm := teardownFixture(t)
+			stopped := stopDeactivationAt(t, step)
+			if err := mm.Deactivate(); !errors.Is(err, stopped) {
+				t.Fatalf("Deactivate = %v, want interruption", err)
+			}
+			deactivationStep = func(int) error { return nil }
+			path := deactivationJournalPath(data)
+			j, err := readDeactivationJournal(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			j.SchemaVersion = 1
+			j.DataCaptured = false
+			j.RetiredCaptured = false
+			body, err := json.Marshal(j)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, body, 0644); err != nil {
+				t.Fatal(err)
+			}
+			outcome, err := CleanupStale(data)
+			if err != nil || outcome.Pending != nil || !outcome.Restored {
+				t.Fatalf("CleanupStale = %+v, %v; want restored", outcome, err)
+			}
+			assertTeardownRestored(t, data, overwrite)
+		})
+	}
+}
+
 // TestRestoreFromBackupClearsTeardownMarkers checks confirmation captures both farm locations before removing markers.
 func TestRestoreFromBackupClearsTeardownMarkers(t *testing.T) {
 	for _, step := range []int{1, 2} {
@@ -616,7 +650,7 @@ func TestStrandedFarmLogicIgnoresRetiredDir(t *testing.T) {
 
 // TestActivateRefusesLeftoverFarmState refuses activation over an unrecovered farm or an unfinished removal.
 func TestActivateRefusesLeftoverFarmState(t *testing.T) {
-	for _, leftover := range []string{"sentinel", "journal", "retired"} {
+	for _, leftover := range []string{"sentinel", "journal", "retired", "staging", "oldfarm", "applying"} {
 		t.Run(leftover, func(t *testing.T) {
 			root := t.TempDir()
 			dataPath := filepath.Join(root, "Data")
@@ -637,6 +671,18 @@ func TestActivateRefusesLeftoverFarmState(t *testing.T) {
 				}
 			case "retired":
 				if err := os.MkdirAll(retiredFarmPath(dataPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			case "staging":
+				if err := os.MkdirAll(stagingDirPath(dataPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			case "oldfarm":
+				if err := os.MkdirAll(oldFarmPath(dataPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			case "applying":
+				if err := os.WriteFile(applyingIntentPath(dataPath), []byte("{}"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}

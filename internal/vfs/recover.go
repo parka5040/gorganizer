@@ -2,7 +2,6 @@ package vfs
 
 import (
 	"bufio"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -112,6 +111,7 @@ func unescapeMountinfoField(s string) string {
 var renameActivationBackup = os.Rename
 
 const teardownCaptureFailureReason = "Gorganizer couldn't save files written during the last session, so it left the mod folder in place. Free some disk space, then restart Gorganizer."
+const foreignActivationDataReason = "An interrupted mod activation left a Data folder Gorganizer did not create. Check Data and Data.orig before restoring."
 
 // CleanupStale heals dataPath after a prior daemon crash; returns Pending for ambiguous states.
 func CleanupStale(dataPath string, capture ...CaptureOptions) (RecoveryOutcome, error) {
@@ -147,11 +147,9 @@ func CleanupStale(dataPath string, capture ...CaptureOptions) (RecoveryOutcome, 
 			}
 			if exists && farm == j.Farm {
 				j.Capture = opts
-				body, err := json.Marshal(j)
-				if err != nil {
-					return outcome, fmt.Errorf("encoding preservation decision: %w", err)
-				}
-				if _, err := atomicfile.WriteFileDurable(journalPath, body, 0644); err != nil {
+				j.DataCaptured = false
+				j.RetiredCaptured = false
+				if err := writeDeactivationJournal(resolved, j); err != nil {
 					return outcome, fmt.Errorf("updating preservation decision: %w", err)
 				}
 			} else {
@@ -268,8 +266,14 @@ func CleanupStale(dataPath string, capture ...CaptureOptions) (RecoveryOutcome, 
 					return outcome, fmt.Errorf("removing activation intent: %w", err)
 				}
 				return outcome, nil
+			case backupExists && backup == activation.Original && dataExists &&
+				(activation.Farm == nil || data != *activation.Farm):
+				outcome.Pending = &RecoveryPending{
+					DataPath: resolved, BackupPath: backupPath, Reason: foreignActivationDataReason,
+				}
+				return outcome, nil
 			case backupExists && backup == activation.Original && (!dataExists || data != activation.Original):
-				if err := rollbackActivation(resolved, backupPath, activatingPath, activation.Original); err != nil {
+				if err := rollbackActivation(resolved, backupPath, activatingPath, activation.Original, activation.Farm); err != nil {
 					return outcome, fmt.Errorf("rolling back interrupted activation: %w", err)
 				}
 				outcome.Restored = true
@@ -519,6 +523,7 @@ func RestoreFromBackup(dataPath string, capture ...CaptureOptions) error {
 	retired := retiredFarmPath(resolved)
 	journal := deactivationJournalPath(resolved)
 	var opts CaptureOptions
+	var teardown *deactivationJournal
 	if len(capture) > 0 {
 		opts = capture[0]
 	}
@@ -527,6 +532,7 @@ func RestoreFromBackup(dataPath string, capture ...CaptureOptions) error {
 		if err != nil {
 			return err
 		}
+		teardown = j
 		if j.Capture.PreserveInto != "" {
 			opts = j.Capture
 		}
@@ -553,11 +559,42 @@ func RestoreFromBackup(dataPath string, capture ...CaptureOptions) error {
 		if journalErr != nil && !errors.Is(journalErr, os.ErrNotExist) || retiredErr != nil && !errors.Is(retiredErr, os.ErrNotExist) {
 			return fmt.Errorf("checking teardown markers: %w", errors.Join(journalErr, retiredErr))
 		}
-	} else if err := captureRetiringFarm(resolved, resolved, opts); err != nil {
+	} else {
+		dataID, exists, err := directoryAt(resolved)
+		if err != nil {
+			return fmt.Errorf("checking Data before capture: %w", err)
+		}
+		if teardown != nil && teardown.DataCaptured && exists && dataID == teardown.Farm {
+			err = captureRecordedFarm(resolved, resolved, opts, true)
+		} else {
+			err = captureRetiringFarm(resolved, resolved, opts)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	retiredID, retiredExists, err := directoryAt(retired)
+	if err != nil {
+		return fmt.Errorf("checking retired farm before capture: %w", err)
+	}
+	if teardown != nil && teardown.RetiredCaptured && retiredExists && retiredID == teardown.Farm {
+		err = captureRecordedFarm(retired, resolved, opts, true)
+	} else {
+		err = captureRetiringFarm(retired, resolved, opts)
+	}
+	if err != nil {
 		return err
 	}
-	if err := captureRetiringFarm(retired, resolved, opts); err != nil {
-		return err
+	for _, sibling := range []string{stagingDirPath(resolved), oldFarmPath(resolved)} {
+		s, err := ReadSentinel(sibling)
+		if err != nil && !errors.Is(err, ErrSentinelMissing) {
+			return fmt.Errorf("reading transition farm %s: %w", sibling, err)
+		}
+		if err == nil && (s.OverwriteRoot != "" || opts.PreserveInto != "") {
+			if err := captureRetiringFarm(sibling, resolved, opts); err != nil {
+				return err
+			}
+		}
 	}
 	if backupErr == nil {
 		slog.Info("RestoreFromBackup: removing Data/", "path", resolved)
@@ -580,6 +617,19 @@ func RestoreFromBackup(dataPath string, capture ...CaptureOptions) error {
 	}
 	if err := atomicfile.RemoveDurable(journal); err != nil {
 		return fmt.Errorf("removing deactivation journal: %w", err)
+	}
+	for _, sibling := range []string{stagingDirPath(resolved), oldFarmPath(resolved)} {
+		if err := os.RemoveAll(sibling); err != nil {
+			return fmt.Errorf("removing transition sibling %s: %w", sibling, err)
+		}
+	}
+	if err := atomicfile.SyncDir(filepath.Dir(resolved)); err != nil {
+		return fmt.Errorf("syncing removed transition farms: %w", err)
+	}
+	for _, intent := range []string{activatingIntentPath(resolved), applyingIntentPath(resolved)} {
+		if err := RemoveIntent(intent); err != nil {
+			return fmt.Errorf("removing transition intent: %w", err)
+		}
 	}
 	slog.Info("RestoreFromBackup: complete", "path", resolved)
 	return nil

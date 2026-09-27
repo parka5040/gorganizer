@@ -15,6 +15,7 @@ import (
 )
 
 const deactivationMagic = "gorganizer-deactivating"
+const currentDeactivationSchema = 2
 
 var deactivationStep = func(int) error { return nil }
 var removeRetiredFarm = os.RemoveAll
@@ -25,14 +26,16 @@ type directoryIdentity struct {
 }
 
 type deactivationJournal struct {
-	SchemaVersion int               `json:"schema_version"`
-	Magic         string            `json:"magic"`
-	GameID        string            `json:"game_id"`
-	FarmID        string            `json:"farm_id"`
-	Farm          directoryIdentity `json:"farm"`
-	Backup        directoryIdentity `json:"backup"`
-	CreatedAt     time.Time         `json:"created_at"`
-	Capture       CaptureOptions    `json:"capture,omitempty"`
+	SchemaVersion   int               `json:"schema_version"`
+	Magic           string            `json:"magic"`
+	GameID          string            `json:"game_id"`
+	FarmID          string            `json:"farm_id"`
+	Farm            directoryIdentity `json:"farm"`
+	Backup          directoryIdentity `json:"backup"`
+	CreatedAt       time.Time         `json:"created_at"`
+	Capture         CaptureOptions    `json:"capture,omitempty"`
+	DataCaptured    bool              `json:"data_captured,omitempty"`
+	RetiredCaptured bool              `json:"retired_captured,omitempty"`
 }
 
 func deactivationJournalPath(dataPath string) string { return dataPath + deactivatingSuffix }
@@ -79,8 +82,10 @@ func readDeactivationJournal(path string) (*deactivationJournal, error) {
 	if err := json.Unmarshal(body, &j); err != nil {
 		return nil, fmt.Errorf("parsing deactivation journal: %w", err)
 	}
-	if j.SchemaVersion != 1 || j.Magic != deactivationMagic || j.Farm.Dev == 0 || j.Farm.Ino == 0 ||
-		j.Backup.Dev == 0 || j.Backup.Ino == 0 || j.Farm == j.Backup || j.CreatedAt.IsZero() {
+	if j.SchemaVersion < 1 || j.SchemaVersion > currentDeactivationSchema || j.Magic != deactivationMagic ||
+		j.Farm.Dev == 0 || j.Farm.Ino == 0 || j.Backup.Dev == 0 || j.Backup.Ino == 0 ||
+		j.Farm == j.Backup || j.CreatedAt.IsZero() ||
+		(j.SchemaVersion == 1 && (j.DataCaptured || j.RetiredCaptured)) {
 		return nil, fmt.Errorf("invalid or unsupported deactivation journal")
 	}
 	if j.Capture.PreserveInto != "" &&
@@ -90,6 +95,36 @@ func readDeactivationJournal(path string) (*deactivationJournal, error) {
 		return nil, fmt.Errorf("invalid preservation decision in deactivation journal")
 	}
 	return &j, nil
+}
+
+// writeDeactivationJournal durably records the state of a farm retirement.
+func writeDeactivationJournal(dataPath string, j *deactivationJournal) error {
+	j.SchemaVersion = currentDeactivationSchema
+	body, err := json.Marshal(j)
+	if err != nil {
+		return fmt.Errorf("marshalling deactivation journal: %w", err)
+	}
+	if _, err := atomicfile.WriteFileDurable(deactivationJournalPath(dataPath), body, 0644); err != nil {
+		return fmt.Errorf("writing deactivation journal: %w", err)
+	}
+	return nil
+}
+
+// captureRecordedFarm saves additional writes when its metadata remains available after an earlier capture.
+func captureRecordedFarm(farmDir, dataPath string, opts CaptureOptions, captured bool) error {
+	s, err := ReadSentinel(farmDir)
+	if errors.Is(err, ErrSentinelMissing) {
+		if captured {
+			return nil
+		}
+		return fmt.Errorf("%w: farm metadata is missing before capture", ErrCaptureFailed)
+	}
+	if captured && err == nil && s.SchemaVersion == 3 {
+		if _, err := os.Lstat(filepath.Join(farmDir, s.Manifest)); errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+	}
+	return captureRetiringFarm(farmDir, dataPath, opts)
 }
 
 // captureRetiringFarm saves new writes from a recorded farm before it is removed.
@@ -153,7 +188,7 @@ func retireFarm(dataPath, backupPath string, s *Sentinel, force bool, capture ..
 		return fmt.Errorf("retiring farm: Data and Data.orig do not match the mounted farm")
 	}
 	j := &deactivationJournal{
-		SchemaVersion: 1,
+		SchemaVersion: currentDeactivationSchema,
 		Magic:         deactivationMagic,
 		GameID:        s.GameID,
 		FarmID:        s.FarmID,
@@ -164,12 +199,8 @@ func retireFarm(dataPath, backupPath string, s *Sentinel, force bool, capture ..
 	if len(capture) > 0 {
 		j.Capture = capture[0]
 	}
-	body, err := json.Marshal(j)
-	if err != nil {
-		return fmt.Errorf("marshalling deactivation journal: %w", err)
-	}
-	if _, err := atomicfile.WriteFileDurable(deactivationJournalPath(dataPath), body, 0644); err != nil {
-		return fmt.Errorf("writing deactivation journal: %w", err)
+	if err := writeDeactivationJournal(dataPath, j); err != nil {
+		return err
 	}
 	if err := deactivationStep(1); err != nil {
 		return err
@@ -190,8 +221,13 @@ func resumeFarmRetirement(dataPath, backupPath string, j *deactivationJournal, f
 		}
 		switch {
 		case dataExists && dataID == j.Farm && backupExists && backupID == j.Backup && !retiredExists:
-			if err := captureRetiringFarm(dataPath, dataPath, j.Capture); err != nil {
+			if err := captureRecordedFarm(dataPath, dataPath, j.Capture, j.DataCaptured); err != nil {
 				if !force {
+					return err
+				}
+			} else if !j.DataCaptured {
+				j.DataCaptured = true
+				if err := writeDeactivationJournal(dataPath, j); err != nil {
 					return err
 				}
 			}
@@ -215,8 +251,13 @@ func resumeFarmRetirement(dataPath, backupPath string, j *deactivationJournal, f
 				return err
 			}
 		case dataExists && dataID == j.Backup && !backupExists && retiredExists && retiredID == j.Farm:
-			if err := captureRetiringFarm(retired, dataPath, j.Capture); err != nil {
+			if err := captureRecordedFarm(retired, dataPath, j.Capture, j.RetiredCaptured); err != nil {
 				if !force {
+					return err
+				}
+			} else if !j.RetiredCaptured {
+				j.RetiredCaptured = true
+				if err := writeDeactivationJournal(dataPath, j); err != nil {
 					return err
 				}
 			}
