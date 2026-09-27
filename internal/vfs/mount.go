@@ -74,6 +74,14 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 	if _, err := os.Stat(backupPath); err == nil {
 		return fmt.Errorf("%w: %s", ErrBackupExists, backupPath)
 	}
+	if _, err := os.Lstat(filepath.Join(dataPath, SentinelFilename)); err == nil {
+		return fmt.Errorf("%w: %s still holds a mod farm", ErrBackupExists, dataPath)
+	}
+	for _, leftover := range []string{deactivationJournalPath(dataPath), retiredFarmPath(dataPath)} {
+		if _, err := os.Lstat(leftover); err == nil {
+			return fmt.Errorf("%w: %s is left from an unfinished mod removal", ErrBackupExists, leftover)
+		}
+	}
 
 	_ = os.RemoveAll(stagingDirPath(dataPath))
 	_ = os.RemoveAll(oldFarmPath(dataPath))
@@ -208,11 +216,7 @@ func (m *MountManager) deactivate(force bool) error {
 	}
 
 	slog.Info("tearing down materialized overlay", "path", dataPath)
-	if err := os.RemoveAll(dataPath); err != nil {
-		return fmt.Errorf("removing materialized %s: %w", dataPath, err)
-	}
-
-	if err := os.Rename(backupPath, dataPath); err != nil {
+	if err := retireFarm(dataPath, backupPath, s); err != nil {
 		return fmt.Errorf("restoring %s from %s: %w", dataPath, backupPath, err)
 	}
 
