@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -97,44 +98,84 @@ func writeTarTree(tw *tar.Writer, root, prefix string, onFile func(rel string, s
 	})
 }
 
-// openArchiveReader opens archivePath and returns a tar.Reader after zstd/gzip/plain magic-byte detection.
+type limitedArchiveReader struct {
+	reader io.Reader
+	limit  int64
+	read   int64
+	item   string
+}
+
+// Read counts decompressed archive bytes and rejects streams that exceed the limit.
+func (r *limitedArchiveReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if r.read >= r.limit {
+		var probe [1]byte
+		n, err := r.reader.Read(probe[:])
+		if n > 0 {
+			return 0, &BundleRejectedError{Reason: BundleRejectedLimit, Item: r.item}
+		}
+		return 0, err
+	}
+	remaining := r.limit - r.read
+	if int64(len(p)) > remaining {
+		p = p[:int(remaining)]
+	}
+	n, err := r.reader.Read(p)
+	r.read += int64(n)
+	return n, err
+}
+
+// openArchiveReader opens archivePath with the default decompressed-stream limit.
 func openArchiveReader(archivePath string) (*tar.Reader, func() error, error) {
+	tr, _, closer, err := openArchiveReaderWithLimit(archivePath, defaultImportLimits().streamBytes)
+	return tr, closer, err
+}
+
+// openArchiveReaderWithLimit opens a bounded tar reader after zstd/gzip/plain magic-byte detection.
+func openArchiveReaderWithLimit(archivePath string, streamLimit int64) (*tar.Reader, *limitedArchiveReader, func() error, error) {
 	f, err := os.Open(archivePath)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	br := bufio.NewReaderSize(f, 1<<16)
 	magic, err := br.Peek(4)
 	if err != nil && len(magic) < 2 {
 		f.Close()
-		return nil, nil, fmt.Errorf("reading archive header %s: %w", archivePath, err)
+		return nil, nil, nil, fmt.Errorf("reading archive header %s: %w", archivePath, err)
 	}
+	var reader io.Reader = br
+	closer := f.Close
 	switch {
 	case len(magic) >= 4 && bytes.Equal(magic[:4], zstdMagic):
-		zr, err := zstd.NewReader(br)
+		zr, err := zstd.NewReader(br,
+			zstd.WithDecoderMaxMemory(256<<20),
+			zstd.WithDecoderMaxWindow(128<<20),
+			zstd.WithDecoderConcurrency(1))
 		if err != nil {
 			f.Close()
-			return nil, nil, fmt.Errorf("opening zstd stream: %w", err)
+			return nil, nil, nil, fmt.Errorf("opening zstd stream: %w", err)
 		}
-		closer := func() error {
+		reader = zr
+		closer = func() error {
 			zr.Close()
 			return f.Close()
 		}
-		return tar.NewReader(zr), closer, nil
 	case len(magic) >= 2 && bytes.Equal(magic[:2], gzipMagic):
 		gr, err := gzip.NewReader(br)
 		if err != nil {
 			f.Close()
-			return nil, nil, fmt.Errorf("opening gzip stream: %w", err)
+			return nil, nil, nil, fmt.Errorf("opening gzip stream: %w", err)
 		}
-		closer := func() error {
+		reader = gr
+		closer = func() error {
 			gr.Close()
 			return f.Close()
 		}
-		return tar.NewReader(gr), closer, nil
-	default:
-		return tar.NewReader(br), f.Close, nil
 	}
+	bounded := &limitedArchiveReader{reader: reader, limit: streamLimit, item: manifestEntryName}
+	return tar.NewReader(bounded), bounded, closer, nil
 }
 
 // splitEntryName validates a tar entry name and returns its top-level prefix plus remainder.
@@ -199,8 +240,8 @@ func duplicatePathError(err error) bool {
 	return os.IsExist(err) || errors.Is(err, syscall.ENOTDIR)
 }
 
-// extractEntry writes one validated tar entry beneath destRoot, preserving the entry's relative path.
-func extractEntry(tr *tar.Reader, hdr *tar.Header, destRoot, rel string) (int64, error) {
+// extractEntry writes one bounded tar entry beneath destRoot, checking cancellation between chunks.
+func extractEntry(ctx context.Context, tr *tar.Reader, hdr *tar.Header, destRoot, rel string, fileLimit, totalRemaining int64, buf []byte) (int64, error) {
 	dest := filepath.Join(destRoot, filepath.FromSlash(rel))
 	switch hdr.Typeflag {
 	case tar.TypeDir:
@@ -222,6 +263,9 @@ func extractEntry(tr *tar.Reader, hdr *tar.Header, destRoot, rel string) (int64,
 		}
 		return 0, nil
 	case tar.TypeReg, tar.TypeRegA:
+		if hdr.Size < 0 || hdr.Size > fileLimit || hdr.Size > totalRemaining {
+			return 0, &BundleRejectedError{Reason: BundleRejectedLimit, Item: hdr.Name}
+		}
 		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 			if duplicatePathError(err) {
 				return 0, &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: hdr.Name}
@@ -239,15 +283,48 @@ func extractEntry(tr *tar.Reader, hdr *tar.Header, destRoot, rel string) (int64,
 			}
 			return 0, err
 		}
-		n, err := io.Copy(f, tr)
+		n, err := copyEntry(ctx, f, tr, hdr.Name, fileLimit, totalRemaining, buf)
 		if cerr := f.Close(); err == nil {
 			err = cerr
 		}
 		if err != nil {
+			if cancelErr := ctx.Err(); cancelErr != nil {
+				return n, cancelErr
+			}
 			return n, fmt.Errorf("extracting %s: %w", hdr.Name, err)
 		}
 		return n, nil
 	default:
 		return 0, validateEntryType(hdr)
+	}
+}
+
+// copyEntry copies a tar entry in bounded chunks and stops when the context is cancelled.
+func copyEntry(ctx context.Context, dst io.Writer, src io.Reader, name string, fileLimit, totalRemaining int64, buf []byte) (int64, error) {
+	var copied int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return copied, err
+		}
+		n, readErr := src.Read(buf)
+		if int64(n) > fileLimit-copied || int64(n) > totalRemaining-copied {
+			return copied, &BundleRejectedError{Reason: BundleRejectedLimit, Item: name}
+		}
+		if n > 0 {
+			written, writeErr := dst.Write(buf[:n])
+			copied += int64(written)
+			if writeErr != nil {
+				return copied, writeErr
+			}
+			if written != n {
+				return copied, io.ErrShortWrite
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				return copied, nil
+			}
+			return copied, readErr
+		}
 	}
 }
