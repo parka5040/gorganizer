@@ -88,6 +88,111 @@ func TestUninstallAppliedModRebuildsFarmFirst(t *testing.T) {
 	requireFarmWithoutMod(t, d, install, modDir)
 }
 
+// TestUninstallCannotBeRedeployedBeforeDeletion verifies a stale modlist and Apply cannot restore a mod while its trash awaits deletion.
+func TestUninstallCannotBeRedeployedBeforeDeletion(t *testing.T) {
+	d, install, modDir := mountedModChangeFixture(t)
+	paused := make(chan string, 1)
+	resume := make(chan struct{})
+	defer func() {
+		select {
+		case <-resume:
+		default:
+			close(resume)
+		}
+	}()
+	d.uninstallBeforeDelete = func(trash string) {
+		paused <- trash
+		<-resume
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := d.UninstallMod(modChangeGame, "A", true)
+		done <- err
+	}()
+	var trash string
+	select {
+	case trash = <-paused:
+	case err := <-done:
+		t.Fatalf("UninstallMod finished before deletion pause: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("UninstallMod did not reach deletion pause")
+	}
+	if _, err := os.Lstat(modDir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("mod folder exists before deletion: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(trash, "a.esp")); err != nil {
+		t.Errorf("mod was not moved to trash: %v", err)
+	}
+	if err := d.SetModList(modChangeGame, "Default", []dto.ModListEntryResult{{ModName: "A", Enabled: true}}); err != nil {
+		t.Fatalf("SetModList with stale entry: %v", err)
+	}
+	if err := d.RebuildVFS(modChangeGame); err != nil {
+		t.Fatalf("Apply with missing mod: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(install, "Data", "a.esp")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("missing mod file redeployed: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(install, "root.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("missing mod root file redeployed: %v", err)
+	}
+	sentinel, err := vfs.ReadSentinel(filepath.Join(install, "Data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, layer := range sentinel.Layers {
+		if layer.Name == "A" {
+			t.Errorf("missing mod remained in applied layers: %+v", sentinel.Layers)
+		}
+	}
+	close(resume)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("UninstallMod: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("UninstallMod did not complete after deletion resumed")
+	}
+	for _, dir := range []string{modDir, trash} {
+		if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("uninstall left folder %s: %v", filepath.Base(dir), err)
+		}
+	}
+}
+
+// TestUninstallRenameFailureKeepsModFolder verifies a failed move reports the error without deleting the original mod.
+func TestUninstallRenameFailureKeepsModFolder(t *testing.T) {
+	d, install, modDir := mountedModChangeFixture(t)
+	d.mu.Lock()
+	d.uninstallRename = func(string, string) error { return errors.New("injected rename failure") }
+	d.mu.Unlock()
+	_, err := d.UninstallMod(modChangeGame, "A", true)
+	if err == nil || !strings.Contains(err.Error(), "injected rename failure") {
+		t.Fatalf("UninstallMod error = %v, want rename failure", err)
+	}
+	if _, err := os.Stat(filepath.Join(modDir, "a.esp")); err != nil {
+		t.Errorf("failed rename removed mod folder: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(install, "Data", "a.esp")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("failed rename restored Data file: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(install, "root.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("failed rename restored root link: %v", err)
+	}
+	if entries, err := d.GetModList(modChangeGame, "Default"); err != nil || len(entries) != 0 {
+		t.Errorf("modlist after rename failure = %+v, %v", entries, err)
+	}
+	entries, err := os.ReadDir(config.ModsDir(modChangeGame))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".gorganizer-trash-") {
+			t.Errorf("rename failure left trash: %s", entry.Name())
+		}
+	}
+}
+
 // TestUninstallDisabledButStillAppliedMod ensures an unapplied disable does not make the old hardlinks eligible for capture.
 func TestUninstallDisabledButStillAppliedMod(t *testing.T) {
 	d, install, modDir := mountedModChangeFixture(t)

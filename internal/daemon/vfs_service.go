@@ -620,6 +620,17 @@ func (vs *VFSService) buildLayers(gameID string, gc config.GameConfig, entries [
 			continue
 		}
 		m := mod.NewMod(e.Name, gameID, filepath.Join(modsDir, e.Name))
+		info, err := os.Lstat(m.BasePath)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			slog.Warn("skipping unreadable mod folder", "game", gameID, "mod", e.Name, "err", err)
+			continue
+		}
+		if !info.IsDir() {
+			continue
+		}
 		if guard != nil {
 			if problem := guard(m.BasePath); problem != "" {
 				slog.Warn("skipping mod with an invalid layout", "game", gameID, "mod", e.Name, "problem", problem)

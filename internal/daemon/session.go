@@ -67,6 +67,8 @@ type session struct {
 	profileLocksMu sync.Mutex
 
 	reinstallFault         func(step string) error
+	uninstallRename        func(string, string) error
+	uninstallBeforeDelete  func(string)
 	modChangeRematerialize func(*vfs.MountManager) error
 	launchFault            func(step string) error
 	steamOpener            func(url string) (int, error)
