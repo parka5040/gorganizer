@@ -114,17 +114,17 @@ func Install(req InstallRequest) (*InstallResult, error) {
 		}
 		extractTmp = tmp
 		extractRoot = tmp
+		defer os.RemoveAll(extractTmp)
+		budget := NewExtractBudget()
 		emit(InstallProgress{Step: StageExtracting, Pct: -1})
-		if err := extractor.Extract(req.ArchivePath, tmp); err != nil {
-			os.RemoveAll(tmp)
+		if err := extractor.ExtractWithBudget(req.ArchivePath, tmp, budget); err != nil {
 			return nil, fmt.Errorf("extracting: %w", err)
 		}
 		if req.Layout == nil {
-			ExpandNestedFomods(tmp)
+			if err := ExpandNestedFomods(tmp, budget); err != nil {
+				return nil, fmt.Errorf("expanding nested installers: %w", err)
+			}
 		}
-	}
-	if extractTmp != "" {
-		defer os.RemoveAll(extractTmp)
 	}
 
 	if req.Layout == nil && len(req.FomodSelectedFiles) == 0 && HasFomodInstaller(extractRoot) {
