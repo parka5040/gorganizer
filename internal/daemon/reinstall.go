@@ -106,31 +106,54 @@ func (md *ModService) refuseEnabledInMountedProfile(gameID, modName string) erro
 	return md.refuseEnabledInMountedProfileLocked(gameID, modName)
 }
 
-// refuseEnabledInMountedProfileLocked is refuseEnabledInMountedProfile for a caller that also holds s.mu; a mod disabled but not yet applied is still in the farm's applied layers.
+// refuseEnabledInMountedProfileLocked refuses a mod present in the mounted profile, applied farm, or active root deployment; the caller holds s.mu and the profile lock.
 func (md *ModService) refuseEnabledInMountedProfileLocked(gameID, modName string) error {
-	mm, hasMM := md.s.mountMgrs[gameID]
-	if !hasMM || !mm.IsMounted() {
-		return nil
-	}
-	for _, layer := range mm.AppliedLayers() {
-		if layer.Name == modName {
-			return &download.ModMountedError{Mod: modName}
-		}
-	}
-	ms, hasMS := md.s.mountStates[gameID]
-	if !hasMS {
-		return nil
-	}
-	_, entries, err := md.s.profileMgr.Load(gameID, ms.profileName)
+	used, err := md.mountedModUsedLocked(gameID, modName)
 	if err != nil {
-		return fmt.Errorf("loading mounted profile %q: %w", ms.profileName, err)
+		return err
 	}
-	for _, e := range entries {
-		if e.Name == modName && e.Enabled {
-			return &download.ModMountedError{Mod: modName}
-		}
+	if used {
+		return &download.ModMountedError{Mod: modName}
 	}
 	return nil
+}
+
+// mountedModUsedLocked reports whether the mounted farm or root deployment uses a mod; the caller holds s.mu and the profile lock.
+func (md *ModService) mountedModUsedLocked(gameID, modName string) (bool, error) {
+	mm := md.s.mountMgrs[gameID]
+	if mm != nil && mm.IsMounted() {
+		for _, layer := range mm.AppliedLayers() {
+			if layer.Name == modName {
+				return true, nil
+			}
+		}
+		if ms, ok := md.s.mountStates[gameID]; ok {
+			_, entries, err := md.s.profileMgr.Load(gameID, ms.profileName)
+			if err != nil {
+				return false, fmt.Errorf("loading mounted profile %q: %w", ms.profileName, err)
+			}
+			for _, e := range entries {
+				if e.Name == modName && e.Enabled {
+					return true, nil
+				}
+			}
+		}
+	}
+	if manager := md.s.rootDeployMgrs[gameID]; manager != nil {
+		manifest, err := manager.ActiveManifest()
+		if err != nil {
+			return false, fmt.Errorf("reading active game-root deployment: %w", err)
+		}
+		if manifest != nil {
+			modDir := filepath.Join(config.ModsDir(gameID), modName)
+			for _, entry := range manifest.Entries {
+				if entry.LayerName == modName || filepath.Clean(entry.SourceRoot) == modDir {
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, nil
 }
 
 // resolveReinstallSources resolves every recorded source archive to a readable file, failing on the first missing one.

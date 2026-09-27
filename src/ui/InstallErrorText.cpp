@@ -215,7 +215,7 @@ QString knownTokenMessage(const InstallError& parsed)
     if (token == QLatin1String("fomod_required"))
         return QStringLiteral("This archive needs its FOMOD installer, which is not available for this game.");
     if (token == QLatin1String("mod_mounted"))
-        return QStringLiteral("\"%1\" is enabled in the mounted profile. Unmount the game before reinstalling it.")
+        return QStringLiteral("\"%1\" is part of the active mods. Choose \"Unmount Mods\", then try again.")
             .arg(field("mod"));
     if (token == QLatin1String("fomod_reinstall_unsupported"))
         return QStringLiteral("\"%1\" was installed through a FOMOD installer and cannot be reinstalled "
