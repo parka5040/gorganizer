@@ -333,6 +333,9 @@ func TestFenceLaunchAdmissionBlocksTheLoader(t *testing.T) {
 
 func TestFenceLoaderOperationBlocksSharedOperations(t *testing.T) {
 	d, _ := newLoaderTestDaemon(t, nil, nil)
+	if err := os.MkdirAll(filepath.Join(config.ModsDir("stardewvalley"), "Some Mod"), 0755); err != nil {
+		t.Fatal(err)
+	}
 	release, err := reserveExclusive(t, d, "stardewvalley")
 	if err != nil {
 		t.Fatal(err)
