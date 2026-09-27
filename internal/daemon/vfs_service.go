@@ -901,7 +901,7 @@ func (vs *VFSService) GetConflicts(gameID, profileName string) ([]dto.FileConfli
 	return results, nil
 }
 
-// sweepOrphanStageDirs removes the `.stage-<rand>/` and `.gorganizer-import-<uuid>/` staging folders of gameID that predate this daemon by stageSweepMargin, and the GUI's `.stage-ui-*` folders once older than guiStageRetention, never one an install may still be writing.
+// sweepOrphanStageDirs removes old install, import, and profile-copy staging directories for a game.
 func (s *session) sweepOrphanStageDirs(gameID string) {
 	cutoff := s.startedAt.Add(-stageSweepMargin)
 	guiCutoff := s.startedAt.Add(-guiStageRetention)
@@ -915,13 +915,16 @@ func (s *session) sweepOrphanStageDirs(gameID string) {
 			if !e.IsDir() {
 				continue
 			}
-			if !strings.HasPrefix(e.Name(), ".stage-") && !strings.HasPrefix(e.Name(), mod.ImportStagePrefix) {
+			if !strings.HasPrefix(e.Name(), ".stage-") && !strings.HasPrefix(e.Name(), mod.ImportStagePrefix) &&
+				!(dir == config.ProfilesDir(gameID) && strings.HasPrefix(e.Name(), profile.CopyStagePrefix)) {
 				continue
 			}
 			path := filepath.Join(dir, e.Name())
 			info, err := e.Info()
 			limit := cutoff
-			if strings.HasPrefix(e.Name(), guiStagePrefix) {
+			if dir == config.ProfilesDir(gameID) && strings.HasPrefix(e.Name(), profile.CopyStagePrefix) {
+				limit = s.startedAt
+			} else if strings.HasPrefix(e.Name(), guiStagePrefix) {
 				limit = guiCutoff
 			}
 			if err != nil || !info.ModTime().Before(limit) {

@@ -284,7 +284,10 @@ func (ls *LaunchService) writePluginsTxt(gameID string, gc config.GameConfig, pr
 	if mounted && mm.IsMounted() {
 		seedDir = mm.BackupPath()
 	}
-	if err := applyProfilePluginLoadout(ls.s.profileMgr, gameID, profileName, seedDir, spec, list); err != nil {
+	unlockProfiles := ls.s.lockProfiles(gameID)
+	err = applyProfilePluginLoadout(ls.s.profileMgr, gameID, profileName, seedDir, spec, list)
+	unlockProfiles()
+	if err != nil {
 		return fmt.Errorf("loading plugin loadout: %w", err)
 	}
 

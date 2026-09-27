@@ -53,6 +53,8 @@ type fakeController struct {
 	modList           []dto.ModListEntryResult
 	getModListArgs    []string
 	setModListArgs    []any
+	copyProfileArgs   []string
+	copyProfile       *dto.ProfileResult
 	vfsStatus         *dto.VFSStatusResult
 	restoreArgs       []any
 	retryGame         string
@@ -295,6 +297,12 @@ func (f *fakeController) ImportInstance(_ context.Context, req dto.ImportRequest
 	return f.transferSummary, f.transferErr
 }
 
+// CopyProfile records the request and returns the copied profile for transport tests.
+func (f *fakeController) CopyProfile(gameID, sourceName, newName string) (*dto.ProfileResult, error) {
+	f.copyProfileArgs = []string{gameID, sourceName, newName}
+	return f.copyProfile, nil
+}
+
 // newTestClient serves the current handlers over bufconn and returns a connected client.
 func newTestClient(t *testing.T, ctrl DaemonController) pb.GorganizerClient {
 	t.Helper()
@@ -324,6 +332,20 @@ func mustEqualProto(t *testing.T, got, want proto.Message) {
 	if !proto.Equal(got, want) {
 		t.Errorf("proto mismatch:\n got: %v\nwant: %v", got, want)
 	}
+}
+
+// TestCopyProfileFieldMapping verifies request fields and response identity across the RPC.
+func TestCopyProfileFieldMapping(t *testing.T) {
+	fake := &fakeController{copyProfile: &dto.ProfileResult{Name: "Copy", GameID: "skyrimse", CreatedAt: "2026-09-27T12:00:00Z"}}
+	client := newTestClient(t, fake)
+	got, err := client.CopyProfile(context.Background(), &pb.CopyProfileRequest{GameId: "skyrimse", SourceName: "Original", Name: "Copy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fake.copyProfileArgs, []string{"skyrimse", "Original", "Copy"}) {
+		t.Fatalf("copy arguments = %v", fake.copyProfileArgs)
+	}
+	mustEqualProto(t, got, &pb.Profile{Name: "Copy", GameId: "skyrimse", CreatedAt: "2026-09-27T12:00:00Z"})
 }
 
 // TestListGamesFieldMapping locks dto.GameInfo → pb.Game field-by-field conversion.

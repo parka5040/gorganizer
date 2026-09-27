@@ -107,6 +107,7 @@ type ModController interface {
 type ProfileController interface {
 	ListProfiles(gameID string) ([]dto.ProfileResult, error)
 	CreateProfile(gameID, name string) (*dto.ProfileResult, error)
+	CopyProfile(gameID, sourceName, newName string) (*dto.ProfileResult, error)
 	DeleteProfile(gameID, name string) error
 	GetModList(gameID, profileName string) ([]dto.ModListEntryResult, error)
 	SetModList(gameID, profileName string, entries []dto.ModListEntryResult) error

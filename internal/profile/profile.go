@@ -26,12 +26,13 @@ type Profile struct {
 
 type Manager struct {
 	dataDir            string
+	CopyFileDurable    func(string, string, os.FileMode, bool) (atomicfile.Outcome, error)
 	pluginLocksMu      sync.Mutex
 	pluginLoadoutLocks map[string]*sync.Mutex
 }
 
 func NewManager(dataDir string) *Manager {
-	return &Manager{dataDir: dataDir, pluginLoadoutLocks: make(map[string]*sync.Mutex)}
+	return &Manager{dataDir: dataDir, CopyFileDurable: atomicfile.CopyFileDurable, pluginLoadoutLocks: make(map[string]*sync.Mutex)}
 }
 
 func (pm *Manager) loadoutLock(gameID, profileName string) *sync.Mutex {

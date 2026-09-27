@@ -62,6 +62,7 @@ public:
     // Synchronous ListProfiles for modal flows (export profile checklist).
     bool listProfilesSync(const QString& gameId, std::vector<GrpcProfile>& out, QString& errorOut);
     void createProfile(const QString& gameId, const QString& name);
+    void copyProfile(const QString& gameId, const QString& source, const QString& name);
     void deleteProfile(const QString& gameId, const QString& name);
     void getModList(const QString& gameId, const QString& profileName);
     void setModList(const QString& gameId, const QString& profileName,
@@ -274,6 +275,7 @@ signals:
 
     void profilesListed(const std::vector<GrpcProfile>& profiles);
     void profileCreated(const GrpcProfile& profile);
+    void profileCopied(const QString& gameId, const GrpcProfile& profile);
     void profileDeleted();
 
     void modListReceived(const std::vector<GrpcModListEntry>& entries);

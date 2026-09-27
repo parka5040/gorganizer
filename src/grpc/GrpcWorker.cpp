@@ -711,6 +711,17 @@ void GrpcWorker::doCreateProfile(const QString& gameId, const QString& name)
     emit profileCreated(profileFromProto(resp));
 }
 
+void GrpcWorker::doCopyProfile(const QString& gameId, const QString& source, const QString& name)
+{
+    gorganizer::v1::CopyProfileRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_source_name(source.toStdString());
+    req.set_name(name.toStdString());
+    gorganizer::v1::Profile resp;
+    if (!call("CopyProfile", &Stub::CopyProfile, req, resp, std::chrono::minutes(5))) return;
+    emit profileCopied(gameId, profileFromProto(resp));
+}
+
 void GrpcWorker::doDeleteProfile(const QString& gameId, const QString& name)
 {
     gorganizer::v1::DeleteProfileRequest req;
