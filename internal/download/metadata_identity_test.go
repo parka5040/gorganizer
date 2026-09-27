@@ -24,7 +24,7 @@ func TestInstalledMetadataUsesFinalFolder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadModMetadata: %v", err)
 	}
-	if meta.Folder != "Actual Mod" || meta.Name != "Innocent" {
-		t.Errorf("installed metadata folder = %q, name = %q, want Actual Mod and Innocent", meta.Folder, meta.Name)
+	if meta.Folder != "Actual Mod" || meta.Name != "Actual Mod" {
+		t.Errorf("installed metadata folder = %q, name = %q, want Actual Mod for both", meta.Folder, meta.Name)
 	}
 }

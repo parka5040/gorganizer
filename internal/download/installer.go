@@ -579,6 +579,8 @@ func LoadModMetadata(modDir string) (*ModMetadata, error) {
 	return m, sc.Err()
 }
 
+var writeModMetadataFn = SaveModMetadata
+
 func SaveModMetadata(modDir string, m *ModMetadata) error {
 	var w kvfile.Writer
 	w.Comment("Gorganizer mod metadata — auto-generated")
@@ -672,9 +674,15 @@ func PatchModMetadataField(modDir, key, value string) (bool, error) {
 
 // AppendSourceArchive adds an archive ref and merges newFiles into the files list.
 func AppendSourceArchive(modDir, modName string, ref SourceArchiveRef, displayName, category, version, modPage string, newFiles []string) error {
+	_, err := appendSourceArchive(modDir, modName, ref, displayName, category, version, modPage, newFiles)
+	return err
+}
+
+// appendSourceArchive saves an archive ref and returns the written record's file count.
+func appendSourceArchive(modDir, modName string, ref SourceArchiveRef, displayName, category, version, modPage string, newFiles []string) (int, error) {
 	m, err := LoadModMetadata(modDir)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	m.Folder = modName
 	if m.Name == "" {
@@ -723,7 +731,10 @@ func AppendSourceArchive(modDir, modName string, ref SourceArchiveRef, displayNa
 	m.Files = merged
 	m.FileCount = len(m.Files)
 
-	return SaveModMetadata(modDir, m)
+	if err := writeModMetadataFn(modDir, m); err != nil {
+		return 0, err
+	}
+	return m.FileCount, nil
 }
 
 type ZipExtractor struct{}
