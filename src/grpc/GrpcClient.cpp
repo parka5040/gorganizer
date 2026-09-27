@@ -312,7 +312,9 @@ void GrpcClient::connectToDaemon()
     if (m_workers[RoleUnary].thread) disconnectFromDaemon();
     ++m_connectionGeneration;
 
-    m_channel = grpc::CreateChannel(socketTarget(), grpc::InsecureChannelCredentials());
+    grpc::ChannelArguments args;
+    args.SetMaxReceiveMessageSize(64 * 1024 * 1024);
+    m_channel = grpc::CreateCustomChannel(socketTarget(), grpc::InsecureChannelCredentials(), args);
     m_syncStub = std::make_unique<GrpcSyncStub>(m_channel);
 
     for (auto& handle : m_workers) {

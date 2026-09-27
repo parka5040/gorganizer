@@ -46,6 +46,7 @@ private:
 
     void actionInstall(const GrpcArchiveRow& row, bool forceNewMod);
     void actionMergeInto(const GrpcArchiveRow& row);
+    void showFomodInstallDialog(const GrpcArchiveRow& row, GrpcInstallMode mode, const QString& target);
     void actionHide(const QString& archivePath, bool hidden);
     void actionBulkHide(GrpcBulkHideScope scope, bool hidden);
     void actionDelete(const GrpcArchiveRow& row);

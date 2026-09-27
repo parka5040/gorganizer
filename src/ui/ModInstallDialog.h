@@ -29,9 +29,15 @@ public:
         static ArchiveSource fromExternal(const QString& path) { return {{}, path}; }
     };
 
+    struct InstallTarget {
+        GrpcInstallMode mode;
+        QString targetMod;
+    };
+
     explicit ModInstallDialog(const QString& gameId, const QString& modName,
                               GrpcClient* grpc, ArchiveSource source,
-                              QWidget* parent = nullptr);
+                              QWidget* parent = nullptr,
+                              InstallTarget target = {GrpcInstallAsNewMod, {}});
 
     QString installedModName() const { return m_modName; }
     int installedFileCount() const { return m_fileCount; }
@@ -63,6 +69,7 @@ private:
     QString m_modName;
     GrpcClient* m_grpc;
     ArchiveSource m_source;
+    InstallTarget m_target;
     QString m_previewId;
     QString m_selectedRoot;
     QStringList m_selectableRoots;

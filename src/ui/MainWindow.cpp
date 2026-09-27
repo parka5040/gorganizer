@@ -304,7 +304,7 @@ void MainWindow::wireConnections()
         m_grpc->startWatching();
     });
     connect(m_grpc, &GrpcClient::disconnected, this, [this] {
-        statusBar()->showMessage("Daemon disconnected");
+        statusBar()->showMessage("Background service disconnected. Run is unavailable until it reconnects.");
     });
 
     connect(m_grpc, &GrpcClient::installRequestCompleted, this, &MainWindow::onInstallRequestCompleted);

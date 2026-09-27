@@ -7,7 +7,6 @@
 #include "Dialogs.h"
 
 #include <QMessageBox>
-#include <QProcess>
 #include <QPushButton>
 #include <QStatusBar>
 
@@ -29,15 +28,21 @@ LaunchController::LaunchController(AppConfig& config, GrpcClient* grpc,
 {
     connect(m_grpc, &GrpcClient::gameLaunched, this, &LaunchController::onGameLaunched);
     connect(m_grpc, &GrpcClient::gameLaunchFailed, this, &LaunchController::onGameLaunchFailed);
+    connect(m_grpc, &GrpcClient::connected, this, &LaunchController::updateRunEnabled);
+    connect(m_grpc, &GrpcClient::disconnected, this, &LaunchController::updateRunEnabled);
     connect(m_modLoader, &ModLoaderController::operationActivityChanged, this,
             &LaunchController::onModLoaderActivityChanged);
     connect(m_session, &SessionController::activeGameChanged, this, &LaunchController::onActiveGameChanged);
+    updateRunEnabled();
 }
 
 void LaunchController::updateRunEnabled()
 {
     const bool loaderBusy = m_modLoader->operationActiveFor(m_session->activeGame().shortName);
-    m_runButton->setEnabled(!m_launchPending && !loaderBusy);
+    const bool connected = m_grpc->isConnected();
+    m_runButton->setEnabled(connected && !m_launchPending && !loaderBusy);
+    m_runButton->setToolTip(connected ? QString()
+        : QStringLiteral("Run is unavailable until Gorganizer's background service reconnects."));
 }
 
 void LaunchController::onModLoaderActivityChanged(const QString& gameId, bool active)
@@ -55,6 +60,12 @@ void LaunchController::onActiveGameChanged(const GameInfo& game)
 
 void LaunchController::onRunGame()
 {
+    if (!m_grpc->isConnected()) {
+        dialogs::warn(m_parentWindow, "Not Connected",
+            "Gorganizer's background service is not connected, so it cannot check your mods before starting the game. Wait for the connection indicator to turn green, then press Run again.");
+        return;
+    }
+
     if (!m_session->activeGame().detected) {
         dialogs::warn(m_parentWindow, "No Game Selected", "Please select a game first.");
         return;
@@ -80,11 +91,6 @@ void LaunchController::onRunGame()
             emit ttwInstallRequested();
             return;
         }
-        if (!m_grpc->isConnected()) {
-            dialogs::warn(m_parentWindow, "Not Connected",
-                "The daemon must be running to install a script extender.");
-            return;
-        }
         m_statusBar->showMessage(
             QString("Downloading %1 from Nexus...").arg(target.label));
         QString name, err;
@@ -101,24 +107,13 @@ void LaunchController::onRunGame()
         return;
     }
 
-    if (m_grpc->isConnected()) {
-        bool useTool = (target.type == RunButtonWidget::TargetTool);
-        m_statusBar->showMessage(
-            useTool ? QString("Preparing mods and launching %1...").arg(target.label)
-                    : QString("Preparing mods and launching %1...").arg(m_session->activeGame().name));
-        m_launchPending = true;
-        updateRunEnabled();
-        m_grpc->launchGame(m_session->activeGame().shortName, useTool, m_session->currentProfile());
-    } else {
-        QString steamUrl = QString("steam://rungameid/%1").arg(m_session->activeGame().appId);
-        bool launched = QProcess::startDetached("xdg-open", {steamUrl});
-        if (!launched) {
-            dialogs::warn(m_parentWindow, "Launch Failed",
-                "Could not launch Steam. Is Steam installed?");
-            return;
-        }
-        m_statusBar->showMessage("Launched " + m_session->activeGame().name + " (no mods)", 5000);
-    }
+    bool useTool = (target.type == RunButtonWidget::TargetTool);
+    m_statusBar->showMessage(
+        useTool ? QString("Preparing mods and launching %1...").arg(target.label)
+                : QString("Preparing mods and launching %1...").arg(m_session->activeGame().name));
+    m_launchPending = true;
+    updateRunEnabled();
+    m_grpc->launchGame(m_session->activeGame().shortName, useTool, m_session->currentProfile());
 }
 
 void LaunchController::onTargetChanged(const QString& toolId)
