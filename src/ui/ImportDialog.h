@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QDateTime>
 #include <QDialog>
 #include <QString>
 #include "GrpcTypes.h"
@@ -44,6 +45,9 @@ private:
     QWidget* buildSelectionPage();
     QWidget* buildProgressPage();
     void populatePreview();
+    void clearPreview();
+    bool previewFileUnchanged() const;
+    void showChangedBackup();
     void updateStartEnabled();
     GrpcTransferPolicy selectedPolicy() const;
     QStringList checkedChildren(const QTreeWidgetItem* root) const;
@@ -52,6 +56,9 @@ private:
     GrpcClient* m_grpc;
     QString m_gameId;
     GrpcImportPreview m_preview;
+    QString m_previewPath;
+    qint64 m_previewSize = -1;
+    QDateTime m_previewModified;
     bool m_running = false;
     bool m_cancelRequested = false;
 
