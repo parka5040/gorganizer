@@ -31,7 +31,7 @@ func walkRel(t *testing.T, root string) []string {
 		if err != nil {
 			return err
 		}
-		if p == root {
+		if p == root || IsFarmMetadataFile(filepath.Base(p)) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, p)

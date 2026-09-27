@@ -46,7 +46,7 @@ func main() {
 		_ = mm.Deactivate()
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "mid-activate fingerprint (excluding sentinel): %s\n", mid)
+	fmt.Fprintf(os.Stderr, "mid-activate fingerprint (excluding farm metadata): %s\n", mid)
 	if mid != pre {
 		fmt.Fprintf(os.Stderr, "MISMATCH: materialized view diverges from source\n")
 		_ = mm.Deactivate()
@@ -69,7 +69,7 @@ func main() {
 		_ = mm.Deactivate()
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "post-rematerialize fingerprint (excluding sentinel): %s\n", remat)
+	fmt.Fprintf(os.Stderr, "post-rematerialize fingerprint (excluding farm metadata): %s\n", remat)
 	if remat != pre {
 		fmt.Fprintf(os.Stderr, "MISMATCH: re-materialized view diverges from source\n")
 		_ = mm.Deactivate()
@@ -111,7 +111,7 @@ func hashTree(dataPath string) (string, error) {
 		if info.IsDir() {
 			return nil
 		}
-		if filepath.Base(p) == vfs.SentinelFilename {
+		if vfs.IsFarmMetadataFile(filepath.Base(p)) {
 			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {

@@ -214,7 +214,7 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 			plainOriginal = plainOriginal && len(entries) == 0
 		}
 		for _, entry := range entries {
-			if isSentinelFile(entry.Name()) {
+			if IsFarmMetadataFile(entry.Name()) {
 				plainOriginal = false
 			}
 		}

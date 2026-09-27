@@ -30,6 +30,10 @@ func TestReMaterialize_AppliesModAndCapturesWrites(t *testing.T) {
 		t.Fatalf("Activate: %v", err)
 	}
 	t.Cleanup(func() { _ = mm.Deactivate() })
+	oldSentinel, err := ReadSentinel(dataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	mustFile(t, filepath.Join(dataPath, "Saves", "quicksave.ess"), "SAVE")
 
@@ -52,6 +56,20 @@ func TestReMaterialize_AppliesModAndCapturesWrites(t *testing.T) {
 	}
 	if mm.IsDirty() {
 		t.Error("expected clean after ReMaterialize")
+	}
+	newSentinel, err := ReadSentinel(dataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newSentinel.FarmID == oldSentinel.FarmID || newSentinel.Manifest == oldSentinel.Manifest {
+		t.Errorf("staging reused old farm identity: old=%q new=%q", oldSentinel.FarmID, newSentinel.FarmID)
+	}
+	if _, err := os.Lstat(filepath.Join(dataPath, oldSentinel.Manifest)); !os.IsNotExist(err) {
+		t.Errorf("old farm manifest remains in new farm: %v", err)
+	}
+	newManifest, err := ReadFarmManifest(dataPath, newSentinel)
+	if err != nil || len(newManifest.Entries) != 3 {
+		t.Fatalf("new farm manifest = %+v, %v; want three placed entries", newManifest, err)
 	}
 	if appliedLayers := mm.AppliedLayers(); len(appliedLayers) != 3 || appliedLayers[1].Name != "ModA" {
 		t.Fatalf("applied layers were not advanced: %+v", appliedLayers)
