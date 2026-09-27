@@ -23,7 +23,7 @@
 #                         preserved. --restart reminds you to reopen a running session.
 #   register              (Re-)install desktop file + icon + nxm:// handler.
 #   unregister            Reverse `register`.
-#   nxm <URI>             One-shot: forward an nxm:// URL to the running daemon.
+#   nxm <URI>             Open Gorganizer if needed and add a Nexus Mods download.
 #   import --from PATH    Move old *_Mods/ folders to the personal data folder.
 #   uninstall [--purge]   After closing Gorganizer and restoring games, unregister
 #                         and delete build artifacts. User data is preserved.
@@ -118,7 +118,7 @@ Subcommands:
                         preserved. --restart reminds you to reopen a running session.
   register              (Re-)install desktop file + icon + nxm:// handler.
   unregister            Reverse \`register\`.
-  nxm <URI>             One-shot: forward an nxm:// URL to the running daemon.
+  nxm <URI>             Open Gorganizer if needed and add a Nexus Mods download.
   import --from PATH    Move old *_Mods/ folders to your personal data folder.
   uninstall [--purge]   After closing Gorganizer and restoring games, unregister
                         and delete build artifacts. User data is preserved.
@@ -867,16 +867,11 @@ cmd_launch() {
 # --- nxm forwarding --------------------------------------------------------
 
 cmd_nxm() {
-    local uri="${1:-}"
-    if [ -z "$uri" ]; then
-        err "Usage: $0 nxm <URI>"
-        exit 2
-    fi
-    if [ ! -x "$DAEMON_BIN" ]; then
-        err "Daemon not built yet. Run ./gorganizer.sh first."
+    if [ ! -x "$DAEMON_BIN" ] || [ ! -x "$CTL_BIN" ]; then
+        err "Gorganizer is not built yet. Run ./gorganizer.sh first."
         exit 1
     fi
-    exec "$DAEMON_BIN" --handle-nxm "$uri"
+    exec "$CTL_BIN" nxm "$@"
 }
 
 # --- update ----------------------------------------------------------------
@@ -1102,7 +1097,7 @@ case "${1:-}" in
         shift; cmd_unregister "$@"
         ;;
     nxm|--nxm)
-        shift; cmd_nxm "${1:-}"
+        shift; cmd_nxm "$@"
         ;;
     import)
         shift; cmd_import "$@"

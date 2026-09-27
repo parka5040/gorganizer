@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -173,13 +174,12 @@ func forwardNXM(uri, socketPath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	client := pb.NewGorganizerClient(conn)
-	resp, err := client.StartDownload(ctx, &pb.StartDownloadRequest{NxmUri: uri})
+	_, err = client.StartDownload(ctx, &pb.StartDownloadRequest{NxmUri: uri})
 	if err != nil {
-		return fmt.Errorf("StartDownload RPC: %w", err)
+		return errors.New("Gorganizer could not add the download")
 	}
 
-	fmt.Printf("Download started: %s (queued ahead: %d)\n",
-		resp.GetDownloadId(), resp.GetQueuedAhead())
+	fmt.Println("Download added to Gorganizer.")
 	return nil
 }
 
