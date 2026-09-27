@@ -385,7 +385,11 @@ func (md *ModService) appendToModLists(gameID, modName string) (int, error) {
 // appendToProfileModList appends modName disabled to the existing profileName's modlist when it lacks it, never recreating a deleted profile.
 func (md *ModService) appendToProfileModList(gameID, profileName, modName string) error {
 	defer md.s.lockProfiles(gameID)()
-	if _, err := os.Stat(filepath.Join(md.s.profileMgr.ProfileDir(gameID, profileName), "profile.json")); err != nil {
+	dir, err := md.s.profileMgr.CheckedProfileDir(gameID, profileName)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(dir, "profile.json")); err != nil {
 		return fmt.Errorf("profile %q is not available: %w", profileName, err)
 	}
 	loaded, entries, err := md.s.profileMgr.Load(gameID, profileName)

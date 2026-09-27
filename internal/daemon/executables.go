@@ -318,6 +318,16 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 	if exe == nil {
 		return 0, "", fmt.Errorf("executable %q not found for %s", execID, gameID)
 	}
+	var profileDir string
+	var profileDirErr error
+	if profileName == "" {
+		profileDir, profileDirErr = es.s.profileMgr.CheckedProfilesDir(gameID)
+	} else {
+		profileDir, profileDirErr = es.s.profileMgr.CheckedProfileDir(gameID, profileName)
+	}
+	if profileDirErr != nil {
+		return 0, "", profileDirErr
+	}
 	catalogEntry, trustedCatalogEntry := tools.ValidateCatalogMatch(exe.ToolID, gameID, exe.ExePath)
 	trustedToolID := ""
 	if trustedCatalogEntry {
@@ -444,7 +454,6 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 		}
 	}
 
-	profileDir := es.s.profileMgr.ProfileDir(gameID, profileName)
 	scratchRoot := filepath.Join(config.CacheDir(), "tool-scratch", gameID, runID)
 	scratchOutputRoot := filepath.Join(scratchRoot, "output")
 	scratchTempRoot := filepath.Join(scratchRoot, "temp")
