@@ -269,6 +269,10 @@ QString knownTokenMessage(const InstallError& parsed)
         return QStringLiteral("%1 still has an unfinished mod change from before. Gorganizer will finish it "
                               "after the game closes. Close the game, then try again.")
             .arg(gameName(field("game"), QStringLiteral("This game")));
+    if (token == QLatin1String("install_record_failed"))
+        return QStringLiteral("\"%1\" could not be installed because its installation record could not be saved. "
+                              "Check that the disk is not full, then try again.")
+            .arg(field("mod"));
     if (token == QLatin1String("recovery_stale"))
         return QStringLiteral("The recovery for %1 changed before your choice was applied. Nothing was restored. "
                               "Review the new message, then choose again.")
@@ -344,6 +348,7 @@ bool tokenValuesPercentEscaped(const QString& token)
         QStringLiteral("plugin_state_failed"),
         QStringLiteral("farm_recovery_deferred"),
         QStringLiteral("recovery_stale"),
+        QStringLiteral("install_record_failed"),
     };
     return escaped.contains(token);
 }

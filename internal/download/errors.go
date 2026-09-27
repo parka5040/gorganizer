@@ -136,3 +136,18 @@ func (e *ArchiveRejectedError) Error() string {
 func (e *ArchiveRejectedError) Unwrap() error {
 	return ErrUnsafeArchive
 }
+
+type InstallRecordError struct {
+	Mod string
+	Err error
+}
+
+// Error returns the failed installation-record message.
+func (e *InstallRecordError) Error() string {
+	return fmt.Sprintf("mod %q could not be installed because its installation record could not be saved: %v", e.Mod, e.Err)
+}
+
+// Unwrap returns the underlying metadata write failure.
+func (e *InstallRecordError) Unwrap() error {
+	return e.Err
+}

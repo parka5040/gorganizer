@@ -67,6 +67,7 @@ const (
 	tokenPluginStateFailed          = "plugin_state_failed:"
 	tokenFarmRecoveryDeferred       = "farm_recovery_deferred:"
 	tokenRecoveryStale              = "recovery_stale:"
+	tokenInstallRecordFailed        = "install_record_failed:"
 )
 
 var errorTokens = []string{
@@ -80,6 +81,7 @@ var errorTokens = []string{
 	tokenTransferGameMismatch, tokenTransferSchema, tokenTransferPath, tokenTransferCollision, tokenTransferOverwriteMounted,
 	tokenArchiveRejected, tokenBundleRejected, tokenProfileIdentityInvalid, tokenInstallSelectionEmpty,
 	tokenPluginStateFailed, tokenFarmRecoveryDeferred, tokenRecoveryStale,
+	tokenInstallRecordFailed,
 }
 
 // MapError turns a structured error into a gRPC status; unrecognized errors pass through with ok=false.
@@ -113,6 +115,10 @@ func MapError(err error) (error, bool) {
 	if errors.As(err, &registration) {
 		msg := tokenModRegistrationFailed + "mod=" + escapeTokenValue(registration.Mod)
 		return status.Error(codes.Internal, msg), true
+	}
+	var installRecord *download.InstallRecordError
+	if errors.As(err, &installRecord) {
+		return status.Error(codes.Internal, tokenInstallRecordFailed+"mod="+escapeTokenValue(installRecord.Mod)), true
 	}
 	var invalidTarget *download.InvalidTargetModError
 	if errors.As(err, &invalidTarget) {
