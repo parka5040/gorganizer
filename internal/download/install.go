@@ -79,7 +79,9 @@ const (
 	StageFailed     InstallStage = 5
 )
 
-// Install is the canonical install path: extract, optionally apply FOMOD selection or a layout plan, stage, rename, write metadata.
+var renameInstallStageFn = os.Rename
+
+// Install extracts and stages an archive, records its files, and publishes the mod.
 func Install(req InstallRequest) (*InstallResult, error) {
 	if req.Layout != nil && len(req.FomodSelectedFiles) > 0 {
 		return nil, ErrFomodNotSupportedForLayout
@@ -194,12 +196,35 @@ func Install(req InstallRequest) (*InstallResult, error) {
 
 	emit(InstallProgress{Step: StageFinalizing, Pct: 100})
 
+	ref := req.SourceArchiveRef
+	if ref.InstalledAt == "" {
+		ref.InstalledAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	record := func(dir string) (int, error) {
+		count, err := appendSourceArchive(
+			dir, req.TargetMod, ref,
+			req.DisplayName, req.Category, req.Version, req.ModPage, written,
+		)
+		if err != nil {
+			recordErr := &InstallRecordError{Mod: req.TargetMod, Err: err}
+			emit(InstallProgress{Step: StageFailed, Error: recordErr.Error()})
+			return 0, recordErr
+		}
+		return count, nil
+	}
+
+	var fileCount int
 	switch req.Mode {
 	case ModeNewMod:
+		ref.Merged = false
+		fileCount, err = record(stageDir)
+		if err != nil {
+			return nil, err
+		}
 		if _, statErr := os.Stat(finalDir); statErr == nil {
 			return nil, &installCollisionMarker{Name: req.TargetMod}
 		}
-		if err := os.Rename(stageDir, finalDir); err != nil {
+		if err := renameInstallStageFn(stageDir, finalDir); err != nil {
 			return nil, fmt.Errorf("moving stage → %s: %w", finalDir, err)
 		}
 		stageCleanup = false
@@ -210,35 +235,22 @@ func Install(req InstallRequest) (*InstallResult, error) {
 		if err := mergeTree(stageDir, finalDir); err != nil {
 			return nil, fmt.Errorf("merging into %s: %w", finalDir, err)
 		}
+		if existing, lerr := LoadModMetadata(finalDir); lerr == nil && existing != nil && len(existing.SourceArchives) > 0 {
+			ref.Merged = true
+		}
+		fileCount, err = record(finalDir)
+		if err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("unknown install mode %d", req.Mode)
 	}
 
-	ref := req.SourceArchiveRef
-	if ref.InstalledAt == "" {
-		ref.InstalledAt = time.Now().UTC().Format(time.RFC3339)
-	}
-	if req.Mode == ModeMergeIntoMod {
-		if existing, lerr := LoadModMetadata(finalDir); lerr == nil && existing != nil && len(existing.SourceArchives) > 0 {
-			ref.Merged = true
-		}
-	}
-	if err := AppendSourceArchive(
-		finalDir, req.TargetMod, ref,
-		req.DisplayName, req.Category, req.Version, req.ModPage, written,
-	); err != nil {
-		slog.Warn("updating mod metadata failed", "err", err)
-	}
-
 	relFromDownloads := strings.TrimPrefix(ref.Path, "Downloads/")
 	if relFromDownloads != ref.Path {
-		_ = SetUninstalled(req.GameID, relFromDownloads, false)
-	}
-
-	final, _ := LoadModMetadata(finalDir)
-	fileCount := 0
-	if final != nil {
-		fileCount = final.FileCount
+		if err := SetUninstalled(req.GameID, relFromDownloads, false); err != nil {
+			slog.Warn("updating download index failed", "err", err)
+		}
 	}
 	emit(InstallProgress{Step: StageComplete, Pct: 100, FilesDone: int64(fileCount), FilesTotal: int64(fileCount)})
 
@@ -278,6 +290,18 @@ func IsCollisionMarker(err error) (string, bool) {
 	return "", false
 }
 
+// skipArchiveMetadata logs and skips a content-root installation record once per copy.
+func skipArchiveMetadata(rel string, logged *bool) bool {
+	if !strings.EqualFold(rel, "metadata.yaml") {
+		return false
+	}
+	if !*logged {
+		slog.Info("ignoring archive metadata.yaml")
+		*logged = true
+	}
+	return true
+}
+
 // copyFlatten replays the archive's content root into stage.
 func copyFlatten(gameID, extractRoot, contentRoot, stageDir, installID string, sink ProgressSink, excludeFomod bool) ([]string, error) {
 	resolvedExtractRoot, err := filepath.EvalSymlinks(extractRoot)
@@ -295,6 +319,7 @@ func copyFlatten(gameID, extractRoot, contentRoot, stageDir, installID string, s
 	rootedOblivionRemastered := gameID == "oblivionremastered" && hasOblivionRemasteredRootMarkers(contentRoot)
 
 	var written []string
+	var loggedMetadata bool
 	err = filepath.WalkDir(contentRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -304,6 +329,9 @@ func copyFlatten(gameID, extractRoot, contentRoot, stageDir, installID string, s
 			return err
 		}
 		if rel == "." {
+			return nil
+		}
+		if !d.IsDir() && skipArchiveMetadata(rel, &loggedMetadata) {
 			return nil
 		}
 		if excludeFomod {
@@ -360,6 +388,7 @@ func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile,
 	ordered := append([]FomodFile(nil), files...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Priority < ordered[j].Priority })
 	var written []string
+	var loggedMetadata bool
 	for _, f := range ordered {
 		src, err := resolveFomodSource(extractRoot, resolvedRoot, f.Source)
 		if errors.Is(err, os.ErrNotExist) {
@@ -401,6 +430,13 @@ func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile,
 				if d.IsDir() {
 					return os.MkdirAll(dst, 0755)
 				}
+				toRoot, destErr := filepath.Rel(stageDir, dst)
+				if destErr != nil {
+					return destErr
+				}
+				if skipArchiveMetadata(toRoot, &loggedMetadata) {
+					return nil
+				}
 				copySource := path
 				if d.Type()&os.ModeSymlink != 0 {
 					copySource, err = filepath.EvalSymlinks(path)
@@ -419,6 +455,13 @@ func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile,
 				return written, err
 			}
 		} else {
+			toRoot, err := filepath.Rel(stageDir, destRoot)
+			if err != nil {
+				return written, err
+			}
+			if skipArchiveMetadata(toRoot, &loggedMetadata) {
+				continue
+			}
 			if err := copyFile(src, destRoot); err != nil {
 				return written, err
 			}
