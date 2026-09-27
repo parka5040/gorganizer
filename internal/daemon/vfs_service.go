@@ -65,6 +65,11 @@ func (vs *VFSService) MountVFSWithSwap(gameID, profileName string) (*dto.VFSStat
 }
 
 func (vs *VFSService) mountVFSWithSwap(gameID, profileName string, autoSwap bool) (*dto.VFSStatusResult, error) {
+	return vs.mountVFSOwned(gameID, profileName, autoSwap, 0)
+}
+
+// mountVFSOwned mounts a profile while excluding the caller's admission from an auto-swap conflict.
+func (vs *VFSService) mountVFSOwned(gameID, profileName string, autoSwap bool, owner uint64) (*dto.VFSStatusResult, error) {
 	if err := vs.s.awaitRecovery(); err != nil {
 		return nil, err
 	}
@@ -93,6 +98,9 @@ func (vs *VFSService) mountVFSWithSwap(gameID, profileName string, autoSwap bool
 			}
 		}
 		if conflictMM, ok := vs.s.mountMgrs[conflict]; ok && conflictMM.IsMounted() {
+			if busy := vs.s.pendingAdmissionLocked(gameID, owner); busy != nil {
+				return nil, busy
+			}
 			if vs.s.teardownBusyLocked(conflict) {
 				return nil, fmt.Errorf("cannot auto-swap while %s is running", conflict)
 			}
@@ -253,8 +261,14 @@ func (vs *VFSService) UnmountVFS(gameID string) error {
 		return err
 	}
 	defer release()
+	if busy := vs.s.pendingAdmissionLocked(gameID, 0); busy != nil {
+		return busy
+	}
 	if vs.s.trackedMountBusy(gameID) {
 		return fmt.Errorf("cannot unmount while %s has a tracked game or tool process", gameID)
+	}
+	if vs.s.unmountRunningLocked(gameID) {
+		return &dto.GameRunningError{GameID: gameID, Operation: dto.GameRunningOperationUnmount}
 	}
 	gc, err := vs.s.config.EffectiveGameConfig(gameID)
 	if err != nil {
@@ -392,6 +406,11 @@ func (vs *VFSService) RestoreFromBackup(gameID string) error {
 }
 
 func (vs *VFSService) RebuildVFS(gameID string) error {
+	return vs.rebuildVFSOwned(gameID, 0)
+}
+
+// rebuildVFSOwned applies pending mod changes while excluding the caller's own launch or tool reservation.
+func (vs *VFSService) rebuildVFSOwned(gameID string, owner uint64) error {
 	vs.s.mu.Lock()
 	defer vs.s.mu.Unlock()
 
@@ -404,6 +423,9 @@ func (vs *VFSService) RebuildVFS(gameID string) error {
 		return err
 	}
 	defer release()
+	if busy := vs.s.pendingAdmissionLocked(gameID, owner); busy != nil {
+		return busy
+	}
 
 	if vs.s.applyBusyLocked(gameID) {
 		return &dto.GameRunningError{GameID: gameID, Operation: dto.GameRunningOperationApply}

@@ -297,11 +297,11 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 	if es.s.applyBusy(gameID) {
 		return 0, "", fmt.Errorf("cannot launch a tool while %s or another managed tool is running", gameID)
 	}
-	releaseFence, fenceErr := es.s.acquireShared(gameID, dto.BusyOperationTool)
+	reservation, fenceErr := es.s.acquireSharedOwned(gameID, dto.BusyOperationTool)
 	if fenceErr != nil {
 		return 0, "", fenceErr
 	}
-	defer releaseFence()
+	defer reservation.Release()
 
 	gc, ok := es.s.gameConfigSnapshot(gameID)
 	if !ok {
@@ -381,12 +381,12 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 	}
 	if exe.NeedsVFSMounted {
 		if !mm.IsMounted() && profileName != "" {
-			if _, err := es.s.svc.vfs.MountVFS(gameID, profileName); err != nil {
+			if _, err := es.s.svc.vfs.mountVFSOwned(gameID, profileName, false, reservation.id); err != nil {
 				return 0, "", fmt.Errorf("mounting VFS for tool: %w", err)
 			}
 		}
 		if mm.IsMounted() && mm.IsDirty() && !es.s.applyBusy(gameID) {
-			if err := es.s.svc.vfs.RebuildVFS(gameID); err != nil {
+			if err := es.s.svc.vfs.rebuildVFSOwned(gameID, reservation.id); err != nil {
 				return 0, "", fmt.Errorf("applying pending mod changes before tool launch: %w", err)
 			}
 		}

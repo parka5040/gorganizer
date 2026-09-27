@@ -26,11 +26,11 @@ func (ls *LaunchService) LaunchGame(gameID string, useTool bool, profileName str
 	if err := ls.s.awaitRecovery(); err != nil {
 		return 0, err
 	}
-	gc, mm, release, err := ls.admitLaunch(gameID)
+	gc, mm, reservation, err := ls.admitLaunch(gameID)
 	if err != nil {
 		return 0, err
 	}
-	defer release()
+	defer reservation.Release()
 	if err := ls.s.launchStep("admitted"); err != nil {
 		return 0, err
 	}
@@ -46,7 +46,7 @@ func (ls *LaunchService) LaunchGame(gameID string, useTool bool, profileName str
 	}
 	if !mm.IsMounted() && profileName != "" {
 		slog.Info("auto-mounting VFS before launch", "game", gameID, "profile", profileName)
-		if _, err := ls.s.svc.vfs.MountVFS(gameID, profileName); err != nil {
+		if _, err := ls.s.svc.vfs.mountVFSOwned(gameID, profileName, false, reservation.id); err != nil {
 			return 0, fmt.Errorf("auto-mount of %s VFS failed: %w", gameID, err)
 		}
 	}
@@ -56,7 +56,7 @@ func (ls *LaunchService) LaunchGame(gameID string, useTool bool, profileName str
 			return 0, err
 		}
 		slog.Info("applying pending mod changes before launch", "game", gameID)
-		if err := ls.s.svc.vfs.RebuildVFS(gameID); err != nil {
+		if err := ls.s.svc.vfs.rebuildVFSOwned(gameID, reservation.id); err != nil {
 			return 0, fmt.Errorf("applying pending mod changes before launch: %w", err)
 		}
 	}
@@ -172,45 +172,45 @@ func xdgOpenURL(url string) (int, error) {
 }
 
 // admitLaunch refuses, under s.mu, a launch of gameID while a recovery is pending or a mutex sibling is mounted, then takes its shared launch reservation and resolves its effective config and mount manager.
-func (ls *LaunchService) admitLaunch(gameID string) (config.GameConfig, *vfs.MountManager, func(), error) {
+func (ls *LaunchService) admitLaunch(gameID string) (config.GameConfig, *vfs.MountManager, sharedReservation, error) {
 	ls.s.mu.Lock()
 	defer ls.s.mu.Unlock()
 	if pending := ls.s.recoveryPendingFor(gameID); pending != nil {
-		return config.GameConfig{}, nil, nil, fmt.Errorf("recovery pending for %s: %s — confirm via the GUI prompt or `gorganizerctl recover-confirm` first",
+		return config.GameConfig{}, nil, sharedReservation{}, fmt.Errorf("recovery pending for %s: %s — confirm via the GUI prompt or `gorganizerctl recover-confirm` first",
 			gameID, pending.Reason)
 	}
 	if conflict := ls.s.findMutexConflict(gameID); conflict != "" {
-		return config.GameConfig{}, nil, nil, &VFSMutexError{
+		return config.GameConfig{}, nil, sharedReservation{}, &VFSMutexError{
 			GameID:      gameID,
 			Conflicting: conflict,
 			Group:       mutexGroupOf(gameID),
 		}
 	}
-	release, err := ls.s.reserveShared(gameID, dto.BusyOperationLaunch)
+	reservation, err := ls.s.reserveSharedOwned(gameID, dto.BusyOperationLaunch)
 	if err != nil {
-		return config.GameConfig{}, nil, nil, err
+		return config.GameConfig{}, nil, sharedReservation{}, err
 	}
 	gc, ok := ls.s.config.Games[gameID]
 	if !ok {
-		release()
-		return config.GameConfig{}, nil, nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
+		reservation.Release()
+		return config.GameConfig{}, nil, sharedReservation{}, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	if gc.LinkedFromGameID != "" {
 		if _, parentOk := ls.s.config.Games[gc.LinkedFromGameID]; !parentOk {
-			release()
-			return config.GameConfig{}, nil, nil, &ErrLinkedParentMissing{
+			reservation.Release()
+			return config.GameConfig{}, nil, sharedReservation{}, &ErrLinkedParentMissing{
 				GameID:       gameID,
 				ParentGameID: gc.LinkedFromGameID,
 			}
 		}
 		eff, err := ls.s.config.EffectiveGameConfig(gameID)
 		if err != nil {
-			release()
-			return config.GameConfig{}, nil, nil, err
+			reservation.Release()
+			return config.GameConfig{}, nil, sharedReservation{}, err
 		}
 		gc = eff
 	}
-	return cloneGameConfig(gc), ls.s.ensureMountManager(gameID, gc), release, nil
+	return cloneGameConfig(gc), ls.s.ensureMountManager(gameID, gc), reservation, nil
 }
 
 // refuseDirtyRunningFarm returns a GameRunningError while a tracked launch or tool, a game process, or a fresh Steam launch may still read gameID's farm, so pending changes are never skipped silently before a launch.
