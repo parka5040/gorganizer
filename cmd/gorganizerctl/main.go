@@ -33,6 +33,10 @@ func main() {
 	switch subcommand {
 	case "ping":
 		os.Exit(runPing(args))
+	case "doctor":
+		os.Exit(runDoctor(args))
+	case "bug-report":
+		os.Exit(runBugReport(args))
 	case "wait-ready":
 		os.Exit(runWaitReady(args))
 	case "stop":
@@ -123,6 +127,8 @@ func usage() {
 
 Subcommands:
   ping                         Check whether Gorganizer is running.
+  doctor                       Check local settings, games and the background service.
+  bug-report [--out DIR]        Save a private, redacted report to attach yourself.
   wait-ready [--timeout 60s]   Wait for startup to finish.
   stop [--timeout 46s]         Ask Gorganizer to stop and wait for it to exit.
   migrate-data --from <path> [--dry-run [--json]] [--yes]
