@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -19,6 +18,7 @@ import (
 	"github.com/parka/gorganizer/internal/instancelock"
 	"github.com/parka/gorganizer/internal/ipc"
 	"github.com/parka/gorganizer/internal/migrate"
+	"github.com/parka/gorganizer/internal/protontricks"
 	"github.com/parka/gorganizer/internal/transfer"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -183,13 +183,14 @@ func forwardNXM(uri, socketPath string) error {
 	return nil
 }
 
-// checkProtontricksAvailable warns once at startup when protontricks is missing.
+// checkProtontricksAvailable reports whether Protontricks can install Windows runtime components.
 func checkProtontricksAvailable() {
-	if _, err := exec.LookPath("protontricks"); err != nil {
-		slog.Warn("protontricks not found on PATH — required for heavy mod loadouts (DX9/VC++/XAudio redists). Install via your package manager: pacman -S protontricks (Arch/Artix), emerge protontricks (Gentoo), apt install protontricks (Debian/Ubuntu), or flatpak install com.github.Matoking.protontricks")
+	invocation, err := protontricks.Resolve(context.Background(), protontricks.Options{})
+	if err != nil {
+		slog.Warn("protontricks not installed; Windows runtime components cannot be added automatically")
 		return
 	}
-	slog.Info("protontricks available — Proton prefix redists will auto-install on script extender install")
+	slog.Info("protontricks available (" + string(invocation.Kind()) + ")")
 }
 
 // parseLogLevel maps a log level name to its slog level, defaulting to info.

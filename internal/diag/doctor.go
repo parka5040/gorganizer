@@ -17,6 +17,7 @@ import (
 	"github.com/parka/gorganizer/internal/gamedef"
 	"github.com/parka/gorganizer/internal/migrate"
 	"github.com/parka/gorganizer/internal/procscan"
+	"github.com/parka/gorganizer/internal/protontricks"
 	"github.com/parka/gorganizer/internal/steam"
 	"github.com/parka/gorganizer/internal/vfs"
 )
@@ -28,14 +29,15 @@ type Health struct {
 }
 
 type Options struct {
-	Version        string
-	Executable     string
-	Checkout       string
-	ProcRoot       string
-	Health         func(context.Context) (Health, error)
-	BinaryVersion  func(context.Context, string) (string, error)
-	FindSteamRoots func() ([]steam.Root, error)
-	LookPath       func(string) (string, error)
+	Version          string
+	Executable       string
+	Checkout         string
+	ProcRoot         string
+	Health           func(context.Context) (Health, error)
+	BinaryVersion    func(context.Context, string) (string, error)
+	FindSteamRoots   func() ([]steam.Root, error)
+	LookPath         func(string) (string, error)
+	ProtontricksInfo func(context.Context, string, ...string) error
 }
 
 type Check struct {
@@ -148,7 +150,12 @@ func Run(opts Options) Report {
 		checkGame(&r, cfg, id, opts.ProcRoot)
 	}
 	checkSteam(&r, opts, cfg, ids)
-	for _, tool := range []string{"protontricks", "7z", "unrar", "notify-send"} {
+	if invocation, err := protontricks.Resolve(context.Background(), protontricks.Options{LookPath: opts.LookPath, RunInfo: opts.ProtontricksInfo}); err == nil {
+		add("OK", "Optional tool protontricks", "Available ("+string(invocation.Kind())+").")
+	} else {
+		add("Note", "Optional tool protontricks", "Not installed; Windows runtime components cannot be added automatically.")
+	}
+	for _, tool := range []string{"7z", "unrar", "notify-send"} {
 		if _, err := opts.LookPath(tool); err == nil {
 			add("OK", "Optional tool "+tool, "Available.")
 		} else {

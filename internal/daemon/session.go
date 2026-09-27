@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	inipkg "github.com/parka/gorganizer/internal/ini"
 	"github.com/parka/gorganizer/internal/plugins"
 	"github.com/parka/gorganizer/internal/profile"
+	"github.com/parka/gorganizer/internal/protontricks"
 	"github.com/parka/gorganizer/internal/steam"
 	"github.com/parka/gorganizer/internal/tools"
 	"github.com/parka/gorganizer/internal/vfs"
@@ -75,6 +77,7 @@ type session struct {
 	launchFault            func(step string) error
 	steamOpener            func(url string) (int, error)
 	readSteamAppState      func(string, int) (steam.AppState, error)
+	resolveProtontricks    func(context.Context, protontricks.Options) (protontricks.Invocation, error)
 
 	activeGameID   string
 	activeGameIDMu sync.RWMutex
@@ -121,6 +124,15 @@ type session struct {
 	softDepFetcherMu sync.Mutex
 
 	svc services
+}
+
+// protontricksInvocation selects an installed Protontricks executable without holding the session lock.
+func (s *session) protontricksInvocation(ctx context.Context) (protontricks.Invocation, error) {
+	resolve := s.resolveProtontricks
+	if resolve == nil {
+		resolve = protontricks.Resolve
+	}
+	return resolve(ctx, protontricks.Options{})
 }
 
 type services struct {

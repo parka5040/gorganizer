@@ -312,7 +312,7 @@ func collectMissing(st *TTWPrereqStatus) []string {
 			missing = append(missing, "Steam (must be running)")
 		}
 		if !st.ProtontricksAvailable {
-			missing = append(missing, "protontricks (Flatpak / pipx)")
+			missing = append(missing, "Protontricks (from your software centre or Flathub)")
 		}
 		if !st.WinetricksAvailable {
 			missing = append(missing, "winetricks")
@@ -350,7 +350,8 @@ func readMpiInstallerVersion(path string) (string, error) {
 // populateWinePrereqs fills the Wine-backend prerequisite fields by inspecting FNV's Proton prefix.
 func (tt *TTWService) populateWinePrereqs(st *TTWPrereqStatus) {
 	st.SteamRunning = tools.SteamIsRunningForTTW()
-	st.ProtontricksAvailable = onPath("protontricks") || onPath("flatpak")
+	_, err := tt.s.protontricksInvocation(context.Background())
+	st.ProtontricksAvailable = err == nil
 	st.WinetricksAvailable = onPath("winetricks")
 
 	tt.s.mu.RLock()
@@ -1311,28 +1312,21 @@ func (tt *TTWService) InstallTTWPrereqs() (string, error) {
 	if !ok {
 		return "", fmt.Errorf("FNV not configured")
 	}
-	pt, err := exec.LookPath("protontricks")
+	ctx := context.Background()
+	invocation, err := tt.s.protontricksInvocation(ctx)
 	if err != nil {
-		if _, ferr := exec.LookPath("flatpak"); ferr == nil {
-			pt = "flatpak"
-		} else {
-			return "", fmt.Errorf("protontricks not on PATH (install via Flatpak or pipx)")
-		}
+		return "", err
 	}
-
+	compatData, err := tools.ResolveCompatDataPath(&fnv, 0)
+	if err != nil {
+		return "", fmt.Errorf("resolving FNV Proton prefix: %w", err)
+	}
+	library, err := tools.ResolveSteamLibrary(&fnv)
+	if err != nil {
+		return "", fmt.Errorf("resolving FNV Steam library: %w", err)
+	}
 	id := mintTTWInstallID(TTWBackendWine) + "-prereqs"
-
-	args := []string{
-		fmt.Sprintf("%d", fnv.SteamAppID),
-		"-q", "vcrun2022", "msxml6", "corefonts", "dotnet48",
-	}
-	var cmd *exec.Cmd
-	if pt == "flatpak" {
-		cmd = exec.Command("flatpak", append([]string{"run", "com.github.Matoking.protontricks"}, args...)...)
-	} else {
-		cmd = exec.Command(pt, args...)
-	}
-	cmd.Env = os.Environ()
+	cmd := invocation.Command(ctx, fnv.SteamAppID, compatData, []string{library}, []string{"vcrun2022", "msxml6", "corefonts", "dotnet48"})
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()

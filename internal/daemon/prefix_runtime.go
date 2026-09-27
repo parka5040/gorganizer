@@ -3,10 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"log/slog"
-	"os"
-	"os/exec"
 	"sync"
 	"time"
 
@@ -45,33 +42,31 @@ func (ls *LaunchService) ensurePrefixRuntime(gameID string, gc config.GameConfig
 	}
 	prefixRuntimeInstalledMu.Unlock()
 
-	if _, err := exec.LookPath("protontricks"); err != nil {
-		slog.Warn("protontricks not found on PATH — heavy mod loadouts may crash without DX9/VC++ redists; install protontricks from your distro (pacman/emerge/apt/flatpak) to silence this",
-			"game", gameID, "packages_needed", pkgs)
-		return
-	}
-
-	args := []string{"--no-bwrap", fmt.Sprintf("%d", appID), "-q"}
-	args = append(args, pkgs...)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "protontricks", args...)
-	cmd.Env = append(os.Environ(), "STEAM_COMPAT_DATA_PATH="+compatData)
+	invocation, err := ls.s.protontricksInvocation(ctx)
+	if err != nil {
+		slog.Warn("protontricks not installed; skipping prefix runtime install", "game", gameID, "packages", pkgs)
+		return
+	}
+	library, err := tools.ResolveSteamLibrary(&gc)
+	if err != nil {
+		slog.Warn("could not resolve Steam library for runtime setup", "game", gameID, "err", err)
+		return
+	}
+	cmd := invocation.Command(ctx, appID, compatData, []string{library}, pkgs)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	slog.Info("installing Proton prefix runtime via protontricks",
-		"game", gameID, "app_id", appID, "packages", pkgs)
+		"game", gameID, "app_id", appID, "packages", pkgs, "kind", invocation.Kind())
 
 	if err := cmd.Run(); err != nil {
 		slog.Warn("protontricks failed — modded launches may crash until the missing redists are installed manually",
 			"game", gameID, "err", err,
 			"stdout", trimForLog(stdout.String()),
-			"stderr", trimForLog(stderr.String()),
-			"hint", fmt.Sprintf("try: protontricks %d %s", appID, joinPkgs(pkgs)))
+			"stderr", trimForLog(stderr.String()))
 		return
 	}
 
@@ -81,18 +76,6 @@ func (ls *LaunchService) ensurePrefixRuntime(gameID string, gc config.GameConfig
 
 	slog.Info("Proton prefix runtime ready",
 		"game", gameID, "app_id", appID, "packages", pkgs)
-}
-
-// joinPkgs joins package names with single spaces.
-func joinPkgs(pkgs []string) string {
-	out := ""
-	for i, p := range pkgs {
-		if i > 0 {
-			out += " "
-		}
-		out += p
-	}
-	return out
 }
 
 // trimForLog truncates winetricks output to a length that fits in a single log line.

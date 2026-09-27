@@ -85,6 +85,57 @@ func TestDoctorReportsProblemsAndFixes(t *testing.T) {
 	}
 }
 
+// TestDoctorProtontricks checks native and Flatpak availability without invoking external binaries.
+func TestDoctorProtontricks(t *testing.T) {
+	for _, tc := range []struct {
+		name, native, flatpak, message string
+		infoError                      error
+		infoCalls                      int
+	}{
+		{name: "native first", native: "native-tool", flatpak: "flatpak-tool", message: "Available (native)."},
+		{name: "Flatpak app installed", flatpak: "flatpak-tool", message: "Available (flatpak).", infoCalls: 1},
+		{name: "Flatpak app absent", flatpak: "flatpak-tool", infoError: os.ErrNotExist, message: "Not installed; Windows runtime components cannot be added automatically.", infoCalls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, _, _ := fixture(t)
+			calls := 0
+			opts.LookPath = func(name string) (string, error) {
+				switch name {
+				case "protontricks":
+					if tc.native != "" {
+						return tc.native, nil
+					}
+				case "flatpak":
+					if tc.flatpak != "" {
+						return tc.flatpak, nil
+					}
+				}
+				return "", os.ErrNotExist
+			}
+			opts.ProtontricksInfo = func(context.Context, string, ...string) error {
+				calls++
+				return tc.infoError
+			}
+			report := Run(opts)
+			if calls != tc.infoCalls {
+				t.Errorf("flatpak info called %d times, want %d", calls, tc.infoCalls)
+			}
+			found := false
+			for _, check := range report.Checks {
+				if check.Name == "Optional tool protontricks" {
+					found = true
+					if check.Message != tc.message {
+						t.Errorf("protontricks check = %q, want %q", check.Message, tc.message)
+					}
+				}
+			}
+			if !found {
+				t.Error("protontricks check missing")
+			}
+		})
+	}
+}
+
 // TestDoctorReportsVersionDisagreement checks nearby binary versions and a mismatched daemon response.
 func TestDoctorReportsVersionDisagreement(t *testing.T) {
 	opts, root, _ := fixture(t)

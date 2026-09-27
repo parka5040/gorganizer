@@ -6,10 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"time"
 
 	"github.com/parka/gorganizer/internal/atomicfile"
@@ -60,17 +58,17 @@ func (es *ExecutableService) ensureExecutableRuntime(gameID string, gameConfig c
 	if len(missing) == 0 {
 		return nil
 	}
-	protontricks, err := exec.LookPath("protontricks")
-	if err != nil {
-		return fmt.Errorf("%s requires %v in its Proton prefix; install protontricks and retry", definition.Title, missing)
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
-	args := []string{"--no-bwrap", strconv.Itoa(appID), "-q"}
-	args = append(args, missing...)
-	cmd := exec.CommandContext(ctx, protontricks, args...)
-	cmd.Env = append(os.Environ(), "STEAM_COMPAT_DATA_PATH="+compatData)
+	invocation, err := es.s.protontricksInvocation(ctx)
+	if err != nil {
+		return fmt.Errorf("%s requires %v in its Proton prefix: %w", definition.Title, missing, err)
+	}
+	library, err := tools.ResolveSteamLibrary(&gameConfig)
+	if err != nil {
+		return fmt.Errorf("resolving Steam library for %s: %w", definition.Title, err)
+	}
+	cmd := invocation.Command(ctx, appID, compatData, []string{library}, missing)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
