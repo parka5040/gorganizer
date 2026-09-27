@@ -79,8 +79,6 @@ private:
     void startExternalInstall(const PendingExternalInstall& request);
     // Reports or resolves a failed pending external install.
     void onExternalInstallFailed(const PendingExternalInstall& request, const QString& error);
-    // Offers merge, rename, or cancel when a pending install hit an existing mod folder.
-    void resolveExternalInstallCollision(const PendingExternalInstall& request, const QString& existingName);
 
     AppConfig& m_config;
     GrpcClient* m_grpc;

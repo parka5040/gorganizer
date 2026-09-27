@@ -5,6 +5,10 @@
 
 namespace gorganizer {
 
+static_assert(static_cast<int>(GrpcInstallAsNewMod) == gorganizer::v1::INSTALL_MODE_NEW_MOD);
+static_assert(static_cast<int>(GrpcInstallMergeIntoMod) == gorganizer::v1::INSTALL_MODE_MERGE_INTO);
+static_assert(static_cast<int>(GrpcInstallReplaceMod) == gorganizer::v1::INSTALL_MODE_REPLACE);
+
 namespace {
 
 GrpcFomodPlan fomodPlanFromProto(const gorganizer::v1::FomodPlan& p)

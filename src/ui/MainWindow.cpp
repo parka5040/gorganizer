@@ -26,6 +26,7 @@
 #include "ThemeManager.h"
 #include "Dialogs.h"
 #include "InstallErrorText.h"
+#include "InstallCollisionDialog.h"
 #include "ErrorPresenter.h"
 
 #include <QToolBar>
@@ -36,13 +37,10 @@
 #include <QFileDialog>
 #include <QVBoxLayout>
 #include <QActionGroup>
-#include <QAbstractButton>
 #include <QCloseEvent>
 #include <QCheckBox>
 #include <QSettings>
-#include <QInputDialog>
 #include <QMessageBox>
-#include <QPushButton>
 
 namespace gorganizer {
 
@@ -489,17 +487,7 @@ void MainWindow::installThroughDaemonLayout(const QString& gameId, const QString
 
 QString MainWindow::askModName(const QString& title, const QString& label, const QString& initial)
 {
-    QString name = initial;
-    for (;;) {
-        bool ok = false;
-        name = QInputDialog::getText(this, title, label, QLineEdit::Normal, name, &ok).trimmed();
-        if (!ok)
-            return QString();
-        const QString problem = modNameProblem(name);
-        if (problem.isEmpty())
-            return name;
-        dialogs::plainWarn(this, title, problem);
-    }
+    return askInstallModName(this, title, label, initial);
 }
 
 void MainWindow::startExternalInstall(const PendingExternalInstall& request)
@@ -536,7 +524,8 @@ void MainWindow::onInstallRequestFailed(quint64 requestId, const QString& error)
         onExternalInstallFailed(request, error);
         return;
     }
-    if (parseInstallError(error).token == QLatin1String("fomod_required"))
+    const QString token = parseInstallError(error).token;
+    if (token == QLatin1String("fomod_required") || token == QLatin1String("mod_collision"))
         return;
     statusBar()->showMessage(errorSummary("install this mod", error, true), 5000);
 }
@@ -546,12 +535,12 @@ void MainWindow::onExternalInstallFailed(const PendingExternalInstall& request, 
     const InstallError parsed = parseInstallError(error);
     statusBar()->clearMessage();
     if (parsed.token == QLatin1String("mod_collision")) {
-        QString existing = parsed.fields.value(QStringLiteral("name"));
-        if (existing.isEmpty())
-            existing = parsed.fields.value(QStringLiteral("existing")).section(QLatin1Char(','), 0, 0);
-        if (existing.isEmpty())
-            existing = request.name;
-        resolveExternalInstallCollision(request, existing);
+        if (const auto choice = resolveInstallCollision(this, error, request.name)) {
+            PendingExternalInstall retry = request;
+            retry.name = choice->targetMod;
+            retry.mode = choice->mode;
+            startExternalInstall(retry);
+        }
         return;
     }
     if (parsed.token == QLatin1String("invalid_target_mod") && request.mode == GrpcInstallAsNewMod) {
@@ -567,41 +556,6 @@ void MainWindow::onExternalInstallFailed(const PendingExternalInstall& request, 
         return;
     }
     presentError(this, "Install Mod", "install this mod", error, true);
-}
-
-void MainWindow::resolveExternalInstallCollision(const PendingExternalInstall& request,
-                                                 const QString& existingName)
-{
-    QMessageBox box(this);
-    box.setWindowTitle("Mod Already Exists");
-    box.setIcon(QMessageBox::Question);
-    box.setTextFormat(Qt::PlainText);
-    box.setText(QString("A mod named \"%1\" is already installed.").arg(existingName));
-    box.setInformativeText(
-        "Merge into existing keeps every file already in that mod and adds this archive on top, so files "
-        "an update removed or renamed stay behind and can break it.\n\n"
-        "Rename… installs this archive as a separate mod, which is safer for updates.");
-    QAbstractButton* mergeBtn = box.addButton("Merge into existing (keeps old files)", QMessageBox::AcceptRole);
-    QAbstractButton* renameBtn = box.addButton("Rename…", QMessageBox::ActionRole);
-    box.addButton(QMessageBox::Cancel);
-    box.setDefaultButton(static_cast<QPushButton*>(renameBtn));
-    box.exec();
-
-    QAbstractButton* clicked = box.clickedButton();
-    PendingExternalInstall retry = request;
-    if (clicked == mergeBtn) {
-        retry.name = existingName;
-        retry.mode = GrpcInstallMergeIntoMod;
-        startExternalInstall(retry);
-        return;
-    }
-    if (clicked != renameBtn)
-        return;
-    retry.name = askModName("Rename Mod", "New mod name:", existingName);
-    if (retry.name.isEmpty())
-        return;
-    retry.mode = GrpcInstallAsNewMod;
-    startExternalInstall(retry);
 }
 
 void MainWindow::onOpenSettings()

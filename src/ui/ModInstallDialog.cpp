@@ -2,6 +2,8 @@
 #include "FomodInstallerDialog.h"
 #include "GrpcClient.h"
 #include "ErrorPresenter.h"
+#include "InstallCollisionDialog.h"
+#include "InstallErrorText.h"
 #include "ThemeManager.h"
 
 #include <QBrush>
@@ -33,7 +35,7 @@ ModInstallDialog::ModInstallDialog(const QString& gameId, const QString& modName
     , m_source(std::move(source))
     , m_target(std::move(target))
 {
-    setWindowTitle(m_target.mode == GrpcInstallMergeIntoMod
+    setWindowTitle(m_target.mode != GrpcInstallAsNewMod
         ? "Update Mod: " + m_target.targetMod : "Install Mod: " + modName);
     setMinimumSize(500, 400);
     resize(600, 500);
@@ -244,6 +246,9 @@ void ModInstallDialog::beginInstall(bool fomodConfirmed,
                                     const std::vector<GrpcFomodFile>& files,
                                     const QString& selectedRoot)
 {
+    m_fomodConfirmed = fomodConfirmed;
+    m_selectedFiles = files;
+    m_installRoot = selectedRoot;
     m_phase = Installing;
     m_installBtn->setEnabled(false);
     m_cancelBtn->setEnabled(false);
@@ -251,8 +256,7 @@ void ModInstallDialog::beginInstall(bool fomodConfirmed,
     m_treeWidget->hide();
     m_progressBar->show();
     m_statusLabel->setText(QString("Installing %1… please wait").arg(m_modName));
-    const QString targetMod = m_target.mode == GrpcInstallMergeIntoMod
-        ? m_target.targetMod : m_modName;
+    const QString targetMod = m_target.targetMod.isEmpty() ? m_modName : m_target.targetMod;
     if (m_source.archiveRelPath.isEmpty()) {
         m_installRequestId = m_grpc->startInstallExternal(m_gameId, m_source.externalArchivePath,
             m_target.mode, targetMod, fomodConfirmed, selectedRoot, m_previewId, files);
@@ -277,6 +281,18 @@ void ModInstallDialog::onInstallFailed(quint64 requestId, const QString& error)
 {
     if (m_phase != Installing || requestId != m_installRequestId)
         return;
+    if (parseInstallError(error).token == QLatin1String("mod_collision")) {
+        const auto choice = resolveInstallCollision(this, error,
+            m_target.targetMod.isEmpty() ? m_modName : m_target.targetMod);
+        if (choice) {
+            m_target = {choice->mode, choice->targetMod};
+            beginInstall(m_fomodConfirmed, m_selectedFiles, m_installRoot);
+        } else {
+            discardPreview();
+            QDialog::reject();
+        }
+        return;
+    }
     discardPreview();
     showFailure(errorSummary("install this mod", error, true));
     presentError(this, "Install Failed", "install this mod", error, true);
