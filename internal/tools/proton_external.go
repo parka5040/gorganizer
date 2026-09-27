@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/parka/gorganizer/internal/config"
+	"github.com/parka/gorganizer/internal/steam"
 )
 
 var dropEnvKeys = map[string]bool{
@@ -73,7 +74,7 @@ func (m *Manager) LaunchExternalWithOptions(o ExternalLaunchOpts) (*ExternalLaun
 		return nil, fmt.Errorf("LaunchExternal: gameCfg is nil")
 	}
 
-	steamRoot, err := findSteamRoot()
+	steamRoot, libraryRoot, err := owningSteamLibrary(o.GameCfg)
 	if err != nil {
 		return nil, fmt.Errorf("finding Steam root: %w", err)
 	}
@@ -83,7 +84,6 @@ func (m *Manager) LaunchExternalWithOptions(o ExternalLaunchOpts) (*ExternalLaun
 		prefixAppID = o.PrefixAppID
 	}
 	appID := strconv.Itoa(prefixAppID)
-	libraryRoot := resolveSteamLibrary(steamRoot, o.GameCfg)
 	compatDataPath := findCompatDataPath(steamRoot, libraryRoot, appID)
 	prefixPath := filepath.Join(compatDataPath, "pfx")
 
@@ -403,62 +403,67 @@ func buildExternalEnv(
 	return env
 }
 
-func resolveSteamLibrary(steamRoot string, gameCfg *config.GameConfig) string {
-	if gameCfg != nil && gameCfg.SteamLibraryPath != "" {
-		if info, err := os.Stat(filepath.Join(gameCfg.SteamLibraryPath, "steamapps")); err == nil && info.IsDir() {
-			return gameCfg.SteamLibraryPath
-		}
+// owningSteamLibrary finds the client and library that contain a game's installation.
+func owningSteamLibrary(gameCfg *config.GameConfig) (string, string, error) {
+	roots, err := steam.FindRoots()
+	if err != nil {
+		return "", "", err
 	}
-	if gameCfg != nil {
-		install, _ := filepath.Abs(gameCfg.InstallPath)
-		for _, library := range steamLibraries(steamRoot) {
-			common, _ := filepath.Abs(filepath.Join(library, "steamapps", "common"))
-			if install == common || strings.HasPrefix(install, common+string(filepath.Separator)) {
-				return library
+	if gameCfg != nil && gameCfg.InstallPath != "" {
+		install, err := filepath.EvalSymlinks(gameCfg.InstallPath)
+		if err == nil {
+			for _, root := range roots {
+				for _, library := range root.Libraries {
+					common, err := filepath.EvalSymlinks(filepath.Join(library, "steamapps", "common"))
+					if err == nil && (install == common || strings.HasPrefix(install, common+string(filepath.Separator))) {
+						return root.Path, library, nil
+					}
+				}
 			}
 		}
 	}
-	return steamRoot
+	if gameCfg != nil && gameCfg.SteamLibraryPath != "" {
+		library, err := filepath.EvalSymlinks(gameCfg.SteamLibraryPath)
+		if err == nil {
+			for _, root := range roots {
+				for _, candidate := range root.Libraries {
+					if candidate == library {
+						return root.Path, library, nil
+					}
+				}
+			}
+			if info, err := os.Stat(filepath.Join(library, "steamapps")); err == nil && info.IsDir() {
+				return roots[0].Path, library, nil
+			}
+		}
+	}
+	return roots[0].Path, roots[0].Path, nil
 }
 
 // ResolveSteamLibrary returns the Steam library that owns a configured game installation.
 func ResolveSteamLibrary(gameCfg *config.GameConfig) (string, error) {
-	steamRoot, err := findSteamRoot()
-	if err != nil {
-		return "", err
-	}
-	return resolveSteamLibrary(steamRoot, gameCfg), nil
+	_, library, err := owningSteamLibrary(gameCfg)
+	return library, err
 }
 
 // ResolveCompatDataPath returns the compatdata directory for a game or tool-specific Steam app ID.
 func ResolveCompatDataPath(gameCfg *config.GameConfig, prefixAppID int) (string, error) {
-	steamRoot, err := findSteamRoot()
-	if err != nil {
-		return "", err
-	}
 	if gameCfg == nil {
 		return "", errors.New("game config is required")
+	}
+	steamRoot, library, err := owningSteamLibrary(gameCfg)
+	if err != nil {
+		return "", err
 	}
 	appID := gameCfg.SteamAppID
 	if prefixAppID > 0 {
 		appID = prefixAppID
 	}
-	library := resolveSteamLibrary(steamRoot, gameCfg)
 	return findCompatDataPath(steamRoot, library, strconv.Itoa(appID)), nil
 }
 
 func steamLibraries(steamRoot string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0)
-	for _, library := range append([]string{steamRoot}, parseLibraryFolders(steamRoot)...) {
-		clean := filepath.Clean(library)
-		if clean == "." || seen[clean] {
-			continue
-		}
-		seen[clean] = true
-		out = append(out, clean)
-	}
-	return out
+	return steam.Libraries(steamRoot)
 }
 
 func findCompatDataPath(steamRoot, preferredLibrary, appID string) string {
@@ -550,10 +555,9 @@ func (m *Manager) WineTranslatePath(prefixGameID string, gameCfg *config.GameCon
 		return "", fmt.Errorf("absolute path of %s: %w", unixPath, err)
 	}
 
-	steamRoot, err := findSteamRoot()
+	steamRoot, libraryRoot, err := owningSteamLibrary(gameCfg)
 	if err == nil {
 		appID := strconv.Itoa(gameCfg.SteamAppID)
-		libraryRoot := resolveSteamLibrary(steamRoot, gameCfg)
 		prefixPath := filepath.Join(findCompatDataPath(steamRoot, libraryRoot, appID), "pfx")
 		if winepath, lerr := exec.LookPath("winepath"); lerr == nil {
 			cmd := exec.Command(winepath, "-w", abs)

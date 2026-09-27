@@ -149,9 +149,8 @@ QWizardPage* SetupWizard::createSteamDetectionPage()
                 "Steam installation not found. You can still add games "
                 "manually using the button below.");
         } else {
-            m_steamPathLabel->setText("Steam found at: " + QString::fromStdString(root->string()));
-            auto folders = GameDetector::findLibraryFolders(*root);
-            m_detectedGames = GameDetector::detectGames(folders);
+            m_steamPathLabel->setText("Steam installations found. Searching all game libraries.");
+            m_detectedGames = GameDetector::detectAll();
         }
 
         m_detectedList->clear();

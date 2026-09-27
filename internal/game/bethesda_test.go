@@ -202,6 +202,38 @@ func TestParseAppManifestRejectsBethesdaWithoutData(t *testing.T) {
 	}
 }
 
+// TestDuplicateAppIDKeepsConfiguredInstall checks configured preference and first-root fallback.
+func TestDuplicateAppIDKeepsConfiguredInstall(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", "")
+	native := filepath.Join(home, ".local", "share", "Steam")
+	flatpak := filepath.Join(home, ".var", "app", "com.valvesoftware.Steam", ".local", "share", "Steam")
+	for _, library := range []string{native, flatpak} {
+		install := filepath.Join(library, "steamapps", "common", "Stardew Valley")
+		writeTestFile(t, filepath.Join(install, "StardewValley"))
+		writeTestManifest(t, filepath.Join(library, "steamapps", "appmanifest_413150.acf"), 413150, "Stardew Valley")
+	}
+	for _, tc := range []struct {
+		name       string
+		configured string
+		want       string
+	}{
+		{name: "unconfigured picks native", want: native},
+		{name: "configured picks Flatpak", configured: filepath.Join(flatpak, "steamapps", "common", "Stardew Valley"), want: flatpak},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			games, err := DetectInstalledGamesWithPaths(map[string]string{"stardewvalley": tc.configured})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(games) != 1 || games[0].LibraryPath != tc.want {
+				t.Fatalf("games = %+v, want one game at %q", games, tc.want)
+			}
+		})
+	}
+}
+
 func writeTestManifest(t *testing.T, path string, appID uint32, installDir string) {
 	t.Helper()
 	contents := fmt.Sprintf(`"AppState"

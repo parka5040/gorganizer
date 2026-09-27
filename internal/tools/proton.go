@@ -36,18 +36,21 @@ func NewManager() *Manager {
 
 // DetectProton scans steamapps/common/Proton*/proton for available versions.
 func (m *Manager) DetectProton() ([]dto.ProtonVersionResult, error) {
-	steamRoot, err := findSteamRoot()
+	roots, err := steam.FindRoots()
 	if err != nil {
 		return nil, err
 	}
 
-	versions := detectProtonVersionsAllLibraries(steamRoot)
 	var results []dto.ProtonVersionResult
-	for _, v := range versions {
-		results = append(results, dto.ProtonVersionResult{
-			Name: v.Name,
-			Path: v.Path,
-		})
+	seen := make(map[string]bool)
+	for _, root := range roots {
+		for _, v := range detectProtonVersionsAllLibraries(root.Path) {
+			if seen[v.Path] {
+				continue
+			}
+			seen[v.Path] = true
+			results = append(results, dto.ProtonVersionResult{Name: v.Name, Path: v.Path})
+		}
 	}
 	return results, nil
 }
@@ -59,7 +62,7 @@ type LaunchHandle struct {
 
 // LaunchGame launches a game through Proton with the correct environment.
 func (m *Manager) LaunchGame(gameID string, useTool bool, gameCfg *config.GameConfig, preferredProton string) (*LaunchHandle, error) {
-	steamRoot, err := findSteamRoot()
+	steamRoot, libraryRoot, err := owningSteamLibrary(gameCfg)
 	if err != nil {
 		return nil, fmt.Errorf("finding Steam root: %w", err)
 	}
@@ -141,7 +144,6 @@ func (m *Manager) LaunchGame(gameID string, useTool bool, gameCfg *config.GameCo
 	}
 
 	appID := strconv.Itoa(gameCfg.SteamAppID)
-	libraryRoot := resolveSteamLibrary(steamRoot, gameCfg)
 	compatDataPath := findCompatDataPath(steamRoot, libraryRoot, appID)
 
 	var dllOverrides string
@@ -420,7 +422,7 @@ func buildSteamParityEnv(compatDataPath, steamRoot, appID, installPath, dllOverr
 		"SteamGameId=" + appID,
 	}
 
-	if libs := parseLibraryFolders(steamRoot); len(libs) > 0 {
+	if libs := steamLibraries(steamRoot); len(libs) > 0 {
 		joined := strings.Join(libs, ":")
 		env = append(env,
 			"STEAM_COMPAT_MOUNTS="+joined,
@@ -489,49 +491,6 @@ func mergeDllOverrides(inherited, ours string) string {
 		parts = append(parts, k+"="+parsed[k])
 	}
 	return strings.Join(parts, ";")
-}
-
-// parseLibraryFolders extracts Steam library root paths from steamapps/libraryfolders.vdf.
-func parseLibraryFolders(steamRoot string) []string {
-	vdfPath := filepath.Join(steamRoot, "steamapps", "libraryfolders.vdf")
-	f, err := os.Open(vdfPath)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-
-	var out []string
-	seen := map[string]struct{}{}
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if !strings.HasPrefix(line, `"path"`) {
-			continue
-		}
-		firstClose := strings.Index(line[1:], `"`) + 1
-		if firstClose <= 0 {
-			continue
-		}
-		rest := strings.TrimSpace(line[firstClose+1:])
-		open := strings.Index(rest, `"`)
-		if open < 0 {
-			continue
-		}
-		close := strings.Index(rest[open+1:], `"`)
-		if close < 0 {
-			continue
-		}
-		p := rest[open+1 : open+1+close]
-		if p == "" {
-			continue
-		}
-		if _, dup := seen[p]; dup {
-			continue
-		}
-		seen[p] = struct{}{}
-		out = append(out, p)
-	}
-	return out
 }
 
 // ResolveProtonRuntime returns the Steam Linux Runtime entry point script and name for the given Proton.
@@ -621,8 +580,4 @@ func removeLegacySteamAppIDFile(gameInstallDir, appID string) {
 		return
 	}
 	slog.Info("removed legacy steam_appid.txt written by older gorganizer", "path", path)
-}
-
-func findSteamRoot() (string, error) {
-	return steam.FindRoot()
 }

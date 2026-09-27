@@ -4,7 +4,105 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/parka/gorganizer/internal/config"
 )
+
+// TestProtonResolvesFromOwningRoot checks prefixes, client data and versions for a second Steam installation.
+func TestProtonResolvesFromOwningRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", "")
+	native := filepath.Join(home, ".local", "share", "Steam")
+	flatpak := filepath.Join(home, ".var", "app", "com.valvesoftware.Steam", ".local", "share", "Steam")
+	extra := filepath.Join(home, "other-library")
+	for _, root := range []string{native, flatpak, extra} {
+		if err := os.MkdirAll(filepath.Join(root, "steamapps"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	vdf := `"libraryfolders" { "0" { "path" "` + extra + `" } }`
+	if err := os.WriteFile(filepath.Join(flatpak, "steamapps", "libraryfolders.vdf"), []byte(vdf), 0644); err != nil {
+		t.Fatal(err)
+	}
+	install := filepath.Join(extra, "steamapps", "common", "Test Game")
+	for _, path := range []string{
+		install,
+		filepath.Join(native, "steamapps", "compatdata", "123", "pfx"),
+		filepath.Join(extra, "steamapps", "compatdata", "123", "pfx"),
+		filepath.Join(flatpak, "steamapps", "common", "Proton 11"),
+	} {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	proton := filepath.Join(flatpak, "steamapps", "common", "Proton 11", "proton")
+	if err := os.WriteFile(proton, []byte("fixture"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.GameConfig{InstallPath: install, SteamAppID: 123, SteamLibraryPath: native}
+	root, library, err := owningSteamLibrary(cfg)
+	if err != nil || root != flatpak || library != extra {
+		t.Fatalf("owningSteamLibrary = (%q, %q, %v), want (%q, %q)", root, library, err, flatpak, extra)
+	}
+	compat, err := ResolveCompatDataPath(cfg, 0)
+	if err != nil || compat != filepath.Join(extra, "steamapps", "compatdata", "123") {
+		t.Fatalf("compatdata = %q, err = %v", compat, err)
+	}
+	resolvedLibrary, err := ResolveSteamLibrary(cfg)
+	if err != nil || resolvedLibrary != extra {
+		t.Fatalf("resolved library = %q, err = %v, want %q", resolvedLibrary, err, extra)
+	}
+	versions := detectProtonVersionsAllLibraries(root)
+	if len(versions) != 1 || versions[0].Path != proton {
+		t.Fatalf("versions = %+v, want %s", versions, proton)
+	}
+	env := buildSteamParityEnv(compat, root, "123", install, "")
+	if !containsEnv(env, "STEAM_COMPAT_CLIENT_INSTALL_PATH="+flatpak) {
+		t.Fatalf("client path not set to owning root: %v", env)
+	}
+}
+
+// TestProtonUsesUnlistedConfiguredLibrary checks an existing configured library remains the prefix location without a VDF entry.
+func TestProtonUsesUnlistedConfiguredLibrary(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", "")
+	root := filepath.Join(home, ".local", "share", "Steam")
+	library := filepath.Join(home, "unlisted-library")
+	alias := filepath.Join(home, "library-alias")
+	install := filepath.Join(library, "steamapps", "common", "Game")
+	for _, path := range []string{
+		filepath.Join(root, "steamapps", "compatdata", "123", "pfx"),
+		filepath.Join(library, "steamapps", "compatdata", "123", "pfx"),
+		install,
+	} {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(library, alias); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.GameConfig{InstallPath: install, SteamLibraryPath: alias, SteamAppID: 123}
+	owner, selected, err := owningSteamLibrary(cfg)
+	if err != nil || owner != root || selected != library {
+		t.Fatalf("owningSteamLibrary = (%q, %q, %v), want (%q, %q)", owner, selected, err, root, library)
+	}
+	compat, err := ResolveCompatDataPath(cfg, 0)
+	if err != nil || compat != filepath.Join(library, "steamapps", "compatdata", "123") {
+		t.Fatalf("compatdata = %q, err = %v, want unlisted library prefix", compat, err)
+	}
+}
+
+func containsEnv(env []string, want string) bool {
+	for _, entry := range env {
+		if entry == want {
+			return true
+		}
+	}
+	return false
+}
 
 func TestReservePrefixPathRejectsConcurrentPreparation(t *testing.T) {
 	m := &Manager{}
