@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/xml"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -111,7 +112,12 @@ func moduleConfigBytes(moduleRoot string) ([]byte, error) {
 	if err != nil || !fsutil.ContainedBy(moduleRoot, resolved) {
 		return nil, reject
 	}
-	data, err := os.ReadFile(path)
+	file, err := os.Open(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("reading ModuleConfig.xml: %w", err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading ModuleConfig.xml: %w", err)
 	}

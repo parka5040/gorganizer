@@ -1,8 +1,8 @@
 package download
 
 import (
-	"errors"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -36,13 +36,50 @@ func redactURL(raw string) string {
 	return u.String()
 }
 
-// redactHTTPError replaces the request URL in a transport error while keeping its cause.
+var (
+	httpBodyURL    = regexp.MustCompile(`(?i)\b(?:https?|nxm)://[^\s"'<>\\]+`)
+	httpBodySecret = regexp.MustCompile(`(?i)\b(key|expires|user_id)\s*=\s*[^&\s"'<>\\]+`)
+)
+
+// RedactHTTPBody strips URLs and credential parameters from a short HTTP error body.
+func RedactHTTPBody(body string) string {
+	body = httpBodyURL.ReplaceAllStringFunc(body, redactURL)
+	return httpBodySecret.ReplaceAllStringFunc(body, func(match string) string {
+		idx := strings.IndexByte(match, '=')
+		return match[:idx+1] + redactedAPIKey
+	})
+}
+
+// RedactHTTPError removes the request URL's credentials while keeping the transport cause.
+func RedactHTTPError(err error) error {
+	return redactHTTPError(err)
+}
+
+type redactedTransportError struct {
+	message string
+	cause   error
+}
+
+// Error returns the sanitized transport error message.
+func (e *redactedTransportError) Error() string { return e.message }
+
+// Unwrap returns the original transport error cause.
+func (e *redactedTransportError) Unwrap() error { return e.cause }
+
+// redactHTTPError replaces request URLs and credential parameters while retaining the cause.
 func redactHTTPError(err error) error {
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
+	if urlErr, ok := err.(*url.Error); ok {
 		clean := *urlErr
 		clean.URL = redactURL(urlErr.URL)
+		clean.Err = redactHTTPError(urlErr.Err)
 		return &clean
+	}
+	if err == nil {
+		return nil
+	}
+	clean := RedactHTTPBody(err.Error())
+	if clean != err.Error() {
+		return &redactedTransportError{message: clean, cause: err}
 	}
 	return err
 }
