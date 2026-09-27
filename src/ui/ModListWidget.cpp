@@ -22,7 +22,8 @@
 #include <QUrl>
 #include <QDir>
 #include <QFile>
-#include <QSaveFile>
+#include <QFileInfo>
+#include <QMessageBox>
 #include <QSet>
 #include <QTimer>
 #include <QTreeWidget>
@@ -320,6 +321,10 @@ void ModListWidget::loadForGame(const GameInfo& game, const QString& profileName
     const QString gameId = game.detected ? game.shortName : QString();
     const QString newProfile = game.detected ? profileName : QString();
     const QString modsDir = game.detected ? GameInfo::modsDirPathFor(gameId) : QString();
+    if (gameId == m_gameId && newProfile == m_profileName && modsDir == m_modsDir && isInteracting()) {
+        m_reloadPending = true;
+        return;
+    }
     if (gameId != m_gameId || newProfile != m_profileName || modsDir != m_modsDir) {
         m_saveQueue->setContext(gameId, newProfile, modsDir);
         m_gameId = gameId;
@@ -344,6 +349,7 @@ void ModListWidget::loadForGame(const GameInfo& game, const QString& profileName
     m_updatingModel = false;
 
     if (!game.detected) {
+        m_reloadPending = false;
         updateEditLock();
         m_view->hide();
         m_placeholder->show();
@@ -360,15 +366,28 @@ void ModListWidget::loadForGame(const GameInfo& game, const QString& profileName
 
 void ModListWidget::scanModsFolder()
 {
+    if (isInteracting()) {
+        m_reloadPending = true;
+        return;
+    }
+    m_reloadPending = false;
     ++m_editSerial;
     m_separators.clear();
     m_mods = scanCatalog();
 
     if (!m_gameId.isEmpty() && !m_profileName.isEmpty()) {
+        const ActionContext context = actionContext();
         std::vector<GrpcSeparator> seps;
         bool viewEnabled = false;
         QString err;
-        if (m_grpc->listSeparators(m_gameId, m_profileName, seps, viewEnabled, err)) {
+        const bool loaded = m_grpc->listSeparators(context.gameId, context.profileName, seps, viewEnabled, err);
+        if (!matchesContext(context))
+            return;
+        if (isInteracting()) {
+            m_reloadPending = true;
+            return;
+        }
+        if (loaded) {
             for (const auto& s : seps) {
                 SeparatorDef d;
                 d.name = s.name;
@@ -592,10 +611,76 @@ std::vector<GrpcModListEntry> ModListWidget::toggleEntries() const
     return entries;
 }
 
+ModListWidget::ActionContext ModListWidget::actionContext() const
+{
+    return {m_gameId, m_profileName, m_modsDir};
+}
+
+bool ModListWidget::matchesContext(const ActionContext& context) const
+{
+    return context.gameId == m_gameId && context.profileName == m_profileName
+        && context.modsDir == m_modsDir;
+}
+
+int ModListWidget::modIndexForFolder(const QString& folder) const
+{
+    for (int i = 0; i < int(m_mods.size()); ++i) {
+        if (m_mods[i].folder == folder)
+            return i;
+    }
+    return -1;
+}
+
+int ModListWidget::separatorIndexForName(const QString& name) const
+{
+    for (int i = 0; i < int(m_separators.size()); ++i) {
+        if (m_separators[i].name == name)
+            return i;
+    }
+    return -1;
+}
+
+QString ModListWidget::metadataPathForFolder(const QString& folder) const
+{
+    if (folder.isEmpty() || folder == "." || folder == ".." || folder.contains('/') || folder.contains('\\'))
+        return {};
+    const QFileInfo dir(m_modsDir + "/" + folder);
+    if (!dir.isDir() || dir.isSymLink())
+        return {};
+    return m_modsDir + "/" + folder + "/metadata.yaml";
+}
+
+int ModListWidget::availableModIndex(const ActionContext& context, const QString& folder)
+{
+    const int index = matchesContext(context) ? modIndexForFolder(folder) : -1;
+    if (index >= 0 && !metadataPathForFolder(folder).isEmpty())
+        return index;
+    QMessageBox::information(this, "Mod unavailable",
+                             "This mod is no longer available. Refresh the list and try again.");
+    return -1;
+}
+
+int ModListWidget::availableSeparatorIndex(const ActionContext& context, const QString& name)
+{
+    const int index = matchesContext(context) ? separatorIndexForName(name) : -1;
+    if (index >= 0) {
+        std::vector<GrpcSeparator> separators;
+        bool viewEnabled = false;
+        QString error;
+        const bool loaded = m_grpc->listSeparators(context.gameId, context.profileName,
+                                                    separators, viewEnabled, error);
+        if (loaded && matchesContext(context) && std::any_of(separators.begin(), separators.end(),
+            [&name](const GrpcSeparator& separator) { return separator.name == name; }))
+            return separatorIndexForName(name);
+    }
+    QMessageBox::information(this, "Separator unavailable",
+                             "This separator is no longer available. Refresh the list and try again.");
+    return -1;
+}
+
 bool ModListWidget::containsMod(const QString& folder) const
 {
-    return std::any_of(m_mods.begin(), m_mods.end(),
-                       [&folder](const ModMetadata& meta) { return meta.folder == folder; });
+    return modIndexForFolder(folder) >= 0;
 }
 
 void ModListWidget::reloadMods()
@@ -621,6 +706,10 @@ void ModListWidget::reloadAfterFailedSave(const GameInfo& game, const QString& p
 
 void ModListWidget::rescanCatalog()
 {
+    if (isInteracting()) {
+        m_reloadPending = true;
+        return;
+    }
     ++m_editSerial;
     m_reloadPending = false;
     m_mods = scanCatalog();
@@ -883,6 +972,35 @@ void ModListWidget::applyEnabledFlags(const QStringList& folders, bool enabled)
     m_updatingModel = false;
 }
 
+void ModListWidget::setSelectedModsEnabled(const ActionContext& context, const QStringList& folders, bool enabled)
+{
+    for (const QString& folder : folders) {
+        const int index = availableModIndex(context, folder);
+        if (index < 0)
+            return;
+        if (m_model->rowForModIndex(index) < 0) {
+            QMessageBox::information(this, "Mod unavailable",
+                                     "This mod is no longer available. Refresh the list and try again.");
+            return;
+        }
+    }
+    if (editsBlocked())
+        return;
+    for (const QString& folder : folders) {
+        const int index = availableModIndex(context, folder);
+        if (index < 0)
+            return;
+        const int row = m_model->rowForModIndex(index);
+        if (row < 0) {
+            QMessageBox::information(this, "Mod unavailable",
+                                     "This mod is no longer available. Refresh the list and try again.");
+            return;
+        }
+        m_model->setData(m_model->index(row, ModColName), enabled ? Qt::Checked : Qt::Unchecked,
+                         Qt::CheckStateRole);
+    }
+}
+
 bool ModListWidget::readyForDependencyEnable() const
 {
     return m_profileAdopted && !m_restoringSavedProfile && !isInteracting() && m_saveQueue->isIdle();
@@ -959,7 +1077,7 @@ void ModListWidget::onModListSaveFailed(quint64 requestId)
     m_restoringSavedProfile = true;
     m_savedProfileRestored = false;
     dropProfileAdoption();
-    requestProfileModList();
+    reloadMods();
 }
 
 void ModListWidget::onModListSavesDrained()
@@ -1026,10 +1144,16 @@ void ModListWidget::endInteraction()
         --m_interactionDepth;
     if (m_interactionDepth > 0)
         return;
-    if (m_reloadPending)
-        rescanCatalog();
-    else if (m_profileListPending)
+    if (m_reloadPending) {
+        if (m_model->rowCount() == 0 && !m_gameId.isEmpty())
+            scanModsFolder();
+        else if (!m_gameId.isEmpty())
+            rescanCatalog();
+        else
+            m_reloadPending = false;
+    } else if (m_profileListPending) {
         requestProfileModList();
+    }
     emit interactionFinished();
 }
 
@@ -1068,18 +1192,28 @@ void ModListWidget::addDependencyActions(QMenu& menu, const QString& folder)
         }
     }
 
+    const ActionContext context = actionContext();
     menu.addSeparator();
     auto* fetch = menu.addAction(QStringLiteral("Fetch Missing Dependencies…"));
     fetch->setEnabled(!missingIds.isEmpty());
-    connect(fetch, &QAction::triggered, this, [this, missingIds] { emit dependencyFetchRequested(missingIds); });
+    connect(fetch, &QAction::triggered, this, [this, context, folder, missingIds] {
+        if (availableModIndex(context, folder) >= 0)
+            emit dependencyFetchRequested(missingIds);
+    });
     auto* enable = menu.addAction(QStringLiteral("Enable Required Dependencies…"));
     enable->setEnabled(!enableNames.isEmpty());
-    connect(enable, &QAction::triggered, this, [this, enableNames] { emit dependencyEnableRequested(enableNames); });
+    connect(enable, &QAction::triggered, this, [this, context, folder, enableNames] {
+        if (availableModIndex(context, folder) >= 0)
+            emit dependencyEnableRequested(enableNames);
+    });
     auto* update = menu.addAction(QStringLiteral("Open Update Page"));
     update->setEnabled(!updateUrl.isEmpty());
     if (!updateUrl.isEmpty())
         update->setToolTip(plainToolTip(updateUrl));
-    connect(update, &QAction::triggered, this, [this, updateUrl] { openWebLink(this, updateUrl); });
+    connect(update, &QAction::triggered, this, [this, context, folder, updateUrl] {
+        if (availableModIndex(context, folder) >= 0)
+            openWebLink(this, updateUrl);
+    });
 }
 
 void ModListWidget::onItemDoubleClicked(const QModelIndex& index)
@@ -1087,18 +1221,16 @@ void ModListWidget::onItemDoubleClicked(const QModelIndex& index)
     if (!index.isValid())
         return;
 
-    const ModListRow& r = m_model->rowAt(index.row());
+    const ModListRow r = m_model->rowAt(index.row());
+    const ActionContext context = actionContext();
     if (r.kind == RowKindSeparator) {
-        toggleCollapseAt(index.row());
+        toggleCollapseAt(context, r.name);
         return;
     }
 
-    if (index.column() != ModColCategory)
+    if (index.column() != ModColCategory || r.kind != RowKindMod || modIndexForFolder(r.folder) < 0)
         return;
-
-    int modIdx = r.modIndex;
-    if (modIdx < 0 || modIdx >= int(m_mods.size()))
-        return;
+    const QString folder = r.folder;
 
     QDialog dlg(m_view);
     dlg.setWindowTitle("Set Category");
@@ -1117,7 +1249,7 @@ void ModListWidget::onItemDoubleClicked(const QModelIndex& index)
 
     beginInteraction();
     if (dlg.exec() == QDialog::Accepted)
-        setCategoryForRow(modIdx, combo->currentText());
+        setCategoryForFolder(context, folder, combo->currentText());
     endInteraction();
 }
 
@@ -1134,33 +1266,44 @@ void ModListWidget::showContextMenu(const QPoint& pos)
     int row = idx.isValid() ? idx.row() : -1;
 
     QMenu menu;
+    const ActionContext context = actionContext();
     const bool locked = editsBlocked();
 
     if (row >= 0) {
-        int kind = m_model->rowAt(row).kind;
-        if (kind == RowKindSeparator) {
-            menu.addAction("Toggle Collapse", [this, row] { toggleCollapseAt(row); });
-            menu.addAction("Rename Separator...", [this, row] { renameSeparator(row); });
+        const ModListRow clickedRow = m_model->rowAt(row);
+        if (clickedRow.kind == RowKindSeparator) {
+            const QString name = clickedRow.name;
+            menu.addAction("Toggle Collapse", [this, context, name] { toggleCollapseAt(context, name); });
+            menu.addAction("Rename Separator...", [this, context, name] { renameSeparator(context, name); });
             menu.addSeparator();
-            menu.addAction("Move to Top", [this, row] { moveSeparatorTo(row, true); })->setEnabled(!locked);
-            menu.addAction("Move to Bottom", [this, row] { moveSeparatorTo(row, false); })->setEnabled(!locked);
+            menu.addAction("Move to Top", [this, context, name] { moveSeparatorTo(context, name, true); })->setEnabled(!locked);
+            menu.addAction("Move to Bottom", [this, context, name] { moveSeparatorTo(context, name, false); })->setEnabled(!locked);
             menu.addSeparator();
-            menu.addAction("Remove Separator", [this, row] { removeSeparator(row); });
+            menu.addAction("Remove Separator", [this, context, name] { removeSeparator(context, name); });
             menu.exec(m_view->viewport()->mapToGlobal(pos));
             return;
         }
-        if (kind == RowKindOverwrite) {
-            onOverwriteContextMenu(m_view->viewport()->mapToGlobal(pos));
+        if (clickedRow.kind == RowKindOverwrite) {
+            onOverwriteContextMenu(context, m_view->viewport()->mapToGlobal(pos));
             return;
         }
     }
 
     if (m_visualMode) {
-        int insertAt = (row >= 0) ? row : m_model->rowCount();
-        menu.addAction("Add Separator Here...", [this, insertAt] {
-            createSeparatorAt(insertAt);
+        ModRowKind anchorKind = RowKindOverwrite;
+        QString anchorName;
+        if (row >= 0) {
+            const ModListRow anchor = m_model->rowAt(row);
+            anchorKind = anchor.kind;
+            anchorName = anchor.kind == RowKindMod ? anchor.folder : anchor.name;
+        }
+        menu.addAction("Add Separator Here...", [this, context, anchorKind, anchorName] {
+            createSeparatorAt(context, anchorKind, anchorName);
         })->setEnabled(!locked);
-        menu.addAction("Group by Category", [this] { groupByCategory(); })->setEnabled(!locked);
+        menu.addAction("Group by Category", [this, context] {
+            if (matchesContext(context))
+                groupByCategory();
+        })->setEnabled(!locked);
         menu.addSeparator();
     }
 
@@ -1169,15 +1312,14 @@ void ModListWidget::showContextMenu(const QPoint& pos)
             menu.exec(m_view->viewport()->mapToGlobal(pos));
         return;
     }
-    const ModListRow& clicked = m_model->rowAt(row);
+    const ModListRow clicked = m_model->rowAt(row);
     if (clicked.kind != RowKindMod)
         return;
-    int modIdx = clicked.modIndex;
-    if (modIdx < 0 || modIdx >= int(m_mods.size()))
+    const int modIdx = modIndexForFolder(clicked.folder);
+    if (modIdx < 0)
         return;
     const ModMetadata meta = m_mods[modIdx];
 
-    QList<int> selectedModIndexes;
     QStringList selectedFolders;
     QStringList selectedNames;
     {
@@ -1191,69 +1333,70 @@ void ModListWidget::showContextMenu(const QPoint& pos)
             const ModListRow& mr = m_model->rowAt(r);
             if (mr.kind != RowKindMod)
                 continue;
-            int idx = mr.modIndex;
-            if (idx < 0 || idx >= int(m_mods.size()))
+            const int idx = modIndexForFolder(mr.folder);
+            if (idx < 0 || selectedFolders.contains(mr.folder))
                 continue;
-            selectedModIndexes.append(idx);
-            selectedFolders.append(m_mods[idx].folder);
+            selectedFolders.append(mr.folder);
             selectedNames.append(m_mods[idx].name);
         }
     }
-    if (selectedModIndexes.size() >= 2) {
-        QString summary = QString("%1 mods selected").arg(selectedModIndexes.size());
+    if (selectedFolders.size() >= 2) {
+        QString summary = QString("%1 mods selected").arg(selectedFolders.size());
         auto* header = menu.addAction(summary);
         header->setEnabled(false);
         menu.addSeparator();
 
-        menu.addAction("Enable All", [this, selectedModIndexes]() {
-            for (int idx : selectedModIndexes) {
-                int row = m_model->rowForModIndex(idx);
-                if (row >= 0)
-                    m_model->setData(m_model->index(row, ModColName), Qt::Checked,
-                                     Qt::CheckStateRole);
-            }
+        menu.addAction("Enable All", [this, context, selectedFolders] {
+            setSelectedModsEnabled(context, selectedFolders, true);
         })->setEnabled(!locked);
-        menu.addAction("Disable All", [this, selectedModIndexes]() {
-            for (int idx : selectedModIndexes) {
-                int row = m_model->rowForModIndex(idx);
-                if (row >= 0)
-                    m_model->setData(m_model->index(row, ModColName), Qt::Unchecked,
-                                     Qt::CheckStateRole);
-            }
+        menu.addAction("Disable All", [this, context, selectedFolders] {
+            setSelectedModsEnabled(context, selectedFolders, false);
         })->setEnabled(!locked);
         menu.addSeparator();
 
         bool allReinstallable = true;
-        for (int idx : selectedModIndexes) {
-            if (m_mods[idx].sourceArchives.isEmpty()) {
+        for (const QString& folder : selectedFolders) {
+            const int index = modIndexForFolder(folder);
+            if (index < 0 || m_mods[index].sourceArchives.isEmpty()) {
                 allReinstallable = false;
                 break;
             }
         }
-        auto* bulkReinstall = menu.addAction(QString("Reinstall %1 Mods").arg(selectedModIndexes.size()));
+        auto* bulkReinstall = menu.addAction(QString("Reinstall %1 Mods").arg(selectedFolders.size()));
         bulkReinstall->setEnabled(allReinstallable);
         if (!allReinstallable)
             bulkReinstall->setToolTip("One or more selected mods have no source archives.");
         connect(bulkReinstall, &QAction::triggered, this,
-                [this, selectedFolders, selectedNames]() {
+                [this, context, selectedFolders, selectedNames]() {
             if (!dialogs::confirm(this, "Reinstall Mods",
                 QString("Reinstall %1 mods by replaying their source archives?\n\n"
                         "Each mod is rebuilt from its archives and replaced only if every archive installs.")
                     .arg(selectedFolders.size())))
                 return;
+            for (const QString& folder : selectedFolders) {
+                if (availableModIndex(context, folder) < 0)
+                    return;
+            }
             int ok = 0, failed = 0;
             QStringList errors;
             for (int i = 0; i < selectedFolders.size(); ++i) {
+                if (availableModIndex(context, selectedFolders[i]) < 0)
+                    return;
                 GrpcReinstallResult res;
                 QString err;
-                if (!m_grpc->reinstallMod(m_gameId, selectedFolders[i], res, err)) {
+                const bool installed = m_grpc->reinstallMod(context.gameId, selectedFolders[i], res, err);
+                if (!matchesContext(context)) {
+                    availableModIndex(context, selectedFolders[i]);
+                    return;
+                }
+                if (!installed) {
                     failed++;
                     errors.append(QString("• %1: %2").arg(selectedNames[i], installErrorMessage(err)));
                 } else {
                     ok++;
                 }
             }
-            scanModsFolder();
+            reloadMods();
             emit modsEdited();
             if (failed > 0) {
                 dialogs::warn(this, "Bulk Reinstall — Partial",
@@ -1267,44 +1410,48 @@ void ModListWidget::showContextMenu(const QPoint& pos)
         return;
     }
 
+    const QString folder = meta.folder;
     if (!meta.nexusUrl.isEmpty()) {
-        menu.addAction("Visit Mod Page", [this, url = meta.nexusUrl] {
-            openWebLink(this, url);
+        menu.addAction("Visit Mod Page", [this, context, folder, url = meta.nexusUrl] {
+            if (availableModIndex(context, folder) >= 0)
+                openWebLink(this, url);
         });
     }
     menu.addAction(meta.nexusUrl.isEmpty() ? "Set Mod Page URL..." : "Change Mod Page URL...",
-        [this, modIdx, currentUrl = meta.nexusUrl] {
+        [this, context, folder, currentUrl = meta.nexusUrl] {
             bool ok = false;
             QString url = QInputDialog::getText(m_view, "Mod Page URL",
                 "Paste a URL (e.g. Nexus Mods page). Leave empty to clear.",
                 QLineEdit::Normal, currentUrl, &ok);
-            if (!ok)
-                return;
-            updateModPageUrl(modIdx, url.trimmed());
+            if (ok)
+                updateModPageUrl(context, folder, url.trimmed());
         });
     if (showsModDependencies(m_activeGame))
         addDependencyActions(menu, meta.folder);
     menu.addSeparator();
 
-    menu.addAction("Show Conflicts...", [this, modName = meta.name] {
-        showConflictDetailsForMod(modName);
+    menu.addAction("Show Conflicts...", [this, context, folder] {
+        const int index = availableModIndex(context, folder);
+        if (index >= 0)
+            showConflictDetailsForMod(m_mods[index].name);
     });
 
-    menu.addAction("Open Mod Folder", [path = m_modsDir + "/" + meta.folder] {
-        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+    menu.addAction("Open Mod Folder", [this, context, folder] {
+        if (availableModIndex(context, folder) >= 0)
+            QDesktopServices::openUrl(QUrl::fromLocalFile(context.modsDir + "/" + folder));
     });
 
     auto* catMenu = menu.addMenu("Set Category");
     for (const auto& cat : defaultCategories()) {
-        catMenu->addAction(cat, [this, modIdx, cat] { setCategoryForRow(modIdx, cat); });
+        catMenu->addAction(cat, [this, context, folder, cat] { setCategoryForFolder(context, folder, cat); });
     }
     catMenu->addSeparator();
-    catMenu->addAction("Custom...", [this, modIdx] {
+    catMenu->addAction("Custom...", [this, context, folder] {
         bool ok = false;
         QString custom = QInputDialog::getText(m_view, "Custom Category",
             "Enter category name:", QLineEdit::Normal, "", &ok);
         if (ok && !custom.trimmed().isEmpty())
-            setCategoryForRow(modIdx, custom.trimmed());
+            setCategoryForFolder(context, folder, custom.trimmed());
     });
 
     menu.addSeparator();
@@ -1316,26 +1463,33 @@ void ModListWidget::showContextMenu(const QPoint& pos)
         if (haveArchives) {
             reinstall->setToolTip(
                 QString("Replays %1 archive(s) in install order.").arg(meta.sourceArchives.size()));
-            connect(reinstall, &QAction::triggered, this, [this, meta] {
+            connect(reinstall, &QAction::triggered, this, [this, context, meta] {
                 if (!dialogs::confirm(this, "Reinstall Mod",
                     QString("Reinstall \"%1\" by replaying %2 archive(s)?\n\n"
                             "The mod is rebuilt from its archives in the order they were installed "
                             "and replaced only if every archive installs.")
                         .arg(meta.name).arg(meta.sourceArchives.size())))
                     return;
+                if (availableModIndex(context, meta.folder) < 0)
+                    return;
                 GrpcReinstallResult res;
                 QString err;
-                if (!m_grpc->reinstallMod(m_gameId, meta.folder, res, err)) {
+                const bool installed = m_grpc->reinstallMod(context.gameId, meta.folder, res, err);
+                if (!matchesContext(context)) {
+                    availableModIndex(context, meta.folder);
+                    return;
+                }
+                if (!installed) {
                     showInstallError(this, "Reinstall Failed", err);
                     return;
                 }
+                reloadMods();
+                emit modsEdited();
                 if (res.archivesSkipped > 0) {
                     dialogs::info(this, "Reinstall Complete",
                         QString("Replayed %1, skipped %2 (missing archive). %3 files total.")
                             .arg(res.archivesReplayed).arg(res.archivesSkipped).arg(res.fileCount));
                 }
-                scanModsFolder();
-                emit modsEdited();
             });
         } else {
             reinstall->setToolTip("No source archives recorded for this mod.");
@@ -1344,32 +1498,45 @@ void ModListWidget::showContextMenu(const QPoint& pos)
 
     menu.addSeparator();
 
-    menu.addAction("Rename Mod...", [this, meta] {
+    menu.addAction("Rename Mod...", [this, context, meta] {
         bool ok = false;
         QString newName = QInputDialog::getText(this, "Rename Mod",
             "New name (also becomes the folder name on disk):",
             QLineEdit::Normal, meta.folder, &ok);
         if (!ok || newName.isEmpty() || newName == meta.folder) return;
+        if (availableModIndex(context, meta.folder) < 0)
+            return;
         QString err;
-        if (!m_grpc->renameMod(m_gameId, meta.folder, newName, err)) {
+        const bool renamed = m_grpc->renameMod(context.gameId, meta.folder, newName, err);
+        if (!matchesContext(context)) {
+            availableModIndex(context, meta.folder);
+            return;
+        }
+        if (!renamed) {
             dialogs::warn(this, "Rename Failed", err);
             return;
         }
-        scanModsFolder();
+        reloadMods();
         emit modsEdited();
     });
 
-    menu.addAction("Uninstall Mod", [this, meta] {
+    menu.addAction("Uninstall Mod", [this, context, meta] {
         if (!dialogs::confirm(this, "Uninstall Mod",
             QString("Uninstall \"%1\"?\n\n"
                     "The mod folder will be removed and its archive will be "
                     "marked Uninstalled in the Downloads tab (the archive "
                     "itself is kept so you can reinstall later).")
                 .arg(meta.name))) return;
+        if (availableModIndex(context, meta.folder) < 0)
+            return;
 
         std::vector<QString> flagged;
         QString err;
-        bool ok = m_grpc->uninstallMod(m_gameId, meta.folder, false, flagged, err);
+        bool ok = m_grpc->uninstallMod(context.gameId, meta.folder, false, flagged, err);
+        if (!matchesContext(context)) {
+            availableModIndex(context, meta.folder);
+            return;
+        }
         const InstallError inUse = parseInstallError(err);
         if (!ok && inUse.token == QLatin1String("mod_in_use")) {
             const QString profiles = inUse.fields.value(QStringLiteral("profiles"));
@@ -1377,13 +1544,19 @@ void ModListWidget::showContextMenu(const QPoint& pos)
                 QString("\"%1\" is enabled in profile(s): %2\n\n"
                         "Uninstall anyway? The mod will also be removed from "
                         "those profiles' mod lists.").arg(meta.name, profiles))) return;
-            ok = m_grpc->uninstallMod(m_gameId, meta.folder, true, flagged, err);
+            if (availableModIndex(context, meta.folder) < 0)
+                return;
+            ok = m_grpc->uninstallMod(context.gameId, meta.folder, true, flagged, err);
+            if (!matchesContext(context)) {
+                availableModIndex(context, meta.folder);
+                return;
+            }
         }
         if (!ok) {
             dialogs::warn(this, "Uninstall Failed", err);
             return;
         }
-        scanModsFolder();
+        reloadMods();
         emit modsEdited();
     });
 
@@ -1429,53 +1602,26 @@ void ModListWidget::restorePriorityOrder()
     m_model->restorePriorityOrder();
 }
 
-void ModListWidget::updateModPageUrl(int row, const QString& url)
+void ModListWidget::updateModPageUrl(const ActionContext& context, const QString& folder, const QString& url)
 {
-    if (row < 0 || row >= static_cast<int>(m_mods.size()))
+    if (availableModIndex(context, folder) < 0)
         return;
-    QString folder = m_mods[row].folder;
-    QString metaPath = m_modsDir + "/" + folder + "/metadata.yaml";
-    QString content;
-    {
-        QFile f(metaPath);
-        if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
-            return;
-        content = f.readAll();
-    }
-
-    QStringList lines = content.split('\n');
-    QStringList kept;
-    kept.reserve(lines.size());
-    for (const auto& ln : lines) {
-        QString trimmed = ln.trimmed();
-        if (trimmed.startsWith("mod_page:") || trimmed.startsWith("nexus_url:"))
-            continue;
-        kept.append(ln);
-    }
-
-    if (!url.isEmpty()) {
-        int anchor = -1;
-        for (int i = 0; i < kept.size(); ++i) {
-            if (kept[i].trimmed() == "source_archives:") {
-                anchor = i;
-                break;
-            }
-        }
-        QString newLine = QString("mod_page: \"%1\"").arg(url);
-        if (anchor >= 0)
-            kept.insert(anchor, newLine);
-        else
-            kept.append(newLine);
-    }
-
-    QSaveFile out(metaPath);
-    if (!out.open(QIODevice::WriteOnly | QIODevice::Text))
+    QFile file(metadataPathForFolder(folder));
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
         return;
-    out.write(kept.join('\n').toUtf8());
-    if (!out.commit())
+    QString key = "mod_page";
+    for (const QString& line : QString::fromUtf8(file.readAll()).split('\n')) {
+        if (line.startsWith("mod_page:"))
+            key = "mod_page";
+        else if (line.startsWith("nexus_url:"))
+            key = "nexus_url";
+    }
+    file.close();
+    const int index = availableModIndex(context, folder);
+    if (index < 0)
         return;
-
-    m_mods[row].nexusUrl = url;
+    ModCatalog::patchMetadataField(metadataPathForFolder(folder), key, url);
+    m_mods[index].nexusUrl = url;
 }
 
 bool ModListWidget::visualModeEnabled() const
@@ -1501,7 +1647,10 @@ struct VisualKey {
 void ModListWidget::onVisualToggled(bool on)
 {
     m_visualMode = on;
-    rebuildView();
+    if (isInteracting())
+        m_reloadPending = true;
+    else
+        rebuildView();
     persistSeparators();
 }
 
@@ -1519,7 +1668,10 @@ void ModListWidget::applyCollapsedSeparatorView(bool on)
         m_visualCheck->setEnabled(false);
         bool wasVisual = m_visualMode;
         m_visualMode = true;
-        rebuildView();
+        if (isInteracting())
+            m_reloadPending = true;
+        else
+            rebuildView();
         if (!wasVisual)
             persistSeparators();
     } else {
@@ -1702,11 +1854,13 @@ void ModListWidget::persistRowOrder()
         if (m_collapsedSeparatorView)
             meta.trueIndex = newVisualIndex;
         if (dirty) {
-            QString yamlPath = m_modsDir + "/" + meta.folder + "/metadata.yaml";
-            ModCatalog::patchMetadataField(yamlPath, "visual_index", newVisualIndex);
-            ModCatalog::patchMetadataField(yamlPath, "separator", newSeparator);
-            if (m_collapsedSeparatorView)
-                ModCatalog::patchMetadataField(yamlPath, "true_index", newVisualIndex);
+            const QString yamlPath = metadataPathForFolder(meta.folder);
+            if (!yamlPath.isEmpty()) {
+                ModCatalog::patchMetadataField(yamlPath, "visual_index", newVisualIndex);
+                ModCatalog::patchMetadataField(yamlPath, "separator", newSeparator);
+                if (m_collapsedSeparatorView)
+                    ModCatalog::patchMetadataField(yamlPath, "true_index", newVisualIndex);
+            }
         }
         if (m_collapsedSeparatorView) {
             GrpcModListEntry e;
@@ -1775,15 +1929,33 @@ void ModListWidget::persistSeparators()
     m_grpc->setSeparators(m_gameId, m_profileName, out, m_visualMode, err);
 }
 
-void ModListWidget::createSeparatorAt(int visualRow)
+void ModListWidget::createSeparatorAt(const ActionContext& context, ModRowKind anchorKind,
+                                      const QString& anchorName)
 {
-    if (editsBlocked())
+    if (editsBlocked() || !matchesContext(context))
         return;
     bool ok = false;
     QString name = QInputDialog::getText(m_view, "New Separator",
         "Separator name:", QLineEdit::Normal, "", &ok);
     name = name.trimmed();
     if (!ok || name.isEmpty())
+        return;
+    int targetRow = m_model->overwriteRow();
+    if (anchorKind == RowKindMod) {
+        const int index = availableModIndex(context, anchorName);
+        if (index < 0)
+            return;
+        targetRow = m_model->rowForModIndex(index);
+        if (targetRow < 0)
+            return;
+    } else if (anchorKind == RowKindSeparator) {
+        if (availableSeparatorIndex(context, anchorName) < 0)
+            return;
+        targetRow = m_model->rowForSeparatorName(anchorName);
+    } else if (!matchesContext(context)) {
+        return;
+    }
+    if (editsBlocked())
         return;
     for (const auto& s : m_separators) {
         if (s.name.compare(name, Qt::CaseInsensitive) == 0) {
@@ -1799,45 +1971,54 @@ void ModListWidget::createSeparatorAt(int visualRow)
     m_separators.push_back(d);
     rebuildView();
     int sepRow = m_model->rowForSeparatorName(name);
-    if (sepRow >= 0 && visualRow >= 0 && visualRow != sepRow)
-        m_model->moveRowsTo({sepRow}, visualRow);
+    if (sepRow >= 0 && targetRow >= 0 && targetRow != sepRow)
+        m_model->moveRowsTo({sepRow}, targetRow);
     persistRowOrder();
 }
 
-void ModListWidget::renameSeparator(int row)
+void ModListWidget::renameSeparator(const ActionContext& context, const QString& oldName)
 {
-    const ModListRow& r = m_model->rowAt(row);
-    if (r.kind != RowKindSeparator) return;
-    QString oldName = r.name;
+    if (availableSeparatorIndex(context, oldName) < 0)
+        return;
     bool ok = false;
     QString newName = QInputDialog::getText(m_view, "Rename Separator",
         "New name:", QLineEdit::Normal, oldName, &ok);
     newName = newName.trimmed();
     if (!ok || newName.isEmpty() || newName == oldName) return;
-    for (auto& meta : m_mods) {
-        if (meta.separator == oldName) {
-            meta.separator = newName;
-            QString yamlPath = m_modsDir + "/" + meta.folder + "/metadata.yaml";
-            ModCatalog::patchMetadataField(yamlPath, "separator", newName);
+    const int index = availableSeparatorIndex(context, oldName);
+    if (index < 0)
+        return;
+    for (const auto& s : m_separators) {
+        if (s.name.compare(newName, Qt::CaseInsensitive) == 0) {
+            dialogs::warn(this, "Duplicate", "A separator with that name already exists in this profile.");
+            return;
         }
     }
-    for (auto& s : m_separators) {
-        if (s.name == oldName) { s.name = newName; break; }
+    for (auto& meta : m_mods) {
+        if (meta.separator == oldName) {
+            const QString yamlPath = metadataPathForFolder(meta.folder);
+            if (!yamlPath.isEmpty()) {
+                meta.separator = newName;
+                ModCatalog::patchMetadataField(yamlPath, "separator", newName);
+            }
+        }
     }
+    m_separators[index].name = newName;
     persistSeparators();
     rebuildView();
 }
 
-void ModListWidget::removeSeparator(int row)
+void ModListWidget::removeSeparator(const ActionContext& context, const QString& name)
 {
-    const ModListRow& r = m_model->rowAt(row);
-    if (r.kind != RowKindSeparator) return;
-    QString name = r.name;
+    if (availableSeparatorIndex(context, name) < 0)
+        return;
     for (auto& meta : m_mods) {
         if (meta.separator == name) {
-            meta.separator.clear();
-            QString yamlPath = m_modsDir + "/" + meta.folder + "/metadata.yaml";
-            ModCatalog::patchMetadataField(yamlPath, "separator", QString());
+            const QString yamlPath = metadataPathForFolder(meta.folder);
+            if (!yamlPath.isEmpty()) {
+                meta.separator.clear();
+                ModCatalog::patchMetadataField(yamlPath, "separator", QString());
+            }
         }
     }
     m_separators.erase(std::remove_if(m_separators.begin(), m_separators.end(),
@@ -1846,27 +2027,21 @@ void ModListWidget::removeSeparator(int row)
     rebuildView();
 }
 
-void ModListWidget::toggleCollapseAt(int row)
+void ModListWidget::toggleCollapseAt(const ActionContext& context, const QString& name)
 {
-    const ModListRow& r = m_model->rowAt(row);
-    if (r.kind != RowKindSeparator) return;
-    QString name = r.name;
-    for (auto& s : m_separators) {
-        if (s.name == name) { s.collapsed = !s.collapsed; break; }
-    }
+    const int index = availableSeparatorIndex(context, name);
+    if (index < 0)
+        return;
+    m_separators[index].collapsed = !m_separators[index].collapsed;
     persistSeparators();
     rebuildView();
 }
 
 // Brackets the separator's index outside the current min/max so rebuildView sorts it to the desired end.
-void ModListWidget::moveSeparatorTo(int row, bool toTop)
+void ModListWidget::moveSeparatorTo(const ActionContext& context, const QString& name, bool toTop)
 {
-    if (editsBlocked())
+    if (editsBlocked() || availableSeparatorIndex(context, name) < 0)
         return;
-    const ModListRow& r = m_model->rowAt(row);
-    if (r.kind != RowKindSeparator)
-        return;
-    QString name = r.name;
     if (name.isEmpty() || m_separators.empty())
         return;
 
@@ -1892,38 +2067,42 @@ void ModListWidget::moveSeparatorTo(int row, bool toTop)
     persistRowOrder();
 }
 
-void ModListWidget::setCategoryForRow(int modIdx, const QString& category)
+void ModListWidget::setCategoryForFolder(const ActionContext& context, const QString& folder,
+                                         const QString& category)
 {
-    if (modIdx < 0 || modIdx >= static_cast<int>(m_mods.size()))
+    const int index = availableModIndex(context, folder);
+    if (index < 0)
         return;
-    m_mods[modIdx].category = category;
-
-    int modelRow = m_model->rowForModIndex(modIdx);
-    if (modelRow >= 0)
-        m_model->setCategoryAt(modelRow, category);
-
-    QString metaPath = m_modsDir + "/" + m_mods[modIdx].folder + "/metadata.yaml";
+    const QString metaPath = metadataPathForFolder(folder);
     ModCatalog::patchMetadataField(metaPath, "category", category);
+    m_mods[index].category = category;
+    const int row = m_model->rowForModIndex(index);
+    if (row >= 0)
+        m_model->setCategoryAt(row, category);
 }
 
 // Builds the right-click menu for the pinned Overwrite row.
-void ModListWidget::onOverwriteContextMenu(const QPoint& globalPos)
+void ModListWidget::onOverwriteContextMenu(const ActionContext& context, const QPoint& globalPos)
 {
     QMenu menu;
 
     std::vector<GrpcOverwriteEntry> files;
     QString owDir, err;
-    bool ok = m_grpc->listOverwriteFiles(m_gameId, files, owDir, err);
+    bool ok = m_grpc->listOverwriteFiles(context.gameId, files, owDir, err);
+    if (!matchesContext(context))
+        return;
     bool hasFiles = false;
     for (const auto& f : files) {
         if (!f.isDir) { hasFiles = true; break; }
     }
 
     auto* openAct = menu.addAction("Open Overwrite Folder");
-    connect(openAct, &QAction::triggered, this, [this, owDir]() {
+    connect(openAct, &QAction::triggered, this, [this, context, owDir] {
+        if (!matchesContext(context))
+            return;
         QString dir = owDir;
         if (dir.isEmpty()) {
-            dir = m_modsDir + "/" + kOverwriteModName;
+            dir = context.modsDir + "/" + kOverwriteModName;
             QDir().mkpath(dir);
         }
         QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
@@ -1936,40 +2115,50 @@ void ModListWidget::onOverwriteContextMenu(const QPoint& globalPos)
         extractAll->setToolTip("Overwrite is empty.");
     if (!ok)
         extractAll->setToolTip(plainToolTip(QString("Daemon not reachable: %1").arg(err)));
-    connect(extractAll, &QAction::triggered, this, &ModListWidget::extractOverwriteAll);
+    connect(extractAll, &QAction::triggered, this, [this, context] { extractOverwriteAll(context); });
 
     auto* extractSel = menu.addAction("Extract Selected Files to New Mod...");
     extractSel->setEnabled(ok && hasFiles);
-    connect(extractSel, &QAction::triggered, this, &ModListWidget::extractOverwriteSelected);
+    connect(extractSel, &QAction::triggered, this, [this, context] { extractOverwriteSelected(context); });
 
     menu.exec(globalPos);
 }
 
-void ModListWidget::extractOverwriteAll()
+void ModListWidget::extractOverwriteAll(const ActionContext& context)
 {
+    if (!matchesContext(context))
+        return;
     bool ok = false;
     QString name = QInputDialog::getText(this, "Extract Overwrite",
         "New mod name (empty list will extract every file in Overwrite):",
         QLineEdit::Normal, "Overwrite Snapshot", &ok);
-    if (!ok || name.trimmed().isEmpty())
+    if (!ok || name.trimmed().isEmpty() || !matchesContext(context))
         return;
     int count = 0;
     QString err;
-    if (!m_grpc->extractOverwriteToMod(m_gameId, name.trimmed(), {}, false, count, err)) {
+    const bool extracted = m_grpc->extractOverwriteToMod(context.gameId, name.trimmed(), {}, false, count, err);
+    if (!matchesContext(context))
+        return;
+    if (!extracted) {
         dialogs::warn(this, "Extract Failed", err);
         return;
     }
     dialogs::info(this, "Extract Complete",
         QString("Moved %1 file(s) into mod \"%2\".").arg(count).arg(name.trimmed()));
-    scanModsFolder();
+    reloadMods();
 }
 
 // Pops a multi-select picker so the user can graduate a subset of Overwrite into a named mod folder.
-void ModListWidget::extractOverwriteSelected()
+void ModListWidget::extractOverwriteSelected(const ActionContext& context)
 {
+    if (!matchesContext(context))
+        return;
     std::vector<GrpcOverwriteEntry> files;
     QString owDir, err;
-    if (!m_grpc->listOverwriteFiles(m_gameId, files, owDir, err)) {
+    const bool listed = m_grpc->listOverwriteFiles(context.gameId, files, owDir, err);
+    if (!matchesContext(context))
+        return;
+    if (!listed) {
         dialogs::warn(this, "Extract Failed", err);
         return;
     }
@@ -2030,7 +2219,7 @@ void ModListWidget::extractOverwriteSelected()
     connect(btns, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
     connect(btns, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
 
-    if (dlg.exec() != QDialog::Accepted)
+    if (dlg.exec() != QDialog::Accepted || !matchesContext(context))
         return;
 
     QStringList chosen;
@@ -2048,14 +2237,17 @@ void ModListWidget::extractOverwriteSelected()
 
     int count = 0;
     QString rpcErr;
-    if (!m_grpc->extractOverwriteToMod(m_gameId, name, chosen, keepCb->isChecked(),
-                                        count, rpcErr)) {
+    const bool extracted = m_grpc->extractOverwriteToMod(context.gameId, name, chosen, keepCb->isChecked(),
+                                                          count, rpcErr);
+    if (!matchesContext(context))
+        return;
+    if (!extracted) {
         dialogs::warn(this, "Extract Failed", rpcErr);
         return;
     }
+    reloadMods();
     dialogs::info(this, "Extract Complete",
         QString("Moved %1 file(s) into mod \"%2\".").arg(count).arg(name));
-    scanModsFolder();
 }
 
 void ModListWidget::onAddSeparatorClicked()
@@ -2066,10 +2258,14 @@ void ModListWidget::onAddSeparatorClicked()
     if (!m_visualMode)
         m_visualCheck->setChecked(true);
     bool atTop = QApplication::keyboardModifiers().testFlag(Qt::ShiftModifier);
-    int targetRow = atTop ? 0 : (m_model->rowCount() - 1);
-    if (targetRow < 0)
-        targetRow = 0;
-    createSeparatorAt(targetRow);
+    ModRowKind anchorKind = RowKindOverwrite;
+    QString anchorName;
+    if (atTop && m_model->rowCount() > 0) {
+        const ModListRow anchor = m_model->rowAt(0);
+        anchorKind = anchor.kind;
+        anchorName = anchor.kind == RowKindMod ? anchor.folder : anchor.name;
+    }
+    createSeparatorAt(actionContext(), anchorKind, anchorName);
     endInteraction();
 }
 
@@ -2078,6 +2274,7 @@ void ModListWidget::groupByCategory()
 {
     if (editsBlocked())
         return;
+    const ActionContext context = actionContext();
     QStringList cats;
     QSet<QString> seen;
     for (const auto& m : m_mods) {
@@ -2101,6 +2298,21 @@ void ModListWidget::groupByCategory()
                 "Mods with no category are left untouched.")
             .arg(cats.size()).arg(cats.size() == 1 ? "y" : "ies")))
         return;
+    if (!matchesContext(context) || editsBlocked())
+        return;
+    for (const auto& meta : m_mods) {
+        if (!meta.category.trimmed().isEmpty() && availableModIndex(context, meta.folder) < 0)
+            return;
+    }
+    cats.clear();
+    seen.clear();
+    for (const auto& meta : m_mods) {
+        const QString category = meta.category.trimmed();
+        if (!category.isEmpty() && !seen.contains(category)) {
+            seen.insert(category);
+            cats.append(category);
+        }
+    }
 
     QSet<QString> existing;
     quint64 nextIdx = 0x10;
@@ -2124,8 +2336,10 @@ void ModListWidget::groupByCategory()
         QString c = meta.category.trimmed();
         if (c.isEmpty() || meta.separator == c)
             continue;
+        const QString yamlPath = metadataPathForFolder(meta.folder);
+        if (yamlPath.isEmpty())
+            continue;
         meta.separator = c;
-        QString yamlPath = m_modsDir + "/" + meta.folder + "/metadata.yaml";
         ModCatalog::patchMetadataField(yamlPath, "separator", c);
     }
 
