@@ -53,7 +53,7 @@ func durableDownloadManager(respond destinationTransport, landed *int) (*Manager
 			(*landed)++
 		}},
 	}
-	return m, &Download{ID: "download-1", GameID: "skyrimse", NXMURI: pipelineURI}
+	return m, &Download{ID: "dl-00000000-0000-4000-8000-000000000001", GameID: "skyrimse", NXMURI: pipelineURI}
 }
 
 // downloadPartPaths returns the archive and part locations for a test download.

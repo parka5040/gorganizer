@@ -45,13 +45,18 @@ func (ar *ArchiveService) managerHooks() download.ManagerHooks {
 	}
 }
 
-// handleLandedArchive waits for startup recovery, then installs a landed archive for the dependency requests it satisfies, otherwise auto-installs it when the game's setting is on.
+// handleLandedArchive handles a new archive for dependency requests and optional automatic installation.
 func (ar *ArchiveService) handleLandedArchive(snap download.DownloadSnapshot, archivePath string, sidecar download.ArchiveSidecar) {
+	ar.handleLandedArchiveMode(snap, archivePath, sidecar, true)
+}
+
+// handleLandedArchiveMode waits for recovery before consuming dependencies or installing a new download.
+func (ar *ArchiveService) handleLandedArchiveMode(snap download.DownloadSnapshot, archivePath string, sidecar download.ArchiveSidecar, autoInstall bool) {
 	if err := ar.s.awaitRecovery(); err != nil {
 		slog.Warn("handling a landed archive skipped; the next start consumes it for waiting dependency requests but never auto-installs it", "game", snap.GameID, "archive", archivePath, "err", err)
 		return
 	}
-	landing := heldLanding{snap: snap, path: archivePath, sidecar: sidecar}
+	landing := heldLanding{snap: snap, path: archivePath, sidecar: sidecar, autoInstall: autoInstall}
 	if ar.s.holdDeferredLanding(landing) {
 		return
 	}
@@ -83,6 +88,9 @@ func (ar *ArchiveService) handleLandedArchive(snap download.DownloadSnapshot, ar
 		return
 	}
 	if deps := ar.s.svc.modDeps; deps != nil && deps.consumeLandedArchive(snap.GameID, snap.ID, archivePath, sidecar) {
+		return
+	}
+	if !autoInstall {
 		return
 	}
 	settings, _ := config.LoadGameSettings(snap.GameID)
@@ -175,6 +183,36 @@ func (ar *ArchiveService) CancelDownload(id string) error {
 
 func (ar *ArchiveService) RetryDownload(id string) (int, error) {
 	state := ar.s.downloadStateSnapshot()
+	for _, gameID := range state.gameIDs {
+		present, err := download.HasLanding(gameID, id)
+		if err != nil {
+			return 0, err
+		}
+		if !present {
+			continue
+		}
+		finished, stillPresent, err := download.FinishLandingWithManager(gameID, id, state.manager)
+		if err != nil {
+			var informationErr *download.ArchiveInformationSaveError
+			if errors.As(err, &informationErr) || errors.Is(err, download.ErrArchiveDownloadBusy) {
+				return 0, err
+			}
+			return 0, &download.LandingRecoveryError{Err: err}
+		}
+		if !stillPresent {
+			continue
+		}
+		ar.s.invalidateInstalledArchiveCache(gameID)
+		if row, err := ar.buildArchiveRow(gameID, relFromDownloads(gameID, finished.ArchivePath)); err == nil {
+			row.DownloadID = finished.Snapshot.ID
+			ar.s.archiveBus.Publish(gameID, dto.ArchiveEventResult{GameID: gameID, RowChanged: row})
+		}
+		ar.managerHooks().OnDownloadProgress(finished.Snapshot)
+		ar.s.goBackground("finish archive landing", func() {
+			ar.handleLandedArchiveMode(finished.Snapshot, finished.ArchivePath, finished.Sidecar, false)
+		})
+		return 0, nil
+	}
 	if state.manager == nil {
 		return 0, fmt.Errorf("download manager not initialized")
 	}
@@ -336,6 +374,13 @@ func (ar *ArchiveService) RemoveArchive(gameID, archiveRelPath, downloadID strin
 		case match.Status == download.LedgerQueued || match.Status == download.LedgerDownloading:
 			return download.ErrArchiveDownloadBusy
 		default:
+			if present, err := download.HasLanding(gameID, downloadID); err != nil {
+				return err
+			} else if present {
+				if err := download.DiscardLanding(gameID, downloadID); err != nil {
+					return err
+				}
+			}
 			if err := download.RemoveLedgerEntry(gameID, downloadID); err != nil {
 				return err
 			}
@@ -356,6 +401,13 @@ func (ar *ArchiveService) RemoveArchive(gameID, archiveRelPath, downloadID strin
 	}
 	for _, entry := range entries {
 		if entry.ArchiveRelPath == archiveRelPath {
+			if present, err := download.HasLanding(gameID, entry.ID); err != nil {
+				return err
+			} else if present {
+				if err := download.DiscardLanding(gameID, entry.ID); err != nil {
+					return err
+				}
+			}
 			if err := download.RemoveLedgerEntry(gameID, entry.ID); err != nil {
 				return err
 			}

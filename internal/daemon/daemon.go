@@ -140,6 +140,7 @@ func newWithClock(cfg *config.Config, now func() time.Time, scans ...func(string
 	download.SetModsDirResolver(config.ModsDir)
 	d.classifyStartupRecoveries()
 	d.recoverInterruptedReinstalls()
+	download.RecoverLandings(d.configuredGameIDs())
 	gameIDs := d.recoverableGameIDs()
 	recoveredLandings := d.svc.modDeps.recoverInterruptedRequests(gameIDs)
 

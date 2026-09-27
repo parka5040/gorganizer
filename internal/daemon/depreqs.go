@@ -513,6 +513,9 @@ func (md *ModDependencyService) downloadLive(gameID, downloadID string, download
 			return true
 		}
 	}
+	if present, _ := download.HasLanding(gameID, downloadID); present {
+		return true
+	}
 	return ledger.nonTerminal(downloadID)
 }
 
@@ -521,6 +524,9 @@ func (md *ModDependencyService) observeDownload(snap download.DownloadSnapshot) 
 	switch snap.Status {
 	case download.StatusFailed, download.StatusCancelled:
 		if _, _, err := dependencySpecFor(snap.GameID); err != nil {
+			return
+		}
+		if present, _ := download.HasLanding(snap.GameID, snap.ID); present {
 			return
 		}
 		reason := snap.Error
@@ -781,8 +787,13 @@ func (md *ModDependencyService) recoverInterruptedRequests(gameIDs []string) []r
 
 // recoverDownloadingEntry keeps a premium entry whose download is still pending, queues its landed archive for consumption, or fails it, reporting whether it changed.
 func recoverDownloadingEntry(gameID string, entry *depEntry, ledger *ledgerSnapshot, index *download.DownloadsIndex, now time.Time, seen map[string]bool, landings *[]recoveredLanding) bool {
-	if entry.DownloadID != "" && ledger.nonTerminal(entry.DownloadID) {
-		return false
+	if entry.DownloadID != "" {
+		if pending, _ := download.HasLanding(gameID, entry.DownloadID); pending {
+			return false
+		}
+		if ledger.nonTerminal(entry.DownloadID) {
+			return false
+		}
 	}
 	if id := ledger.pendingFor(entry.NexusModID, entry.FileID); id != "" {
 		entry.DownloadID = id
