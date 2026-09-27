@@ -733,7 +733,10 @@ message ArchiveEvent {
 
 message PreviewInstallRequest {
   string game_id = 1;
+  // Exactly one of archive_rel_path (in Downloads) or external_archive_path
+  // (an absolute path to an archive outside the library) must be set.
   string archive_rel_path = 2;
+  string external_archive_path = 3;
 }
 message PreviewInstallResponse {
   // Daemon-side opaque handle referring to the cached extraction. Pass
@@ -742,6 +745,13 @@ message PreviewInstallResponse {
   bool has_fomod = 2;
   FomodPlan plan = 3;                    // valid when has_fomod=true
   repeated string flat_file_list = 4;    // relative to extract root; valid when has_fomod=false
+  // Candidate content roots (relative, '/'-separated; "" = archive root) the
+  // user may pick when root_ambiguous is true. Bounded and validated.
+  repeated string selectable_roots = 5;
+  // Content root the daemon would install from ("" = archive root).
+  string detected_root = 6;
+  // True when the daemon could not decide the content root on its own.
+  bool root_ambiguous = 7;
 }
 
 message DiscardPreviewRequest {
@@ -769,6 +779,11 @@ message StartInstallRequest {
   // When non-empty, skip auto-flatten and copy exactly this file set
   // (FOMOD path). Ignored when preview reported has_fomod=false.
   repeated FomodFile fomod_selected_files = 7;
+  // The user completed the FOMOD wizard (an empty fomod_selected_files list
+  // is then a deliberate empty selection, not "wizard not run").
+  bool fomod_confirmed = 8;
+  // Content root chosen by the user from PreviewInstallResponse.selectable_roots.
+  string selected_root = 9;
 }
 message StartInstallResponse {
   string mod_folder = 1;
@@ -1141,6 +1156,11 @@ message FomodPlan {
   string screenshot_path = 7;           // absolute path to a screenshot in fomod/, or empty
   string version = 8;                   // from fomod/info.xml <Version>
   string author = 9;                    // from fomod/info.xml <Author>
+  // Raw fomod/ModuleConfig.xml bytes (at most 1 MiB) so the GUI can run the
+  // wizard without reading daemon-side files; empty for legacy info-only.
+  bytes module_config_xml = 10;
+  // Screenshot image bytes (at most 2 MiB), or empty.
+  bytes screenshot_data = 11;
 }
 
 // --- INI management messages ---

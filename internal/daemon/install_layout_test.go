@@ -150,7 +150,7 @@ func TestInstallEntryPointsRefuseLayoutsWithoutPlanner(t *testing.T) {
 	}); !errors.As(err, &layoutErr) {
 		t.Errorf("StartInstall error = %v, want LayoutUnsupportedError", err)
 	}
-	if _, err := d.PreviewInstall("stardewvalley", "SampleMod.zip"); !errors.As(err, &layoutErr) {
+	if _, err := d.PreviewInstall(dto.PreviewInstallRequest{GameID: "stardewvalley", ArchiveRelPath: "SampleMod.zip"}); !errors.As(err, &layoutErr) {
 		t.Errorf("PreviewInstall error = %v, want LayoutUnsupportedError", err)
 	}
 	if _, _, _, err := d.ReinstallMod("stardewvalley", "Existing"); !errors.As(err, &layoutErr) {
@@ -305,7 +305,7 @@ func TestPreviewInstallListsPlannedFiles(t *testing.T) {
 		"Core/assets/nested/x.png":     "png",
 	})
 
-	res, err := d.PreviewInstall("stardewvalley", "Pack.zip")
+	res, err := d.PreviewInstall(dto.PreviewInstallRequest{GameID: "stardewvalley", ArchiveRelPath: "Pack.zip"})
 	if err != nil {
 		t.Fatalf("PreviewInstall: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestPreviewInstallListsPlannedFiles(t *testing.T) {
 	}
 
 	writeZipFiles(t, filepath.Join(config.DownloadsDir("stardewvalley"), "Readme.zip"), map[string]string{"readme.txt": "hi"})
-	if _, err := d.PreviewInstall("stardewvalley", "Readme.zip"); !errors.Is(err, smapi.ErrNotAMod) {
+	if _, err := d.PreviewInstall(dto.PreviewInstallRequest{GameID: "stardewvalley", ArchiveRelPath: "Readme.zip"}); !errors.Is(err, smapi.ErrNotAMod) {
 		t.Fatalf("PreviewInstall(no manifest) error = %v, want ErrNotAMod", err)
 	}
 	root, err := extractionRoot()

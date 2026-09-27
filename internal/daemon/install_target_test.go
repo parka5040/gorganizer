@@ -160,7 +160,7 @@ func TestStartInstallRefusesAPreviewOfAnotherGameOrArchive(t *testing.T) {
 	writeZipFiles(t, filepath.Join(config.DownloadsDir("skyrimse"), "Skyrim.zip"), map[string]string{"plugin.esp": "plugin"})
 	writeZipFiles(t, filepath.Join(config.DownloadsDir("skyrimse"), "Other.zip"), map[string]string{"other.esp": "other"})
 	writeManifestArchive(t, filepath.Join(config.DownloadsDir("stardewvalley"), "Skyrim.zip"))
-	preview, err := d.PreviewInstall("skyrimse", "Skyrim.zip")
+	preview, err := d.PreviewInstall(dto.PreviewInstallRequest{GameID: "skyrimse", ArchiveRelPath: "Skyrim.zip"})
 	if err != nil {
 		t.Fatalf("PreviewInstall: %v", err)
 	}

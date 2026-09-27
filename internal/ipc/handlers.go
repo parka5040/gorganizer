@@ -344,14 +344,21 @@ func (s *gorganizerServer) StreamArchiveEvents(req *pb.StreamArchiveEventsReques
 }
 
 func (s *gorganizerServer) PreviewInstall(_ context.Context, req *pb.PreviewInstallRequest) (*pb.PreviewInstallResponse, error) {
-	res, err := s.ctrl.PreviewInstall(req.GetGameId(), req.GetArchiveRelPath())
+	res, err := s.ctrl.PreviewInstall(dto.PreviewInstallRequest{
+		GameID:              req.GetGameId(),
+		ArchiveRelPath:      req.GetArchiveRelPath(),
+		ExternalArchivePath: req.GetExternalArchivePath(),
+	})
 	if err != nil {
 		return nil, grpcError(err)
 	}
 	out := &pb.PreviewInstallResponse{
-		PreviewId:    res.PreviewID,
-		HasFomod:     res.HasFomod,
-		FlatFileList: res.FlatFileList,
+		PreviewId:       res.PreviewID,
+		HasFomod:        res.HasFomod,
+		FlatFileList:    res.FlatFileList,
+		SelectableRoots: res.SelectableRoots,
+		DetectedRoot:    res.DetectedRoot,
+		RootAmbiguous:   res.RootAmbiguous,
 	}
 	if res.Plan != nil {
 		out.Plan = fomodPlanToProto(res.Plan)
@@ -375,6 +382,8 @@ func (s *gorganizerServer) StartInstall(_ context.Context, req *pb.StartInstallR
 		TargetMod:           req.GetTargetMod(),
 		PreviewID:           req.GetPreviewId(),
 		FomodSelectedFiles:  files,
+		FomodConfirmed:      req.GetFomodConfirmed(),
+		SelectedRoot:        req.GetSelectedRoot(),
 	})
 	if err != nil {
 		return nil, grpcError(err)
@@ -1086,8 +1095,10 @@ func fomodPlanToProto(p *dto.FomodPlanResult) *pb.FomodPlan {
 		LegacyInfoOnly: p.LegacyInfoOnly,
 		Description:    p.Description,
 		ScreenshotPath: p.ScreenshotPath,
-		Version:        p.Version,
-		Author:         p.Author,
+		Version:         p.Version,
+		Author:          p.Author,
+		ModuleConfigXml: p.ModuleConfigXML,
+		ScreenshotData:  p.ScreenshotData,
 	}
 	for _, f := range p.RequiredFiles {
 		out.RequiredFiles = append(out.RequiredFiles, &pb.FomodFile{

@@ -267,13 +267,25 @@ type FomodPlanResult struct {
 	ScreenshotPath string
 	Version        string
 	Author         string
+
+	ModuleConfigXML []byte
+	ScreenshotData  []byte
+}
+
+type PreviewInstallRequest struct {
+	GameID              string
+	ArchiveRelPath      string
+	ExternalArchivePath string
 }
 
 type PreviewResult struct {
-	PreviewID    string
-	HasFomod     bool
-	Plan         *FomodPlanResult
-	FlatFileList []string
+	PreviewID       string
+	HasFomod        bool
+	Plan            *FomodPlanResult
+	FlatFileList    []string
+	SelectableRoots []string
+	DetectedRoot    string
+	RootAmbiguous   bool
 }
 
 type StartInstallRequest struct {
@@ -284,6 +296,8 @@ type StartInstallRequest struct {
 	TargetMod           string
 	PreviewID           string
 	FomodSelectedFiles  []FomodFileResult
+	FomodConfirmed      bool
+	SelectedRoot        string
 }
 
 type GameSettingsResult struct {

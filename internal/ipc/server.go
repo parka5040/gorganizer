@@ -143,7 +143,7 @@ type ArchiveController interface {
 }
 
 type InstallController interface {
-	PreviewInstall(gameID, archiveRelPath string) (*dto.PreviewResult, error)
+	PreviewInstall(req dto.PreviewInstallRequest) (*dto.PreviewResult, error)
 	StartInstall(req dto.StartInstallRequest) (modFolder string, fileCount int, err error)
 	DiscardPreview(previewID string) error
 	StreamInstallEvents(ctx context.Context, gameID string) (<-chan dto.InstallEventResult, error)

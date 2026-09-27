@@ -46,7 +46,11 @@ func (is *InstallService) StreamInstallEvents(ctx context.Context, gameID string
 }
 
 // PreviewInstall extracts an archive into a daemon-cached tmpdir and returns a FOMOD plan or flat listing.
-func (is *InstallService) PreviewInstall(gameID, archiveRelPath string) (*dto.PreviewResult, error) {
+func (is *InstallService) PreviewInstall(req dto.PreviewInstallRequest) (*dto.PreviewResult, error) {
+	gameID, archiveRelPath := req.GameID, req.ArchiveRelPath
+	if req.ExternalArchivePath != "" {
+		return nil, fmt.Errorf("previewing an archive outside the Downloads folder is not supported yet")
+	}
 	if !is.s.gameConfigured(gameID) {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
