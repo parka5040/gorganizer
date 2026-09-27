@@ -2,18 +2,19 @@ package download
 
 import (
 	"archive/zip"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/bodgit/sevenzip"
+	"github.com/nwaples/rardecode/v2"
 
 	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/fsutil"
@@ -55,7 +56,7 @@ func DetectExtractor(archivePath string) (Extractor, error) {
 		magic[3] == 0xAF && magic[4] == 0x27 && magic[5] == 0x1C {
 		return &SevenZipExtractor{}, nil
 	}
-	if n >= 4 && magic[0] == 0x52 && magic[1] == 0x61 && magic[2] == 0x72 && magic[3] == 0x21 {
+	if bytes.HasPrefix(magic[:n], []byte("Rar!\x1a\x07\x00")) || bytes.HasPrefix(magic[:n], []byte("Rar!\x1a\x07\x01\x00")) {
 		return &RarExtractor{}, nil
 	}
 
@@ -793,19 +794,64 @@ func (e *RarExtractor) Extract(archivePath, destDir string) error {
 	return e.ExtractWithBudget(archivePath, destDir, NewExtractBudget())
 }
 
-// ExtractWithBudget extracts a rar archive and validates it within the shared extraction budget.
+// ExtractWithBudget extracts a rar archive while enforcing the shared extraction budget.
 func (e *RarExtractor) ExtractWithBudget(archivePath, destDir string, budget *ExtractBudget) error {
-	cmd := exec.Command("unrar", "x", "-o+", "--", archivePath, destDir+"/")
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	if err := cmd.Run(); err != nil {
-		slog.Warn("unrar failed, trying 7z fallback", "err", err)
-		cmd = exec.Command("7z", "x", "-o"+destDir, "-y", "--", archivePath)
-		cmd.Stdout = io.Discard
-		cmd.Stderr = io.Discard
-		if err := cmd.Run(); err != nil {
+	archive, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("opening rar: %w", err)
+	}
+	defer archive.Close()
+
+	r, err := rardecode.NewReader(archive, rardecode.MaxDictionarySize(1<<30))
+	if err != nil {
+		return rarReadError(err)
+	}
+	for {
+		header, err := r.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return rarReadError(err)
+		}
+		name := header.Name
+		if budget.remainingEntries <= 0 {
+			return &ArchiveRejectedError{Reason: ArchiveRejectedLimit, Detail: fmt.Sprintf("entry %q exceeds the maximum entry count", name)}
+		}
+		budget.remainingEntries--
+
+		path, err := fsutil.SafeJoin(destDir, name, false)
+		if err != nil {
+			return &ArchiveRejectedError{Reason: ArchiveRejectedUnsafeEntry, Detail: fmt.Sprintf("entry %q escapes the destination directory: %v", name, err)}
+		}
+		mode := header.Mode()
+		if header.LinkType != 0 || (header.IsDir && !mode.IsDir()) || (!header.IsDir && !mode.IsRegular()) {
+			return &ArchiveRejectedError{Reason: ArchiveRejectedUnsafeEntry, Detail: fmt.Sprintf("entry %q is not a regular file or directory", name)}
+		}
+		if header.Encrypted || header.HeaderEncrypted {
+			return &ArchiveRejectedError{Reason: ArchiveRejectedUnsupported, Detail: fmt.Sprintf("entry %q is encrypted", name)}
+		}
+		if header.IsDir {
+			if err := os.MkdirAll(path, 0755); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return err
 		}
+		if err := copyExtractedFile(header, path, name, budget, func(*rardecode.FileHeader) (io.ReadCloser, error) {
+			return io.NopCloser(r), nil
+		}); err != nil {
+			return rarReadError(err)
+		}
 	}
-	return validateRarExtraction(destDir, budget)
+}
+
+// rarReadError maps unsupported RAR features to archive rejections.
+func rarReadError(err error) error {
+	if errors.Is(err, rardecode.ErrArchiveEncrypted) || errors.Is(err, rardecode.ErrArchivedFileEncrypted) || errors.Is(err, rardecode.ErrMultiVolume) {
+		return &ArchiveRejectedError{Reason: ArchiveRejectedUnsupported, Detail: err.Error()}
+	}
+	return err
 }
