@@ -9,7 +9,13 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/parka/gorganizer/internal/atomicfile"
 )
+
+var removeActivationData = os.RemoveAll
+var syncFarmParent = atomicfile.SyncDir
 
 type MountManager struct {
 	gameDataPath  string
@@ -93,11 +99,20 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 	overwriteName := m.deriveOverwriteName(layers)
 	sentLayers := layersForSentinel(layers)
 
+	original, exists, err := directoryAt(dataPath)
+	if err != nil {
+		return fmt.Errorf("checking original Data: %w", err)
+	}
+	if !exists || original.Dev == 0 || original.Ino == 0 {
+		return fmt.Errorf("%w: %s is not a real directory", ErrDataDirMissing, dataPath)
+	}
 	intentPath := activatingIntentPath(dataPath)
 	if err := WriteIntent(intentPath, &ActivationIntent{
 		SchemaVersion: CurrentIntentSchema,
 		Magic:         IntentMagic,
 		Kind:          IntentActivating,
+		OperationID:   uuid.NewString(),
+		Original:      original,
 		GameID:        m.gameID,
 		DataPath:      dataPath,
 		BackupPath:    backupPath,
@@ -109,23 +124,23 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 
 	slog.Info("renaming data directory", "from", dataPath, "to", backupPath)
 	if err := os.Rename(dataPath, backupPath); err != nil {
-		_ = RemoveIntent(intentPath)
-		return fmt.Errorf("renaming %s to %s: %w", dataPath, backupPath, err)
+		return errors.Join(fmt.Errorf("renaming %s to %s: %w", dataPath, backupPath, err), RemoveIntent(intentPath))
+	}
+	rollback := func(err error) error {
+		return errors.Join(err, rollbackActivation(dataPath, backupPath, intentPath, original))
+	}
+	if err := syncFarmParent(filepath.Dir(dataPath)); err != nil {
+		return rollback(fmt.Errorf("syncing renamed Data: %w", err))
 	}
 
 	tree := NewMergedTree()
 	if err := tree.Build(layers); err != nil {
-		_ = os.Rename(backupPath, dataPath)
-		_ = RemoveIntent(intentPath)
-		return fmt.Errorf("building merged tree: %w", err)
+		return rollback(fmt.Errorf("building merged tree: %w", err))
 	}
 
 	stats, err := BuildInto(dataPath, tree, layers, overwriteName)
 	if err != nil {
-		_ = os.RemoveAll(dataPath)
-		_ = os.Rename(backupPath, dataPath)
-		_ = RemoveIntent(intentPath)
-		return fmt.Errorf("materializing overlay: %w", err)
+		return rollback(fmt.Errorf("materializing overlay: %w", err))
 	}
 
 	sentinel := &Sentinel{
@@ -147,10 +162,7 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 		ManifestEntries:     stats.ManifestEntries,
 	}
 	if err := WriteSentinel(dataPath, sentinel); err != nil {
-		_ = os.RemoveAll(dataPath)
-		_ = os.Rename(backupPath, dataPath)
-		_ = RemoveIntent(intentPath)
-		return fmt.Errorf("writing sentinel: %w", err)
+		return rollback(fmt.Errorf("writing sentinel: %w", err))
 	}
 
 	if err := RemoveIntent(intentPath); err != nil {
@@ -174,6 +186,34 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 		"overwrite_mod", overwriteName)
 
 	return nil
+}
+
+// rollbackActivation restores the recorded original directory and removes its intent only after syncing the rename.
+func rollbackActivation(dataPath, backupPath, intentPath string, original directoryIdentity) error {
+	backup, backupExists, err := directoryAt(backupPath)
+	if err != nil {
+		return fmt.Errorf("checking activation backup: %w", err)
+	}
+	if !backupExists || backup != original {
+		return fmt.Errorf("activation backup does not match the recorded original directory")
+	}
+	data, dataExists, err := directoryAt(dataPath)
+	if err != nil {
+		return fmt.Errorf("checking partial Data: %w", err)
+	}
+	if dataExists && data == original {
+		return fmt.Errorf("Data still holds the recorded original directory")
+	}
+	if err := removeActivationData(dataPath); err != nil {
+		return fmt.Errorf("removing partial Data: %w", err)
+	}
+	if err := renameActivationBackup(backupPath, dataPath); err != nil {
+		return fmt.Errorf("restoring original Data: %w", err)
+	}
+	if err := syncFarmParent(filepath.Dir(dataPath)); err != nil {
+		return fmt.Errorf("syncing restored Data: %w", err)
+	}
+	return RemoveIntent(intentPath)
 }
 
 // Deactivate captures new writes into Overwrite and restores Data.orig, leaving the farm intact if capture fails.
@@ -272,6 +312,13 @@ func (m *MountManager) ReMaterialize() error {
 	if vErr := ValidateSentinel(s); vErr != nil {
 		return fmt.Errorf("sentinel rejected: %w", vErr)
 	}
+	for _, path := range []string{applyingIntentPath(dataPath), stagingDirPath(dataPath), oldFarmPath(dataPath)} {
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("an unfinished mod change at %s is still being cleaned up; restart Gorganizer, then try again", path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("checking mod change at %s: %w", path, err)
+		}
+	}
 
 	if m.overwriteRoot != "" {
 		if _, capErr := CaptureNewFiles(dataPath, m.overwriteRoot); capErr != nil {
@@ -286,7 +333,6 @@ func (m *MountManager) ReMaterialize() error {
 	m.tree = tree
 
 	staging := stagingDirPath(dataPath)
-	_ = os.RemoveAll(staging)
 	overwriteName := m.deriveOverwriteName(m.layers)
 	stats, err := BuildInto(staging, tree, m.layers, overwriteName)
 	if err != nil {
@@ -318,17 +364,25 @@ func (m *MountManager) ReMaterialize() error {
 	}
 
 	applyPath := applyingIntentPath(dataPath)
-	if err := WriteIntent(applyPath, &ActivationIntent{
+	applyIntent := &ActivationIntent{
 		SchemaVersion: CurrentIntentSchema,
 		Magic:         IntentMagic,
 		Kind:          IntentApplying,
+		OperationID:   uuid.NewString(),
+		LiveFarmID:    s.FarmID,
+		StagingFarmID: stats.FarmID,
 		GameID:        m.gameID,
 		DataPath:      dataPath,
 		BackupPath:    dataPath + m.backupSuffix,
 		OverwriteRoot: m.overwriteRoot,
 		StagingPath:   staging,
 		PID:           os.Getpid(),
-	}); err != nil {
+	}
+	if s.FarmID == "" {
+		applyIntent.SchemaVersion = 1
+		applyIntent.OperationID, applyIntent.LiveFarmID, applyIntent.StagingFarmID = "", "", ""
+	}
+	if err := WriteIntent(applyPath, applyIntent); err != nil {
 		_ = os.RemoveAll(staging)
 		return fmt.Errorf("writing apply intent: %w", err)
 	}
@@ -336,8 +390,7 @@ func (m *MountManager) ReMaterialize() error {
 	if err := renameExchange(dataPath, staging); err != nil {
 		if rmErr := os.RemoveAll(staging); rmErr != nil {
 			err = errors.Join(err, fmt.Errorf("removing staging overlay: %w", rmErr))
-		}
-		if rmErr := RemoveIntent(applyPath); rmErr != nil {
+		} else if rmErr := RemoveIntent(applyPath); rmErr != nil {
 			err = errors.Join(err, rmErr)
 		}
 		if errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EINVAL) {
@@ -345,8 +398,12 @@ func (m *MountManager) ReMaterialize() error {
 		}
 		return fmt.Errorf("apply swap: %w", err)
 	}
-
-	_ = os.RemoveAll(staging)
+	if err := syncFarmParent(filepath.Dir(dataPath)); err != nil {
+		return fmt.Errorf("syncing applied farm: %w", err)
+	}
+	if err := os.RemoveAll(staging); err != nil {
+		return fmt.Errorf("removing old farm: %w", err)
+	}
 	if err := RemoveIntent(applyPath); err != nil {
 		slog.Warn("apply committed but could not remove intent", "path", applyPath, "err", err)
 	}
