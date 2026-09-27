@@ -387,6 +387,7 @@ private:
     QTimer* m_connectionTimer = nullptr;
     bool m_connected = false;
     bool m_transferActive = false;
+    quint64 m_connectionGeneration = 0;
     quint64 m_nextPreviewRequestId = 0;
     quint64 m_nextInstallRequestId = 0;
     quint64 m_nextModLoaderRequestId = 0;

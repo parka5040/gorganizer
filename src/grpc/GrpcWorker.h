@@ -177,6 +177,7 @@ signals:
 private:
     using Stub = gorganizer::v1::Gorganizer::Stub;
 
+    std::shared_ptr<grpc::Channel> m_channel;
     std::unique_ptr<Stub> m_stub;
     std::atomic<bool> m_stopped{false};
 

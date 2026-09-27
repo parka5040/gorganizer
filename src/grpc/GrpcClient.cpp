@@ -200,6 +200,7 @@ std::string GrpcClient::socketTarget() const
 
 void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
 {
+    const quint64 generation = m_connectionGeneration;
     connect(worker, &GrpcWorker::gamesListed, this, &GrpcClient::gamesListed);
     connect(worker, &GrpcWorker::gamesDetected, this, &GrpcClient::gamesDetected);
     connect(worker, &GrpcWorker::gameConfigured, this, &GrpcClient::gameConfigured);
@@ -238,11 +239,13 @@ void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
     connect(worker, &GrpcWorker::daemonInfo, this, &GrpcClient::daemonInfo);
     connect(worker, &GrpcWorker::recoveryPending, this, &GrpcClient::recoveryPending);
     connect(worker, &GrpcWorker::transferProgress, this, &GrpcClient::transferProgress);
-    connect(worker, &GrpcWorker::transferCompleted, this, [this](const GrpcTransferSummary& summary) {
+    connect(worker, &GrpcWorker::transferCompleted, this, [this, generation](const GrpcTransferSummary& summary) {
+        if (generation != m_connectionGeneration) return;
         m_transferActive = false;
         emit transferCompleted(summary);
     });
-    connect(worker, &GrpcWorker::transferFailed, this, [this](const QString& error) {
+    connect(worker, &GrpcWorker::transferFailed, this, [this, generation](const QString& error) {
+        if (generation != m_connectionGeneration) return;
         m_transferActive = false;
         emit transferFailed(error);
     });
@@ -266,6 +269,7 @@ void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
 void GrpcClient::connectToDaemon()
 {
     if (m_workers[RoleUnary].thread) disconnectFromDaemon();
+    ++m_connectionGeneration;
 
     m_channel = grpc::CreateChannel(socketTarget(), grpc::InsecureChannelCredentials());
     m_syncStub = std::make_unique<GrpcSyncStub>(m_channel);
@@ -285,6 +289,7 @@ void GrpcClient::connectToDaemon()
 // Stops workers, joins threads, and leaks any thread still alive after 3s to avoid stub use-after-free.
 void GrpcClient::disconnectFromDaemon()
 {
+    ++m_connectionGeneration;
     m_connectionTimer->stop();
     for (auto& handle : m_workers)
         if (handle.worker) handle.worker->stop();
@@ -293,6 +298,8 @@ void GrpcClient::disconnectFromDaemon()
         if (!handle.thread) continue;
         handle.thread->quit();
         if (!handle.thread->wait(3000)) {
+            QObject::disconnect(handle.worker, nullptr, this, nullptr);
+            handle.thread->setParent(nullptr);
             qWarning("GrpcClient: %s thread did not exit within 3s; "
                      "leaking it to avoid use-after-free on the gRPC stub",
                      handle.tag);
@@ -301,6 +308,7 @@ void GrpcClient::disconnectFromDaemon()
             continue;
         }
         delete handle.worker;
+        delete handle.thread;
         handle.worker = nullptr;
         handle.thread = nullptr;
     }
