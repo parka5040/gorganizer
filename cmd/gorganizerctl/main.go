@@ -123,8 +123,9 @@ Subcommands:
   ping                         Check whether Gorganizer is running.
   wait-ready [--timeout 60s]   Wait for startup to finish.
   stop [--timeout 46s]         Ask Gorganizer to stop and wait for it to exit.
-  migrate-data --from <path> [--dry-run] [--yes]
+  migrate-data --from <path> [--dry-run [--json]] [--yes]
                                Move mods and downloads to your personal data folder.
+  migrate-data --status        Print none or pending for an interrupted move.
   migrate-data --resume        Finish an interrupted move.
   session [--daemon PATH] [--gui PATH] [--socket-path P] [-- GUI_ARGS…]
                                Open Gorganizer and supervise its background service.

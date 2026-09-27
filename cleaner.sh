@@ -1,6 +1,6 @@
 #!/bin/bash
-# cleaner.sh — Reset gorganizer to a clean first-time-user state.
-# Removes build artifacts, mod folders, config, and temporary extraction data.
+# cleaner.sh — Remove local build artifacts and old in-checkout mods.
+# Removes build artifacts, old in-checkout mod folders, config, and temporary extraction data.
 # Source code is untouched.
 #
 # Usage:
@@ -36,8 +36,9 @@ for arg in "$@"; do
         --help|-h)
             echo "Usage: $0 [--keep-mods] [--yes]"
             echo ""
-            echo "  (no args)     Remove build, mods, config, data and temporary extracts"
-            echo "  --keep-mods   Keep mod folders (*_Mods/), clean everything else"
+            echo "  (no args)     Remove build, old in-checkout mods, config and temporary extracts"
+            echo "  --keep-mods   Keep old in-checkout folders (*_Mods/)"
+            echo "  Personal data in ~/.local/share/gorganizer is not touched."
             echo "  --yes, -y     Skip the destructive-action confirmation prompt"
             exit 0
             ;;
@@ -52,13 +53,13 @@ done
 if ! $ASSUME_YES; then
     if $KEEP_MODS; then
         warn "About to remove: build artifacts, config (~/.config/gorganizer),"
-        warn "                 data (~/.local/share/gorganizer), temporary extracts, desktop entries."
-        warn "Mod folders (*_Mods/) will be KEPT."
+        warn "                 temporary extracts, desktop entries."
+        warn "Old in-checkout mod folders (*_Mods/) will be KEPT."
     else
-        warn "About to remove: build artifacts, ALL *_Mods/ folders in $SCRIPT_DIR,"
-        warn "                 config (~/.config/gorganizer),"
-        warn "                 data (~/.local/share/gorganizer), temporary extracts, desktop entries."
+        warn "About to remove: build artifacts, old in-checkout *_Mods/ folders in $SCRIPT_DIR,"
+        warn "                 config (~/.config/gorganizer), temporary extracts, desktop entries."
     fi
+    warn "Personal data in ~/.local/share/gorganizer is not touched."
     if [ -t 0 ]; then
         read -r -p "$(echo -e "${CYAN}[cleaner]${RESET} Type 'yes' to proceed: ")" reply || reply=""
         if [ "$reply" != "yes" ]; then
@@ -87,22 +88,17 @@ ok "Build artifacts removed."
 
 # Mod folders.
 if $KEEP_MODS; then
-    warn "Keeping mod folders (--keep-mods)."
+    warn "Keeping old in-checkout mod folders (--keep-mods)."
 else
-    log "Removing mod folders..."
+    log "Removing old in-checkout mod folders..."
     rm -rf "$SCRIPT_DIR/"*_Mods
-    ok "Mod folders removed."
+    ok "Old in-checkout mod folders removed."
 fi
 
 # Config (daemon config + Qt settings).
 log "Removing config..."
 rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/gorganizer"
 ok "Config removed."
-
-# Data (profiles, downloads).
-log "Removing data..."
-rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/gorganizer"
-ok "Data removed."
 
 # Leave the daemon's socket and lock alone; remove only this user's extraction cache.
 log "Removing temporary extracts..."
@@ -119,4 +115,4 @@ update-desktop-database "${XDG_DATA_HOME:-$HOME/.local/share}/applications" 2>/d
 ok "Desktop registrations removed."
 
 echo ""
-ok "Clean. Run ${GREEN}./gorganizer.sh${RESET} for a fresh start."
+ok "Local cleanup complete. Run ${GREEN}./gorganizer.sh${RESET} to rebuild."

@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/instancelock"
 	"github.com/parka/gorganizer/internal/migrate"
@@ -67,6 +69,95 @@ func TestMigrateDataDryRunChangesNothing(t *testing.T) {
 				t.Fatalf("destination changed: %v", err)
 			}
 		})
+	}
+}
+
+// TestMigrateDataJSONDryRun lists only registered old folder paths without moving them.
+func TestMigrateDataJSONDryRun(t *testing.T) {
+	from, mods, deps, out, errOut := migrateFixture(t)
+	for _, tc := range []struct {
+		name    string
+		prepare func(*testing.T)
+		want    int
+	}{
+		{"available", func(*testing.T) {}, 0},
+		{"blocked", func(t *testing.T) {
+			path := filepath.Join(config.XDGModsDir("skyrimse"), "existing.esp")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := atomicfile.WriteFile(path, []byte("existing"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out.Reset()
+			errOut.Reset()
+			tc.prepare(t)
+			if code := runMigrateDataWith([]string{"--from", from, "--dry-run", "--json"}, deps); code != tc.want {
+				t.Fatalf("exit = %d, want %d: %s", code, tc.want, errOut.String())
+			}
+			var got struct {
+				Sources []string `json:"sources"`
+			}
+			if err := json.Unmarshal(out.Bytes(), &got); err != nil || len(got.Sources) != 1 || got.Sources[0] != mods {
+				t.Fatalf("sources = %q, %v", out.String(), err)
+			}
+			if _, err := os.Lstat(mods); err != nil {
+				t.Fatalf("old folder changed: %v", err)
+			}
+		})
+	}
+}
+
+// TestMigrateDataStatus checks journal presence without taking the daemon lock or changing files.
+func TestMigrateDataStatus(t *testing.T) {
+	_, _, deps, out, errOut := migrateFixture(t)
+	release, err := instancelock.Acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	for _, tc := range []struct {
+		name    string
+		prepare func(*testing.T)
+		want    string
+	}{
+		{"none", func(*testing.T) {}, "none\n"},
+		{"pending", func(t *testing.T) {
+			if err := os.MkdirAll(config.DataDir(), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := atomicfile.WriteFile(migrate.JournalPath(), []byte("pending"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "pending\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out.Reset()
+			errOut.Reset()
+			tc.prepare(t)
+			if code := runMigrateDataWith([]string{"--status"}, deps); code != 0 || out.String() != tc.want || errOut.Len() != 0 {
+				t.Fatalf("status = %d, output = %q, error = %q", code, out.String(), errOut.String())
+			}
+		})
+	}
+}
+
+// TestMigrateDataJSONDryRunNoFoldersWhileDaemonRuns checks a clean checkout can be detected without locking the active daemon.
+func TestMigrateDataJSONDryRunNoFoldersWhileDaemonRuns(t *testing.T) {
+	from, mods, deps, out, errOut := migrateFixture(t)
+	if err := os.RemoveAll(mods); err != nil {
+		t.Fatal(err)
+	}
+	release, err := instancelock.Acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if code := runMigrateDataWith([]string{"--from", from, "--dry-run", "--json"}, deps); code != 0 || out.String() != "{\"sources\":[]}\n" || errOut.Len() != 0 {
+		t.Fatalf("empty plan = %d, output = %q, error = %q", code, out.String(), errOut.String())
 	}
 }
 
@@ -136,5 +227,13 @@ func TestMigrateDataConfirmedMove(t *testing.T) {
 	}
 	if code := runMigrateDataWith([]string{"--from", from, "--yes"}, deps); code != 0 {
 		t.Fatalf("repeat exit = %d: %s", code, errOut.String())
+	}
+}
+
+// TestMigrateDataCountDryRun prints only the number of old folders for the launcher.
+func TestMigrateDataCountDryRun(t *testing.T) {
+	from, _, deps, out, errOut := migrateFixture(t)
+	if code := runMigrateDataWith([]string{"--from", from, "--dry-run", "--count"}, deps); code != 0 || out.String() != "1\n" || errOut.Len() != 0 {
+		t.Fatalf("count = %d, output = %q, error = %q", code, out.String(), errOut.String())
 	}
 }
