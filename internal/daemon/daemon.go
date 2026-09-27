@@ -3,11 +3,13 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/dto"
@@ -45,16 +47,31 @@ func (d *Daemon) RetryDeferredRecovery(gameID string) error {
 	return d.VFSService.RetryDeferredRecovery(gameID)
 }
 
+const APIEpoch int32 = 1
+
 // New creates a Daemon from configuration with all subsystems initialized.
 func New(cfg *config.Config) (*Daemon, error) {
-	return newWithClock(cfg, time.Now)
+	return NewWithVersion(cfg, "dev")
+}
+
+// NewWithVersion creates a Daemon that reports the supplied build version.
+func NewWithVersion(cfg *config.Config, version string) (*Daemon, error) {
+	return newWithClockAndVersion(cfg, time.Now, version)
 }
 
 // newWithClock initializes a daemon using the supplied clock for startup recovery and launches.
 func newWithClock(cfg *config.Config, now func() time.Time, scans ...func(string) (bool, error)) (*Daemon, error) {
+	return newWithClockAndVersion(cfg, now, "dev", scans...)
+}
+
+// newWithClockAndVersion initializes a daemon with the supplied build version and clock.
+func newWithClockAndVersion(cfg *config.Config, now func() time.Time, version string, scans ...func(string) (bool, error)) (*Daemon, error) {
 	profileMgr := profile.NewManager(config.DataDir())
 	s := &session{
-		config:                  cfg,
+		config: cfg,
+		readiness: dto.ReadinessResult{
+			InstanceID: uuid.NewString(), PID: int32(os.Getpid()), Version: version, APIEpoch: APIEpoch,
+		},
 		profileMgr:              profileMgr,
 		iniMgr:                  inipkg.NewManager(profileMgr.ProfileDir),
 		mountMgrs:               make(map[string]*vfs.MountManager),
@@ -203,10 +220,13 @@ func (d *Daemon) Run(stopIPC func()) error {
 	return nil
 }
 
+// Health returns the daemon's identity and current readiness state.
 func (d *Daemon) Health() dto.ReadinessResult {
 	d.readinessMu.RLock()
-	defer d.readinessMu.RUnlock()
-	return d.readiness
+	result := d.readiness
+	d.readinessMu.RUnlock()
+	result.Stopping = d.shuttingDown.Load()
+	return result
 }
 
 // GetShutdownPlan reports which mounted games shutdown would leave active without changing daemon state.
@@ -434,7 +454,10 @@ func (d *Daemon) waitForLaunchedExit(ctx context.Context) {
 
 // Shutdown closes d.shutdownCh to signal shutdown; repeated calls are no-ops.
 func (d *Daemon) Shutdown() {
-	d.shutdownOnce.Do(func() { close(d.shutdownCh) })
+	d.shutdownOnce.Do(func() {
+		d.beginShutdown()
+		close(d.shutdownCh)
+	})
 }
 
 func (d *Daemon) WatchStatus() <-chan dto.StatusEventResult {

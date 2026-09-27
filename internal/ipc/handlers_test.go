@@ -900,6 +900,7 @@ func TestRecoveryRPCBindings(t *testing.T) {
 func TestHealthMapping(t *testing.T) {
 	fake := &fakeController{readiness: dto.ReadinessResult{
 		SocketReady: true, RecoveryDone: true, GamesWarmed: false, LastInitStep: "warming games",
+		InstanceID: "instance-1", PID: 42, Version: "1.2.3", APIEpoch: 1, Stopping: true,
 	}}
 	client := newTestClient(t, fake)
 	resp, err := client.Health(t.Context(), &pb.HealthRequest{})
@@ -908,6 +909,7 @@ func TestHealthMapping(t *testing.T) {
 	}
 	mustEqualProto(t, resp, &pb.Readiness{
 		SocketReady: true, RecoveryDone: true, GamesWarmed: false, LastInitStep: "warming games",
+		InstanceId: "instance-1", Pid: 42, Version: "1.2.3", ApiEpoch: 1, Stopping: true,
 	})
 }
 

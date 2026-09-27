@@ -429,6 +429,11 @@ type ReadinessResult struct {
 	RecoveryDone bool
 	GamesWarmed  bool
 	LastInitStep string
+	InstanceID   string
+	PID          int32
+	Version      string
+	APIEpoch     int32
+	Stopping     bool
 }
 
 type ProfileIniFileResult struct {
