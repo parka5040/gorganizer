@@ -20,14 +20,14 @@ const QRegularExpression& identifierPattern()
 QString withDetail(const QString& text, const QString& detail)
 {
     if (detail.isEmpty())
-        return text + QLatin1Char('.');
-    return QStringLiteral("%1: \"%2\".").arg(text, detail);
+        return text + QStringLiteral(". Try another archive.");
+    return QStringLiteral("%1: \"%2\". Try another archive.").arg(text, detail);
 }
 
 QString notAModMessage(const QString& reason, const QString& detail)
 {
     if (reason == QLatin1String("no_manifest"))
-        return QStringLiteral("This archive does not contain a SMAPI mod (no manifest.json).");
+        return QStringLiteral("This archive does not contain a mod this game can use. Try another archive.");
     if (reason == QLatin1String("loader_installer"))
         return QStringLiteral("This is the SMAPI installer, not a mod. Install SMAPI from Tools → SMAPI.");
     if (reason == QLatin1String("unsafe_destination"))
@@ -38,25 +38,18 @@ QString notAModMessage(const QString& reason, const QString& detail)
                                          "letter case, so they would install over each other"),
                           detail);
     if (reason == QLatin1String("duplicate_ids"))
-        return withDetail(QStringLiteral("This archive contains several mod folders with the same SMAPI UniqueID "
-                                         "(usually alternative versions of one mod), so SMAPI would load none of them"),
-                          detail);
+        return withDetail(QStringLiteral("This archive contains several copies of the same mod, so the game "
+                                         "cannot load them together"), detail);
     if (reason == QLatin1String("nested_mods"))
         return withDetail(QStringLiteral("This archive contains a mod folder nested inside another mod folder, "
                                          "so it cannot be installed safely"),
                           detail);
-    QString text = QStringLiteral("This archive is not a mod this game can use");
-    if (!reason.isEmpty())
-        text += QStringLiteral(" (%1)").arg(reason);
-    return withDetail(text, detail);
+    return QStringLiteral("This archive is not a mod this game can use. Try another archive.");
 }
 
-QString genericTokenMessage(const QString& lead, const InstallError& parsed)
+QString genericTokenMessage(const QString& lead)
 {
-    QString text = QStringLiteral("%1 (%2).").arg(lead, parsed.token);
-    for (auto it = parsed.fields.cbegin(); it != parsed.fields.cend(); ++it)
-        text += QStringLiteral("\n%1: %2").arg(it.key(), it.value());
-    return text;
+    return QStringLiteral("%1. Show details for more information.").arg(lead);
 }
 
 QString gameName(const QString& gameId, const QString& fallback)
@@ -69,19 +62,17 @@ QString gameName(const QString& gameId, const QString& fallback)
 QString modLoaderBusyReason(const QString& operation, const QString& subject, const QString& subjectTitle)
 {
     if (operation == QLatin1String("modloader") || operation == QLatin1String("transaction"))
-        return QStringLiteral("Another SMAPI operation is in progress for %1. Wait for it to finish, then try again.")
+        return QStringLiteral("Another SMAPI change is in progress for %1. Wait for it to finish, then try again.")
             .arg(subject);
     if (operation == QLatin1String("mounted"))
-        return QStringLiteral("The mods of %1 are mounted. Unmount them with Tools → Unmount Mods, then try again.")
-            .arg(subject);
+        return QStringLiteral("%1 has active mods. Choose Tools → Unmount Mods, then try again.").arg(subject);
     if (operation == QLatin1String("running") || operation == QLatin1String("launch"))
-        return QStringLiteral("%1 is running. Close it, then try again; gorganizer never changes SMAPI while the "
-                              "game may be running.").arg(subjectTitle);
+        return QStringLiteral("%1 is running. Close the game, then try again.").arg(subjectTitle);
     if (operation == QLatin1String("tool"))
         return QStringLiteral("A tool started from gorganizer is running for %1. Close it, then try again.")
             .arg(subject);
     if (operation == QLatin1String("root_deployment"))
-        return QStringLiteral("Root files of %1 are deployed into its game folder. Unmount the mods, then try again.")
+        return QStringLiteral("%1 has active mods in its game folder. Choose Tools → Unmount Mods, then try again.")
             .arg(subject);
     if (operation == QLatin1String("mount") || operation == QLatin1String("unmount")
         || operation == QLatin1String("apply"))
@@ -91,20 +82,18 @@ QString modLoaderBusyReason(const QString& operation, const QString& subject, co
     if (operation == QLatin1String("script_extender"))
         return QStringLiteral("A script extender is being installed for %1. Try again when that finishes.").arg(subject);
     if (operation == QLatin1String("import"))
-        return QStringLiteral("An instance import is running for %1. Try again when it finishes.").arg(subject);
+        return QStringLiteral("A backup is being imported for %1. Try again when it finishes.").arg(subject);
     if (operation == QLatin1String("reinstall"))
         return QStringLiteral("A mod of %1 is being reinstalled. Try again when that finishes.").arg(subject);
-    if (operation.isEmpty())
-        return QStringLiteral("%1 is busy. Try again when it is idle.").arg(subjectTitle);
-    return QStringLiteral("%1 is busy (%2). Try again when that finishes.").arg(subjectTitle, operation);
+    return QStringLiteral("%1 is busy. Try again when it is idle.").arg(subjectTitle);
 }
 
 QString modLoaderBusyMessage(const QString& operation, const QString& gameId, const QString& holderId)
 {
     const bool otherHolder = !holderId.isEmpty() && holderId != gameId;
     const QString busyId = otherHolder ? holderId : gameId;
-    const QString subject = gameName(busyId, otherHolder ? holderId : QStringLiteral("this game"));
-    const QString subjectTitle = gameName(busyId, otherHolder ? holderId : QStringLiteral("The game"));
+    const QString subject = gameName(busyId, otherHolder ? QStringLiteral("the other game") : QStringLiteral("this game"));
+    const QString subjectTitle = gameName(busyId, otherHolder ? QStringLiteral("The other game") : QStringLiteral("The game"));
     QString text = modLoaderBusyReason(operation, subject, subjectTitle);
     if (otherHolder)
         text += QStringLiteral(" (%1 shares its game folder with %2.)")
@@ -115,59 +104,50 @@ QString modLoaderBusyMessage(const QString& operation, const QString& gameId, co
 QString modLoaderFailedMessage(const QString& reason)
 {
     if (reason == QLatin1String("interrupted"))
-        return QStringLiteral("A previous SMAPI operation was interrupted. Restart gorganizer so it can "
-                              "recover, then try again.");
+        return QStringLiteral("A previous SMAPI change was interrupted. Restart Gorganizer to finish it, "
+                              "then try again.");
     if (reason == QLatin1String("game_changed"))
         return QStringLiteral("Steam changed the game while SMAPI was installing. Try again.");
     if (reason == QLatin1String("no_vanilla_launcher"))
         return QStringLiteral("The game's original launcher could not be found. Verify the game files in "
                               "Steam, then repair SMAPI.");
     if (reason == QLatin1String("unsafe_target"))
-        return QStringLiteral("SMAPI would have written to an unsafe location in the game folder (for "
-                              "example through a symbolic link), so gorganizer refused the change.");
+        return QStringLiteral("A file in the game folder points to an unsafe location. Check the game files, "
+                              "then try again.");
     if (reason == QLatin1String("farm_mounted"))
-        return QStringLiteral("The game's Mods folder is still a mounted gorganizer mod view. Unmount the "
-                              "mods, then try again.");
+        return QStringLiteral("This game has active mods. Choose Tools → Unmount Mods, then try again.");
     if (reason == QLatin1String("stage_incomplete"))
-        return QStringLiteral("The SMAPI installer did not produce a complete install, so gorganizer did "
-                              "not apply it to the game.");
+        return QStringLiteral("The SMAPI installer did not finish preparing all its files. Try again later.");
     if (reason == QLatin1String("stage_unexpected"))
-        return QStringLiteral("The SMAPI installer produced files gorganizer did not expect, so gorganizer "
-                              "did not apply them to the game.");
+        return QStringLiteral("The SMAPI installer created unexpected files. Try again later.");
     if (reason == QLatin1String("cross_device"))
-        return QStringLiteral("Part of the game folder is on a different filesystem mount, so SMAPI cannot "
-                              "be changed safely there.");
+        return QStringLiteral("Parts of the game folder are on different drives. Move the game to one drive, "
+                              "then try again.");
     if (reason == QLatin1String("rename_unsupported"))
-        return QStringLiteral("The game's filesystem does not support the safe no-replace renames "
-                              "gorganizer needs, so SMAPI cannot be changed there.");
+        return QStringLiteral("This drive cannot safely update SMAPI. Move the game to another drive, then try again.");
     if (reason == QLatin1String("digest_mismatch"))
-        return QStringLiteral("The downloaded SMAPI release does not match its published SHA-256 checksum, "
-                              "so gorganizer discarded it. Try again later.");
+        return QStringLiteral("The SMAPI download did not match the published version. Try again later.");
     if (reason == QLatin1String("not_stable"))
-        return QStringLiteral("The newest SMAPI release is not a stable release, so gorganizer did not "
-                              "install it.");
+        return QStringLiteral("The newest SMAPI version is not ready to install. Try again later.");
     if (reason == QLatin1String("no_digest"))
-        return QStringLiteral("The SMAPI release does not publish a SHA-256 checksum, so gorganizer cannot "
-                              "verify it and did not install it.");
+        return QStringLiteral("The SMAPI download could not be verified. Try again later.");
     if (reason == QLatin1String("no_previous"))
-        return QStringLiteral("No usable previous SMAPI version is kept, so there is nothing to roll back to.");
+        return QStringLiteral("No previous SMAPI version is available. Install or update SMAPI instead.");
     if (reason == QLatin1String("no_artifact"))
-        return QStringLiteral("gorganizer has no retained SMAPI installer to repair from. Use Install or Update "
-                              "SMAPI instead.");
-    return QStringLiteral("The SMAPI operation failed (%1).").arg(reason);
+        return QStringLiteral("The saved SMAPI installer is missing. Install or update SMAPI instead.");
+    return QStringLiteral("The SMAPI change failed. Try again or show details for more information.");
 }
 
 QString modLoaderUnavailableMessage(const QString& reason, const QString& gameId)
 {
     if (reason == QLatin1String("unsupported_build"))
-        return QStringLiteral("This %1 install is not the native Linux Steam build (for example a Windows "
-                              "build run through Proton). gorganizer manages SMAPI only for the native "
-                              "Linux build.").arg(gameName(gameId, QStringLiteral("game")));
+        return QStringLiteral("This %1 installation is not the Linux Steam version. Install the Linux version "
+                              "from Steam to use SMAPI here.").arg(gameName(gameId, QStringLiteral("game")));
     const QString text = QStringLiteral("SMAPI is %1.").arg(modLoaderUnavailableReasonText(reason));
     if (reason == QLatin1String("not_installed"))
         return text + QStringLiteral(" Install it from Tools → SMAPI.");
     if (reason == QLatin1String("interrupted"))
-        return text + QStringLiteral(" Restart gorganizer so it can recover, or repair SMAPI from Tools → SMAPI.");
+        return text + QStringLiteral(" Restart Gorganizer to finish the change, or repair SMAPI from Tools → SMAPI.");
     return text + QStringLiteral(" Repair it from Tools → SMAPI.");
 }
 
@@ -175,17 +155,18 @@ QString modLoaderUnavailableMessage(const QString& reason, const QString& gameId
 QString archiveRejectedMessage(const QString& reason)
 {
     if (reason == QLatin1String("nested_installer"))
-        return QStringLiteral("This archive contains an unsafe nested installer. Nothing was installed.");
+        return QStringLiteral("This archive contains an installer that cannot be opened safely. "
+                              "Nothing was installed. Try another archive.");
     if (reason == QLatin1String("limit"))
         return QStringLiteral("This archive is too large or contains too many files to install safely. "
-                              "Nothing was installed.");
+                              "Nothing was installed. Try a smaller archive.");
     if (reason == QLatin1String("destination"))
         return QStringLiteral("This download has an unsafe saved location. Download it again from Nexus Mods.");
     if (reason == QLatin1String("unsupported"))
         return QStringLiteral("This archive uses a format Gorganizer cannot open safely (for example a "
                               "multi-part or encrypted RAR). Try a ZIP or 7z version of the mod.");
     return QStringLiteral("This archive contains unsafe file names or links, so it was not installed. "
-                          "Nothing was changed.");
+                          "Try another archive.");
 }
 
 QString knownTokenMessage(const InstallError& parsed)
@@ -198,20 +179,25 @@ QString knownTokenMessage(const InstallError& parsed)
     if (token == QLatin1String("mod_collision")) {
         const QString name = field("name");
         if (name.isEmpty())
-            return QStringLiteral("A mod with this name is already installed.");
-        return QStringLiteral("A mod named \"%1\" is already installed.").arg(name);
+            return QStringLiteral("A mod with this name is already installed. Choose a different name.");
+        return QStringLiteral("A mod named \"%1\" is already installed. Choose a different name.").arg(name);
     }
+    if (token == QLatin1String("mod_registration_failed"))
+        return QStringLiteral("The files were installed, but the mod could not be added to your profiles. "
+                              "Refresh before trying again.");
+    if (token == QLatin1String("manifest_layout_invalid"))
+        return QStringLiteral("\"%1\" has a folder layout this game cannot load. Install a compatible archive.")
+            .arg(field("mod").isEmpty() ? QStringLiteral("This mod") : field("mod"));
     if (token == QLatin1String("not_a_mod"))
         return notAModMessage(field("reason"), field("detail"));
     if (token == QLatin1String("invalid_target_mod"))
-        return QStringLiteral("\"%1\" cannot be used as a mod name. Mod names must not be empty, start with "
-                              "a dot, contain slashes, or be \"Overwrite\" or \"Downloads\".")
-            .arg(field("name"));
+        return QStringLiteral("\"%1\" cannot be used as a mod name. Choose a name that does not start with a "
+                              "dot, contain slashes, or match \"Overwrite\" or \"Downloads\".")
+            .arg(field("name").isEmpty() ? QStringLiteral("This name") : field("name"));
     if (token == QLatin1String("layout_unsupported"))
-        return QStringLiteral("This install option is not supported for this game's mod layout (%1).")
-            .arg(field("layout"));
+        return QStringLiteral("This install option does not work with this game. Choose another install option.");
     if (token == QLatin1String("fomod_unsupported"))
-        return QStringLiteral("This archive is a FOMOD installer, which this game's mod layout does not support.");
+        return QStringLiteral("This game's mods cannot use this archive's installer. Try a different archive.");
     if (token == QLatin1String("fomod_required"))
         return QStringLiteral("This archive needs its FOMOD installer, which is not available for this game.");
     if (token == QLatin1String("mod_mounted"))
@@ -222,29 +208,30 @@ QString knownTokenMessage(const InstallError& parsed)
                               "automatically. Install it again from its archive instead.")
             .arg(field("mod"));
     if (token == QLatin1String("reinstall_source_missing"))
-        return QStringLiteral("\"%1\" cannot be reinstalled because its source archive \"%2\" is missing or "
-                              "unreadable. The mod was not changed.")
-            .arg(field("mod"), field("path"));
+        return QStringLiteral("\"%1\" cannot be reinstalled because its original archive is missing or "
+                              "unreadable. Download it again, then try again.")
+            .arg(field("mod").isEmpty() ? QStringLiteral("This mod") : field("mod"));
     if (token == QLatin1String("archive_missing"))
-        return QStringLiteral("The archive \"%1\" is no longer in the Downloads folder.").arg(field("path"));
+        return QStringLiteral("This archive is no longer in Downloads. Download it again, then try again.");
     if (token == QLatin1String("unsafe_path"))
-        return QStringLiteral("The daemon refused an unsafe path (%1).").arg(field("field"));
+        return QStringLiteral("This file location is unsafe. Choose a different location, then try again.");
     if (token == QLatin1String("modloader_busy"))
         return modLoaderBusyMessage(field("operation"), field("game"), field("holder"));
     if (token == QLatin1String("modloader_unavailable"))
         return modLoaderUnavailableMessage(field("reason"), field("game"));
     if (token == QLatin1String("modloader_unsupported"))
-        return QStringLiteral("%1 has no mod loader that gorganizer manages.")
-            .arg(gameName(field("game"), QStringLiteral("This game")));
+        return QStringLiteral("Gorganizer cannot set up this game's mod support. Choose a supported game.");
     if (token == QLatin1String("modloader_failed"))
         return modLoaderFailedMessage(field("reason"));
+    if (token == QLatin1String("loader_missing"))
+        return QStringLiteral("The script extender is missing or needs repair.");
     if (token == QLatin1String("mod_dependencies_unsupported"))
-        return QStringLiteral("%1 does not use SMAPI mod dependencies, so gorganizer cannot check them.")
+        return QStringLiteral("%1 does not use SMAPI mod requirements. Check the mod's page for what it needs.")
             .arg(gameName(field("game"), QStringLiteral("This game")));
     if (token == QLatin1String("game_running")) {
         if (field("operation") == QLatin1String("unmount"))
-            return QStringLiteral("%1 is still running, or was started less than two minutes ago, so its mods "
-                                  "cannot be unmounted. Close the game, then try again.")
+            return QStringLiteral("%1 is still running, or was started less than two minutes ago, so its active "
+                                  "mods cannot be turned off. Close the game, then try again.")
                 .arg(gameName(field("game"), QStringLiteral("The game")));
         return QStringLiteral("%1 is still running, or was started less than two minutes ago, so gorganizer "
                               "cannot apply your pending mod changes. Close the game, then press Run (or Apply) "
@@ -252,14 +239,13 @@ QString knownTokenMessage(const InstallError& parsed)
             .arg(gameName(field("game"), QStringLiteral("The game")));
     }
     if (token == QLatin1String("daemon_shutting_down"))
-        return QStringLiteral("The gorganizer daemon is shutting down. Start gorganizer again to continue.");
+        return QStringLiteral("Gorganizer is closing. Start it again to continue.");
     if (token == QLatin1String("archive_rejected"))
         return archiveRejectedMessage(field("reason"));
     if (token == QLatin1String("bundle_rejected")) {
         if (field("reason") == QLatin1String("limit"))
-            return QStringLiteral("This backup is larger than Gorganizer's safety limits, so nothing was imported. "
-                                  "Ask for a smaller export bundle.");
-        return QStringLiteral("This backup contains unsafe names or file links, so nothing was imported.");
+            return QStringLiteral("This backup is too large to import safely. Ask for a smaller backup.");
+        return QStringLiteral("This backup contains unsafe names or file links. Ask for a new backup.");
     }
     if (token == QLatin1String("plugin_state_failed"))
         return QStringLiteral("Gorganizer could not prepare the plugin list for %1, so the game was not started. "
@@ -270,18 +256,55 @@ QString knownTokenMessage(const InstallError& parsed)
                               "after the game closes. Close the game, then try again.")
             .arg(gameName(field("game"), QStringLiteral("This game")));
     if (token == QLatin1String("install_record_failed"))
-        return QStringLiteral("\"%1\" could not be installed because its installation record could not be saved. "
+        return QStringLiteral("\"%1\" could not be installed because its install information could not be saved. "
                               "Check that the disk is not full, then try again.")
-            .arg(field("mod"));
+            .arg(field("mod").isEmpty() ? QStringLiteral("This mod") : field("mod"));
     if (token == QLatin1String("recovery_stale"))
-        return QStringLiteral("The recovery for %1 changed before your choice was applied. Nothing was restored. "
-                              "Review the new message, then choose again.")
+        return QStringLiteral("The unfinished change for %1 changed before your choice was applied. "
+                              "Nothing was restored. Review the new message, then choose again.")
             .arg(gameName(field("game"), QStringLiteral("this game")));
     if (token == QLatin1String("install_selection_empty"))
         return QStringLiteral("No files are selected. Go back and choose at least one option to install.");
     if (token == QLatin1String("profile_identity_invalid"))
-        return QStringLiteral("The profile \"%1\" has an invalid name or folder, so it was not changed.")
-            .arg(field("name"));
+        return QStringLiteral("The profile \"%1\" has a name or folder that cannot be used. "
+                              "Choose a different profile name.")
+            .arg(field("name").isEmpty() ? QStringLiteral("this profile") : field("name"));
+    if (token == QLatin1String("mod_not_found"))
+        return QStringLiteral("This mod is no longer installed. Refresh the list.");
+    if (token == QLatin1String("mod_in_use"))
+        return QStringLiteral("This mod is used by other profiles. Review them before removing it.");
+    if (token == QLatin1String("nxm_expired"))
+        return QStringLiteral("This download link has expired. Download the file again from Nexus Mods.");
+    if (token == QLatin1String("download_not_found"))
+        return QStringLiteral("This download is no longer available. Refresh Downloads.");
+    if (token == QLatin1String("preview_not_found"))
+        return QStringLiteral("The installer preview has expired. Open the installer again.");
+    if (token == QLatin1String("vfs_mutex"))
+        return QStringLiteral("Another game sharing these files has active mods. Close that game before switching.");
+    if (token == QLatin1String("linked_parent_missing"))
+        return QStringLiteral("Add the required base game before using this game.");
+    if (token == QLatin1String("ttw_drift"))
+        return QStringLiteral("The Tale of Two Wastelands installation needs attention before it can launch.");
+    if (token == QLatin1String("prefix_missing"))
+        return QStringLiteral("Start this game once from Steam, close it, then try again.");
+    if (token == QLatin1String("steam_not_running"))
+        return QStringLiteral("Open Steam, then try again.");
+    if (token == QLatin1String("ttw_requires_vanilla_fnv"))
+        return QStringLiteral("Deactivate Fallout: New Vegas mods before installing Tale of Two Wastelands.");
+    if (token == QLatin1String("xnvse_missing_for_ttw"))
+        return QStringLiteral("Install xNVSE from the menu beside Run, then try again.");
+    if (token == QLatin1String("fnv4gb_not_applied_for_ttw"))
+        return QStringLiteral("Choose Tools → Patch Fallout to 4GB, then try again.");
+    if (token == QLatin1String("transfer_game_mismatch"))
+        return QStringLiteral("This backup belongs to a different game.");
+    if (token == QLatin1String("transfer_schema"))
+        return QStringLiteral("This backup uses an unsupported format. Update Gorganizer and try again.");
+    if (token == QLatin1String("transfer_path"))
+        return QStringLiteral("This backup contains an unsafe file location and cannot be imported.");
+    if (token == QLatin1String("transfer_collision"))
+        return QStringLiteral("An item with this name already exists. Choose Rename or Skip.");
+    if (token == QLatin1String("transfer_overwrite_mounted"))
+        return QStringLiteral("Deactivate mods before replacing items used by the active profile.");
     return QString();
 }
 
@@ -361,7 +384,7 @@ QString installErrorMessage(const QString& error)
     const QString known = knownTokenMessage(parsed);
     if (!known.isEmpty())
         return known;
-    return genericTokenMessage(QStringLiteral("The install failed"), parsed);
+    return genericTokenMessage(QStringLiteral("The install failed"));
 }
 
 QString modLoaderErrorMessage(const QString& error)
@@ -372,9 +395,7 @@ QString modLoaderErrorMessage(const QString& error)
     const QString known = knownTokenMessage(parsed);
     if (!known.isEmpty())
         return known;
-    if (parsed.fields.isEmpty())
-        return QStringLiteral("The SMAPI operation failed: %1").arg(error);
-    return genericTokenMessage(QStringLiteral("The SMAPI operation failed"), parsed);
+    return genericTokenMessage(QStringLiteral("The SMAPI operation failed"));
 }
 
 QString modDependencyErrorMessage(const QString& error)
@@ -385,9 +406,7 @@ QString modDependencyErrorMessage(const QString& error)
     const QString known = knownTokenMessage(parsed);
     if (!known.isEmpty())
         return known;
-    if (parsed.fields.isEmpty())
-        return QStringLiteral("The SMAPI dependency request failed: %1").arg(error);
-    return genericTokenMessage(QStringLiteral("The SMAPI dependency request failed"), parsed);
+    return genericTokenMessage(QStringLiteral("The SMAPI dependency request failed"));
 }
 
 QString daemonErrorMessage(const QString& error)
@@ -396,7 +415,7 @@ QString daemonErrorMessage(const QString& error)
     if (parsed.token.isEmpty())
         return error;
     const QString known = knownTokenMessage(parsed);
-    return known.isEmpty() ? error : known;
+    return known.isEmpty() ? genericTokenMessage(QStringLiteral("The request failed")) : known;
 }
 
 QString modLoaderUnavailableReasonText(const QString& reason)
@@ -409,11 +428,10 @@ QString modLoaderUnavailableReasonText(const QString& reason)
     if (reason == QLatin1String("incomplete"))
         return QStringLiteral("incomplete");
     if (reason == QLatin1String("unsupported_build"))
-        return QStringLiteral("not supported on this game build");
+        return QStringLiteral("not supported for this version of the game");
     if (reason == QLatin1String("interrupted"))
-        return QStringLiteral("unusable until an interrupted SMAPI operation is recovered");
-    QString text = reason;
-    return text.replace(QLatin1Char('_'), QLatin1Char(' '));
+        return QStringLiteral("unavailable after an interrupted change");
+    return QStringLiteral("not ready");
 }
 
 void showInstallError(QWidget* parent, const QString& title, const QString& error)
