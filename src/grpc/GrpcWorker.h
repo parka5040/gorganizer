@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QSet>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -23,6 +24,7 @@ public:
     void stop();
     void cancelActiveStream();
     void setStreamGeneration(quint64 generation);
+    void cancelInstall(quint64 requestId);
 
 public slots:
     void doListGames();
@@ -78,7 +80,8 @@ public slots:
                         const QString& externalArchivePath, int mode,
                         const QString& targetMod, const QString& previewId,
                         const std::vector<GrpcFomodFile>& fomodSelectedFiles,
-                        bool fomodConfirmed, const QString& selectedRoot);
+                        bool fomodConfirmed, const QString& selectedRoot, const QString& clientRequestId);
+    void doGetInstallOutcome(quint64 requestId, const QString& gameId, const QString& clientRequestId);
 
     void doSetNexusAPIKey(const QString& apiKey);
     void doSetNexusAPIKeyTracked(quint64 requestId, const QString& apiKey);
@@ -105,7 +108,8 @@ public slots:
     void doGetModListRequest(quint64 requestId, const QString& gameId, const QString& profileName);
     void doSetModListRequest(quint64 requestId, const QString& gameId, const QString& profileName,
                              const std::vector<GrpcModListEntry>& entries);
-    void doReinstallMod(quint64 requestId, const QString& gameId, const QString& modName);
+    void doReinstallMod(quint64 requestId, const QString& gameId, const QString& modName,
+                        const QString& clientRequestId);
     void doUninstallMod(quint64 requestId, const QString& gameId, const QString& modName, bool force);
     void doRenameMod(quint64 requestId, const QString& gameId, const QString& oldName, const QString& newName);
     void doGetModDependencyReport(quint64 requestId, const QString& gameId, const QString& profileName,
@@ -157,7 +161,10 @@ signals:
     void previewInstallCompleted(quint64 requestId, const GrpcPreviewInstallResult& result);
     void previewInstallFailed(quint64 requestId, const QString& error);
     void installRequestCompleted(quint64 requestId, const QString& modFolder, int fileCount);
-    void installRequestFailed(quint64 requestId, const QString& error);
+    void installRequestFailed(quint64 requestId, int grpcCode, const QString& error, bool sent);
+    void reinstallRequestFailed(quint64 requestId, int grpcCode, const QString& error, bool sent);
+    void installOutcomeReceived(quint64 requestId, const GrpcInstallOutcome& outcome);
+    void installOutcomeFailed(quint64 requestId, int grpcCode, const QString& error);
 
     void nexusAPIKeySet(bool valid, const QString& errorMessage);
     void nexusKeySaveFinished(quint64 requestId, bool saved, const QString& error);
@@ -227,12 +234,20 @@ private:
     std::atomic<quint64> m_streamGeneration{0};
 
     std::mutex m_streamMu;
+    std::mutex m_installMu;
+    QSet<quint64> m_cancelledInstalls;
+    quint64 m_activeInstallId = 0;
+    grpc::ClientContext* m_installCtx = nullptr;
     grpc::ClientContext* m_streamCtx = nullptr;
     grpc::ClientContext* m_unaryCtx = nullptr;
 
     template <typename Req, typename Resp, typename Method>
     grpc::Status invoke(Method method, const Req& req, Resp& resp,
                         std::chrono::milliseconds deadline = kDefaultUnaryTimeout);
+
+    template <typename Req, typename Resp, typename Method>
+    grpc::Status invokeInstall(quint64 requestId, Method method, const Req& req, Resp& resp,
+                               bool& sent);
 
     template <typename Req, typename Resp, typename Method>
     bool call(const char* rpcName, Method method, const Req& req, Resp& resp,

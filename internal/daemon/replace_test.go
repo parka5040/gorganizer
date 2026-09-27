@@ -83,7 +83,7 @@ func TestReplaceInstallSwapsFilesAndKeepsSettings(t *testing.T) {
 		}
 		return nil
 	}
-	folderAfter, count, err := d.StartInstall(dto.StartInstallRequest{
+	folderAfter, count, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: "skyrimse", ArchiveRelPath: "Update.zip", Mode: dto.InstallReplaceMod, TargetMod: folder,
 	})
 	d.reinstallFault = nil
@@ -161,7 +161,7 @@ func TestReplaceInstallDeployedRebuildsFarm(t *testing.T) {
 	d, install, modDir := mountedModChangeFixture(t)
 	archive := filepath.Join(config.DownloadsDir(modChangeGame), "Replacement.zip")
 	writeZipFiles(t, archive, map[string]string{"b.esp": "new plugin", ".gorganizer-root/root.txt": "new root"})
-	folder, count, err := d.StartInstall(dto.StartInstallRequest{
+	folder, count, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: modChangeGame, ArchiveRelPath: "Replacement.zip", Mode: dto.InstallReplaceMod, TargetMod: "A",
 	})
 	if err != nil || folder != "A" || count != 2 {
@@ -193,7 +193,7 @@ func TestReplaceRefusedWhileGameRuns(t *testing.T) {
 	archive := filepath.Join(config.DownloadsDir(modChangeGame), "Replacement.zip")
 	writeZipFiles(t, archive, map[string]string{"a.esp": "replacement"})
 	fakeProcesses(d, true, nil)
-	_, _, err := d.StartInstall(dto.StartInstallRequest{
+	_, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: modChangeGame, ArchiveRelPath: "Replacement.zip", Mode: dto.InstallReplaceMod, TargetMod: "A",
 	})
 	requireGameRunning(t, "StartInstall replace", err, dto.GameRunningOperationReinstall)
@@ -209,7 +209,7 @@ func TestReplaceRefusedWhileGameRuns(t *testing.T) {
 // TestReplaceMissingTargetRefused checks that replace requires a real existing mod folder.
 func TestReplaceMissingTargetRefused(t *testing.T) {
 	d, _, archive := replaceFixture(t)
-	_, _, err := d.StartInstall(dto.StartInstallRequest{
+	_, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: "skyrimse", ExternalArchivePath: archive, Mode: dto.InstallReplaceMod, TargetMod: "Missing",
 	})
 	var invalid *download.InvalidTargetModError
@@ -231,9 +231,9 @@ func TestReplaceFailureKeepsOriginal(t *testing.T) {
 	extracted := t.TempDir()
 	writeFixture(t, filepath.Join(extracted, "new.esp"))
 	writeFixture(t, filepath.Join(extracted, "metadata.yaml", "payload.txt"))
-	_, _, err := d.startInstallFrom(dto.StartInstallRequest{
+	_, _, err := d.startInstallFrom(context.Background(), dto.StartInstallRequest{
 		GameID: "skyrimse", ExternalArchivePath: archive, Mode: dto.InstallReplaceMod, TargetMod: folder,
-	}, extracted)
+	}, extracted, new(bool))
 	var recordErr *download.InstallRecordError
 	if !errors.As(err, &recordErr) {
 		t.Fatalf("StartInstall error = %v, want stage record failure", err)
@@ -266,7 +266,7 @@ func TestReplaceInterruptedSwapRecovers(t *testing.T) {
 				}
 				return nil
 			}
-			_, _, err := d.StartInstall(dto.StartInstallRequest{
+			_, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 				GameID: "skyrimse", ExternalArchivePath: archive, Mode: dto.InstallReplaceMod, TargetMod: folder,
 			})
 			if !errors.Is(err, errSimulatedCrash) {
@@ -304,7 +304,7 @@ func TestReplaceInstallUsesNewDownloadDetails(t *testing.T) {
 	if err := download.SaveSidecar(archive, download.ArchiveSidecar{ModName: "new name", Version: "new", Category: "new category", GameDomain: "skyrimspecialedition", ModID: 42}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := d.StartInstall(dto.StartInstallRequest{GameID: "skyrimse", ArchiveRelPath: "Update.zip", Mode: dto.InstallReplaceMod, TargetMod: folder}); err != nil {
+	if _, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{GameID: "skyrimse", ArchiveRelPath: "Update.zip", Mode: dto.InstallReplaceMod, TargetMod: folder}); err != nil {
 		t.Fatal(err)
 	}
 	meta, err := download.LoadModMetadata(modDir)

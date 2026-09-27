@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -654,9 +655,10 @@ func (md *ModDependencyService) checkLandedArchive(archivePath string) (archiveC
 // installForRequests installs a checked extraction as a new disabled mod, records the outcome on every entry attached to install, and announces the install with the batches whose update was recorded; an install refused or failed during shutdown leaves its entries installing for startup recovery.
 func (md *ModDependencyService) installForRequests(gameID, rel, root, install string, planned map[string]bool) {
 	defer md.dropCheck(root)
-	folder, _, installErr := md.s.svc.install.startInstallFrom(dto.StartInstallRequest{
+	published := false
+	folder, _, installErr := md.s.svc.install.startInstallFrom(context.Background(), dto.StartInstallRequest{
 		GameID: gameID, ArchiveRelPath: rel, Mode: dto.InstallAsNewMod,
-	}, root)
+	}, root, &published)
 	if installErr != nil {
 		var deferred *dto.RecoveryDeferredError
 		var busy *dto.OperationBusyError

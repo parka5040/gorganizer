@@ -46,7 +46,8 @@ public:
     void rescanMod(const QString& gameId, const QString& modName);
     bool uninstallMod(const QString& gameId, const QString& modName, bool force,
                       std::vector<QString>& archivesFlaggedOut, QString& errorOut);
-    quint64 reinstallModAsync(const QString& gameId, const QString& modName);
+    quint64 reinstallModAsync(const QString& gameId, const QString& modName,
+                              const QString& clientRequestId);
     quint64 uninstallModAsync(const QString& gameId, const QString& modName, bool force);
     quint64 renameModAsync(const QString& gameId, const QString& oldName, const QString& newName);
     // Registers a mod folder created outside StartInstall.
@@ -167,20 +168,17 @@ public:
                          GrpcInstallMode mode, const QString& targetMod,
                          const QString& previewId,
                          const std::vector<GrpcFomodFile>& fomodSelectedFiles,
-                         bool fomodConfirmed = false, const QString& selectedRoot = QString());
+                         bool fomodConfirmed, const QString& selectedRoot,
+                         const QString& clientRequestId);
     // Queues an install from an archive outside the Downloads index and returns its request id.
     quint64 startInstallExternal(const QString& gameId, const QString& externalArchivePath,
                                  GrpcInstallMode mode, const QString& targetMod,
-                                 bool fomodConfirmed = false, const QString& selectedRoot = QString(),
-                                 const QString& previewId = QString(),
-                                 const std::vector<GrpcFomodFile>& fomodSelectedFiles = {});
-    // Synchronous StartInstall for modal flows.
-    bool startInstallSync(const QString& gameId, const QString& archiveRelPath,
-                          const QString& externalArchivePath,
-                          GrpcInstallMode mode, const QString& targetMod,
-                          const QString& previewId,
-                          const std::vector<GrpcFomodFile>& fomodSelectedFiles,
-                          QString& modFolderOut, int& fileCountOut, QString& errorOut);
+                                 bool fomodConfirmed, const QString& selectedRoot,
+                                 const QString& previewId,
+                                 const std::vector<GrpcFomodFile>& fomodSelectedFiles,
+                                 const QString& clientRequestId);
+    void cancelInstallRequest(quint64 requestId);
+    quint64 getInstallOutcome(const QString& gameId, const QString& clientRequestId);
 
     // Reads an export archive's manifest and per-item collision flags without writing anything.
     bool previewImport(const QString& gameId, const QString& archivePath,
@@ -316,7 +314,10 @@ signals:
     void previewInstallCompleted(quint64 requestId, const GrpcPreviewInstallResult& result);
     void previewInstallFailed(quint64 requestId, const QString& error);
     void installRequestCompleted(quint64 requestId, const QString& modFolder, int fileCount);
-    void installRequestFailed(quint64 requestId, const QString& error);
+    void installRequestFailed(quint64 requestId, int grpcCode, const QString& error, bool sent);
+    void reinstallRequestFailed(quint64 requestId, int grpcCode, const QString& error, bool sent);
+    void installOutcomeReceived(quint64 requestId, const GrpcInstallOutcome& outcome);
+    void installOutcomeFailed(quint64 requestId, int grpcCode, const QString& error);
 
     void downloadStarted(const QString& downloadId, int queuedAhead);
     void downloadCancelled(const QString& downloadId);
@@ -398,6 +399,7 @@ private:
         RolePluginStatus,
         RoleTransfer,
         RoleInstallRpc,
+        RoleInstallStatus,
         RoleDependencyRpc,
         RoleModLoaderRpc,
         RoleModLoaderStatus,
@@ -414,6 +416,7 @@ private:
         {nullptr, nullptr, "plugin-status-stream"},
         {nullptr, nullptr, "transfer-stream"},
         {nullptr, nullptr, "install-rpc"},
+        {nullptr, nullptr, "install-status"},
         {nullptr, nullptr, "dependency-rpc"},
         {nullptr, nullptr, "modloader-rpc"},
         {nullptr, nullptr, "modloader-status"},
@@ -424,6 +427,7 @@ private:
     quint64 m_connectionGeneration = 0;
     quint64 m_nextPreviewRequestId = 0;
     quint64 m_nextInstallRequestId = 0;
+    quint64 m_nextInstallStatusRequestId = 0;
     quint64 m_nextModActionRequestId = 0;
     quint64 m_nextModLoaderRequestId = 0;
     quint64 m_nextModListRequestId = 0;
@@ -452,6 +456,7 @@ private:
     GrpcWorker* pluginStatusWorker() const { return m_workers[RolePluginStatus].worker; }
     GrpcWorker* transferWorker() const { return m_workers[RoleTransfer].worker; }
     GrpcWorker* installRpcWorker() const { return m_workers[RoleInstallRpc].worker; }
+    GrpcWorker* installStatusWorker() const { return m_workers[RoleInstallStatus].worker; }
     GrpcWorker* dependencyRpcWorker() const { return m_workers[RoleDependencyRpc].worker; }
     GrpcWorker* modLoaderRpcWorker() const { return m_workers[RoleModLoaderRpc].worker; }
     GrpcWorker* modLoaderStatusWorker() const { return m_workers[RoleModLoaderStatus].worker; }
@@ -465,7 +470,8 @@ private:
                         const QString& externalArchivePath, GrpcInstallMode mode,
                         const QString& targetMod, const QString& previewId,
                         const std::vector<GrpcFomodFile>& fomodSelectedFiles,
-                        bool fomodConfirmed, const QString& selectedRoot);
+                        bool fomodConfirmed, const QString& selectedRoot,
+                        const QString& clientRequestId);
 
     template <typename Method, typename... Args>
     quint64 postModLoaderOperation(const QString& gameId, const QString& operation, Method method, Args... args);

@@ -438,10 +438,10 @@ func (md *ModService) RegisterManualInstall(gameID, modName, archiveRelPath stri
 	if err := md.s.awaitRecovery(); err != nil {
 		return 0, err
 	}
-	if err := md.s.refuseWhenShuttingDown("register_install"); err != nil {
+	if err := md.s.refuseWhenShuttingDown(dto.BusyOperationRegisterInstall); err != nil {
 		return 0, err
 	}
-	release, err := md.s.acquireShared(gameID, "register_install")
+	release, err := md.s.acquireShared(gameID, dto.BusyOperationRegisterInstall)
 	if err != nil {
 		return 0, err
 	}
@@ -555,7 +555,7 @@ func (md *ModService) ExtractOverwriteToMod(gameID, modName string, files []stri
 	if err := md.s.awaitRecovery(); err != nil {
 		return 0, err
 	}
-	release, err := md.s.acquireShared(gameID, "extract_overwrite")
+	release, err := md.s.acquireShared(gameID, dto.BusyOperationExtractOverwrite)
 	if err != nil {
 		return 0, err
 	}

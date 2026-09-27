@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -50,7 +51,7 @@ func TestPreviewExternalArchive(t *testing.T) {
 				if err != nil || result == nil || result.PreviewID == "" || result.DetectedRoot != "Data" {
 					t.Fatalf("PreviewInstall = %+v, %v", result, err)
 				}
-				folder, _, err := d.StartInstall(dto.StartInstallRequest{
+				folder, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 					GameID: "skyrimse", ExternalArchivePath: tc.path, PreviewID: result.PreviewID,
 					Mode: dto.InstallAsNewMod, TargetMod: "Install-" + tc.name,
 				})
@@ -114,7 +115,7 @@ func TestPreviewBindsSourceIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			mutation.edit(t, archive)
-			_, _, err = d.StartInstall(dto.StartInstallRequest{
+			_, _, err = d.StartInstall(context.Background(), dto.StartInstallRequest{
 				GameID: "skyrimse", ExternalArchivePath: archive, PreviewID: preview.PreviewID,
 				Mode: dto.InstallAsNewMod, TargetMod: "Target",
 			})
@@ -132,7 +133,7 @@ func TestPreviewBindsSourceIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = d.StartInstall(dto.StartInstallRequest{
+	_, _, err = d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: "skyrimse", ExternalArchivePath: external, PreviewID: preview.PreviewID,
 		Mode: dto.InstallAsNewMod, TargetMod: "Target",
 	})
@@ -144,7 +145,7 @@ func TestPreviewBindsSourceIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = d.StartInstall(dto.StartInstallRequest{
+	_, _, err = d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: "skyrimse", ArchiveRelPath: "Absent.zip", PreviewID: externalPreview.PreviewID,
 		Mode: dto.InstallAsNewMod, TargetMod: "Target",
 	})
@@ -261,7 +262,7 @@ func TestPreviewOblivionGameRootMarkers(t *testing.T) {
 	if err != nil || preview.DetectedRoot != "" || preview.RootAmbiguous {
 		t.Fatalf("PreviewInstall = %+v, %v", preview, err)
 	}
-	folder, _, err := d.StartInstall(dto.StartInstallRequest{
+	folder, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: "oblivionremastered", ExternalArchivePath: archive, PreviewID: preview.PreviewID,
 		TargetMod: "GameRoot", Mode: dto.InstallAsNewMod,
 	})
@@ -363,14 +364,14 @@ func TestStartInstallSelectedRoot(t *testing.T) {
 	}
 	for _, root := range []string{"../Second", "Second/../First", "Missing", "second"} {
 		req.SelectedRoot = root
-		_, _, err := d.StartInstall(req)
+		_, _, err := d.StartInstall(context.Background(), req)
 		var unsafe *UnsafePathError
 		if !errors.As(err, &unsafe) || unsafe.Field != "selected_root" {
 			t.Fatalf("StartInstall(%q) error = %v, want selected_root", root, err)
 		}
 	}
 	req.SelectedRoot = "Second"
-	folder, _, err := d.StartInstall(req)
+	folder, _, err := d.StartInstall(context.Background(), req)
 	if err != nil || folder != "Chosen" {
 		t.Fatalf("StartInstall = %q, %v", folder, err)
 	}
@@ -384,7 +385,7 @@ func TestStartInstallSelectedRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.ExternalArchivePath, req.PreviewID, req.SelectedRoot, req.TargetMod = fomodArchive, fomod.PreviewID, "fomod", "Refused"
-	_, _, err = d.StartInstall(req)
+	_, _, err = d.StartInstall(context.Background(), req)
 	var unsafe *UnsafePathError
 	if !errors.As(err, &unsafe) || unsafe.Field != "selected_root" {
 		t.Fatalf("FOMOD selected root error = %v", err)
@@ -400,7 +401,7 @@ func TestStartInstallConfirmedEmptyFomodSelection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = d.StartInstall(dto.StartInstallRequest{
+	_, _, err = d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: "skyrimse", ExternalArchivePath: archive, PreviewID: preview.PreviewID,
 		TargetMod: "Empty", Mode: dto.InstallAsNewMod, FomodConfirmed: true,
 	})
@@ -421,7 +422,7 @@ func TestStartInstallConfirmedRequiredFomodFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	folder, _, err := d.StartInstall(dto.StartInstallRequest{
+	folder, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: "skyrimse", ExternalArchivePath: archive, PreviewID: preview.PreviewID,
 		TargetMod: "Required", Mode: dto.InstallAsNewMod, FomodConfirmed: true,
 	})
@@ -442,7 +443,7 @@ func TestStartInstallUnconfirmedFomodStillRequiresWizard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = d.StartInstall(dto.StartInstallRequest{
+	_, _, err = d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: "skyrimse", ExternalArchivePath: archive, PreviewID: preview.PreviewID,
 		TargetMod: "Wizard", Mode: dto.InstallAsNewMod,
 	})
@@ -464,7 +465,7 @@ func TestLegacyFomodConfirmedFlatCopyExcludesFomodDir(t *testing.T) {
 	if err != nil || preview.Plan == nil || !preview.Plan.LegacyInfoOnly {
 		t.Fatalf("PreviewInstall = %+v, %v", preview, err)
 	}
-	folder, _, err := d.StartInstall(dto.StartInstallRequest{
+	folder, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: "skyrimse", ExternalArchivePath: archive, PreviewID: preview.PreviewID,
 		TargetMod: "Legacy", Mode: dto.InstallAsNewMod, FomodConfirmed: true,
 	})
@@ -486,7 +487,7 @@ func TestStartInstallFomodSelectionStaysInsideModuleRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, previewID := range []string{preview.PreviewID, ""} {
-		_, _, err = d.StartInstall(dto.StartInstallRequest{
+		_, _, err = d.StartInstall(context.Background(), dto.StartInstallRequest{
 			GameID: "skyrimse", ExternalArchivePath: archive, PreviewID: previewID,
 			TargetMod: "Unsafe", Mode: dto.InstallAsNewMod, FomodConfirmed: true,
 			FomodSelectedFiles: []dto.FomodFileResult{{Source: "../outside.esp", Destination: "outside.esp"}},
@@ -516,7 +517,7 @@ func TestStartInstallManifestLayoutRejectsPreviewOverrides(t *testing.T) {
 		{name: "chosen root", root: "SampleMod"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := d.StartInstall(dto.StartInstallRequest{
+			_, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 				GameID: "stardewvalley", ExternalArchivePath: archive, PreviewID: preview.PreviewID,
 				TargetMod: "Refused", Mode: dto.InstallAsNewMod, FomodConfirmed: tc.confirm, SelectedRoot: tc.root,
 			})

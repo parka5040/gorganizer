@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -77,7 +78,7 @@ func installForReinstall(t *testing.T, d *Daemon, gameID, name string, files map
 		req.ArchiveRelPath = name + ".zip"
 	}
 	writeZipFiles(t, archive, files)
-	folder, _, err := d.StartInstall(req)
+	folder, _, err := d.StartInstall(context.Background(), req)
 	if err != nil {
 		t.Fatalf("StartInstall(%s): %v", name, err)
 	}
@@ -102,7 +103,7 @@ func TestReinstallModRestoresFilesFromEverySource(t *testing.T) {
 			}, tc.external)
 			patch := filepath.Join(t.TempDir(), "Patch.zip")
 			writeZipFiles(t, patch, map[string]string{"textures/b.dds": "patch texture", "plugin.esp": "patched plugin"})
-			if _, _, err := d.StartInstall(dto.StartInstallRequest{
+			if _, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 				GameID: "skyrimse", ExternalArchivePath: patch, Mode: dto.InstallMergeIntoMod, TargetMod: folder,
 			}); err != nil {
 				t.Fatalf("merge install: %v", err)
@@ -122,7 +123,7 @@ func TestReinstallModRestoresFilesFromEverySource(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			replayed, skipped, fileCount, err := d.ReinstallMod("skyrimse", folder)
+			replayed, skipped, fileCount, err := d.ReinstallMod(context.Background(), "skyrimse", folder, "")
 			if err != nil {
 				t.Fatalf("ReinstallMod: %v", err)
 			}
@@ -273,7 +274,7 @@ func TestReinstallModRefusesBeforeTouchingTheMod(t *testing.T) {
 			tc.mutate(t, modDir, archive)
 			want := snapshotTree(t, modDir)
 
-			_, _, _, err := d.ReinstallMod("skyrimse", folder)
+			_, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", folder, "")
 			tc.check(t, err)
 			if got := snapshotTree(t, modDir); !reflect.DeepEqual(got, want) {
 				t.Errorf("mod changed by refused reinstall:\n got %v\nwant %v", got, want)
@@ -318,7 +319,7 @@ func TestReinstallModPreservesMetadataKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, _, err := d.ReinstallMod("skyrimse", folder); err != nil {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", folder, ""); err != nil {
 		t.Fatalf("ReinstallMod: %v", err)
 	}
 	got, err := download.LoadModMetadata(modDir)
@@ -349,7 +350,7 @@ func TestReinstallModKeepsSMAPIManifestFolders(t *testing.T) {
 	}
 	writeFixture(t, filepath.Join(modDir, "SampleMod", "junk.txt"))
 
-	if _, _, fileCount, err := d.ReinstallMod("stardewvalley", folder); err != nil || fileCount != 2 {
+	if _, _, fileCount, err := d.ReinstallMod(context.Background(), "stardewvalley", folder, ""); err != nil || fileCount != 2 {
 		t.Fatalf("ReinstallMod = %d, %v", fileCount, err)
 	}
 	want := []string{"SampleMod/Sample.dll", "SampleMod/manifest.json", "metadata.yaml"}

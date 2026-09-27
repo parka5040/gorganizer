@@ -329,6 +329,7 @@ type PreviewResult struct {
 }
 
 type StartInstallRequest struct {
+	ClientRequestID     string
 	GameID              string
 	ArchiveRelPath      string
 	ExternalArchivePath string

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,8 +62,17 @@ func checkModReplacement(modsDir, name string) error {
 }
 
 // ReinstallMod waits for startup recovery, then rebuilds a mod from its recorded source archives in hidden staging and swaps it in only after every replay succeeds.
-func (md *ModService) ReinstallMod(gameID, modName string) (int, int, int, error) {
-	if err := md.s.awaitRecovery(); err != nil {
+func (md *ModService) ReinstallMod(ctx context.Context, gameID, modName, clientRequestID string) (replayed, skipped, fileCount int, err error) {
+	if err = md.s.installOutcomes.register(gameID, clientRequestID); err != nil {
+		return 0, 0, 0, err
+	}
+	published := false
+	defer func() {
+		md.s.installOutcomes.finish(clientRequestID, ctx, published, dto.InstallOutcome{
+			ModFolder: modName, FileCount: fileCount, ArchivesReplayed: replayed, ArchivesSkipped: skipped,
+		}, err)
+	}()
+	if err := md.s.awaitRecoveryCtx(ctx); err != nil {
 		return 0, 0, 0, err
 	}
 	if err := md.s.refuseWhenShuttingDown("reinstall"); err != nil {
@@ -79,10 +89,16 @@ func (md *ModService) ReinstallMod(gameID, modName string) (int, int, int, error
 		return 0, 0, 0, err
 	}
 	defer release()
+	if err := installCtxErr(ctx); err != nil {
+		return 0, 0, 0, err
+	}
 	if err := checkInstallLayout(gameID); err != nil {
 		return 0, 0, 0, err
 	}
 	defer md.s.lockMods(gameID, modName)()
+	if err := installCtxErr(ctx); err != nil {
+		return 0, 0, 0, err
+	}
 	if err := checkModReplacement(config.ModsDir(gameID), modName); err != nil {
 		return 0, 0, 0, err
 	}
@@ -105,14 +121,14 @@ func (md *ModService) ReinstallMod(gameID, modName string) (int, int, int, error
 
 	token := uuid.NewString()
 	stageDir := filepath.Join(modsDir, reinstallStagePrefix+token)
-	if err := md.replaySources(gameID, modName, reinstallStagePrefix+token, meta.SourceArchives, sources); err != nil {
+	if err := md.replaySources(ctx, gameID, modName, reinstallStagePrefix+token, meta.SourceArchives, sources); err != nil {
 		_ = os.RemoveAll(stageDir)
 		return 0, 0, 0, err
 	}
 	if err := md.s.reinstallStep("replayed"); err != nil {
 		return 0, 0, 0, err
 	}
-	fileCount, err := md.commitReinstall(gameID, modName, modsDir, token, meta)
+	fileCount, err = md.commitReinstall(ctx, gameID, modName, modsDir, token, meta, &published)
 	if err != nil {
 		return 0, 0, 0, err
 	}
@@ -203,9 +219,12 @@ func checkReadableFile(path string) error {
 }
 
 // replaySources installs every source archive in order into the hidden staging mod folder.
-func (md *ModService) replaySources(gameID, modName, stageName string, refs []download.SourceArchiveRef, sources []string) error {
+func (md *ModService) replaySources(ctx context.Context, gameID, modName, stageName string, refs []download.SourceArchiveRef, sources []string) error {
 	planner := layoutPlannerFor(gameID)
 	sink := func(p download.InstallProgress) {
+		if md.s.installCopyProgress != nil && p.Step == download.StageCopying {
+			md.s.installCopyProgress(p)
+		}
 		md.s.installBus.Publish(gameID, dto.InstallEventResult{
 			GameID: gameID,
 			Progress: &dto.InstallProgressResult{
@@ -217,8 +236,12 @@ func (md *ModService) replaySources(gameID, modName, stageName string, refs []do
 		})
 	}
 	for i, sa := range refs {
+		if err := installCtxErr(ctx); err != nil {
+			return err
+		}
 		req := download.InstallRequest{
-			GameID: gameID, ArchivePath: sources[i],
+			Context: ctx,
+			GameID:  gameID, ArchivePath: sources[i],
 			Mode: download.ModeMergeIntoMod, TargetMod: stageName,
 			SourceArchiveRef: download.SourceArchiveRef{
 				Path: sa.Path, ModID: sa.ModID, FileID: sa.FileID,
@@ -239,7 +262,7 @@ func (md *ModService) replaySources(gameID, modName, stageName string, refs []do
 }
 
 // commitReinstall writes the merged metadata into staging and swaps the staged mod in, all under the game's profile lock.
-func (md *ModService) commitReinstall(gameID, modName, modsDir, token string, snapshot *download.ModMetadata) (int, error) {
+func (md *ModService) commitReinstall(ctx context.Context, gameID, modName, modsDir, token string, snapshot *download.ModMetadata, published *bool) (int, error) {
 	defer md.s.lockProfiles(gameID)()
 	modDir := filepath.Join(modsDir, modName)
 	stageDir := filepath.Join(modsDir, reinstallStagePrefix+token)
@@ -252,8 +275,16 @@ func (md *ModService) commitReinstall(gameID, modName, modsDir, token string, sn
 		_ = os.RemoveAll(stageDir)
 		return 0, fmt.Errorf("writing reinstalled metadata: %w", err)
 	}
+	if err := installCtxErr(ctx); err != nil {
+		_ = os.RemoveAll(stageDir)
+		return 0, err
+	}
+	*published = true
 	if err := md.publishReinstallStage(gameID, modName, modsDir, token, dto.GameRunningOperationReinstall, false); err != nil {
 		return 0, err
+	}
+	if md.s.installAfterPublish != nil {
+		md.s.installAfterPublish()
 	}
 	return final.FileCount, nil
 }

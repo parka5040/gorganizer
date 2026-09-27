@@ -190,6 +190,7 @@ GrpcClient::GrpcClient(QObject* parent)
 {
     qRegisterMetaType<GrpcPreviewInstallResult>();
     qRegisterMetaType<GrpcReinstallResult>();
+    qRegisterMetaType<GrpcInstallOutcome>();
     qRegisterMetaType<GrpcIniSaveResult>();
     qRegisterMetaType<QStringList>();
     qRegisterMetaType<GrpcRecoveryPending>();
@@ -250,6 +251,9 @@ void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
     connect(worker, &GrpcWorker::previewInstallFailed, this, &GrpcClient::previewInstallFailed);
     connect(worker, &GrpcWorker::installRequestCompleted, this, &GrpcClient::installRequestCompleted);
     connect(worker, &GrpcWorker::installRequestFailed, this, &GrpcClient::installRequestFailed);
+    connect(worker, &GrpcWorker::reinstallRequestFailed, this, &GrpcClient::reinstallRequestFailed);
+    connect(worker, &GrpcWorker::installOutcomeReceived, this, &GrpcClient::installOutcomeReceived);
+    connect(worker, &GrpcWorker::installOutcomeFailed, this, &GrpcClient::installOutcomeFailed);
     connect(worker, &GrpcWorker::nexusAPIKeySet, this, &GrpcClient::nexusAPIKeySet);
     connect(worker, &GrpcWorker::nexusKeySaveFinished, this, &GrpcClient::nexusKeySaveFinished);
     connect(worker, &GrpcWorker::vfsStatusChanged, this, &GrpcClient::vfsStatusChanged);
@@ -659,20 +663,22 @@ quint64 GrpcClient::startInstall(const QString& gameId, const QString& archiveRe
                                  GrpcInstallMode mode, const QString& targetMod,
                                  const QString& previewId,
                                  const std::vector<GrpcFomodFile>& fomodSelectedFiles,
-                                 bool fomodConfirmed, const QString& selectedRoot)
+                                 bool fomodConfirmed, const QString& selectedRoot,
+                                 const QString& clientRequestId)
 {
     return postInstall(gameId, archiveRelPath, QString(), mode, targetMod, previewId,
-                       fomodSelectedFiles, fomodConfirmed, selectedRoot);
+                       fomodSelectedFiles, fomodConfirmed, selectedRoot, clientRequestId);
 }
 
 quint64 GrpcClient::startInstallExternal(const QString& gameId, const QString& externalArchivePath,
                                          GrpcInstallMode mode, const QString& targetMod,
                                          bool fomodConfirmed, const QString& selectedRoot,
                                          const QString& previewId,
-                                         const std::vector<GrpcFomodFile>& fomodSelectedFiles)
+                                         const std::vector<GrpcFomodFile>& fomodSelectedFiles,
+                                         const QString& clientRequestId)
 {
     return postInstall(gameId, QString(), externalArchivePath, mode, targetMod, previewId,
-                       fomodSelectedFiles, fomodConfirmed, selectedRoot);
+                       fomodSelectedFiles, fomodConfirmed, selectedRoot, clientRequestId);
 }
 
 // Assigns a request id and queues StartInstall on the install RPC worker, failing asynchronously when not connected.
@@ -680,18 +686,37 @@ quint64 GrpcClient::postInstall(const QString& gameId, const QString& archiveRel
                                 const QString& externalArchivePath, GrpcInstallMode mode,
                                 const QString& targetMod, const QString& previewId,
                                 const std::vector<GrpcFomodFile>& fomodSelectedFiles,
-                                bool fomodConfirmed, const QString& selectedRoot)
+                                bool fomodConfirmed, const QString& selectedRoot,
+                                const QString& clientRequestId)
 {
     const quint64 requestId = ++m_nextInstallRequestId;
-    if (!installRpcWorker()) {
+    if (!installRpcWorker() || !isConnected()) {
         QMetaObject::invokeMethod(this, [this, requestId] {
-            emit installRequestFailed(requestId, QStringLiteral("not connected"));
+            emit installRequestFailed(requestId, GrpcStatusUnavailable, QStringLiteral("not connected"), false);
         }, Qt::QueuedConnection);
         return requestId;
     }
     postTo(installRpcWorker(), &GrpcWorker::doStartInstall, requestId, gameId, archiveRelPath,
            externalArchivePath, static_cast<int>(mode), targetMod, previewId, fomodSelectedFiles,
-           fomodConfirmed, selectedRoot);
+           fomodConfirmed, selectedRoot, clientRequestId);
+    return requestId;
+}
+
+void GrpcClient::cancelInstallRequest(quint64 requestId)
+{
+    if (installRpcWorker()) installRpcWorker()->cancelInstall(requestId);
+}
+
+quint64 GrpcClient::getInstallOutcome(const QString& gameId, const QString& clientRequestId)
+{
+    const quint64 requestId = ++m_nextInstallStatusRequestId;
+    if (!installStatusWorker() || !isConnected()) {
+        QMetaObject::invokeMethod(this, [this, requestId] {
+            emit installOutcomeFailed(requestId, GrpcStatusUnavailable, QStringLiteral("not connected"));
+        }, Qt::QueuedConnection);
+        return requestId;
+    }
+    postTo(installStatusWorker(), &GrpcWorker::doGetInstallOutcome, requestId, gameId, clientRequestId);
     return requestId;
 }
 
@@ -1046,35 +1071,6 @@ quint64 GrpcClient::previewInstallAsync(const QString& gameId, const QString& ar
     return requestId;
 }
 
-bool GrpcClient::startInstallSync(const QString& gameId, const QString& archiveRelPath,
-                                   const QString& externalArchivePath,
-                                   GrpcInstallMode mode, const QString& targetMod,
-                                   const QString& previewId,
-                                   const std::vector<GrpcFomodFile>& fomodSelectedFiles,
-                                   QString& modFolderOut, int& fileCountOut, QString& errorOut)
-{
-    gorganizer::v1::StartInstallRequest req;
-    req.set_game_id(gameId.toStdString());
-    if (!archiveRelPath.isEmpty()) req.set_archive_rel_path(archiveRelPath.toStdString());
-    if (!externalArchivePath.isEmpty()) req.set_external_archive_path(externalArchivePath.toStdString());
-    req.set_mode(static_cast<gorganizer::v1::InstallMode>(mode));
-    req.set_target_mod(targetMod.toStdString());
-    req.set_preview_id(previewId.toStdString());
-    for (const auto& f : fomodSelectedFiles) {
-        auto* pb = req.add_fomod_selected_files();
-        pb->set_source(f.source.toStdString());
-        pb->set_destination(f.destination.toStdString());
-        pb->set_is_folder(f.isFolder);
-        pb->set_priority(f.priority);
-    }
-    gorganizer::v1::StartInstallResponse resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::StartInstall, req, resp,
-                              std::chrono::minutes(10)), errorOut)) return false;
-    modFolderOut = QString::fromStdString(resp.mod_folder());
-    fileCountOut = resp.file_count();
-    return true;
-}
-
 bool GrpcClient::discardPreview(const QString& previewId, QString& errorOut)
 {
     gorganizer::v1::DiscardPreviewRequest req;
@@ -1122,17 +1118,17 @@ bool GrpcClient::uninstallMod(const QString& gameId, const QString& modName, boo
     return true;
 }
 
-quint64 GrpcClient::reinstallModAsync(const QString& gameId, const QString& modName)
+quint64 GrpcClient::reinstallModAsync(const QString& gameId, const QString& modName,
+                                       const QString& clientRequestId)
 {
-    const quint64 requestId = ++m_nextModActionRequestId;
+    const quint64 requestId = ++m_nextInstallRequestId;
     if (!installRpcWorker() || !isConnected()) {
-        QMetaObject::invokeMethod(this, [this, requestId, gameId, modName] {
-            emit modActionFailed(requestId, gameId, modName, QStringLiteral("ReinstallMod"),
-                                 QStringLiteral("not connected"));
+        QMetaObject::invokeMethod(this, [this, requestId] {
+            emit reinstallRequestFailed(requestId, GrpcStatusUnavailable, QStringLiteral("not connected"), false);
         }, Qt::QueuedConnection);
         return requestId;
     }
-    postTo(installRpcWorker(), &GrpcWorker::doReinstallMod, requestId, gameId, modName);
+    postTo(installRpcWorker(), &GrpcWorker::doReinstallMod, requestId, gameId, modName, clientRequestId);
     return requestId;
 }
 

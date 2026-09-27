@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -58,7 +59,7 @@ func TestReinstallDeployedModRebuildsFarm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := d.ReinstallMod(modChangeGame, "A"); err != nil {
+	if _, _, _, err := d.ReinstallMod(context.Background(), modChangeGame, "A", ""); err != nil {
 		t.Fatalf("ReinstallMod: %v", err)
 	}
 	updated, err := os.Stat(modDir)
@@ -81,7 +82,7 @@ func TestReinstallDeployedModRemovesOldRootDeployment(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := d.ReinstallMod(modChangeGame, "A"); err != nil {
+	if _, _, _, err := d.ReinstallMod(context.Background(), modChangeGame, "A", ""); err != nil {
 		t.Fatalf("ReinstallMod: %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(install, "root.txt")); !errors.Is(err, os.ErrNotExist) {
@@ -116,7 +117,7 @@ func TestDeployedReinstallRefusedWhileGameRuns(t *testing.T) {
 			d, install, modDir := mountedModChangeFixture(t)
 			recordDeployedReinstallSource(t, modDir)
 			tc.busy(t, d)
-			_, _, _, err := d.ReinstallMod(modChangeGame, "A")
+			_, _, _, err := d.ReinstallMod(context.Background(), modChangeGame, "A", "")
 			requireGameRunning(t, "ReinstallMod", err, dto.GameRunningOperationReinstall)
 			for _, path := range []string{filepath.Join(modDir, "a.esp"), filepath.Join(install, "Data", "a.esp")} {
 				body, readErr := os.ReadFile(path)
@@ -143,7 +144,7 @@ func TestDeployedReinstallRebuildFailureRestoresOriginal(t *testing.T) {
 	d.mu.Lock()
 	d.modChangeRematerialize = func(*vfs.MountManager) error { return errors.New("injected rebuild failure") }
 	d.mu.Unlock()
-	_, _, _, err = d.ReinstallMod(modChangeGame, "A")
+	_, _, _, err = d.ReinstallMod(context.Background(), modChangeGame, "A", "")
 	if err == nil || !strings.Contains(err.Error(), "injected rebuild failure") {
 		t.Fatalf("ReinstallMod error = %v, want rebuild failure", err)
 	}
@@ -198,7 +199,7 @@ func TestDeployedReinstallCrashAfterSwapRecovers(t *testing.T) {
 		}
 		return nil
 	}
-	if _, _, _, err := d.ReinstallMod(modChangeGame, "A"); !errors.Is(err, errSimulatedCrash) {
+	if _, _, _, err := d.ReinstallMod(context.Background(), modChangeGame, "A", ""); !errors.Is(err, errSimulatedCrash) {
 		t.Fatalf("ReinstallMod error = %v, want simulated crash", err)
 	}
 	body, err := os.ReadFile(filepath.Join(install, "Data", "a.esp"))

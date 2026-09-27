@@ -55,9 +55,9 @@ func TestMergeCopyFailureLeavesTargetUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFixture(t, filepath.Join(extracted, "keep.txt", "nested.esp"))
-	_, _, err := d.startInstallFrom(dto.StartInstallRequest{
+	_, _, err := d.startInstallFrom(context.Background(), dto.StartInstallRequest{
 		GameID: "skyrimse", ExternalArchivePath: update, Mode: dto.InstallMergeIntoMod, TargetMod: folder,
-	}, extracted)
+	}, extracted, new(bool))
 	var rejected *download.ArchiveRejectedError
 	if !errors.As(err, &rejected) || rejected.Reason != download.ArchiveRejectedUnsafeEntry {
 		t.Fatalf("merge error = %v, want a target type collision after the first file", err)
@@ -103,7 +103,7 @@ func TestMergePublishesThroughSwap(t *testing.T) {
 		}
 		return nil
 	}
-	installed, count, err := d.StartInstall(dto.StartInstallRequest{
+	installed, count, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: "skyrimse", ExternalArchivePath: update, Mode: dto.InstallMergeIntoMod, TargetMod: folder,
 	})
 	d.reinstallFault = nil
@@ -160,7 +160,7 @@ func TestInterruptedMergeRecoversAtStartup(t *testing.T) {
 				}
 				return nil
 			}
-			_, _, err := d.StartInstall(dto.StartInstallRequest{
+			_, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 				GameID: "skyrimse", ExternalArchivePath: update, Mode: dto.InstallMergeIntoMod, TargetMod: folder,
 			})
 			if !errors.Is(err, errSimulatedCrash) {
@@ -198,7 +198,7 @@ func TestMergePreSwapFaultLeavesTargetUntouched(t *testing.T) {
 				}
 				return nil
 			}
-			_, _, err := d.StartInstall(dto.StartInstallRequest{
+			_, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 				GameID: "skyrimse", ExternalArchivePath: update, Mode: dto.InstallMergeIntoMod, TargetMod: folder,
 			})
 			d.reinstallFault = nil
@@ -225,7 +225,7 @@ func TestMergeRefusesSymlinkInExistingMod(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := snapshotTree(t, modDir)
-	_, _, err := d.StartInstall(dto.StartInstallRequest{
+	_, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: "skyrimse", ExternalArchivePath: update, Mode: dto.InstallMergeIntoMod, TargetMod: folder,
 	})
 	var rejected *download.ArchiveRejectedError

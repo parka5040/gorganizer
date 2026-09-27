@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -78,7 +79,7 @@ func TestReinstallCrashAtEveryStepIsRecoverable(t *testing.T) {
 				}
 				return nil
 			}
-			if _, _, _, err := d.ReinstallMod("skyrimse", folder); !errors.Is(err, errSimulatedCrash) {
+			if _, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", folder, ""); !errors.Is(err, errSimulatedCrash) {
 				t.Fatalf("ReinstallMod error = %v, want the simulated crash", err)
 			}
 			d.reinstallFault = nil
@@ -113,7 +114,7 @@ func TestReinstallDoubleRenameFailureIsRecoveredAtStartup(t *testing.T) {
 		return nil
 	}
 
-	if _, _, _, err := d.ReinstallMod("skyrimse", folder); !errors.Is(err, renameFailure) {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", folder, ""); !errors.Is(err, renameFailure) {
 		t.Fatalf("ReinstallMod error = %v, want the rename failure", err)
 	}
 	if _, err := os.Lstat(modDir); !errors.Is(err, os.ErrNotExist) {
@@ -211,7 +212,7 @@ func TestReinstallModTracksMountedProfileChangesDuringReplay(t *testing.T) {
 		}
 	})
 	farmFile := filepath.Join(install, "Mods", "Enabled", "manifest.json")
-	if _, _, _, err := d.ReinstallMod("stardewvalley", enabled); err != nil {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "stardewvalley", enabled, ""); err != nil {
 		t.Fatalf("ReinstallMod(enabled): %v", err)
 	}
 	var st syscall.Stat_t
@@ -227,7 +228,7 @@ func TestReinstallModTracksMountedProfileChangesDuringReplay(t *testing.T) {
 		}
 		return nil
 	}
-	if _, _, _, err := d.ReinstallMod("stardewvalley", disabled); err != nil {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "stardewvalley", disabled, ""); err != nil {
 		t.Fatalf("ReinstallMod enabled during replay: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(install, "Mods", "Disabled", "manifest.json")); err != nil {
@@ -240,7 +241,7 @@ func TestReinstallModTracksMountedProfileChangesDuringReplay(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := d.ReinstallMod("stardewvalley", disabled); err != nil {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "stardewvalley", disabled, ""); err != nil {
 		t.Fatalf("ReinstallMod(disabled) while mounted: %v", err)
 	}
 
@@ -251,7 +252,7 @@ func TestReinstallModTracksMountedProfileChangesDuringReplay(t *testing.T) {
 	if entries, err := os.ReadDir(filepath.Join(modsDir, "Overwrite")); err == nil && len(entries) != 0 {
 		t.Errorf("unmount captured files into Overwrite: %v", entries)
 	}
-	if _, _, _, err := d.ReinstallMod("stardewvalley", enabled); err != nil {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "stardewvalley", enabled, ""); err != nil {
 		t.Fatalf("ReinstallMod(enabled) after unmount: %v", err)
 	}
 }
@@ -272,7 +273,7 @@ func TestReinstallModKeepsMetadataEditedDuringReplay(t *testing.T) {
 		}
 		return nil
 	}
-	if _, _, _, err := d.ReinstallMod("skyrimse", folder); err != nil {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", folder, ""); err != nil {
 		t.Fatalf("ReinstallMod: %v", err)
 	}
 	meta, err := download.LoadModMetadata(modDir)
@@ -305,7 +306,7 @@ func TestReinstallModConcurrentWithSetModListKeepsMetadataConsistent(t *testing.
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			_, _, _, reinstallErr = d.ReinstallMod("skyrimse", folder)
+			_, _, _, reinstallErr = d.ReinstallMod(context.Background(), "skyrimse", folder, "")
 		}()
 		go func() {
 			defer wg.Done()
@@ -335,7 +336,7 @@ func TestReinstallModRefusesFomodInstalledMods(t *testing.T) {
 	before := snapshotTree(t, modDir)
 
 	var fomodErr *download.FomodReinstallUnsupportedError
-	if _, _, _, err := d.ReinstallMod("skyrimse", folder); !errors.As(err, &fomodErr) || fomodErr.Mod != folder {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", folder, ""); !errors.As(err, &fomodErr) || fomodErr.Mod != folder {
 		t.Fatalf("ReinstallMod error = %v, want FomodReinstallUnsupportedError", err)
 	}
 	if got := snapshotTree(t, modDir); !reflect.DeepEqual(got, before) {
@@ -355,7 +356,7 @@ func TestReinstallModRefusesAFifoSourceWithoutBlocking(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, _, _, err := d.ReinstallMod("skyrimse", folder)
+		_, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", folder, "")
 		done <- err
 	}()
 	select {
@@ -383,7 +384,7 @@ func TestReinstallModRefusesASymlinkedModFolder(t *testing.T) {
 	before := snapshotTree(t, target)
 
 	var invalid *download.InvalidTargetModError
-	if _, _, _, err := d.ReinstallMod("skyrimse", folder); !errors.As(err, &invalid) {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", folder, ""); !errors.As(err, &invalid) {
 		t.Fatalf("ReinstallMod error = %v, want InvalidTargetModError", err)
 	}
 	if info, err := os.Lstat(filepath.Join(modsDir, folder)); err != nil || info.Mode()&os.ModeSymlink == 0 {
@@ -393,7 +394,7 @@ func TestReinstallModRefusesASymlinkedModFolder(t *testing.T) {
 		t.Errorf("symlink target changed:\n got %v\nwant %v", got, before)
 	}
 	var notFound *ModNotFoundError
-	if _, _, _, err := d.ReinstallMod("skyrimse", "Missing"); !errors.As(err, &notFound) {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", "Missing", ""); !errors.As(err, &notFound) {
 		t.Errorf("ReinstallMod(missing) error = %v, want ModNotFoundError", err)
 	}
 }
@@ -409,7 +410,7 @@ func TestReinstallModMergesCaseVariantManifestFolders(t *testing.T) {
 		"samplemod/manifest.json":    sampleManifest,
 		"samplemod/assets/extra.png": "png",
 	})
-	if _, _, err := d.StartInstall(dto.StartInstallRequest{
+	if _, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: "stardewvalley", ExternalArchivePath: update, Mode: dto.InstallMergeIntoMod, TargetMod: folder,
 	}); err != nil {
 		t.Fatalf("merge install: %v", err)
@@ -419,7 +420,7 @@ func TestReinstallModMergesCaseVariantManifestFolders(t *testing.T) {
 	if got := modFiles(t, modDir); !reflect.DeepEqual(got, want) {
 		t.Fatalf("merged files = %v, want %v", got, want)
 	}
-	if _, _, _, err := d.ReinstallMod("stardewvalley", folder); err != nil {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "stardewvalley", folder, ""); err != nil {
 		t.Fatalf("ReinstallMod: %v", err)
 	}
 	if got := modFiles(t, modDir); !reflect.DeepEqual(got, want) {

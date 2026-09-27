@@ -1,6 +1,7 @@
 package download
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,7 @@ type extractLimits struct {
 }
 
 type ExtractBudget struct {
+	Context             context.Context
 	remainingEntries    int
 	remainingTotalBytes int64
 	maxEntryBytes       int64
@@ -73,6 +75,9 @@ func (r *extractionLimitReader) Read(p []byte) (int, error) {
 // extractEntries writes archive entries into destDir within the shared budget.
 func extractEntries[T any](files []T, destDir string, budget *ExtractBudget, name func(T) string, isDir func(T) bool, mode func(T) os.FileMode, open func(T) (io.ReadCloser, error)) error {
 	for _, file := range files {
+		if err := installContextErr(budget.Context); err != nil {
+			return err
+		}
 		entryName := name(file)
 		if budget.remainingEntries <= 0 {
 			return &ArchiveRejectedError{Reason: ArchiveRejectedLimit, Detail: fmt.Sprintf("entry %q exceeds the maximum entry count", entryName)}

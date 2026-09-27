@@ -80,8 +80,8 @@ func (s *gorganizerServer) UninstallMod(_ context.Context, req *pb.UninstallModR
 	return &pb.UninstallModResponse{ArchivesFlaggedUninstalled: flagged}, nil
 }
 
-func (s *gorganizerServer) ReinstallMod(_ context.Context, req *pb.ReinstallModRequest) (*pb.ReinstallModResponse, error) {
-	replayed, skipped, fileCount, err := s.ctrl.ReinstallMod(req.GetGameId(), req.GetModName())
+func (s *gorganizerServer) ReinstallMod(ctx context.Context, req *pb.ReinstallModRequest) (*pb.ReinstallModResponse, error) {
+	replayed, skipped, fileCount, err := s.ctrl.ReinstallMod(ctx, req.GetGameId(), req.GetModName(), req.GetClientRequestId())
 	if err != nil {
 		return nil, grpcError(err)
 	}
@@ -418,7 +418,7 @@ func (s *gorganizerServer) PreviewInstall(_ context.Context, req *pb.PreviewInst
 	return out, nil
 }
 
-func (s *gorganizerServer) StartInstall(_ context.Context, req *pb.StartInstallRequest) (*pb.StartInstallResponse, error) {
+func (s *gorganizerServer) StartInstall(ctx context.Context, req *pb.StartInstallRequest) (*pb.StartInstallResponse, error) {
 	files := make([]dto.FomodFileResult, len(req.GetFomodSelectedFiles()))
 	for i, f := range req.GetFomodSelectedFiles() {
 		files[i] = dto.FomodFileResult{
@@ -426,7 +426,8 @@ func (s *gorganizerServer) StartInstall(_ context.Context, req *pb.StartInstallR
 			IsFolder: f.GetIsFolder(), Priority: f.GetPriority(),
 		}
 	}
-	folder, count, err := s.ctrl.StartInstall(dto.StartInstallRequest{
+	folder, count, err := s.ctrl.StartInstall(ctx, dto.StartInstallRequest{
+		ClientRequestID:     req.GetClientRequestId(),
 		GameID:              req.GetGameId(),
 		ArchiveRelPath:      req.GetArchiveRelPath(),
 		ExternalArchivePath: req.GetExternalArchivePath(),
@@ -441,6 +442,23 @@ func (s *gorganizerServer) StartInstall(_ context.Context, req *pb.StartInstallR
 		return nil, grpcError(err)
 	}
 	return &pb.StartInstallResponse{ModFolder: folder, FileCount: int32(count)}, nil
+}
+
+func (s *gorganizerServer) GetInstallOutcome(_ context.Context, req *pb.GetInstallOutcomeRequest) (*pb.GetInstallOutcomeResponse, error) {
+	outcome, err := s.ctrl.GetInstallOutcome(req.GetGameId(), req.GetClientRequestId())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	resp := &pb.GetInstallOutcomeResponse{
+		State: pb.InstallOutcomeState(outcome.State), ModFolder: outcome.ModFolder,
+		FileCount: int32(outcome.FileCount), ArchivesReplayed: int32(outcome.ArchivesReplayed),
+		ArchivesSkipped: int32(outcome.ArchivesSkipped),
+	}
+	if outcome.State == dto.InstallOutcomeFailed && outcome.Err != nil {
+		mapped := status.Convert(grpcError(outcome.Err))
+		resp.Error, resp.ErrorCode = mapped.Message(), int32(mapped.Code())
+	}
+	return resp, nil
 }
 
 func (s *gorganizerServer) DiscardPreview(_ context.Context, req *pb.DiscardPreviewRequest) (*pb.DiscardPreviewResponse, error) {
@@ -474,11 +492,12 @@ func installEventToProto(evt dto.InstallEventResult) *pb.InstallEvent {
 		return &pb.InstallEvent{Event: &pb.InstallEvent_InstallProgress{InstallProgress: installProgressToProto(evt.Progress)}}
 	case evt.Completed != nil:
 		return &pb.InstallEvent{Event: &pb.InstallEvent_InstallCompleted{InstallCompleted: &pb.InstallCompleted{
-			GameId:         evt.Completed.GameID,
-			ModName:        evt.Completed.ModName,
-			ArchiveRelPath: evt.Completed.ArchiveRelPath,
-			BatchId:        evt.Completed.BatchID,
-			BatchIds:       append([]string(nil), evt.Completed.BatchIDs...),
+			GameId:          evt.Completed.GameID,
+			ModName:         evt.Completed.ModName,
+			ArchiveRelPath:  evt.Completed.ArchiveRelPath,
+			BatchId:         evt.Completed.BatchID,
+			BatchIds:        append([]string(nil), evt.Completed.BatchIDs...),
+			ClientRequestId: evt.Completed.ClientRequestID,
 		}}}
 	}
 	return nil

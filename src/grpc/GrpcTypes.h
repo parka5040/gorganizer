@@ -450,6 +450,17 @@ struct GrpcInstallCompleted {
     QString archiveRelPath;
     QString batchId;
     QStringList batchIds;
+    QString clientRequestId;
+};
+
+enum class GrpcInstallOutcomeState { Unknown, Running, Succeeded, Failed, Cancelled };
+
+struct GrpcInstallOutcome {
+    GrpcInstallOutcomeState state = GrpcInstallOutcomeState::Unknown;
+    QString modFolder;
+    int fileCount = 0;
+    QString error;
+    int errorCode = 0;
 };
 
 enum GrpcStatusCode {

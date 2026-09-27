@@ -320,19 +320,37 @@ func (is *InstallService) DiscardPreview(previewID string) error {
 	return nil
 }
 
+// installCtxErr returns a wrapped cancellation error before publication.
+func installCtxErr(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("install stopped: %w", err)
+	}
+	return nil
+}
+
 // StartInstall installs an archive and publishes InstallCompleted once the install and its modlist registration succeeded.
-func (is *InstallService) StartInstall(req dto.StartInstallRequest) (string, int, error) {
-	folder, count, err := is.startInstallFrom(req, "")
+func (is *InstallService) StartInstall(ctx context.Context, req dto.StartInstallRequest) (folder string, count int, err error) {
+	if err = is.s.installOutcomes.register(req.GameID, req.ClientRequestID); err != nil {
+		return "", 0, err
+	}
+	published := false
+	defer func() {
+		is.s.installOutcomes.finish(req.ClientRequestID, ctx, published, dto.InstallOutcome{ModFolder: folder, FileCount: count}, err)
+	}()
+	folder, count, err = is.startInstallFrom(ctx, req, "", &published)
 	if err == nil {
-		is.publishInstallCompleted(req.GameID, folder, req.ArchiveRelPath, nil)
+		is.publishInstallCompleted(req.GameID, folder, req.ArchiveRelPath, nil, req.ClientRequestID)
 	}
 	return folder, count, err
 }
 
 // publishInstallCompleted announces a registered install on the game's install stream as a lossy refresh hint naming every dependency batch it satisfied.
-func (is *InstallService) publishInstallCompleted(gameID, modName, archiveRelPath string, batchIDs []string) {
+func (is *InstallService) publishInstallCompleted(gameID, modName, archiveRelPath string, batchIDs []string, clientRequestID ...string) {
 	completed := &dto.InstallCompletedResult{
 		GameID: gameID, ModName: modName, ArchiveRelPath: archiveRelPath, BatchIDs: append([]string(nil), batchIDs...),
+	}
+	if len(clientRequestID) > 0 {
+		completed.ClientRequestID = clientRequestID[0]
 	}
 	if len(batchIDs) > 0 {
 		completed.BatchID = batchIDs[0]
@@ -367,18 +385,21 @@ func ensureModsDir(gameID string) error {
 }
 
 // startInstallFrom waits for startup recovery, then extracts (unless extracted names a checked extraction of the archive), stages and registers an archive install without announcing its completion, refusing once shutdown began.
-func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracted string) (string, int, error) {
-	if err := is.s.awaitRecovery(); err != nil {
+func (is *InstallService) startInstallFrom(ctx context.Context, req dto.StartInstallRequest, extracted string, published *bool) (string, int, error) {
+	if err := is.s.awaitRecoveryCtx(ctx); err != nil {
 		return "", 0, err
 	}
-	if err := is.s.refuseWhenShuttingDown("install"); err != nil {
+	if err := is.s.refuseWhenShuttingDown(dto.BusyOperationInstall); err != nil {
 		return "", 0, err
 	}
-	release, err := is.s.acquireShared(req.GameID, "install")
+	release, err := is.s.acquireShared(req.GameID, dto.BusyOperationInstall)
 	if err != nil {
 		return "", 0, err
 	}
 	defer release()
+	if err := installCtxErr(ctx); err != nil {
+		return "", 0, err
+	}
 	if !is.s.gameConfigured(req.GameID) {
 		return "", 0, fmt.Errorf("%w: %s", config.ErrInvalidGameID, req.GameID)
 	}
@@ -452,6 +473,9 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 	}
 
 	defer is.s.lockMods(req.GameID, target)()
+	if err := installCtxErr(ctx); err != nil {
+		return "", 0, err
+	}
 	if err := checkModReplacement(config.ModsDir(req.GameID), target); err != nil {
 		return "", 0, err
 	}
@@ -542,6 +566,12 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 		})
 	}
 	sink := func(p download.InstallProgress) {
+		if is.s.installBeforePublish != nil && p.Step == download.StageFinalizing {
+			is.s.installBeforePublish()
+		}
+		if is.s.installCopyProgress != nil && p.Step == download.StageCopying {
+			is.s.installCopyProgress(p)
+		}
 		if (req.Mode == dto.InstallMergeIntoMod || req.Mode == dto.InstallReplaceMod) && p.Step == download.StageComplete {
 			stagedComplete = &p
 			return
@@ -558,6 +588,13 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 	}
 
 	installReq := download.InstallRequest{
+		Context: ctx,
+		OnPublished: func() {
+			*published = true
+			if is.s.installAfterPublish != nil {
+				is.s.installAfterPublish()
+			}
+		},
 		GameID:              req.GameID,
 		ArchivePath:         absArchive,
 		ExtractedRoot:       extractedRoot,
@@ -622,6 +659,11 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 		return "", 0, err
 	}
 	if stageDir != "" {
+		if err := installCtxErr(ctx); err != nil {
+			_ = os.RemoveAll(stageDir)
+			return "", 0, err
+		}
+		*published = true
 		var publishErr error
 		if req.Mode == dto.InstallReplaceMod {
 			publishErr = is.publishPreparedReplace(req.GameID, target, stageToken)
@@ -631,6 +673,9 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 		if publishErr != nil {
 			sink(download.InstallProgress{InstallID: result.InstallID, Step: download.StageFailed, Error: publishErr.Error()})
 			return "", 0, publishErr
+		}
+		if is.s.installAfterPublish != nil {
+			is.s.installAfterPublish()
 		}
 		if req.Mode == dto.InstallReplaceMod && req.ArchiveRelPath != "" {
 			if err := download.SetUninstalled(req.GameID, req.ArchiveRelPath, false); err != nil {

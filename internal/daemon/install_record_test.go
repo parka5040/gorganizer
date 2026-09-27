@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -20,7 +21,7 @@ func TestInstallRecordFailureMapsToToken(t *testing.T) {
 		"plugin.esp": "plugin", "metadata.yaml/payload.txt": "not a record",
 	})
 
-	_, _, err := d.StartInstall(dto.StartInstallRequest{
+	_, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: "skyrimse", ArchiveRelPath: "Patch.zip", Mode: dto.InstallAsNewMod, TargetMod: "New Mod",
 	})
 	var recordErr *download.InstallRecordError

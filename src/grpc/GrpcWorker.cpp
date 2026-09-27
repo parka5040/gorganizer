@@ -347,6 +347,7 @@ GrpcInstallCompleted installCompletedFromProto(const gorganizer::v1::InstallComp
     out.archiveRelPath = QString::fromStdString(c.archive_rel_path());
     out.batchId = QString::fromStdString(c.batch_id());
     out.batchIds = stringListFromProto(c.batch_ids());
+    out.clientRequestId = QString::fromStdString(c.client_request_id());
     return out;
 }
 }
@@ -364,6 +365,16 @@ void GrpcWorker::stop()
     std::lock_guard<std::mutex> lk(m_streamMu);
     if (m_streamCtx) m_streamCtx->TryCancel();
     if (m_unaryCtx) m_unaryCtx->TryCancel();
+    std::lock_guard<std::mutex> installLock(m_installMu);
+    if (m_installCtx) m_installCtx->TryCancel();
+}
+
+void GrpcWorker::cancelInstall(quint64 requestId)
+{
+    std::lock_guard<std::mutex> lock(m_installMu);
+    m_cancelledInstalls.insert(requestId);
+    if (m_installCtx && m_activeInstallId == requestId)
+        m_installCtx->TryCancel();
 }
 
 void GrpcWorker::cancelActiveStream()
@@ -387,6 +398,30 @@ grpc::Status GrpcWorker::invoke(Method method, const Req& req, Resp& resp,
     setUnaryDeadline(ctx, deadline);
     ScopedCtxRegistration reg(m_streamMu, m_unaryCtx, ctx);
     return ((*m_stub).*method)(&ctx, req, &resp);
+}
+
+template <typename Req, typename Resp, typename Method>
+grpc::Status GrpcWorker::invokeInstall(quint64 requestId, Method method, const Req& req,
+                                       Resp& resp, bool& sent)
+{
+    grpc::ClientContext ctx;
+    setUnaryDeadline(ctx, std::chrono::hours(3));
+    {
+        std::lock_guard<std::mutex> lock(m_installMu);
+        if (m_stopped.load() || m_cancelledInstalls.remove(requestId))
+            return grpc::Status(grpc::StatusCode::CANCELLED, "cancelled before sending");
+        m_activeInstallId = requestId;
+        m_installCtx = &ctx;
+        sent = true;
+    }
+    const auto status = ((*m_stub).*method)(&ctx, req, &resp);
+    {
+        std::lock_guard<std::mutex> lock(m_installMu);
+        m_installCtx = nullptr;
+        m_activeInstallId = 0;
+        m_cancelledInstalls.remove(requestId);
+    }
+    return status;
 }
 
 template <typename Req, typename Resp, typename Method>
@@ -1055,7 +1090,8 @@ void GrpcWorker::doStartInstall(quint64 requestId, const QString& gameId,
                                  const QString& externalArchivePath, int mode,
                                  const QString& targetMod, const QString& previewId,
                                  const std::vector<GrpcFomodFile>& fomodSelectedFiles,
-                                 bool fomodConfirmed, const QString& selectedRoot)
+                                 bool fomodConfirmed, const QString& selectedRoot,
+                                 const QString& clientRequestId)
 {
     gorganizer::v1::StartInstallRequest req;
     req.set_game_id(gameId.toStdString());
@@ -1066,6 +1102,7 @@ void GrpcWorker::doStartInstall(quint64 requestId, const QString& gameId,
     req.set_preview_id(previewId.toStdString());
     req.set_fomod_confirmed(fomodConfirmed);
     req.set_selected_root(selectedRoot.toStdString());
+    req.set_client_request_id(clientRequestId.toStdString());
     for (const auto& f : fomodSelectedFiles) {
         auto* pb = req.add_fomod_selected_files();
         pb->set_source(f.source.toStdString());
@@ -1074,12 +1111,52 @@ void GrpcWorker::doStartInstall(quint64 requestId, const QString& gameId,
         pb->set_priority(f.priority);
     }
     gorganizer::v1::StartInstallResponse resp;
-    auto status = invoke(&Stub::StartInstall, req, resp, std::chrono::minutes(10));
+    bool sent = false;
+    auto status = invokeInstall(requestId, &Stub::StartInstall, req, resp, sent);
     if (!status.ok()) {
-        emit installRequestFailed(requestId, QString::fromStdString(status.error_message()));
+        emit installRequestFailed(requestId, static_cast<int>(status.error_code()),
+                                  QString::fromStdString(status.error_message()), sent);
         return;
     }
     emit installRequestCompleted(requestId, QString::fromStdString(resp.mod_folder()), resp.file_count());
+}
+
+void GrpcWorker::doGetInstallOutcome(quint64 requestId, const QString& gameId,
+                                      const QString& clientRequestId)
+{
+    gorganizer::v1::GetInstallOutcomeRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_client_request_id(clientRequestId.toStdString());
+    gorganizer::v1::GetInstallOutcomeResponse resp;
+    const auto status = invoke(&Stub::GetInstallOutcome, req, resp, std::chrono::seconds(8));
+    if (!status.ok()) {
+        emit installOutcomeFailed(requestId, static_cast<int>(status.error_code()),
+                                  QString::fromStdString(status.error_message()));
+        return;
+    }
+    GrpcInstallOutcome outcome;
+    switch (resp.state()) {
+    case gorganizer::v1::INSTALL_OUTCOME_STATE_RUNNING:
+        outcome.state = GrpcInstallOutcomeState::Running;
+        break;
+    case gorganizer::v1::INSTALL_OUTCOME_STATE_SUCCEEDED:
+        outcome.state = GrpcInstallOutcomeState::Succeeded;
+        break;
+    case gorganizer::v1::INSTALL_OUTCOME_STATE_FAILED:
+        outcome.state = GrpcInstallOutcomeState::Failed;
+        break;
+    case gorganizer::v1::INSTALL_OUTCOME_STATE_CANCELLED:
+        outcome.state = GrpcInstallOutcomeState::Cancelled;
+        break;
+    default:
+        outcome.state = GrpcInstallOutcomeState::Unknown;
+        break;
+    }
+    outcome.modFolder = QString::fromStdString(resp.mod_folder());
+    outcome.fileCount = resp.file_count();
+    outcome.error = QString::fromStdString(resp.error());
+    outcome.errorCode = resp.error_code();
+    emit installOutcomeReceived(requestId, outcome);
 }
 
 void GrpcWorker::doSetNexusAPIKey(const QString& apiKey)
@@ -1346,16 +1423,19 @@ void GrpcWorker::doSetModListRequest(quint64 requestId, const QString& gameId, c
     emit modListSaved(requestId, gameId, profileName);
 }
 
-void GrpcWorker::doReinstallMod(quint64 requestId, const QString& gameId, const QString& modName)
+void GrpcWorker::doReinstallMod(quint64 requestId, const QString& gameId, const QString& modName,
+                                 const QString& clientRequestId)
 {
     gorganizer::v1::ReinstallModRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_mod_name(modName.toStdString());
+    req.set_client_request_id(clientRequestId.toStdString());
     gorganizer::v1::ReinstallModResponse resp;
-    const auto status = invoke(&Stub::ReinstallMod, req, resp, std::chrono::minutes(30));
+    bool sent = false;
+    const auto status = invokeInstall(requestId, &Stub::ReinstallMod, req, resp, sent);
     if (!status.ok()) {
-        emit modActionFailed(requestId, gameId, modName, QStringLiteral("ReinstallMod"),
-                             QString::fromStdString(status.error_message()));
+        emit reinstallRequestFailed(requestId, static_cast<int>(status.error_code()),
+                                    QString::fromStdString(status.error_message()), sent);
         return;
     }
     GrpcReinstallResult result;

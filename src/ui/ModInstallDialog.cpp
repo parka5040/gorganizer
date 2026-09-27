@@ -1,6 +1,7 @@
 #include "ModInstallDialog.h"
 #include "FomodInstallerDialog.h"
 #include "GrpcClient.h"
+#include "InstallController.h"
 #include "ErrorPresenter.h"
 #include "InstallCollisionDialog.h"
 #include "InstallErrorText.h"
@@ -26,12 +27,14 @@ enum RootRole { RootPathRole = Qt::UserRole + 1 };
 }
 
 ModInstallDialog::ModInstallDialog(const QString& gameId, const QString& modName,
-                                   GrpcClient* grpc, ArchiveSource source, QWidget* parent,
+                                   GrpcClient* grpc, InstallController* installs,
+                                   ArchiveSource source, QWidget* parent,
                                    InstallTarget target)
     : QDialog(parent)
     , m_gameId(gameId)
     , m_modName(modName)
     , m_grpc(grpc)
+    , m_installs(installs)
     , m_source(std::move(source))
     , m_target(std::move(target))
 {
@@ -82,10 +85,21 @@ ModInstallDialog::ModInstallDialog(const QString& gameId, const QString& modName
             this, &ModInstallDialog::onPreviewCompleted);
     connect(m_grpc, &GrpcClient::previewInstallFailed,
             this, &ModInstallDialog::onPreviewFailed);
-    connect(m_grpc, &GrpcClient::installRequestCompleted,
+    connect(m_installs, &InstallController::installSucceeded,
             this, &ModInstallDialog::onInstallCompleted);
-    connect(m_grpc, &GrpcClient::installRequestFailed,
+    connect(m_installs, &InstallController::installFailed,
             this, &ModInstallDialog::onInstallFailed);
+    connect(m_installs, &InstallController::cancelled,
+            this, &ModInstallDialog::onInstallCancelled);
+    connect(m_installs, &InstallController::outcomeUnknown,
+            this, &ModInstallDialog::onInstallUnknown);
+    connect(m_installs, &InstallController::reconciling, this, [this](quint64 id) {
+        if (m_phase == Installing && id == m_installRequestId) {
+            m_reconciling = true;
+            m_cancelBtn->setEnabled(false);
+            m_statusLabel->setText("Checking whether this mod was installed…");
+        }
+    });
     m_previewRequestId = m_grpc->previewInstallAsync(m_gameId, m_source.archiveRelPath,
                                                        m_source.externalArchivePath);
 }
@@ -250,20 +264,26 @@ void ModInstallDialog::beginInstall(bool fomodConfirmed,
     m_selectedFiles = files;
     m_installRoot = selectedRoot;
     m_phase = Installing;
+    m_cancelRequested = false;
+    m_reconciling = false;
     m_installBtn->setEnabled(false);
-    m_cancelBtn->setEnabled(false);
+    m_cancelBtn->setEnabled(true);
     m_treeLabel->hide();
     m_treeWidget->hide();
     m_progressBar->show();
     m_statusLabel->setText(QString("Installing %1… please wait").arg(m_modName));
     const QString targetMod = m_target.targetMod.isEmpty() ? m_modName : m_target.targetMod;
-    if (m_source.archiveRelPath.isEmpty()) {
-        m_installRequestId = m_grpc->startInstallExternal(m_gameId, m_source.externalArchivePath,
-            m_target.mode, targetMod, fomodConfirmed, selectedRoot, m_previewId, files);
-    } else {
-        m_installRequestId = m_grpc->startInstall(m_gameId, m_source.archiveRelPath,
-            m_target.mode, targetMod, m_previewId, files, fomodConfirmed, selectedRoot);
-    }
+    InstallController::InstallRequest request;
+    request.gameId = m_gameId;
+    request.archiveRelPath = m_source.archiveRelPath;
+    request.externalArchivePath = m_source.externalArchivePath;
+    request.mode = m_target.mode;
+    request.targetMod = targetMod;
+    request.previewId = m_previewId;
+    request.selectedFiles = files;
+    request.fomodConfirmed = fomodConfirmed;
+    request.selectedRoot = selectedRoot;
+    m_installRequestId = m_installs->install(request);
 }
 
 void ModInstallDialog::onInstallCompleted(quint64 requestId, const QString& modFolder, int fileCount)
@@ -281,7 +301,7 @@ void ModInstallDialog::onInstallFailed(quint64 requestId, const QString& error)
 {
     if (m_phase != Installing || requestId != m_installRequestId)
         return;
-    if (parseInstallError(error).token == QLatin1String("mod_collision")) {
+    if (!m_cancelRequested && parseInstallError(error).token == QLatin1String("mod_collision")) {
         const auto choice = resolveInstallCollision(this, error,
             m_target.targetMod.isEmpty() ? m_modName : m_target.targetMod);
         if (choice) {
@@ -296,6 +316,25 @@ void ModInstallDialog::onInstallFailed(quint64 requestId, const QString& error)
     discardPreview();
     showFailure(errorSummary("install this mod", error, true));
     presentError(this, "Install Failed", "install this mod", error, true);
+}
+
+void ModInstallDialog::onInstallCancelled(quint64 requestId)
+{
+    if (m_phase != Installing || requestId != m_installRequestId) return;
+    discardPreview();
+    m_phase = Done;
+    m_statusLabel->setText("Install cancelled. Nothing was installed.");
+    m_progressBar->hide();
+    m_installBtn->hide();
+    m_cancelBtn->setText("Close");
+}
+
+void ModInstallDialog::onInstallUnknown(quint64 requestId)
+{
+    if (m_phase != Installing || requestId != m_installRequestId) return;
+    m_installUnconfirmed = true;
+    discardPreview();
+    showFailure("Gorganizer could not confirm whether this mod was installed. Check Mods and Downloads before trying again.");
 }
 
 void ModInstallDialog::closeEvent(QCloseEvent* event)
@@ -321,7 +360,13 @@ void ModInstallDialog::reject()
     if (m_phase == CancellingPreview)
         return;
     if (m_phase == Installing) {
-        m_statusLabel->setText("Installing… please wait");
+        if (m_reconciling) return;
+        if (!m_cancelRequested) {
+            m_cancelRequested = true;
+            m_cancelBtn->setEnabled(false);
+            m_statusLabel->setText("Cancelling… checking whether anything was installed.");
+            m_installs->cancel(m_installRequestId);
+        }
         return;
     }
     discardPreview();

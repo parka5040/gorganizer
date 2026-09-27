@@ -25,7 +25,7 @@ func interruptedReinstall(t *testing.T, d *Daemon, folder string) (string, strin
 		}
 		return nil
 	}
-	if _, _, _, err := d.ReinstallMod("skyrimse", folder); !errors.Is(err, errSimulatedCrash) {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", folder, ""); !errors.Is(err, errSimulatedCrash) {
 		t.Fatalf("ReinstallMod = %v, want interrupted swap", err)
 	}
 	d.reinstallFault = nil
@@ -64,16 +64,16 @@ func TestPendingReinstallReservesName(t *testing.T) {
 		run  func() error
 	}{
 		{"new install", func() error {
-			_, _, err := d.StartInstall(dto.StartInstallRequest{GameID: "skyrimse", ArchiveRelPath: filepath.Base(archive), Mode: dto.InstallAsNewMod, TargetMod: folder})
+			_, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{GameID: "skyrimse", ArchiveRelPath: filepath.Base(archive), Mode: dto.InstallAsNewMod, TargetMod: folder})
 			return err
 		}},
 		{"merge", func() error {
-			_, _, err := d.StartInstall(dto.StartInstallRequest{GameID: "skyrimse", ArchiveRelPath: filepath.Base(archive), Mode: dto.InstallMergeIntoMod, TargetMod: folder})
+			_, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{GameID: "skyrimse", ArchiveRelPath: filepath.Base(archive), Mode: dto.InstallMergeIntoMod, TargetMod: folder})
 			return err
 		}},
 		{"rename from", func() error { return d.RenameMod("skyrimse", folder, "Fresh") }},
 		{"rename to", func() error { return d.RenameMod("skyrimse", other, folder) }},
-		{"reinstall", func() error { _, _, _, err := d.ReinstallMod("skyrimse", folder); return err }},
+		{"reinstall", func() error { _, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", folder, ""); return err }},
 		{"uninstall", func() error { _, err := d.UninstallMod("skyrimse", folder, true); return err }},
 		{"import", func() error {
 			_, err := d.ImportInstance(context.Background(), dto.ImportRequest{GameID: "skyrimse", ArchivePath: bundle, Policy: dto.PolicySkip}, nil)
@@ -110,7 +110,7 @@ func TestPendingTransferJournalReservesDaemonModName(t *testing.T) {
 		run  func() error
 	}{
 		{"install", func() error {
-			_, _, err := d.StartInstall(dto.StartInstallRequest{GameID: "skyrimse", ArchiveRelPath: filepath.Base(archive), Mode: dto.InstallAsNewMod, TargetMod: "Reserved"})
+			_, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{GameID: "skyrimse", ArchiveRelPath: filepath.Base(archive), Mode: dto.InstallAsNewMod, TargetMod: "Reserved"})
 			return err
 		}},
 		{"rename to", func() error { return d.RenameMod("skyrimse", other, "Reserved") }},
@@ -182,7 +182,7 @@ func TestReplacementSyncsFilesystemBeforeRemovingOld(t *testing.T) {
 		steps = append(steps, step)
 		return nil
 	}
-	if _, _, _, err := d.ReinstallMod("skyrimse", folder); err != nil {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", folder, ""); err != nil {
 		t.Fatal(err)
 	}
 	d.reinstallFault = nil

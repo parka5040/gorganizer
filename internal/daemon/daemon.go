@@ -105,6 +105,7 @@ func newWithClockAndVersion(cfg *config.Config, now func() time.Time, version st
 		nexusUsers:              nexusClientUserValidator{},
 		readSteamAppState:       steam.ReadAppState,
 		now:                     now,
+		installOutcomes:         installOutcomeRegistry{now: now},
 	}
 	if len(scans) > 0 {
 		s.procScan = scans[0]

@@ -98,7 +98,7 @@ type ModController interface {
 	RescanMod(gameID, modName string) (*dto.ModInfoResult, error)
 	RenameMod(gameID, oldName, newName string) error
 	UninstallMod(gameID, modName string, force bool) ([]string, error)
-	ReinstallMod(gameID, modName string) (replayed, skipped, fileCount int, err error)
+	ReinstallMod(ctx context.Context, gameID, modName, clientRequestID string) (replayed, skipped, fileCount int, err error)
 	RegisterManualInstall(gameID, modName, archiveRelPath string) (profilesUpdated int, err error)
 	ListOverwriteFiles(gameID string) (entries []dto.OverwriteEntryResult, dir string, err error)
 	ExtractOverwriteToMod(gameID, modName string, files []string, keep bool) (fileCount int, err error)
@@ -152,7 +152,8 @@ type ArchiveController interface {
 
 type InstallController interface {
 	PreviewInstall(req dto.PreviewInstallRequest) (*dto.PreviewResult, error)
-	StartInstall(req dto.StartInstallRequest) (modFolder string, fileCount int, err error)
+	StartInstall(ctx context.Context, req dto.StartInstallRequest) (modFolder string, fileCount int, err error)
+	GetInstallOutcome(gameID, clientRequestID string) (dto.InstallOutcome, error)
 	DiscardPreview(previewID string) error
 	StreamInstallEvents(ctx context.Context, gameID string) (<-chan dto.InstallEventResult, error)
 }

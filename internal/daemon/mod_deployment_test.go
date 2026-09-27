@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -400,7 +401,7 @@ func TestMergeIntoDeployedModRebuildsFarm(t *testing.T) {
 	}
 	archive := filepath.Join(config.DownloadsDir(modChangeGame), "Update.zip")
 	writeZipFiles(t, archive, map[string]string{"a.esp": "replacement bytes", ".gorganizer-root/root.txt": "replacement root"})
-	if _, _, err := d.StartInstall(dto.StartInstallRequest{GameID: modChangeGame, ArchiveRelPath: "Update.zip", Mode: dto.InstallMergeIntoMod, TargetMod: "A"}); err != nil {
+	if _, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{GameID: modChangeGame, ArchiveRelPath: "Update.zip", Mode: dto.InstallMergeIntoMod, TargetMod: "A"}); err != nil {
 		t.Fatalf("StartInstall: %v", err)
 	}
 	updated, err := os.Stat(modDir)
@@ -435,7 +436,7 @@ func TestMergeIntoDeployedModRefusedWhileGameRuns(t *testing.T) {
 	archive := filepath.Join(config.DownloadsDir(modChangeGame), "Update.zip")
 	writeZipFiles(t, archive, map[string]string{"a.esp": "replacement bytes"})
 	fakeProcesses(d, true, nil)
-	_, _, err := d.StartInstall(dto.StartInstallRequest{GameID: modChangeGame, ArchiveRelPath: "Update.zip", Mode: dto.InstallMergeIntoMod, TargetMod: "A"})
+	_, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{GameID: modChangeGame, ArchiveRelPath: "Update.zip", Mode: dto.InstallMergeIntoMod, TargetMod: "A"})
 	requireGameRunning(t, "StartInstall merge", err, dto.GameRunningOperationMerge)
 	for _, path := range []string{filepath.Join(modDir, "a.esp"), filepath.Join(install, "Data", "a.esp")} {
 		body, readErr := os.ReadFile(path)

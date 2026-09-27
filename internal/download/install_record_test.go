@@ -103,6 +103,28 @@ func TestCanonicalMetadataWrittenBeforeRename(t *testing.T) {
 	}
 }
 
+// TestDanglingInstallDestinationIsCollision reports a dangling symlink as a collision and leaves it untouched.
+func TestDanglingInstallDestinationIsCollision(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	modsDir := useModsDir(t)
+	extract := t.TempDir()
+	writeTree(t, extract, "plugin.esp")
+	final := filepath.Join(modsDir, "Existing")
+	if err := os.Symlink("missing-target", final); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Install(InstallRequest{GameID: "skyrimse", ExtractedRoot: extract, Mode: ModeNewMod, TargetMod: "Existing"})
+	if name, ok := IsCollisionMarker(err); !ok || name != "Existing" {
+		t.Fatalf("Install error = %v, want collision", err)
+	}
+	if target, err := os.Readlink(final); err != nil || target != "missing-target" {
+		t.Fatalf("destination = %q, %v", target, err)
+	}
+	if entries, err := os.ReadDir(modsDir); err != nil || len(entries) != 1 {
+		t.Fatalf("staging leftovers = %v, %v", entries, err)
+	}
+}
+
 // TestArchiveMetadataIsIgnored excludes forged root records across copy paths while preserving nested files.
 func TestArchiveMetadataIsIgnored(t *testing.T) {
 	for _, tc := range []struct {

@@ -72,6 +72,7 @@ type fakeController struct {
 	installFolder     string
 	installCount      int
 	installReq        dto.StartInstallRequest
+	installOutcome    dto.InstallOutcome
 	pluginOrderArgs   []any
 	pluginLoadoutArgs []any
 	launchPid         int
@@ -164,7 +165,7 @@ func (f *fakeController) GetMod(gameID, modName string) (*dto.ModInfoResult, err
 	return f.mod, f.modErr
 }
 
-func (f *fakeController) ReinstallMod(gameID, modName string) (int, int, int, error) {
+func (f *fakeController) ReinstallMod(_ context.Context, gameID, modName, _ string) (int, int, int, error) {
 	f.reinstallArgs = []string{gameID, modName}
 	return f.reinstallCounts[0], f.reinstallCounts[1], f.reinstallCounts[2], nil
 }
@@ -244,9 +245,13 @@ func (f *fakeController) StreamPluginStatus(_ context.Context, _, _ string) (<-c
 	return out, nil
 }
 
-func (f *fakeController) StartInstall(req dto.StartInstallRequest) (string, int, error) {
+func (f *fakeController) StartInstall(_ context.Context, req dto.StartInstallRequest) (string, int, error) {
 	f.installReq = req
 	return f.installFolder, f.installCount, nil
+}
+
+func (f *fakeController) GetInstallOutcome(_, _ string) (dto.InstallOutcome, error) {
+	return f.installOutcome, nil
 }
 
 func (f *fakeController) SetPluginOrder(gameID, profileName string, filenames []string) error {

@@ -1,4 +1,5 @@
 #include "ModListWidget.h"
+#include "InstallController.h"
 #include "ModListSaveQueue.h"
 #include "ModListRowDelegate.h"
 #include "ThemeManager.h"
@@ -234,9 +235,10 @@ QStringList ModListWidget::defaultCategories()
     };
 }
 
-ModListWidget::ModListWidget(GrpcClient* grpc, QWidget* parent)
+ModListWidget::ModListWidget(GrpcClient* grpc, InstallController* installs, QWidget* parent)
     : QWidget(parent)
     , m_grpc(grpc)
+    , m_installs(installs)
     , m_saveQueue(new ModListSaveQueue(grpc, this))
 {
     auto* layout = new QVBoxLayout(this);
@@ -309,7 +311,26 @@ ModListWidget::ModListWidget(GrpcClient* grpc, QWidget* parent)
     connect(m_saveQueue, &ModListSaveQueue::saveFailed, this, &ModListWidget::onModListSaveFailed);
     connect(m_saveQueue, &ModListSaveQueue::drained, this, &ModListWidget::onModListSavesDrained);
     connect(m_grpc, &GrpcClient::connected, this, &ModListWidget::requestProfileModList);
-    connect(m_grpc, &GrpcClient::modReinstalled, this, &ModListWidget::onModReinstalled);
+    connect(m_installs, &InstallController::reinstallSucceeded, this,
+            [this](quint64 id, const GrpcReinstallResult& result) {
+        if (m_modAction && m_modAction->requestId == id)
+            onModReinstalled(id, m_modAction->context.gameId, m_modAction->folder, result);
+    });
+    connect(m_installs, &InstallController::reinstallFailed, this, &ModListWidget::onReinstallFailed);
+    connect(m_installs, &InstallController::cancelled, this, &ModListWidget::onReinstallCancelled);
+    connect(m_installs, &InstallController::outcomeUnknown, this, &ModListWidget::onReinstallUnknown);
+    connect(m_installs, &InstallController::reconciling, this, [this](quint64 id) {
+        if (!m_modAction || m_modAction->kind != ModActionKind::Reinstall || m_modAction->requestId != id)
+            return;
+        if (m_reinstallProgress) {
+            m_reinstallProgress->setCancelButton(nullptr);
+            m_reinstallProgress->setLabelText("Checking whether this mod was reinstalled…");
+        }
+        if (m_bulkReinstall && m_bulkReinstall->progress) {
+            m_bulkReinstall->progress->setCancelButtonText("Stop After This Mod");
+            m_bulkReinstall->progress->setLabelText("Checking whether this mod was reinstalled…");
+        }
+    });
     connect(m_grpc, &GrpcClient::modUninstalled, this, &ModListWidget::onModUninstalled);
     connect(m_grpc, &GrpcClient::modRenamed, this, &ModListWidget::onModRenamed);
     connect(m_grpc, &GrpcClient::modActionFailed, this, &ModListWidget::onModActionFailed);
@@ -1449,7 +1470,7 @@ void ModListWidget::startModAction(ModAction action)
         return;
     action.submittedWhileConnected = m_grpc->isConnected();
     if (action.kind == ModActionKind::Reinstall)
-        action.requestId = m_grpc->reinstallModAsync(action.context.gameId, action.folder);
+        action.requestId = m_installs->reinstall(action.context.gameId, action.folder);
     else if (action.kind == ModActionKind::Uninstall)
         action.requestId = m_grpc->uninstallModAsync(action.context.gameId, action.folder, false);
     else
@@ -1457,6 +1478,24 @@ void ModListWidget::startModAction(ModAction action)
     m_modAction = std::move(action);
     m_modActionInProgress = true;
     updateEditLock();
+    if (m_modAction->kind == ModActionKind::Reinstall && !m_bulkReinstall) {
+        auto* progress = new QProgressDialog("Reinstalling this mod…", "Cancel Reinstall", 0, 0, this);
+        progress->setWindowTitle("Reinstall Mod");
+        progress->setWindowModality(Qt::NonModal);
+        progress->setMinimumDuration(0);
+        progress->setAutoClose(false);
+        const quint64 id = m_modAction->requestId;
+        connect(progress, &QProgressDialog::canceled, this, [this, id, progress] {
+            m_installs->cancel(id);
+            QTimer::singleShot(0, progress, [progress] {
+                progress->setCancelButton(nullptr);
+                progress->setLabelText("Cancelling… checking whether this mod was reinstalled.");
+                progress->show();
+            });
+        });
+        m_reinstallProgress = progress;
+        progress->show();
+    }
 }
 
 void ModListWidget::startBulkReinstall(const ActionContext& context, const QStringList& folders,
@@ -1472,7 +1511,7 @@ void ModListWidget::startBulkReinstall(const ActionContext& context, const QStri
     auto* progress = new QProgressDialog(this);
     progress->setWindowTitle(QStringLiteral("Reinstall Mods"));
     progress->setLabelText(QStringLiteral("Reinstalling 1 of %1…").arg(folders.size()));
-    progress->setCancelButtonText(QStringLiteral("Stop after this mod"));
+    progress->setCancelButtonText(QStringLiteral("Cancel Current and Stop"));
     progress->setRange(0, folders.size());
     progress->setValue(0);
     progress->setMinimumDuration(0);
@@ -1484,6 +1523,8 @@ void ModListWidget::startBulkReinstall(const ActionContext& context, const QStri
             return;
         m_bulkReinstall->stopRequested = true;
         m_bulkReinstall->folders.resize(m_bulkReinstall->next);
+        if (m_modAction && m_modAction->kind == ModActionKind::Reinstall)
+            m_installs->cancel(m_modAction->requestId);
         QTimer::singleShot(0, this, [this] {
             if (!m_bulkReinstall || !m_modAction || !matchesContext(m_bulkReinstall->context)
                 || !m_bulkReinstall->progress)
@@ -1516,6 +1557,7 @@ void ModListWidget::startNextBulkReinstall()
             continue;
         }
         if (bulk.progress) {
+            bulk.progress->setCancelButtonText("Cancel Current and Stop");
             bulk.progress->setLabelText(QStringLiteral("Reinstalling %1 of %2…")
                                             .arg(bulk.next).arg(bulk.total));
         }
@@ -1567,19 +1609,21 @@ void ModListWidget::showPendingBulkSummaries()
 
 void ModListWidget::showBulkSummary(const BulkReinstall& bulk)
 {
-    QString summary = QStringLiteral("Reinstalled %1 mods; %2 failed.")
-                          .arg(bulk.completed).arg(bulk.failed);
+    QString summary = QStringLiteral("Reinstalled %1 mods; %2 failed; %3 could not be confirmed.")
+                          .arg(bulk.completed).arg(bulk.failed).arg(bulk.unknown);
     if (bulk.stopRequested)
         summary += QStringLiteral("\nStopped. %1 mods were not attempted.").arg(bulk.total - bulk.next);
-    if (bulk.failed > 0 || !bulk.notices.isEmpty()) {
+    if (bulk.failed > 0 || bulk.unknown > 0 || !bulk.notices.isEmpty()) {
         QMessageBox box(this);
-        box.setIcon(bulk.failed > 0 ? QMessageBox::Warning : QMessageBox::Information);
-        const QString title = bulk.failed > 0 ? QStringLiteral("Bulk Reinstall — Partial")
+        box.setIcon(bulk.failed > 0 || bulk.unknown > 0 ? QMessageBox::Warning : QMessageBox::Information);
+        const QString title = bulk.failed > 0 || bulk.unknown > 0 ? QStringLiteral("Bulk Reinstall — Partial")
             : QStringLiteral("Bulk Reinstall Complete");
         box.setWindowTitle(title);
         box.setTextFormat(Qt::PlainText);
         box.setText(summary);
-        if (!bulk.notices.isEmpty())
+        if (bulk.unknown > 0)
+            box.setInformativeText(QStringLiteral("Check Mods and Downloads before trying again. Show details for each mod."));
+        else if (!bulk.notices.isEmpty())
             box.setInformativeText(QStringLiteral("Some source archives were missing. Show details for each mod."));
         box.setStandardButtons(QMessageBox::Ok);
         attachErrorDetails(&box, title, QStringLiteral("reinstall these mods"),
@@ -1601,6 +1645,11 @@ void ModListWidget::finishModAction(bool changed)
 {
     const ActionContext context = m_modAction->context;
     m_modAction.reset();
+    if (m_reinstallProgress) {
+        m_reinstallProgress->hide();
+        m_reinstallProgress->deleteLater();
+        m_reinstallProgress = nullptr;
+    }
     if (m_bulkReinstall) {
         if (m_bulkReinstall->progress)
             m_bulkReinstall->progress->setValue(m_bulkReinstall->next);
@@ -1709,13 +1758,60 @@ void ModListWidget::onModActionFailed(quint64 requestId, const QString& gameId, 
     presentError(this, title, operation, displayError, true, error);
 }
 
+void ModListWidget::onReinstallFailed(quint64 requestId, const QString& error)
+{
+    if (!m_modAction || m_modAction->kind != ModActionKind::Reinstall ||
+        m_modAction->requestId != requestId) return;
+    onModActionFailed(requestId, m_modAction->context.gameId, m_modAction->folder,
+                      QStringLiteral("ReinstallMod"), error);
+}
+
+void ModListWidget::onReinstallCancelled(quint64 requestId)
+{
+    if (!m_modAction || m_modAction->kind != ModActionKind::Reinstall ||
+        m_modAction->requestId != requestId) return;
+    const bool bulk = m_bulkReinstall.has_value();
+    if (bulk) {
+        m_bulkReinstall->stopRequested = true;
+        m_bulkReinstall->folders.resize(m_bulkReinstall->next);
+    }
+    finishModAction(false);
+    if (!bulk)
+        dialogs::info(this, "Reinstall Cancelled", "Reinstall cancelled. The original mod was not changed.");
+}
+
+void ModListWidget::onReinstallUnknown(quint64 requestId)
+{
+    if (!m_modAction || m_modAction->kind != ModActionKind::Reinstall ||
+        m_modAction->requestId != requestId) return;
+    const bool bulk = m_bulkReinstall.has_value();
+    const bool current = matchesContext(m_modAction->context);
+    if (bulk) {
+        ++m_bulkReinstall->unknown;
+        m_bulkReinstall->notices.append(QStringLiteral("• %1: Reinstall result could not be confirmed. "
+                                                     "Check Mods and Downloads before trying again.")
+                                             .arg(m_modAction->name));
+        m_bulkReinstall->stopRequested = true;
+        m_bulkReinstall->folders.resize(m_bulkReinstall->next);
+    }
+    finishModAction(false);
+    if (current) {
+        reloadMods();
+        emit modsEdited();
+    }
+    if (!bulk)
+        dialogs::plainWarn(this, "Reinstall Result Unknown",
+            "Gorganizer could not confirm whether this mod was reinstalled. Check Mods and Downloads before trying again.");
+}
+
 void ModListWidget::onModActionWorkersStopped()
 {
-    if (!m_modAction || m_modAction->requestId == 0)
+    if (!m_modAction || m_modAction->requestId == 0 ||
+        m_modAction->kind == ModActionKind::Reinstall)
         return;
     const ModAction action = *m_modAction;
-    const QString method = action.kind == ModActionKind::Reinstall ? QStringLiteral("ReinstallMod")
-        : action.kind == ModActionKind::Uninstall ? QStringLiteral("UninstallMod") : QStringLiteral("RenameMod");
+    const QString method = action.kind == ModActionKind::Uninstall ? QStringLiteral("UninstallMod")
+        : QStringLiteral("RenameMod");
     onModActionFailed(action.requestId, action.context.gameId, action.folder, method,
                       action.submittedWhileConnected ? QStringLiteral("deadline exceeded")
                           : QStringLiteral("not connected"));

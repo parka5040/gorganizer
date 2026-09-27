@@ -14,6 +14,7 @@ class QToolButton;
 namespace gorganizer {
 
 class GrpcClient;
+class InstallController;
 class GameSelectorWidget;
 class ModListWidget;
 class PluginListWidget;
@@ -54,6 +55,8 @@ private slots:
     void onInstallRequestCompleted(quint64 requestId, const QString& modFolder, int fileCount);
     // Resolves the matching pending install's failure, or reports any other asynchronous install failure.
     void onInstallRequestFailed(quint64 requestId, const QString& error);
+    void onInstallCancelled(quint64 requestId);
+    void onInstallUnknown(quint64 requestId);
 
 private:
     struct PendingExternalInstall {
@@ -82,6 +85,7 @@ private:
 
     AppConfig& m_config;
     GrpcClient* m_grpc;
+    InstallController* m_installs;
     GameSelectorWidget* m_gameSelector = nullptr;
     ModListWidget* m_modList = nullptr;
     PluginListWidget* m_pluginList = nullptr;
@@ -94,6 +98,7 @@ private:
     ProfileSelectorWidget* m_profileSelector = nullptr;
     ConnectionIndicator* m_connectionIndicator = nullptr;
     QLabel* m_statusInfo = nullptr;
+    QToolButton* m_cancelInstallButton = nullptr;
     QToolButton* m_applyButton = nullptr;
 
     SessionController* m_session = nullptr;

@@ -818,6 +818,9 @@ func (e *RarExtractor) ExtractWithBudget(archivePath, destDir string, budget *Ex
 		return rarReadError(err)
 	}
 	for {
+		if err := installContextErr(budget.Context); err != nil {
+			return err
+		}
 		header, err := r.Next()
 		if errors.Is(err, io.EOF) {
 			return nil

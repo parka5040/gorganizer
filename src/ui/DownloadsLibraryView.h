@@ -1,21 +1,26 @@
 #pragma once
 
 #include <QWidget>
+#include <QHash>
+#include <QPointer>
 #include <QTreeView>
 #include <QSortFilterProxyModel>
 #include <QCheckBox>
 #include "GrpcClient.h"
 #include "GameInfo.h"
 
+class QProgressDialog;
+
 namespace gorganizer {
 
 class DownloadsModel;
 class DownloadsRowDelegate;
+class InstallController;
 
 class DownloadsLibraryView : public QWidget {
     Q_OBJECT
 public:
-    explicit DownloadsLibraryView(GrpcClient* grpc, QWidget* parent = nullptr);
+    explicit DownloadsLibraryView(GrpcClient* grpc, InstallController* installs, QWidget* parent = nullptr);
 
     void setGame(const GameInfo& game);
 
@@ -27,14 +32,31 @@ private slots:
     void onDoubleClicked(const QModelIndex& idx);
     void onDownloadProgress(const GrpcDownloadProgress& progress);
     void onInstallProgress(const GrpcInstallProgress& progress);
+    void onInstallSucceeded(quint64 requestId, const QString& modFolder, int fileCount);
+    void onInstallFailed(quint64 requestId, const QString& error);
+    void onInstallCancelled(quint64 requestId);
+    void onInstallUnknown(quint64 requestId);
 
 signals:
-    void modInstalledFromDownload();
+    void modInstalledFromDownload(const QString& gameId);
+    void modStateNeedsRefresh(const QString& gameId);
     void fomodWizardOpened(const QString& archivePath, const QString& modName);
     void fomodWizardClosed(const QString& archivePath);
 
 private:
+    struct Attempt {
+        GrpcArchiveRow row;
+        QString gameId;
+        QString target;
+        GrpcInstallMode mode = GrpcInstallAsNewMod;
+        bool explicitMerge = false;
+        QPointer<QProgressDialog> progress;
+    };
+    void finishAttempt(quint64 requestId);
+
     GrpcClient* m_grpc;
+    InstallController* m_installs;
+    QHash<quint64, Attempt> m_attempts;
     QTreeView* m_view;
     DownloadsModel* m_model;
     DownloadsRowDelegate* m_delegate;

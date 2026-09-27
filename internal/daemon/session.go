@@ -94,7 +94,11 @@ type session struct {
 	archiveBus *streamBus[dto.ArchiveEventResult]
 	installBus *streamBus[dto.InstallEventResult]
 
-	previews *previewCache
+	previews             *previewCache
+	installOutcomes      installOutcomeRegistry
+	installAfterPublish  func()
+	installCopyProgress  func(download.InstallProgress)
+	installBeforePublish func()
 
 	shutdownCh   chan struct{}
 	shutdownOnce sync.Once

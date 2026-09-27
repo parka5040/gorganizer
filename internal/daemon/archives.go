@@ -63,12 +63,12 @@ func (ar *ArchiveService) handleLandedArchiveMode(snap download.DownloadSnapshot
 	var release func()
 	for {
 		var err error
-		release, err = ar.s.acquireShared(snap.GameID, "install")
+		release, err = ar.s.acquireShared(snap.GameID, dto.BusyOperationInstall)
 		if err == nil {
 			break
 		}
 		var busy *dto.OperationBusyError
-		if !errors.As(err, &busy) || busy.Operation != "recovery" {
+		if !errors.As(err, &busy) || busy.Operation != dto.BusyOperationRecovery {
 			return
 		}
 		select {
@@ -116,7 +116,7 @@ func (ar *ArchiveService) autoInstallAfterDownload(gameID, archivePath string, s
 		base := filepath.Base(archivePath)
 		modName = strings.TrimSuffix(base, filepath.Ext(base))
 	}
-	if _, _, err := ar.s.svc.install.StartInstall(dto.StartInstallRequest{
+	if _, _, err := ar.s.svc.install.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: gameID, ArchiveRelPath: rel,
 		Mode: dto.InstallAsNewMod, TargetMod: modName,
 	}); err != nil {

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -485,7 +486,7 @@ func TestEnsureInModListReportsUnwritableProfile(t *testing.T) {
 	}
 
 	writeZipFiles(t, filepath.Join(config.DownloadsDir("skyrimse"), "Late.zip"), map[string]string{"plugin.esp": "plugin"})
-	_, _, err := d.StartInstall(dto.StartInstallRequest{GameID: "skyrimse", ArchiveRelPath: "Late.zip", Mode: dto.InstallAsNewMod})
+	_, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{GameID: "skyrimse", ArchiveRelPath: "Late.zip", Mode: dto.InstallAsNewMod})
 	var registration *download.ModRegistrationError
 	if !errors.As(err, &registration) || registration.Mod != "Late" {
 		t.Fatalf("StartInstall error = %v, want ModRegistrationError for Late", err)

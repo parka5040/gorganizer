@@ -23,6 +23,7 @@ namespace gorganizer {
 
 class ModListWidget;
 class ModListSaveQueue;
+class InstallController;
 
 class ModListTreeView : public QTreeView {
     Q_OBJECT
@@ -42,7 +43,7 @@ private:
 class ModListWidget : public QWidget {
     Q_OBJECT
 public:
-    explicit ModListWidget(GrpcClient* grpc, QWidget* parent = nullptr);
+    explicit ModListWidget(GrpcClient* grpc, InstallController* installs, QWidget* parent = nullptr);
 
     void loadForGame(const GameInfo& game);
     void loadForGame(const GameInfo& game, const QString& profileName);
@@ -125,6 +126,9 @@ private slots:
     void onModActionFailed(quint64 requestId, const QString& gameId, const QString& modName,
                            const QString& method, const QString& error);
     void onModActionWorkersStopped();
+    void onReinstallFailed(quint64 requestId, const QString& error);
+    void onReinstallCancelled(quint64 requestId);
+    void onReinstallUnknown(quint64 requestId);
 
 private:
     friend class ModListTreeView;
@@ -203,6 +207,7 @@ private:
         int total = 0;
         int completed = 0;
         int failed = 0;
+        int unknown = 0;
         bool stopRequested = false;
     };
     bool refuseModAction() const;
@@ -243,7 +248,9 @@ private:
     void extractOverwriteSelected(const ActionContext& context);
 
     GrpcClient* m_grpc;
+    InstallController* m_installs;
     ModListSaveQueue* m_saveQueue;
+    QPointer<QProgressDialog> m_reinstallProgress;
     ModListTreeView* m_view;
     ModListModel* m_model;
     QWidget* m_placeholder;

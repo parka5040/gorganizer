@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"archive/zip"
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -145,7 +146,7 @@ func TestInstallEntryPointsRefuseLayoutsWithoutPlanner(t *testing.T) {
 	writeFixture(t, existing)
 
 	var layoutErr *download.LayoutUnsupportedError
-	if _, _, err := d.StartInstall(dto.StartInstallRequest{
+	if _, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: "stardewvalley", ArchiveRelPath: "SampleMod.zip", Mode: dto.InstallAsNewMod,
 	}); !errors.As(err, &layoutErr) {
 		t.Errorf("StartInstall error = %v, want LayoutUnsupportedError", err)
@@ -153,7 +154,7 @@ func TestInstallEntryPointsRefuseLayoutsWithoutPlanner(t *testing.T) {
 	if _, err := d.PreviewInstall(dto.PreviewInstallRequest{GameID: "stardewvalley", ArchiveRelPath: "SampleMod.zip"}); !errors.As(err, &layoutErr) {
 		t.Errorf("PreviewInstall error = %v, want LayoutUnsupportedError", err)
 	}
-	if _, _, _, err := d.ReinstallMod("stardewvalley", "Existing"); !errors.As(err, &layoutErr) {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "stardewvalley", "Existing", ""); !errors.As(err, &layoutErr) {
 		t.Errorf("ReinstallMod error = %v, want LayoutUnsupportedError", err)
 	}
 	if layoutErr == nil || layoutErr.GameID != "stardewvalley" || layoutErr.Layout != "smapi_manifest" {
@@ -205,7 +206,7 @@ func TestStartInstallAppliesGameLayout(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d := newStardewDaemon(t)
 			writeZipFiles(t, filepath.Join(config.DownloadsDir(tc.gameID), "SampleMod.zip"), tc.archive)
-			folder, count, err := d.StartInstall(dto.StartInstallRequest{
+			folder, count, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 				GameID: tc.gameID, ArchiveRelPath: "SampleMod.zip", Mode: dto.InstallAsNewMod,
 			})
 			if err != nil {
@@ -246,7 +247,7 @@ func TestStartInstallRefusesInvalidSMAPIArchives(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d := newStardewDaemon(t)
 			writeZipFiles(t, filepath.Join(config.DownloadsDir("stardewvalley"), "Bad.zip"), tc.archive)
-			_, _, err := d.StartInstall(dto.StartInstallRequest{
+			_, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 				GameID: "stardewvalley", ArchiveRelPath: "Bad.zip", Mode: dto.InstallAsNewMod,
 				FomodSelectedFiles: tc.fomod,
 			})
@@ -323,7 +324,7 @@ func TestPreviewInstallListsPlannedFiles(t *testing.T) {
 		t.Errorf("FlatFileList = %v, want %v", res.FlatFileList, want)
 	}
 
-	folder, _, err := d.StartInstall(dto.StartInstallRequest{
+	folder, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: "stardewvalley", ArchiveRelPath: "Pack.zip", Mode: dto.InstallAsNewMod, PreviewID: res.PreviewID,
 	})
 	if err != nil {

@@ -148,7 +148,7 @@ func TestInstallsWaitForStartupRecovery(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := d.StartInstall(dto.StartInstallRequest{GameID: "skyrimse", ArchiveRelPath: "Early.zip", Mode: dto.InstallAsNewMod, TargetMod: "Early"})
+		_, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{GameID: "skyrimse", ArchiveRelPath: "Early.zip", Mode: dto.InstallAsNewMod, TargetMod: "Early"})
 		done <- err
 	}()
 	select {

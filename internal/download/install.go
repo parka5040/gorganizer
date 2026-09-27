@@ -1,6 +1,7 @@
 package download
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -38,6 +39,8 @@ type InstallProgress struct {
 type ProgressSink func(InstallProgress)
 
 type InstallRequest struct {
+	Context             context.Context
+	OnPublished         func()
 	GameID              string
 	ArchivePath         string
 	ExtractedRoot       string
@@ -126,6 +129,7 @@ func Install(req InstallRequest) (*InstallResult, error) {
 		extractRoot = tmp
 		defer os.RemoveAll(extractTmp)
 		budget := NewExtractBudget()
+		budget.Context = req.Context
 		emit(InstallProgress{Step: StageExtracting, Pct: -1})
 		if err := extractor.ExtractWithBudget(req.ArchivePath, tmp, budget); err != nil {
 			return nil, fmt.Errorf("extracting: %w", err)
@@ -181,16 +185,16 @@ func Install(req InstallRequest) (*InstallResult, error) {
 	var written []string
 	switch {
 	case len(req.FomodSelectedFiles) > 0:
-		written, err = copyFomodSelection(req.GameID, extractRoot, stageDir, req.FomodSelectedFiles, req.InstallID, req.ProgressSink)
+		written, err = copyFomodSelection(req.GameID, extractRoot, stageDir, req.FomodSelectedFiles, req.InstallID, req.ProgressSink, req.Context)
 	case req.Layout != nil:
-		written, err = copyPlanned(extractRoot, stageDir, planned, req.InstallID, req.ProgressSink)
+		written, err = copyPlanned(extractRoot, stageDir, planned, req.InstallID, req.ProgressSink, req.Context)
 	default:
 		contentRoot := req.ContentRoot
 		if contentRoot == "" {
 			rel, _ := DetectContentRoot(extractRoot, req.GameID)
 			contentRoot = filepath.Join(extractRoot, filepath.FromSlash(rel))
 		}
-		written, err = copyFlatten(req.GameID, extractRoot, contentRoot, stageDir, req.InstallID, req.ProgressSink, req.LegacyFomodFlatCopy)
+		written, err = copyFlatten(req.GameID, extractRoot, contentRoot, stageDir, req.InstallID, req.ProgressSink, req.LegacyFomodFlatCopy, req.Context)
 	}
 	if err != nil {
 		emit(InstallProgress{Step: StageFailed, Error: err.Error()})
@@ -228,11 +232,19 @@ func Install(req InstallRequest) (*InstallResult, error) {
 		if err != nil {
 			return nil, err
 		}
-		if _, statErr := os.Stat(finalDir); statErr == nil {
+		if _, statErr := os.Lstat(finalDir); statErr == nil {
 			return nil, &installCollisionMarker{Name: req.TargetMod}
+		} else if !os.IsNotExist(statErr) {
+			return nil, fmt.Errorf("checking install destination: %w", statErr)
+		}
+		if err := installContextErr(req.Context); err != nil {
+			return nil, err
 		}
 		if err := renameInstallStageFn(stageDir, finalDir); err != nil {
 			return nil, fmt.Errorf("moving stage → %s: %w", finalDir, err)
+		}
+		if req.OnPublished != nil {
+			req.OnPublished()
 		}
 		stageCleanup = false
 	case ModeMergeIntoMod:
@@ -297,6 +309,14 @@ func IsCollisionMarker(err error) (string, bool) {
 	return "", false
 }
 
+// installContextErr returns a wrapped cancellation error when the install context has ended.
+func installContextErr(ctx context.Context) error {
+	if ctx != nil && ctx.Err() != nil {
+		return fmt.Errorf("install stopped: %w", ctx.Err())
+	}
+	return nil
+}
+
 // skipArchiveMetadata logs and skips a content-root installation record once per copy.
 func skipArchiveMetadata(rel string, logged *bool) bool {
 	if !strings.EqualFold(rel, "metadata.yaml") {
@@ -310,7 +330,11 @@ func skipArchiveMetadata(rel string, logged *bool) bool {
 }
 
 // copyFlatten replays the archive's content root into stage.
-func copyFlatten(gameID, extractRoot, contentRoot, stageDir, installID string, sink ProgressSink, excludeFomod bool) ([]string, error) {
+func copyFlatten(gameID, extractRoot, contentRoot, stageDir, installID string, sink ProgressSink, excludeFomod bool, contexts ...context.Context) ([]string, error) {
+	var ctx context.Context
+	if len(contexts) > 0 {
+		ctx = contexts[0]
+	}
 	resolvedExtractRoot, err := filepath.EvalSymlinks(extractRoot)
 	if err != nil {
 		return nil, fmt.Errorf("resolving archive extraction root: %w", err)
@@ -329,6 +353,9 @@ func copyFlatten(gameID, extractRoot, contentRoot, stageDir, installID string, s
 	var loggedMetadata bool
 	err = filepath.WalkDir(contentRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := installContextErr(ctx); err != nil {
 			return err
 		}
 		rel, err := filepath.Rel(contentRoot, path)
@@ -387,7 +414,11 @@ func copyFlatten(gameID, extractRoot, contentRoot, stageDir, installID string, s
 }
 
 // copyFomodSelection applies a FOMOD plugin's file/folder rules in priority order.
-func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile, installID string, sink ProgressSink) ([]string, error) {
+func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile, installID string, sink ProgressSink, contexts ...context.Context) ([]string, error) {
+	var ctx context.Context
+	if len(contexts) > 0 {
+		ctx = contexts[0]
+	}
 	resolvedRoot, err := filepath.EvalSymlinks(extractRoot)
 	if err != nil {
 		return nil, fmt.Errorf("resolving FOMOD extraction root: %w", err)
@@ -397,6 +428,9 @@ func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile,
 	var written []string
 	var loggedMetadata bool
 	for _, f := range ordered {
+		if err := installContextErr(ctx); err != nil {
+			return written, err
+		}
 		src, err := resolveFomodSource(extractRoot, resolvedRoot, f.Source)
 		if errors.Is(err, os.ErrNotExist) {
 			slog.Warn("fomod file missing, skipping", "path", f.Source)
@@ -428,6 +462,9 @@ func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile,
 			err := filepath.WalkDir(src, func(path string, d os.DirEntry, walkErr error) error {
 				if walkErr != nil {
 					return walkErr
+				}
+				if err := installContextErr(ctx); err != nil {
+					return err
 				}
 				rel, err := filepath.Rel(src, path)
 				if err != nil {

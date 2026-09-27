@@ -196,11 +196,11 @@ func (s *session) reserveExclusiveLocked(gameID, op string) (func(), error) {
 func (s *session) acquireRecoveryExclusive(gameID string) (func(), error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if err := s.refuseWhenShuttingDown("recovery"); err != nil {
+	if err := s.refuseWhenShuttingDown(dto.BusyOperationRecovery); err != nil {
 		return nil, err
 	}
 	key := s.fenceKeyLocked(gameID)
-	holder := fenceHolder{op: "recovery", gameID: gameID}
+	holder := fenceHolder{op: dto.BusyOperationRecovery, gameID: gameID}
 	s.fenceMu.Lock()
 	defer s.fenceMu.Unlock()
 	if exclusive, ok := s.fenceExclusive[key]; ok {

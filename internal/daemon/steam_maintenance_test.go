@@ -195,7 +195,7 @@ func TestSteamBusyBlocksDeployedModChanges(t *testing.T) {
 	requireSteamRefusal(t, d.RenameMod("skyrimse", "A", "B"), "busy")
 	_, err := d.UninstallMod("skyrimse", "A", true)
 	requireSteamRefusal(t, err, "busy")
-	_, _, _, err = d.ReinstallMod("skyrimse", "A")
+	_, _, _, err = d.ReinstallMod(context.Background(), "skyrimse", "A", "")
 	requireSteamRefusal(t, err, "busy")
 	if _, err := os.Stat(filepath.Join(modDir, "a.esp")); err != nil {
 		t.Errorf("deployed mod removed during Steam update: %v", err)

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -50,7 +51,7 @@ func TestReinstallIsFencedAndSwapsUnderTheDaemonLock(t *testing.T) {
 		}
 		return nil
 	}
-	if _, _, _, err := d.ReinstallMod("stardewvalley", folder); err != nil {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "stardewvalley", folder, ""); err != nil {
 		t.Fatalf("ReinstallMod: %v", err)
 	}
 	d.reinstallFault = nil
@@ -120,7 +121,7 @@ func TestReinstallAppliedButDisabledModRebuildsFarm(t *testing.T) {
 	})
 	setStardewModList(t, d, "Default", map[string]bool{folder: false})
 
-	if _, _, _, err := d.ReinstallMod("stardewvalley", folder); err != nil {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "stardewvalley", folder, ""); err != nil {
 		t.Fatalf("reinstall of a disabled but still deployed mod: %v", err)
 	}
 	farmFile := filepath.Join(install, "Mods", "Linked", "assets", "a.png")
@@ -168,7 +169,7 @@ func TestReinstallSwapRefusalDiscardsTheStageAndIntent(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = d.UnmountVFS("stardewvalley") })
 
-	_, _, _, err := d.ReinstallMod("stardewvalley", folder)
+	_, _, _, err := d.ReinstallMod(context.Background(), "stardewvalley", folder, "")
 	d.reinstallFault = nil
 	fakeProcesses(d, false, nil)
 	requireGameRunning(t, "reinstall after a game starts", err, dto.GameRunningOperationReinstall)

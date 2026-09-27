@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -33,7 +34,7 @@ func TestDestructiveModOperationsRejectReservedNames(t *testing.T) {
 		{name: "Rename old", run: func(name string) error { return d.RenameMod("skyrimse", name, "Renamed") }},
 		{name: "Rename new", run: func(name string) error { return d.RenameMod("skyrimse", "Mod", name) }},
 		{name: "Reinstall", run: func(name string) error {
-			_, _, _, err := d.ReinstallMod("skyrimse", name)
+			_, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", name, "")
 			return err
 		}},
 	}

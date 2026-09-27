@@ -1,5 +1,6 @@
 add_library(gorganizer_ui STATIC
     MainWindow.cpp
+    InstallController.cpp
     SessionController.cpp
     SteamMaintenanceController.cpp
     LaunchController.cpp

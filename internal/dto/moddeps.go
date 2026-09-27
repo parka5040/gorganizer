@@ -116,11 +116,12 @@ type DependencyFetchResult struct {
 }
 
 type InstallCompletedResult struct {
-	GameID         string
-	ModName        string
-	ArchiveRelPath string
-	BatchID        string
-	BatchIDs       []string
+	ClientRequestID string
+	GameID          string
+	ModName         string
+	ArchiveRelPath  string
+	BatchID         string
+	BatchIDs        []string
 }
 
 type ModDependenciesUnsupportedError struct {

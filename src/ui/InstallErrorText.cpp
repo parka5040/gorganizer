@@ -103,6 +103,12 @@ QString modLoaderBusyReason(const QString& operation, const QString& subject, co
         return QStringLiteral("A backup is being imported for %1. Try again when it finishes.").arg(subject);
     if (operation == QLatin1String("reinstall"))
         return QStringLiteral("A mod of %1 is being reinstalled. Try again when that finishes.").arg(subject);
+    if (operation == QLatin1String("install") || operation == QLatin1String("register_install"))
+        return QStringLiteral("A mod is being installed for %1. Try again when that finishes.").arg(subject);
+    if (operation == QLatin1String("extract_overwrite"))
+        return QStringLiteral("Files are being moved out of the Overwrite folder for %1. Try again when that finishes.").arg(subject);
+    if (operation == QLatin1String("recovery"))
+        return QStringLiteral("Gorganizer is repairing the mod folder of %1 after an interruption. Try again in a moment.").arg(subject);
     return QStringLiteral("%1 is busy. Try again when it is idle.").arg(subjectTitle);
 }
 

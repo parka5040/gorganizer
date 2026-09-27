@@ -17,6 +17,7 @@ class QTreeWidget;
 namespace gorganizer {
 
 class GrpcClient;
+class InstallController;
 
 class ModInstallDialog : public QDialog {
     Q_OBJECT
@@ -35,12 +36,13 @@ public:
     };
 
     explicit ModInstallDialog(const QString& gameId, const QString& modName,
-                              GrpcClient* grpc, ArchiveSource source,
+                              GrpcClient* grpc, InstallController* installs, ArchiveSource source,
                               QWidget* parent = nullptr,
                               InstallTarget target = {GrpcInstallAsNewMod, {}});
 
     QString installedModName() const { return m_modName; }
     int installedFileCount() const { return m_fileCount; }
+    bool installUnconfirmed() const { return m_installUnconfirmed; }
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -55,6 +57,8 @@ private slots:
     void onPreviewFailed(quint64 requestId, const QString& error);
     void onInstallCompleted(quint64 requestId, const QString& modFolder, int fileCount);
     void onInstallFailed(quint64 requestId, const QString& error);
+    void onInstallCancelled(quint64 requestId);
+    void onInstallUnknown(quint64 requestId);
     void onInstallClicked();
 
 private:
@@ -68,6 +72,7 @@ private:
     QString m_gameId;
     QString m_modName;
     GrpcClient* m_grpc;
+    InstallController* m_installs;
     ArchiveSource m_source;
     InstallTarget m_target;
     QString m_previewId;
@@ -75,6 +80,9 @@ private:
     QString m_installRoot;
     std::vector<GrpcFomodFile> m_selectedFiles;
     bool m_fomodConfirmed = false;
+    bool m_cancelRequested = false;
+    bool m_reconciling = false;
+    bool m_installUnconfirmed = false;
     QStringList m_selectableRoots;
     quint64 m_previewRequestId = 0;
     quint64 m_installRequestId = 0;

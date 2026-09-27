@@ -1,6 +1,7 @@
 package ipc
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -92,6 +93,18 @@ var errorTokens = []string{
 func MapError(err error) (error, bool) {
 	if err == nil {
 		return nil, true
+	}
+	if errors.Is(err, context.Canceled) {
+		return status.Error(codes.Canceled, err.Error()), true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return status.Error(codes.DeadlineExceeded, err.Error()), true
+	}
+	if errors.Is(err, dto.ErrDuplicateClientRequestID) || errors.Is(err, dto.ErrInvalidClientRequestID) || errors.Is(err, dto.ErrInstallOutcomeGameMismatch) {
+		return status.Error(codes.InvalidArgument, err.Error()), true
+	}
+	if errors.Is(err, dto.ErrInstallOutcomeFull) {
+		return status.Error(codes.ResourceExhausted, err.Error()), true
 	}
 	var shuttingDown *dto.ShuttingDownError
 	if errors.As(err, &shuttingDown) {
