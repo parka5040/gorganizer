@@ -432,7 +432,7 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 		}
 		if gameID != "morrowind" {
 			if err := es.s.svc.launch.writePluginsTxt(gameID, eff, profileName); err != nil {
-				return 0, "", fmt.Errorf("preparing plugin state for LOOT: %w", err)
+				return 0, "", &dto.PluginStateError{GameID: gameID, Cause: err}
 			}
 		}
 		library, err := tools.ResolveSteamLibrary(&eff)
@@ -449,7 +449,7 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 		if gameID == "morrowind" {
 			if err := es.s.svc.launch.writePluginsTxt(gameID, eff, profileName, lootWorkspace.GameRoot); err != nil {
 				_ = lootWorkspace.Remove()
-				return 0, "", fmt.Errorf("preparing Morrowind plugin state for LOOT: %w", err)
+				return 0, "", &dto.PluginStateError{GameID: gameID, Cause: err}
 			}
 		}
 	}

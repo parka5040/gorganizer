@@ -111,7 +111,7 @@ func (ls *LaunchService) LaunchGame(gameID string, useTool bool, profileName str
 
 	if profileName != "" {
 		if err := ls.writePluginsTxt(gameID, gc, profileName); err != nil {
-			slog.Warn("writing plugins.txt failed", "game", gameID, "err", err)
+			return 0, &dto.PluginStateError{GameID: gameID, Cause: err}
 		}
 	}
 
