@@ -41,12 +41,11 @@ public:
     bool listModsSync(const QString& gameId, std::vector<GrpcModInfo>& out, QString& errorOut);
     void getMod(const QString& gameId, const QString& modName);
     void rescanMod(const QString& gameId, const QString& modName);
-    bool renameMod(const QString& gameId, const QString& oldName,
-                   const QString& newName, QString& errorOut);
     bool uninstallMod(const QString& gameId, const QString& modName, bool force,
                       std::vector<QString>& archivesFlaggedOut, QString& errorOut);
-    bool reinstallMod(const QString& gameId, const QString& modName,
-                      GrpcReinstallResult& resultOut, QString& errorOut);
+    quint64 reinstallModAsync(const QString& gameId, const QString& modName);
+    quint64 uninstallModAsync(const QString& gameId, const QString& modName, bool force);
+    quint64 renameModAsync(const QString& gameId, const QString& oldName, const QString& newName);
     // Registers a mod folder created outside StartInstall.
     bool registerManualInstall(const QString& gameId, const QString& modName,
                                const QString& archiveRelPath, QString& errorOut);
@@ -331,6 +330,13 @@ signals:
     void modListSaved(quint64 requestId, const QString& gameId, const QString& profileName);
     void modListSaveFailed(quint64 requestId, const QString& gameId, const QString& profileName,
                            const QString& error);
+    void modReinstalled(quint64 requestId, const QString& gameId, const QString& modName,
+                        const GrpcReinstallResult& result);
+    void modUninstalled(quint64 requestId, const QString& gameId, const QString& modName,
+                        const QStringList& flaggedArchives);
+    void modRenamed(quint64 requestId, const QString& gameId, const QString& oldName, const QString& newName);
+    void modActionFailed(quint64 requestId, const QString& gameId, const QString& modName,
+                         const QString& method, const QString& error);
     void modDependencyReportReceived(quint64 requestId, const GrpcModDependencyReport& report);
     void modDependencyReportFailed(quint64 requestId, const QString& gameId, const QString& profileName,
                                    const QString& error);
@@ -391,6 +397,7 @@ private:
     quint64 m_connectionGeneration = 0;
     quint64 m_nextPreviewRequestId = 0;
     quint64 m_nextInstallRequestId = 0;
+    quint64 m_nextModActionRequestId = 0;
     quint64 m_nextModLoaderRequestId = 0;
     quint64 m_nextModListRequestId = 0;
     quint64 m_nextDependencyRequestId = 0;

@@ -95,6 +95,9 @@ public slots:
     void doGetModListRequest(quint64 requestId, const QString& gameId, const QString& profileName);
     void doSetModListRequest(quint64 requestId, const QString& gameId, const QString& profileName,
                              const std::vector<GrpcModListEntry>& entries);
+    void doReinstallMod(quint64 requestId, const QString& gameId, const QString& modName);
+    void doUninstallMod(quint64 requestId, const QString& gameId, const QString& modName, bool force);
+    void doRenameMod(quint64 requestId, const QString& gameId, const QString& oldName, const QString& newName);
     void doGetModDependencyReport(quint64 requestId, const QString& gameId, const QString& profileName,
                                   bool refreshRemote, bool forceRemote);
     void doFetchModDependencies(quint64 requestId, const QString& gameId, const QString& profileName,
@@ -165,6 +168,13 @@ signals:
     void modListSaved(quint64 requestId, const QString& gameId, const QString& profileName);
     void modListSaveFailed(quint64 requestId, const QString& gameId, const QString& profileName,
                            const QString& error);
+    void modReinstalled(quint64 requestId, const QString& gameId, const QString& modName,
+                        const GrpcReinstallResult& result);
+    void modUninstalled(quint64 requestId, const QString& gameId, const QString& modName,
+                        const QStringList& flaggedArchives);
+    void modRenamed(quint64 requestId, const QString& gameId, const QString& oldName, const QString& newName);
+    void modActionFailed(quint64 requestId, const QString& gameId, const QString& modName,
+                         const QString& method, const QString& error);
     void modDependencyReportReceived(quint64 requestId, const GrpcModDependencyReport& report);
     void modDependencyReportFailed(quint64 requestId, const QString& gameId, const QString& profileName,
                                    const QString& error);

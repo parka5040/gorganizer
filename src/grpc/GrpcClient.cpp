@@ -184,6 +184,8 @@ GrpcClient::GrpcClient(QObject* parent)
     : QObject(parent)
 {
     qRegisterMetaType<GrpcPreviewInstallResult>();
+    qRegisterMetaType<GrpcReinstallResult>();
+    qRegisterMetaType<QStringList>();
     qRegisterMetaType<GrpcRecoveryPending>();
     qRegisterMetaType<quint64>();
     m_connectionTimer = new QTimer(this);
@@ -296,6 +298,10 @@ void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
     connect(worker, &GrpcWorker::modListRequestFailed, this, &GrpcClient::modListRequestFailed);
     connect(worker, &GrpcWorker::modListSaved, this, &GrpcClient::modListSaved);
     connect(worker, &GrpcWorker::modListSaveFailed, this, &GrpcClient::modListSaveFailed);
+    connect(worker, &GrpcWorker::modReinstalled, this, &GrpcClient::modReinstalled);
+    connect(worker, &GrpcWorker::modUninstalled, this, &GrpcClient::modUninstalled);
+    connect(worker, &GrpcWorker::modRenamed, this, &GrpcClient::modRenamed);
+    connect(worker, &GrpcWorker::modActionFailed, this, &GrpcClient::modActionFailed);
     connect(worker, &GrpcWorker::modDependencyReportReceived, this, &GrpcClient::modDependencyReportReceived);
     connect(worker, &GrpcWorker::modDependencyReportFailed, this, &GrpcClient::modDependencyReportFailed);
     connect(worker, &GrpcWorker::modDependenciesFetched, this, &GrpcClient::modDependenciesFetched);
@@ -976,15 +982,18 @@ void GrpcClient::discardPreviewAsync(const QString& previewId)
     post(&GrpcWorker::doDiscardPreview, previewId);
 }
 
-bool GrpcClient::renameMod(const QString& gameId, const QString& oldName,
-                            const QString& newName, QString& errorOut)
+quint64 GrpcClient::renameModAsync(const QString& gameId, const QString& oldName, const QString& newName)
 {
-    gorganizer::v1::RenameModRequest req;
-    req.set_game_id(gameId.toStdString());
-    req.set_old_name(oldName.toStdString());
-    req.set_new_name(newName.toStdString());
-    gorganizer::v1::RenameModResponse resp;
-    return mapError(invokeUnary(m_syncStub.get(), &Stub::RenameMod, req, resp), errorOut);
+    const quint64 requestId = ++m_nextModActionRequestId;
+    if (!installRpcWorker() || !isConnected()) {
+        QMetaObject::invokeMethod(this, [this, requestId, gameId, oldName] {
+            emit modActionFailed(requestId, gameId, oldName, QStringLiteral("RenameMod"),
+                                 QStringLiteral("not connected"));
+        }, Qt::QueuedConnection);
+        return requestId;
+    }
+    postTo(installRpcWorker(), &GrpcWorker::doRenameMod, requestId, gameId, oldName, newName);
+    return requestId;
 }
 
 bool GrpcClient::uninstallMod(const QString& gameId, const QString& modName, bool force,
@@ -1003,19 +1012,32 @@ bool GrpcClient::uninstallMod(const QString& gameId, const QString& modName, boo
     return true;
 }
 
-bool GrpcClient::reinstallMod(const QString& gameId, const QString& modName,
-                               GrpcReinstallResult& resultOut, QString& errorOut)
+quint64 GrpcClient::reinstallModAsync(const QString& gameId, const QString& modName)
 {
-    gorganizer::v1::ReinstallModRequest req;
-    req.set_game_id(gameId.toStdString());
-    req.set_mod_name(modName.toStdString());
-    gorganizer::v1::ReinstallModResponse resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::ReinstallMod, req, resp,
-                              std::chrono::minutes(10)), errorOut)) return false;
-    resultOut.archivesReplayed = resp.archives_replayed();
-    resultOut.archivesSkipped = resp.archives_skipped();
-    resultOut.fileCount = resp.file_count();
-    return true;
+    const quint64 requestId = ++m_nextModActionRequestId;
+    if (!installRpcWorker() || !isConnected()) {
+        QMetaObject::invokeMethod(this, [this, requestId, gameId, modName] {
+            emit modActionFailed(requestId, gameId, modName, QStringLiteral("ReinstallMod"),
+                                 QStringLiteral("not connected"));
+        }, Qt::QueuedConnection);
+        return requestId;
+    }
+    postTo(installRpcWorker(), &GrpcWorker::doReinstallMod, requestId, gameId, modName);
+    return requestId;
+}
+
+quint64 GrpcClient::uninstallModAsync(const QString& gameId, const QString& modName, bool force)
+{
+    const quint64 requestId = ++m_nextModActionRequestId;
+    if (!installRpcWorker() || !isConnected()) {
+        QMetaObject::invokeMethod(this, [this, requestId, gameId, modName] {
+            emit modActionFailed(requestId, gameId, modName, QStringLiteral("UninstallMod"),
+                                 QStringLiteral("not connected"));
+        }, Qt::QueuedConnection);
+        return requestId;
+    }
+    postTo(installRpcWorker(), &GrpcWorker::doUninstallMod, requestId, gameId, modName, force);
+    return requestId;
 }
 
 bool GrpcClient::registerManualInstall(const QString& gameId, const QString& modName,
