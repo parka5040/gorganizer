@@ -328,11 +328,13 @@ void MainWindow::wireConnections()
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
+    const bool daemonStopsOnExit = m_daemonOwned ||
+        (qgetenv("GORGANIZER_SUPERVISED") == "1" && qgetenv("GORGANIZER_DAEMON_OWNED") == "1");
     const QString loaderOperation = m_modLoader ? m_modLoader->interruptibleOperation() : QString();
     QStringList paragraphs;
     if (!loaderOperation.isEmpty()) {
-        const QString consequence = m_daemonOwned
-            ? QStringLiteral("Gorganizer also stops the background service it started. The service rolls an "
+        const QString consequence = daemonStopsOnExit
+            ? QStringLiteral("Closing Gorganizer also asks its background service to stop. The service rolls an "
                              "unfinished SMAPI change back the next time it starts.")
             : QStringLiteral("Gorganizer's background service keeps running and finishes the operation or rolls "
                              "it back, but Gorganizer cannot report the result.");
@@ -341,8 +343,9 @@ void MainWindow::closeEvent(QCloseEvent* event)
                                          "activated again automatically.").arg(loaderOperation, consequence));
     }
     if (m_pendingExternalInstall) {
-        const QString consequence = m_daemonOwned
-            ? QStringLiteral("Gorganizer also stops the background service it started, which interrupts the install.")
+        const QString consequence = daemonStopsOnExit
+            ? QStringLiteral("Closing Gorganizer also asks its background service to stop, which interrupts the "
+                             "install.")
             : QStringLiteral("Gorganizer's background service keeps running and finishes the install, but "
                              "Gorganizer cannot report the result.");
         paragraphs.append(QStringLiteral("Installing \"%1\" is still in progress.\n\nQuitting may interrupt "
@@ -375,7 +378,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
                                                  "Gorganizer turns them off the next time it starts after the game has closed.")
                                       .arg(name, reason));
             }
-            if (!m_daemonOwned && !items.empty()) {
+            if (!daemonStopsOnExit && !items.empty()) {
                 paragraphs.append(QStringLiteral("Gorganizer's background service keeps running after this window closes, "
                                                  "so your mods stay active until you choose Deactivate Mods."));
             }

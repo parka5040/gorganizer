@@ -67,17 +67,6 @@ CTL_BIN="$SCRIPT_DIR/gorganizerctl"
 GUI_BIN="$SCRIPT_DIR/build/src/gorganizer"
 ICON_SRC="$SCRIPT_DIR/resources/icons/tmp_logo.png"
 
-# Runtime — must match internal/config/paths.go and singleton.go.
-if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
-    RUNTIME_DIR="${XDG_RUNTIME_DIR%/}/gorganizer"
-else
-    RUNTIME_DIR="${TMPDIR:-/tmp}"
-    RUNTIME_DIR="${RUNTIME_DIR%/}/gorganizer-$(id -u)"
-fi
-SOCKET_PATH="$RUNTIME_DIR/gorganizer.sock"
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/gorganizer"
-DAEMON_LOG="$STATE_DIR/gorganizerd.log"
-
 # User-facing install locations (XDG).
 APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps"
@@ -847,83 +836,8 @@ cmd_import() {
 
 # --- daemon lifecycle ------------------------------------------------------
 
-wait_for_pid_exit() {
-    local pid="$1" seconds="$2" i
-    for ((i = 0; i < seconds * 10; i++)); do
-        kill -0 "$pid" 2>/dev/null || return 0
-        sleep 0.1
-    done
-    ! kill -0 "$pid" 2>/dev/null
-}
-
 cmd_stop() {
-    local pids pid
-    pids="$(pgrep -u "$(id -u)" -x gorganizerd || true)"
-    if [ -z "$pids" ]; then
-        log "Gorganizer is not running."
-        return 0
-    fi
-    while IFS= read -r pid; do
-        kill -TERM "$pid" 2>/dev/null || true
-    done <<< "$pids"
-    while IFS= read -r pid; do
-        wait_for_pid_exit "$pid" 46 || true
-    done <<< "$pids"
-    if pgrep -u "$(id -u)" -x gorganizerd >/dev/null 2>&1; then
-        warn "Gorganizer is still finishing. Try again in a minute."
-        return 1
-    fi
-    ok "Gorganizer stopped."
-}
-
-DAEMON_PID=""
-start_daemon() {
-    mkdir -p -m 700 "$RUNTIME_DIR"
-    mkdir -p "$STATE_DIR"
-    local i
-    for i in 3 2; do
-        if [ -e "$DAEMON_LOG.$((i - 1))" ]; then
-            mv -f "$DAEMON_LOG.$((i - 1))" "$DAEMON_LOG.$i"
-        fi
-    done
-    if [ -e "$DAEMON_LOG" ]; then
-        mv -f "$DAEMON_LOG" "$DAEMON_LOG.1"
-    fi
-
-    # GORGANIZER_ROOT pins per-game mod folders to the project dir
-    # (e.g. ./FalloutNV_Mods/) instead of ~/.local/share/gorganizer/...
-    GORGANIZER_ROOT="$SCRIPT_DIR" \
-        "$DAEMON_BIN" --log-level info >>"$DAEMON_LOG" 2>&1 &
-    DAEMON_PID=$!
-
-    for i in $(seq 1 50); do
-        if [ -S "$SOCKET_PATH" ]; then
-            ok "Daemon up (pid $DAEMON_PID, log: $DAEMON_LOG)"
-            return 0
-        fi
-        if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
-            err "Daemon exited during startup. Last 20 log lines:"
-            tail -20 "$DAEMON_LOG" | sed 's/^/    /' >&2 || true
-            exit 1
-        fi
-        sleep 0.1
-    done
-    err "Daemon started but socket never appeared at $SOCKET_PATH"
-    tail -20 "$DAEMON_LOG" | sed 's/^/    /' >&2 || true
-    kill -TERM "$DAEMON_PID" 2>/dev/null || true
-    exit 1
-}
-
-stop_daemon_trap() {
-    local rc=$?
-    if [ -n "${DAEMON_PID:-}" ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
-        log "Shutting down daemon (pid $DAEMON_PID)..."
-        kill -TERM "$DAEMON_PID" 2>/dev/null || true
-        if ! wait_for_pid_exit "$DAEMON_PID" 46; then
-            warn "Gorganizer's background service is still finishing up. It will exit on its own; please don't shut down your computer for a minute."
-        fi
-    fi
-    exit "$rc"
+    "$CTL_BIN" stop "$@"
 }
 
 # --- install (default) -----------------------------------------------------
@@ -1004,81 +918,16 @@ cmd_install() {
 
 # --- launch ----------------------------------------------------------------
 
-notify_user() {
-    warn "$1"
-    if command -v notify-send >/dev/null 2>&1; then
-        notify-send --app-name=Gorganizer "Gorganizer" "$1" >/dev/null 2>&1 || true
-    fi
-}
-
 cmd_launch() {
-    local existing_daemon
-    existing_daemon="$(pgrep -u "$(id -u)" -x gorganizerd | head -n 1 || true)"
-    if [ -n "$existing_daemon" ] && pgrep -u "$(id -u)" -x gorganizer >/dev/null 2>&1; then
-        notify_user "Gorganizer is already open. Switch to its window."
-        return 1
-    fi
-
-    # Argv carryover from the desktop entry: an nxm:// URI may be passed
-    # along when the user clicks a Nexus "Mod manager download" button
-    # while the GUI is already up. The GUI itself forwards URIs through
-    # to the daemon (see src/main.cpp); we just pass them through argv.
-    if [ ! -x "$DAEMON_BIN" ] || [ ! -x "$GUI_BIN" ]; then
+    if [ ! -x "$DAEMON_BIN" ] || [ ! -x "$GUI_BIN" ] || [ ! -x "$CTL_BIN" ]; then
         err "Gorganizer is not built yet."
         err "Run \`./gorganizer.sh\` from this clone to build and install."
         exit 1
     fi
 
-    # Silence Qt6 D-Bus / system tray noise on systems without a
-    # cooperative notification server. Doesn't mute Qt's actual errors.
     export QT_LOGGING_RULES="${QT_LOGGING_RULES:+$QT_LOGGING_RULES;}qt.dbus.*=false;qt.qpa.systemtray.*=false;qt.qpa.theme.dbus.*=false;qt.qpa.theme.debug=false"
     export GORGANIZER_ROOT="$SCRIPT_DIR"
-
-    echo ""
-    echo -e "  ${BOLD}Gorganizer${RESET} ${CYAN}$(gorganizer_version)${RESET}"
-    echo -e "  ${CYAN}-----------${RESET}"
-    log "  Daemon:    $DAEMON_BIN"
-    log "  Frontend:  $GUI_BIN"
-    log "  Mod root:  $SCRIPT_DIR/<Game>_Mods/"
-    log "  Socket:    $SOCKET_PATH"
-    log "  Log:       $DAEMON_LOG"
-    echo ""
-
-    if [ -n "$existing_daemon" ]; then
-        # A background service without a window (for example after the GUI
-        # crashed) is adopted: the GUI connects to it and it is stopped
-        # safely when this session ends. It is never killed.
-        log "Reusing the running background service (pid $existing_daemon)."
-        DAEMON_PID="$existing_daemon"
-    else
-        start_daemon
-    fi
-
-    # GUI as a backgrounded child + `wait`. Three reasons:
-    #   * `exec "$GUI_BIN"` would replace this shell, so EXIT/INT/TERM
-    #     traps cannot fire — a GUI crash (segfault, OOM, uncaught Qt
-    #     exception) would orphan the daemon.
-    #   * Running the GUI as a *foreground* child (no `&`) makes bash
-    #     wait synchronously, queueing pending signals until the GUI
-    #     exits on its own. A `kill -TERM` to the script alone wouldn't
-    #     reach the GUI.
-    #   * Backgrounding + `wait` lets bash respond to signals
-    #     immediately. The INT/TERM trap forwards to the GUI so it
-    #     shuts down cleanly; the EXIT trap then reaps the daemon.
-    "$GUI_BIN" "$@" &
-    GUI_PID=$!
-    trap 'kill -TERM "$GUI_PID" 2>/dev/null || true' INT TERM
-    trap stop_daemon_trap EXIT
-
-    # `wait` is interruptible: a fired trap unblocks it with exit code
-    # 128+signum. Loop until the GUI is actually gone so we propagate
-    # the GUI's real exit code, not the signal-interrupted placeholder.
-    GUI_RC=0
-    while kill -0 "$GUI_PID" 2>/dev/null; do
-        wait "$GUI_PID"
-        GUI_RC=$?
-    done
-    exit "$GUI_RC"
+    exec "$CTL_BIN" session --daemon "$DAEMON_BIN" --gui "$GUI_BIN" -- "$@"
 }
 
 # --- nxm forwarding --------------------------------------------------------

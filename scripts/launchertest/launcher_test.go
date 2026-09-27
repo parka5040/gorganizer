@@ -159,6 +159,21 @@ func (f *fixture) assertInstalledOld(t *testing.T) {
 	}
 }
 
+// TestLaunchExecsSupervisor verifies the launcher forwards paths and GUI arguments to the session supervisor.
+func TestLaunchExecsSupervisor(t *testing.T) {
+	f := newFixture(t)
+	logPath := filepath.Join(f.root, "supervisor-args")
+	writeFixtureFile(t, filepath.Join(f.root, "gorganizerctl"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SHIM_LOG\"\nprintf 'root=%s\\nqt=%s\\n' \"$GORGANIZER_ROOT\" \"$QT_LOGGING_RULES\" >> \"$SHIM_LOG\"\n"), 0o755)
+	output, err := f.run(t, `cmd_launch 'nxm://example/mod?id=1' 'with spaces'`, "SHIM_LOG="+logPath, "QT_LOGGING_RULES=")
+	if err != nil || output != "" {
+		t.Fatalf("launch = %v: %s", err, output)
+	}
+	want := strings.Join([]string{"session", "--daemon", filepath.Join(f.root, "gorganizerd"), "--gui", filepath.Join(f.root, "build/src/gorganizer"), "--", "nxm://example/mod?id=1", "with spaces", "root=" + f.root, "qt=qt.dbus.*=false;qt.qpa.systemtray.*=false;qt.qpa.theme.dbus.*=false;qt.qpa.theme.debug=false", ""}, "\n")
+	if got := string(readFixtureFile(t, logPath)); got != want {
+		t.Fatalf("supervisor arguments = %q, want %q", got, want)
+	}
+}
+
 // TestFailedBuildKeepsInstalledBinaries checks that a failed build cannot overwrite installed binaries or their fingerprint.
 func TestFailedBuildKeepsInstalledBinaries(t *testing.T) {
 	f := newFixture(t)
