@@ -37,7 +37,7 @@ func TestActivationRollbackFailureRetainsJournal(t *testing.T) {
 			calls := 0
 			syncFarmParent = func(path string) error {
 				calls++
-				if calls == 1 {
+				if calls == 1 && tc.name == "rename" || calls == 2 && tc.name == "remove" {
 					return errors.New("sync refused")
 				}
 				return oldSync(path)
@@ -63,7 +63,14 @@ func TestActivationRollbackFailureRetainsJournal(t *testing.T) {
 			removeActivationData = os.RemoveAll
 			renameActivationBackup = os.Rename
 			outcome, err := CleanupStale(data)
-			if err != nil || outcome.Pending != nil || !outcome.Restored {
+			if tc.name == "remove" {
+				if err != nil || outcome.Pending == nil || outcome.Restored {
+					t.Fatalf("CleanupStale = %+v, %v; want unrecorded farm pending", outcome, err)
+				}
+				if err := RestoreFromBackup(data); err != nil {
+					t.Fatalf("RestoreFromBackup: %v", err)
+				}
+			} else if err != nil || outcome.Pending != nil || !outcome.Restored {
 				t.Fatalf("CleanupStale = %+v, %v", outcome, err)
 			}
 			if got := mustRead(t, filepath.Join(data, "Skyrim.esm")); got != "original" {
@@ -73,6 +80,49 @@ func TestActivationRollbackFailureRetainsJournal(t *testing.T) {
 				t.Errorf("intent remains: %v", err)
 			}
 		})
+	}
+}
+
+// TestActivationRecordsFarmBeforeMaterializing verifies that the new Data identity is durably recorded before building.
+func TestActivationRecordsFarmBeforeMaterializing(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	data := filepath.Join(t.TempDir(), "Data")
+	mustFile(t, filepath.Join(data, "Skyrim.esm"), "original")
+	old := writeIntentDurable
+	t.Cleanup(func() { writeIntentDurable = old })
+	writes := 0
+	stopped := errors.New("simulated intent update failure")
+	writeIntentDurable = func(path string, body []byte, perm os.FileMode) (atomicfile.Outcome, error) {
+		writes++
+		var in ActivationIntent
+		if err := json.Unmarshal(body, &in); err != nil {
+			t.Fatal(err)
+		}
+		if writes == 1 {
+			if in.Farm != nil {
+				t.Error("initial activation intent already identifies a farm")
+			}
+			return old(path, body, perm)
+		}
+		farm, exists, err := directoryAt(data)
+		if err != nil || !exists || in.Farm == nil || *in.Farm != farm {
+			t.Errorf("recorded farm = %+v; Data = %+v, exists=%t, err=%v", in.Farm, farm, exists, err)
+		}
+		entries, err := os.ReadDir(data)
+		if err != nil || len(entries) != 0 {
+			t.Errorf("farm has content before journal rewrite: entries=%v, err=%v", entries, err)
+		}
+		return atomicfile.Durable, stopped
+	}
+	mm := NewMountManager(data, "", "testgame")
+	if err := mm.Activate([]Layer{{Name: "__base__", RootPath: data, Enabled: true}}, ""); !errors.Is(err, stopped) {
+		t.Fatalf("Activate = %v, want failed rewrite", err)
+	}
+	if writes != 2 {
+		t.Errorf("intent writes = %d, want 2", writes)
+	}
+	if got := mustRead(t, filepath.Join(data, "Skyrim.esm")); got != "original" {
+		t.Errorf("restored original = %q", got)
 	}
 }
 
@@ -106,6 +156,133 @@ func TestActivationRecoveryVerifiesBackupIdentity(t *testing.T) {
 	}
 	if _, err := ReadIntent(activatingIntentPath(data)); err != nil {
 		t.Errorf("intent was removed: %v", err)
+	}
+}
+
+// TestActivationRecoveryKeepsForeignData leaves a replacement Data folder untouched when the intent cannot identify it.
+func TestActivationRecoveryKeepsForeignData(t *testing.T) {
+	for _, recorded := range []bool{false, true} {
+		name := "no farm identity"
+		if recorded {
+			name = "different farm identity"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			data := filepath.Join(t.TempDir(), "Data")
+			backup := data + farmBackupSuffix
+			mustFile(t, filepath.Join(data, "Skyrim.esm"), "original")
+			writeActivatingIntent(t, data, backup)
+			if err := os.Rename(data, backup); err != nil {
+				t.Fatal(err)
+			}
+			if recorded {
+				mustFile(t, filepath.Join(data, "partial"), "old farm")
+				farm, _, err := directoryAt(data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				in, err := ReadIntent(activatingIntentPath(data))
+				if err != nil {
+					t.Fatal(err)
+				}
+				in.Farm = &farm
+				if err := WriteIntent(activatingIntentPath(data), in); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(data, data+".saved"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			mustFile(t, filepath.Join(data, "unique.txt"), "keep this file")
+			outcome, err := CleanupStale(data)
+			if err != nil || outcome.Pending == nil || outcome.Restored {
+				t.Fatalf("CleanupStale = %+v, %v; want pending", outcome, err)
+			}
+			if got := outcome.Pending.Reason; got != "An interrupted mod activation left a Data folder Gorganizer did not create. Check Data and Data.orig before restoring." {
+				t.Errorf("pending reason = %q", got)
+			}
+			if got := mustRead(t, filepath.Join(data, "unique.txt")); got != "keep this file" {
+				t.Errorf("replacement Data changed: %q", got)
+			}
+			if got := mustRead(t, filepath.Join(backup, "Skyrim.esm")); got != "original" {
+				t.Errorf("original backup changed: %q", got)
+			}
+			if _, err := ReadIntent(activatingIntentPath(data)); err != nil {
+				t.Errorf("activation intent removed: %v", err)
+			}
+		})
+	}
+}
+
+// TestActivationRollbackKeepsForeignData leaves a replacement Data folder in place during in-process rollback.
+func TestActivationRollbackKeepsForeignData(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	data := filepath.Join(t.TempDir(), "Data")
+	backup := data + farmBackupSuffix
+	mustFile(t, filepath.Join(backup, "original"), "original")
+	original, _, err := directoryAt(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustFile(t, filepath.Join(data, "partial"), "farm")
+	farm, _, err := directoryAt(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeActivatingIntent(t, data, backup)
+	if err := os.Rename(data, data+".saved"); err != nil {
+		t.Fatal(err)
+	}
+	mustFile(t, filepath.Join(data, "unique"), "foreign")
+	if err := rollbackActivation(data, backup, activatingIntentPath(data), original, &farm); err == nil || !strings.Contains(err.Error(), "Data folder Gorganizer did not create") {
+		t.Fatalf("rollbackActivation = %v; want foreign Data refusal", err)
+	}
+	if got := mustRead(t, filepath.Join(data, "unique")); got != "foreign" {
+		t.Errorf("replacement Data changed: %q", got)
+	}
+	if got := mustRead(t, filepath.Join(backup, "original")); got != "original" {
+		t.Errorf("original backup changed: %q", got)
+	}
+	if _, err := ReadIntent(activatingIntentPath(data)); err != nil {
+		t.Errorf("intent removed: %v", err)
+	}
+}
+
+// TestActivationRecoveryRemovesRecordedPartialFarm restores the original after removing only the identified partial farm.
+func TestActivationRecoveryRemovesRecordedPartialFarm(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	data := filepath.Join(t.TempDir(), "Data")
+	backup := data + farmBackupSuffix
+	mustFile(t, filepath.Join(data, "Skyrim.esm"), "original")
+	writeActivatingIntent(t, data, backup)
+	if err := os.Rename(data, backup); err != nil {
+		t.Fatal(err)
+	}
+	mustFile(t, filepath.Join(data, "partial"), "unfinished farm")
+	farm, _, err := directoryAt(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := ReadIntent(activatingIntentPath(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Farm = &farm
+	if err := WriteIntent(activatingIntentPath(data), in); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := CleanupStale(data)
+	if err != nil || outcome.Pending != nil || !outcome.Restored {
+		t.Fatalf("CleanupStale = %+v, %v; want restored", outcome, err)
+	}
+	if got := mustRead(t, filepath.Join(data, "Skyrim.esm")); got != "original" {
+		t.Errorf("original Data = %q", got)
+	}
+	if _, err := os.Lstat(filepath.Join(data, "partial")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("partial farm remains: %v", err)
+	}
+	if _, err := os.Lstat(activatingIntentPath(data)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("activation intent remains: %v", err)
 	}
 }
 
@@ -267,6 +444,116 @@ func TestIntentWriteIsDurable(t *testing.T) {
 	}
 }
 
+// TestRestoreFromBackupClearsApplyLeftovers clears a partially deleted exchanged farm and its apply record after confirmation.
+func TestRestoreFromBackupClearsApplyLeftovers(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	data := filepath.Join(t.TempDir(), "Data")
+	mustFile(t, filepath.Join(data, "original"), "original")
+	mm := NewMountManager(data, "", "testgame")
+	layers := []Layer{{Name: "__base__", RootPath: data, Enabled: true}}
+	if err := mm.Activate(layers, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := mm.MarkDirty(layers); err != nil {
+		t.Fatal(err)
+	}
+	old := removeOldFarm
+	t.Cleanup(func() { removeOldFarm = old })
+	stopped := errors.New("simulated interrupted staging removal")
+	removeOldFarm = func(path string) error {
+		if err := os.Remove(filepath.Join(path, SentinelFilename)); err != nil {
+			return err
+		}
+		return stopped
+	}
+	if err := mm.ReMaterialize(); !errors.Is(err, stopped) {
+		t.Fatalf("ReMaterialize = %v, want interruption", err)
+	}
+	removeOldFarm = old
+	outcome, err := CleanupStale(data)
+	if err != nil || outcome.Pending == nil || outcome.Restored {
+		t.Fatalf("CleanupStale = %+v, %v; want pending", outcome, err)
+	}
+	if err := RestoreFromBackup(data); err != nil {
+		t.Fatalf("RestoreFromBackup: %v", err)
+	}
+	if got := mustRead(t, filepath.Join(data, "original")); got != "original" {
+		t.Errorf("restored original = %q", got)
+	}
+	for _, path := range []string{activatingIntentPath(data), applyingIntentPath(data), stagingDirPath(data), oldFarmPath(data)} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("apply leftover %s remains: %v", path, err)
+		}
+	}
+	outcome, err = CleanupStale(data)
+	if err != nil || outcome.Pending != nil || outcome.Restored {
+		t.Fatalf("restart CleanupStale = %+v, %v; want clean state", outcome, err)
+	}
+}
+
+// TestRestoreFromBackupCapturesApplySibling keeps an exchanged farm until its new files are safely captured.
+func TestRestoreFromBackupCapturesApplySibling(t *testing.T) {
+	for _, conflict := range []bool{false, true} {
+		name := "capture succeeds"
+		if conflict {
+			name = "capture fails"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			root := t.TempDir()
+			data := filepath.Join(root, "Data")
+			backup := data + farmBackupSuffix
+			staging := stagingDirPath(data)
+			overwrite := filepath.Join(root, "Overwrite")
+			mustFile(t, filepath.Join(backup, "original"), "original")
+			mustFile(t, filepath.Join(data, "foreign"), "leave until captured")
+			mustFile(t, filepath.Join(staging, "Saves", "new.ess"), "new save")
+			writeRecoverableFarm(t, staging, backup, overwrite)
+			if conflict {
+				mustDir(t, overwrite)
+				if err := os.Symlink(t.TempDir(), filepath.Join(overwrite, "Saves")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := WriteIntent(applyingIntentPath(data), &ActivationIntent{
+				SchemaVersion: 1, Magic: IntentMagic, Kind: IntentApplying, DataPath: data, BackupPath: backup,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			err := RestoreFromBackup(data)
+			if conflict {
+				if !errors.Is(err, ErrCaptureFailed) {
+					t.Fatalf("RestoreFromBackup = %v, want capture failure", err)
+				}
+				if got := mustRead(t, filepath.Join(data, "foreign")); got != "leave until captured" {
+					t.Errorf("Data changed before capture: %q", got)
+				}
+				if got := mustRead(t, filepath.Join(staging, "Saves", "new.ess")); got != "new save" {
+					t.Errorf("staging save changed: %q", got)
+				}
+				if _, err := os.Lstat(applyingIntentPath(data)); err != nil {
+					t.Errorf("apply intent removed: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("RestoreFromBackup: %v", err)
+			}
+			if got := mustRead(t, filepath.Join(overwrite, "Saves", "new.ess")); got != "new save" {
+				t.Errorf("captured save = %q", got)
+			}
+			if got := mustRead(t, filepath.Join(data, "original")); got != "original" {
+				t.Errorf("restored original = %q", got)
+			}
+			for _, path := range []string{staging, applyingIntentPath(data)} {
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("transition leftover %s remains: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
 // TestApplySyncFailureRetainsJournal keeps both exchanged farms until a failed parent sync can be reconciled.
 func TestApplySyncFailureRetainsJournal(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
@@ -315,7 +602,7 @@ func TestApplySyncFailureRetainsJournal(t *testing.T) {
 	}
 }
 
-// TestActivationSyncsParent checks that activation syncs the renamed directory's parent before building the farm.
+// TestActivationSyncsParent checks that activation syncs the renamed and created farm directories before building.
 func TestActivationSyncsParent(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	data := filepath.Join(t.TempDir(), "Data")
@@ -334,8 +621,8 @@ func TestActivationSyncsParent(t *testing.T) {
 	if err := mm.Activate([]Layer{{Name: "__base__", RootPath: data, Enabled: true}}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 {
-		t.Errorf("activation parent syncs = %d, want 1", calls)
+	if calls != 2 {
+		t.Errorf("activation parent syncs = %d, want 2", calls)
 	}
 	if err := mm.Deactivate(); err != nil {
 		t.Fatal(err)

@@ -67,19 +67,20 @@ const (
 )
 
 type ActivationIntent struct {
-	SchemaVersion int               `json:"schema_version"`
-	Magic         string            `json:"magic"`
-	Kind          IntentKind        `json:"kind"`
-	GameID        string            `json:"game_id"`
-	DataPath      string            `json:"data_path"`
-	BackupPath    string            `json:"backup_path"`
-	OverwriteRoot string            `json:"overwrite_root"`
-	StagingPath   string            `json:"staging_path,omitempty"`
-	OperationID   string            `json:"operation_id,omitempty"`
-	Original      directoryIdentity `json:"original,omitempty"`
-	LiveFarmID    string            `json:"live_farm_id,omitempty"`
-	StagingFarmID string            `json:"staging_farm_id,omitempty"`
-	PID           int               `json:"pid"`
+	SchemaVersion int                `json:"schema_version"`
+	Magic         string             `json:"magic"`
+	Kind          IntentKind         `json:"kind"`
+	GameID        string             `json:"game_id"`
+	DataPath      string             `json:"data_path"`
+	BackupPath    string             `json:"backup_path"`
+	OverwriteRoot string             `json:"overwrite_root"`
+	StagingPath   string             `json:"staging_path,omitempty"`
+	OperationID   string             `json:"operation_id,omitempty"`
+	Original      directoryIdentity  `json:"original,omitempty"`
+	Farm          *directoryIdentity `json:"farm,omitempty"`
+	LiveFarmID    string             `json:"live_farm_id,omitempty"`
+	StagingFarmID string             `json:"staging_farm_id,omitempty"`
+	PID           int                `json:"pid"`
 }
 
 func activatingIntentPath(dataPath string) string { return dataPath + activatingSuffix }
@@ -132,6 +133,9 @@ func ReadIntent(markerPath string) (*ActivationIntent, error) {
 		case IntentActivating:
 			if in.Original.Dev == 0 || in.Original.Ino == 0 {
 				return nil, fmt.Errorf("%w: missing original directory identity", ErrSentinelInvalid)
+			}
+			if in.Farm != nil && (in.Farm.Dev == 0 || in.Farm.Ino == 0 || *in.Farm == in.Original) {
+				return nil, fmt.Errorf("%w: invalid activation farm identity", ErrSentinelInvalid)
 			}
 		case IntentApplying:
 			if in.LiveFarmID == "" || in.StagingFarmID == "" || in.LiveFarmID == in.StagingFarmID {

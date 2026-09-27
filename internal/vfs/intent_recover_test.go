@@ -16,11 +16,16 @@ func writeActivatingIntent(t *testing.T, dataPath, backupPath string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var farm *directoryIdentity
 	if !exists {
 		original, exists, err = directoryAt(dataPath)
 		if err != nil || !exists {
 			t.Fatalf("finding original directory: exists=%t err=%v", exists, err)
 		}
+	} else if id, present, err := directoryAt(dataPath); err != nil {
+		t.Fatal(err)
+	} else if present {
+		farm = &id
 	}
 	err = WriteIntent(activatingIntentPath(dataPath), &ActivationIntent{
 		SchemaVersion: CurrentIntentSchema,
@@ -28,6 +33,7 @@ func writeActivatingIntent(t *testing.T, dataPath, backupPath string) {
 		Kind:          IntentActivating,
 		OperationID:   uuid.NewString(),
 		Original:      original,
+		Farm:          farm,
 		GameID:        "testgame",
 		DataPath:      dataPath,
 		BackupPath:    backupPath,
