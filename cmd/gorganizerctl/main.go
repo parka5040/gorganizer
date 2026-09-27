@@ -77,6 +77,7 @@ type recoveryTarget struct {
 	dataPath    string
 	installPath string
 	name        string
+	gameID      string
 	appIDs      []int
 	config      *config.Config
 }
@@ -100,7 +101,12 @@ func runRecoverConfirmWith(args []string, deps recoveryDeps) int {
 		return 2
 	}
 	return withOfflineRecovery(deps, "", *dataPath, func(target recoveryTarget) int {
-		if err := vfs.RestoreFromBackup(target.dataPath); err != nil {
+		capture, err := recoverySteamCapture(target)
+		if err != nil {
+			fmt.Fprintln(deps.errOut, "Steam may still be changing this game. Wait until Steam finishes, then try again. Nothing was changed.")
+			return 2
+		}
+		if err := vfs.RestoreFromBackup(target.dataPath, capture); err != nil {
 			fmt.Fprintf(deps.errOut, "error: %v\n", err)
 			return 1
 		}
@@ -169,7 +175,12 @@ func runRecoverWith(args []string, deps recoveryDeps) int {
 	}
 	return withOfflineRecovery(deps, *gameID, *dataPath, func(target recoveryTarget) int {
 		if *dataPath != "" {
-			outcome, err := vfs.CleanupStale(target.dataPath)
+			capture, err := recoverySteamCapture(target)
+			if err != nil {
+				fmt.Fprintln(deps.errOut, "Steam may still be changing this game. Wait until Steam finishes, then try again. Nothing was changed.")
+				return 2
+			}
+			outcome, err := vfs.CleanupStale(target.dataPath, capture)
 			if err != nil {
 				fmt.Fprintf(deps.errOut, "error: recovery failed: %v\n", err)
 				return 1
@@ -218,12 +229,48 @@ func withOfflineRecovery(deps recoveryDeps, gameID, dataPath string, recoverFn f
 		fmt.Fprintf(deps.errOut, "error: %v\n", err)
 		return 1
 	}
+	if dataPath != "" && target.gameID == "" {
+		baseline, err := unknownSteamBaseline(target.dataPath)
+		if err != nil {
+			fmt.Fprintf(deps.errOut, "error: checking the Data folder: %v\n", err)
+			return 1
+		}
+		if baseline {
+			fmt.Fprintln(deps.errOut, "This folder belongs to a game Gorganizer does not know. Use gorganizerctl recover --game <id>.")
+			return 2
+		}
+	}
 	running, err := procscan.RunningIn(deps.procRoot, target.installPath, target.appIDs)
 	if running || err != nil || daemon.LaunchTicketBlocksRecovery(target.dataPath, time.Now()) != "" {
 		fmt.Fprintf(deps.errOut, "%s is running. Close the game, then run this command again. Nothing was changed.\n", target.name)
 		return 1
 	}
 	return recoverFn(target)
+}
+
+// unknownSteamBaseline reports whether an unrecognized farm records a Steam state that recovery must preserve.
+func unknownSteamBaseline(dataPath string) (bool, error) {
+	for _, path := range append([]string{dataPath}, vfs.RecoveryFarmCandidates(dataPath)...) {
+		sentinel, err := vfs.ReadSentinel(path)
+		if errors.Is(err, vfs.ErrSentinelMissing) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if sentinel.Storefront != nil {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// recoverySteamCapture chooses Steam-aware capture for a configured game or ordinary capture for an unknown folder.
+func recoverySteamCapture(target recoveryTarget) (vfs.CaptureOptions, error) {
+	if target.gameID == "" {
+		return vfs.CaptureOptions{}, nil
+	}
+	return daemon.OfflineSteamCapture(target.config, target.gameID, target.dataPath)
 }
 
 // resolveRecoveryTarget finds the game's install and Steam app IDs from config or the existing Steam discovery fallback.
@@ -253,6 +300,7 @@ func resolveRecoveryTarget(gameID, dataPath string) (recoveryTarget, error) {
 			if err == nil && filepath.Clean(filepath.Join(gc.InstallPath, dataSubpath(gc))) == filepath.Clean(dataPath) {
 				target.installPath = gc.InstallPath
 				target.name = gameName(id, cfg.Games[id].Name)
+				target.gameID = id
 				target.appIDs = appendAppID(target.appIDs, gc.SteamAppID)
 			}
 		}
@@ -269,6 +317,7 @@ func resolveRecoveryTarget(gameID, dataPath string) (recoveryTarget, error) {
 		target.dataPath = filepath.Join(effective.InstallPath, dataSubpath(effective))
 		target.installPath = effective.InstallPath
 		target.name = gameName(gameID, gc.Name)
+		target.gameID = gameID
 		target.appIDs = appendAppID(target.appIDs, effective.SteamAppID)
 		if gc.LinkedFromGameID != "" {
 			target.appIDs = appendAppID(target.appIDs, cfg.Games[gc.LinkedFromGameID].SteamAppID)
@@ -284,6 +333,7 @@ func resolveRecoveryTarget(gameID, dataPath string) (recoveryTarget, error) {
 			target.dataPath = g.DataPath
 			target.installPath = g.InstallPath
 			target.name = gameName(gameID, g.Name)
+			target.gameID = gameID
 			target.appIDs = appendAppID(target.appIDs, int(g.SteamAppID))
 			gc := config.GameConfig{Name: g.Name, InstallPath: g.InstallPath, DataSubpath: g.DataSubpath, SteamAppID: int(g.SteamAppID)}
 			if g.ParentGameID != "" {

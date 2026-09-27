@@ -126,6 +126,57 @@ func TestLaunchOwnAdmissionAllowsAutoMount(t *testing.T) {
 	}
 }
 
+// TestInitialMountRefusedWhileGameRuns keeps an unmounted install untouched when a process, admission, or launch record may still use it.
+func TestInitialMountRefusedWhileGameRuns(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		process   bool
+		scanError error
+		ticket    bool
+		admission bool
+	}{
+		{name: "running process", process: true},
+		{name: "process scan failed", scanError: errors.New("processes unavailable")},
+		{name: "recent launch record", ticket: true},
+		{name: "pending tool admission", admission: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			d, install := newLoaderTestDaemon(t, nil, nil)
+			writeFixture(t, filepath.Join(config.ModsDir("stardewvalley"), "Plain", vfs.RootContentDirName, "Hook.dll"))
+			setStardewModList(t, d, "Default", map[string]bool{"Plain": true})
+			fakeProcesses(d, tc.process, tc.scanError)
+			if tc.ticket {
+				if err := d.writeLaunchTicket("stardewvalley", "Default", filepath.Join(install, "Mods"), []int{413150}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.admission {
+				reservation, err := d.acquireSharedOwned("stardewvalley", dto.BusyOperationTool)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer reservation.Release()
+			}
+			_, err := d.MountVFS("stardewvalley", "Default")
+			if tc.admission {
+				requireBusyHolder(t, tc.name, err, "stardewvalley", dto.BusyOperationTool, "stardewvalley")
+			} else {
+				requireGameRunning(t, tc.name, err, dto.GameRunningOperationMount)
+			}
+			if d.mountMgrs["stardewvalley"].IsMounted() {
+				t.Fatal("initial mount activated a farm while the game might be running")
+			}
+			if _, err := os.Stat(filepath.Join(install, "Mods", vfs.SentinelFilename)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("initial mount wrote a sentinel: %v", err)
+			}
+			if _, err := os.Lstat(filepath.Join(install, "Hook.dll")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("initial mount deployed a root file: %v", err)
+			}
+		})
+	}
+}
+
 // TestUnmountRefusesRunningGameAndGrace checks process detection, launch grace, stale flags, and scan failures.
 func TestUnmountRefusesRunningGameAndGrace(t *testing.T) {
 	for _, tc := range []struct {
@@ -144,10 +195,11 @@ func TestUnmountRefusesRunningGameAndGrace(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			d, install := newLoaderTestDaemon(t, nil, nil)
-			fakeProcesses(d, tc.running, tc.scanErr)
+			fakeProcesses(d, false, nil)
 			if _, err := d.MountVFS("stardewvalley", "Default"); err != nil {
 				t.Fatal(err)
 			}
+			fakeProcesses(d, tc.running, tc.scanErr)
 			now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 			d.mu.Lock()
 			d.now = func() time.Time { return now }

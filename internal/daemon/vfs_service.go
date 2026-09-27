@@ -244,6 +244,12 @@ func (vs *VFSService) mountVFSOwned(gameID, profileName string, autoSwap, retarg
 		}
 		return vs.alreadyMountedStatus(gameID, profileName, effectiveGC, mm)
 	}
+	if busy := vs.s.pendingAdmissionLocked(gameID, owner); busy != nil {
+		return nil, busy
+	}
+	if vs.s.trackedInstallBusyLocked(gameID) || vs.s.unmountRunningLocked(gameID) || vs.s.mountRecoveryBusyLocked(gameID) {
+		return nil, &dto.GameRunningError{GameID: gameID, Operation: dto.GameRunningOperationMount}
+	}
 	if err := vs.ensureOptionalDataDir(gameID, mm); err != nil {
 		return nil, err
 	}
@@ -275,6 +281,30 @@ func (vs *VFSService) mountVFSOwned(gameID, profileName string, autoSwap, retarg
 	st := vs.vfsStatus(gameID, effectiveGC, profileName, mm, entries)
 	vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: st})
 	return st, nil
+}
+
+// mountRecoveryBusyLocked checks the install's processes and launch records before an initial mount; the caller holds s.mu.
+func (s *session) mountRecoveryBusyLocked(gameID string) bool {
+	key := s.fenceKeyLocked(gameID)
+	games := s.gamesOnFenceKeyLocked(gameID, key)
+	unit := &installRecoveryUnit{key: key, appIDs: s.steamAppIDsLocked(games)}
+	for _, id := range games {
+		gc, err := s.config.EffectiveGameConfig(id)
+		if err != nil {
+			slog.Warn("checking game install before mount failed", "game", id, "err", err)
+			return true
+		}
+		subpath := gc.DataSubpath
+		if subpath == "" {
+			subpath = "Data"
+		}
+		unit.dataPaths = append(unit.dataPaths, filepath.Join(s.mountInstallPath(gc), subpath))
+	}
+	if reason := s.recoveryIdle(unit); reason != "" {
+		slog.Warn("mount refused while a game may be running", "game", gameID, "reason", reason)
+		return true
+	}
+	return false
 }
 
 // trackedInstallBusyLocked reports whether any game on an install has a tracked launch or tool; the caller holds s.mu.

@@ -69,6 +69,13 @@ func (vs *VFSService) SetSteamMaintenance(gameID string, enabled, verificationCo
 				return nil, err
 			}
 		}
+		marker, err = vfs.ReadMaintenance(dataPath)
+		if err != nil {
+			return nil, fmt.Errorf("reading Steam maintenance after unmount: %w", err)
+		}
+		if marker != nil && marker.GameID != gameID {
+			return nil, fmt.Errorf("Steam maintenance belongs to a different game")
+		}
 		if marker == nil {
 			marker = &vfs.MaintenanceMarker{SchemaVersion: 1, GameID: gameID, Reason: "user", CreatedAt: vs.s.clock().UTC()}
 			if err := writeMaintenanceMarker(dataPath, marker); err != nil {

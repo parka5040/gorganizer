@@ -4,6 +4,7 @@ import "fmt"
 
 const (
 	GameRunningOperationLaunch    = "launch"
+	GameRunningOperationMount     = "mount"
 	GameRunningOperationApply     = "apply"
 	GameRunningOperationUnmount   = "unmount"
 	GameRunningOperationUninstall = "uninstall"
@@ -32,6 +33,9 @@ type GameRunningError struct {
 
 // Error reports that a game running or recently launched prevents changing its deployed mods.
 func (e *GameRunningError) Error() string {
+	if e.Operation == GameRunningOperationMount {
+		return fmt.Sprintf("%s is still running, or was started less than two minutes ago, so its mods cannot be mounted; close the game first", e.GameID)
+	}
 	if e.Operation == GameRunningOperationUnmount {
 		return fmt.Sprintf("%s is still running, or was started less than two minutes ago, so its mods cannot be unmounted; close it first", e.GameID)
 	}

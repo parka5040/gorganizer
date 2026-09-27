@@ -371,6 +371,29 @@ func TestSteamBusyRecoveryRetainsFarm(t *testing.T) {
 	d.mountMgrs["skyrimse"].ResetAfterRestore()
 }
 
+// TestPauseKeepsVerifyMarkerCreatedDuringUnmount checks that pausing after a changed Steam build never replaces the verification marker.
+func TestPauseKeepsVerifyMarkerCreatedDuringUnmount(t *testing.T) {
+	d, data, manifest := newSteamMaintenanceDaemon(t)
+	if _, err := d.MountVFS("skyrimse", "Default"); err != nil {
+		t.Fatal(err)
+	}
+	changeSteamFixture(t, manifest, "buildid", "123", "124")
+	status, err := d.SetSteamMaintenance("skyrimse", true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, err := vfs.ReadMaintenance(data)
+	if err != nil || marker == nil || marker.Reason != "verify" || status.SteamMaintenance != dto.SteamMaintenanceVerify {
+		t.Fatalf("paused maintenance = %+v, marker = %+v, error = %v", status, marker, err)
+	}
+	if _, err := d.SetSteamMaintenance("skyrimse", false, false); !errors.Is(err, ErrVerificationConfirmationRequired) {
+		t.Fatalf("finishing without verification = %v, want confirmation required", err)
+	}
+	if marker, err = vfs.ReadMaintenance(data); err != nil || marker == nil || marker.Reason != "verify" {
+		t.Fatalf("verify marker after refused finish = %+v, %v", marker, err)
+	}
+}
+
 // TestSteamMaintenanceBlocksMountAndLaunch checks retained verification refusal without reaching a launcher.
 func TestSteamMaintenanceBlocksMountAndLaunch(t *testing.T) {
 	d, _, manifest := newSteamMaintenanceDaemon(t)
