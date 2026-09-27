@@ -369,14 +369,6 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 	if err := es.ensureExecutableRuntime(gameID, eff, *exe); err != nil {
 		return 0, "", err
 	}
-	profileSyncCompatData := ""
-	if outputPolicy == tools.OutputProfileSync && trustedToolID != "loot" && profileName != "" {
-		profileSyncCompatData, _ = tools.ResolveCompatDataPath(&eff, exe.PrefixAppID)
-		if _, err := es.s.iniMgr.PushToDocumentsAt(gameID, profileName, eff.SteamAppID, profileSyncCompatData); err != nil {
-			return 0, "", fmt.Errorf("preparing profile INIs for tool: %w", err)
-		}
-	}
-
 	es.s.mu.Lock()
 	mm := es.s.ensureMountManager(gameID, eff)
 	es.s.mu.Unlock()
@@ -384,9 +376,9 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 		return 0, "", errors.New("exclusive source-edit tools require the game VFS to be unmounted")
 	}
 	if exe.NeedsVFSMounted {
-		if !mm.IsMounted() && profileName != "" {
-			if _, err := es.s.svc.vfs.mountVFSOwned(gameID, profileName, false, reservation.id); err != nil {
-				return 0, "", fmt.Errorf("mounting VFS for tool: %w", err)
+		if profileName != "" {
+			if _, err := es.s.svc.vfs.mountVFSOwned(gameID, profileName, false, true, reservation.id); err != nil {
+				return 0, "", fmt.Errorf("preparing VFS for tool: %w", err)
 			}
 		}
 		if mm.IsMounted() && mm.IsDirty() && !es.s.applyBusy(gameID) {
@@ -396,6 +388,13 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 		}
 		if err := es.s.applyMountedRootDeployment(gameID, eff, profileName, mm); err != nil {
 			return 0, "", fmt.Errorf("applying game-root deployment before tool launch: %w", err)
+		}
+	}
+	profileSyncCompatData := ""
+	if outputPolicy == tools.OutputProfileSync && trustedToolID != "loot" && profileName != "" {
+		profileSyncCompatData, _ = tools.ResolveCompatDataPath(&eff, exe.PrefixAppID)
+		if _, err := es.s.iniMgr.PushToDocumentsAt(gameID, profileName, eff.SteamAppID, profileSyncCompatData); err != nil {
+			return 0, "", fmt.Errorf("preparing profile INIs for tool: %w", err)
 		}
 	}
 

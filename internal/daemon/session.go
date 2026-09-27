@@ -71,6 +71,7 @@ type session struct {
 	uninstallRename        func(string, string) error
 	uninstallBeforeDelete  func(string)
 	modChangeRematerialize func(*vfs.MountManager) error
+	retargetData           func(*vfs.MountManager, []vfs.Layer, string) error
 	launchFault            func(step string) error
 	steamOpener            func(url string) (int, error)
 	readSteamAppState      func(string, int) (steam.AppState, error)

@@ -108,22 +108,26 @@ func (vs *VFSService) vfsStatus(gameID string, gc config.GameConfig, profileName
 }
 
 func (vs *VFSService) MountVFS(gameID, profileName string) (*dto.VFSStatusResult, error) {
-	return vs.mountVFSWithSwap(gameID, profileName, false)
+	return vs.MountVFSWithOptions(gameID, profileName, false, false)
 }
 
 // MountVFSWithSwap is the auto-swap variant for gameID's mutex group.
 func (vs *VFSService) MountVFSWithSwap(gameID, profileName string) (*dto.VFSStatusResult, error) {
-	return vs.mountVFSWithSwap(gameID, profileName, true)
+	return vs.MountVFSWithOptions(gameID, profileName, true, false)
 }
 
-func (vs *VFSService) mountVFSWithSwap(gameID, profileName string, autoSwap bool) (*dto.VFSStatusResult, error) {
-	return vs.mountVFSOwned(gameID, profileName, autoSwap, 0)
+// MountVFSWithOptions mounts or retargets a profile and optionally swaps a conflicting game.
+func (vs *VFSService) MountVFSWithOptions(gameID, profileName string, autoSwap, retarget bool) (*dto.VFSStatusResult, error) {
+	return vs.mountVFSOwned(gameID, profileName, autoSwap, retarget, 0)
 }
 
-// mountVFSOwned mounts a profile while excluding the caller's admission from an auto-swap conflict.
-func (vs *VFSService) mountVFSOwned(gameID, profileName string, autoSwap bool, owner uint64) (*dto.VFSStatusResult, error) {
+// mountVFSOwned mounts a profile while excluding the caller's admission from a retarget or auto-swap conflict.
+func (vs *VFSService) mountVFSOwned(gameID, profileName string, autoSwap, retarget bool, owner uint64) (*dto.VFSStatusResult, error) {
 	if err := vs.s.awaitRecovery(); err != nil {
 		return nil, err
+	}
+	if retarget {
+		defer vs.s.lockProfiles(gameID)()
 	}
 	vs.s.mu.Lock()
 	defer vs.s.mu.Unlock()
@@ -205,6 +209,9 @@ func (vs *VFSService) mountVFSOwned(gameID, profileName string, autoSwap bool, o
 
 	mm := vs.s.ensureMountManager(gameID, effectiveGC)
 	if mm.IsMounted() {
+		if ms, ok := vs.s.mountStates[gameID]; retarget && ok && ms.profileName != profileName {
+			return vs.retargetVFSLocked(gameID, profileName, effectiveGC, mm, owner)
+		}
 		return vs.alreadyMountedStatus(gameID, profileName, effectiveGC, mm)
 	}
 	if err := vs.ensureOptionalDataDir(gameID, mm); err != nil {
@@ -238,6 +245,109 @@ func (vs *VFSService) mountVFSOwned(gameID, profileName string, autoSwap bool, o
 	st := vs.vfsStatus(gameID, effectiveGC, profileName, mm, entries)
 	vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: st})
 	return st, nil
+}
+
+// trackedInstallBusyLocked reports whether any game on an install has a tracked launch or tool; the caller holds s.mu.
+func (s *session) trackedInstallBusyLocked(gameID string) bool {
+	key := s.fenceKeyLocked(gameID)
+	for _, id := range s.gamesOnFenceKeyLocked(gameID, key) {
+		if s.trackedMountBusy(id) {
+			return true
+		}
+	}
+	return false
+}
+
+// retargetVFSLocked replaces the active root deployment and Data farm only while the install is idle; the caller holds the profile lock and s.mu.
+func (vs *VFSService) retargetVFSLocked(gameID, profileName string, gc config.GameConfig, mm *vfs.MountManager, owner uint64) (*dto.VFSStatusResult, error) {
+	if busy := vs.s.pendingAdmissionLocked(gameID, owner); busy != nil {
+		return nil, busy
+	}
+	if vs.s.trackedInstallBusyLocked(gameID) || vs.s.unmountRunningLocked(gameID) {
+		return nil, &dto.GameRunningError{GameID: gameID, Operation: dto.GameRunningOperationRetarget}
+	}
+	_, entries, err := vs.s.profileMgr.Load(gameID, profileName)
+	if err != nil {
+		return nil, fmt.Errorf("loading profile %q: %w", profileName, err)
+	}
+	layers := vs.buildLayers(gameID, gc, entries)
+	oldProfile := vs.s.mountStates[gameID].profileName
+	oldLayers := mm.AppliedLayers()
+	rootManager, err := vs.s.ensureRootDeploymentManager(gameID, gc)
+	if err != nil {
+		return nil, fmt.Errorf("initializing game-root deployment: %w", err)
+	}
+	if _, err := rootManager.Apply(layers, profileName); err != nil {
+		return nil, fmt.Errorf("applying game-root deployment: %w", err)
+	}
+	retargetData := mm.Retarget
+	if vs.s.retargetData != nil {
+		retargetData = func(layers []vfs.Layer, profile string) error {
+			return vs.s.retargetData(mm, layers, profile)
+		}
+	}
+	if err := retargetData(layers, profileName); err != nil {
+		var committed *vfs.RetargetCommittedError
+		if errors.As(err, &committed) {
+			vs.s.mountStates[gameID] = mountState{profileName: profileName}
+			vs.registerRetargetDataRecoveryLocked(gameID, mm, err)
+			vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: vs.vfsStatus(gameID, gc, profileName, mm, entries)})
+			return nil, fmt.Errorf("switching Data mods: %w", err)
+		}
+		var cleanup *vfs.RetargetCleanupError
+		if errors.As(err, &cleanup) {
+			vs.registerRetargetDataRecoveryLocked(gameID, mm, err)
+		}
+		if _, restoreErr := rootManager.Apply(oldLayers, oldProfile); restoreErr != nil {
+			vs.registerRetargetRootRecoveryLocked(gameID, rootManager, restoreErr)
+			return nil, errors.Join(fmt.Errorf("switching Data mods: %w", err), fmt.Errorf("restoring game-root deployment: %w", restoreErr))
+		}
+		return nil, fmt.Errorf("switching Data mods: %w", err)
+	}
+	vs.s.mountStates[gameID] = mountState{profileName: profileName}
+	st := vs.vfsStatus(gameID, gc, profileName, mm, entries)
+	vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: st})
+	return st, nil
+}
+
+// registerRetargetDataRecoveryLocked prompts for Data repair when a profile transition needs recovery; the caller holds s.mu.
+func (vs *VFSService) registerRetargetDataRecoveryLocked(gameID string, mm *vfs.MountManager, cause error) {
+	dataPath, err := filepath.Abs(mm.DataPath())
+	if err != nil {
+		dataPath = mm.DataPath()
+	}
+	pending := &dto.RecoveryPendingResult{
+		GameID: gameID, DataPath: dataPath, BackupPath: mm.BackupPath(),
+		Reason: "Data profile switch left unfinished cleanup: " + cause.Error(),
+		Kind:   dto.RecoveryKindData,
+	}
+	vs.s.pendingRecoveriesMu.Lock()
+	pending = identifiedRecovery(vs.s.pendingRecoveries[dataPath], pending)
+	vs.s.pendingRecoveries[dataPath] = pending
+	var affected []string
+	for affectedGameID, manager := range vs.s.mountMgrs {
+		if filepath.Clean(manager.DataPath()) == dataPath {
+			affected = append(affected, affectedGameID)
+		}
+	}
+	vs.s.gamesAtPath[dataPath] = affected
+	vs.s.pendingRecoveriesMu.Unlock()
+	vs.s.publishRecoveryEvent(dto.StatusEventResult{RecoveryPending: pending})
+}
+
+// registerRetargetRootRecoveryLocked prompts for game-root repair when restoring the previous deployment fails; the caller holds s.mu.
+func (vs *VFSService) registerRetargetRootRecoveryLocked(gameID string, manager *vfs.RootDeploymentManager, cause error) {
+	pending := &dto.RecoveryPendingResult{
+		GameID: gameID, DataPath: manager.GameRoot(),
+		BackupPath: filepath.Join(manager.GameRoot(), vfs.RootBackupDirName),
+		Reason:     "game-root deployment: restoring the previous profile failed: " + cause.Error(),
+		Kind:       dto.RecoveryKindGameRoot,
+	}
+	vs.s.pendingRecoveriesMu.Lock()
+	pending = identifiedRecovery(vs.s.rootPendingRecoveries[gameID], pending)
+	vs.s.rootPendingRecoveries[gameID] = pending
+	vs.s.pendingRecoveriesMu.Unlock()
+	vs.s.publishRecoveryEvent(dto.StatusEventResult{RecoveryPending: pending})
 }
 
 // ensureOptionalDataDir creates a missing registry deploy folder before mounting a game whose deploy folder is optional.
@@ -508,11 +618,39 @@ func (vs *VFSService) RestoreFromBackup(gameID string, expectedKind dto.Recovery
 		return fmt.Errorf("no recovery pending for %s (path %s)", gameID, resolved)
 	}
 
+	vs.s.mu.Lock()
+	mounted := mm.IsMounted()
+	if vs.s.trackedInstallBusyLocked(gameID) || vs.s.unmountRunningLocked(gameID) {
+		vs.s.mu.Unlock()
+		return &dto.GameRunningError{GameID: gameID, Operation: dto.GameRunningOperationUnmount}
+	}
+	manager := vs.s.rootDeployMgrs[gameID]
+	if manager != nil {
+		if _, err := manager.Deactivate(); err != nil {
+			vs.s.mu.Unlock()
+			return fmt.Errorf("deactivating game-root deployment before recovery: %w", err)
+		}
+	}
 	if err := vfs.RestoreFromBackup(pending.DataPath); err != nil {
+		if mounted && manager != nil {
+			state := vs.s.mountStates[gameID]
+			if _, restoreErr := manager.Apply(mm.AppliedLayers(), state.profileName); restoreErr != nil {
+				vs.registerRetargetRootRecoveryLocked(gameID, manager, restoreErr)
+				err = errors.Join(err, fmt.Errorf("restoring game-root deployment: %w", restoreErr))
+			}
+		}
+		vs.s.mu.Unlock()
 		return fmt.Errorf("restoring %s: %w", pending.DataPath, err)
 	}
+	if mounted {
+		mm.ResetAfterRestore()
+	}
+	delete(vs.s.mountStates, gameID)
+	vs.s.setSteamLaunched(gameID, false)
+	vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: vs.s.unmountedVFSStatusLocked(gameID)})
+	vs.s.mu.Unlock()
 	if err := removeLaunchTicket(pending.DataPath); err != nil {
-		return err
+		slog.Warn("removing launch record after backup recovery failed", "game", gameID, "err", err)
 	}
 
 	vs.s.pendingRecoveriesMu.Lock()

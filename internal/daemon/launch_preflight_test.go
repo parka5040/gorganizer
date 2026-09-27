@@ -154,7 +154,7 @@ func TestLaunchPreflightChecksTheEffectiveSMAPIModSet(t *testing.T) {
 	}
 }
 
-func TestLaunchPreflightEvaluatesTheMountedProfile(t *testing.T) {
+func TestLaunchPreflightEvaluatesTheRequestedProfile(t *testing.T) {
 	engine := &fakeLoaderEngine{status: smapi.Status{State: smapi.StateNotInstalled}}
 	d, _ := newLoaderTestDaemon(t, engine, nil)
 	modsDir := config.ModsDir("stardewvalley")
@@ -170,7 +170,9 @@ func TestLaunchPreflightEvaluatesTheMountedProfile(t *testing.T) {
 	if _, err := d.MountVFS("stardewvalley", "Modded"); err != nil {
 		t.Fatalf("MountVFS(Modded): %v", err)
 	}
-	requireUnavailable(t, preflight(d, "Vanilla"), smapi.StateNotInstalled)
+	if err := preflight(d, "Vanilla"); err != nil {
+		t.Fatalf("preflight switching to vanilla: %v", err)
+	}
 	if err := d.UnmountVFS("stardewvalley"); err != nil {
 		t.Fatal(err)
 	}
@@ -179,9 +181,7 @@ func TestLaunchPreflightEvaluatesTheMountedProfile(t *testing.T) {
 		t.Fatalf("MountVFS(Vanilla): %v", err)
 	}
 	t.Cleanup(func() { _ = d.UnmountVFS("stardewvalley") })
-	if err := preflight(d, "Modded"); err != nil {
-		t.Errorf("preflight with Vanilla mounted = %v, want the mounted profile to decide", err)
-	}
+	requireUnavailable(t, preflight(d, "Modded"), smapi.StateNotInstalled)
 }
 
 func TestLaunchGameRefusesSMAPIModsWithoutTheLoader(t *testing.T) {
