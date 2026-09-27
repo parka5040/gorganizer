@@ -285,6 +285,10 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 		return 0, "", err
 	}
 	es.s.mu.RLock()
+	if err := es.s.deferredForLocked(gameID, dto.BusyOperationTool); err != nil {
+		es.s.mu.RUnlock()
+		return 0, "", err
+	}
 	pending := es.s.recoveryPendingFor(gameID)
 	conflict := es.s.findMutexConflict(gameID)
 	es.s.mu.RUnlock()

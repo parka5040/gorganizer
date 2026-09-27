@@ -217,6 +217,9 @@ func TestPreferredProtonSaveConcurrentConfigureGame(t *testing.T) {
 func TestLaunchGamePreferredProtonConcurrentSet(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	install := filepath.Join(t.TempDir(), "game")
+	if err := os.Mkdir(install, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	d := newIsolatedDaemon(t, map[string]config.GameConfig{
 		"custom": {Name: "Custom", InstallPath: install, DataSubpath: "Data"},
 	})
@@ -247,6 +250,9 @@ func TestLaunchGamePreferredProtonConcurrentSet(t *testing.T) {
 func TestConfigSnapshotsOwnExecutableStorage(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	install := filepath.Join(t.TempDir(), "game")
+	if err := os.Mkdir(install, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	original := config.Executable{ID: "one", Title: "Old", ExePath: filepath.Join(install, "tool"), Args: []string{"old"}, Environment: map[string]string{"KEY": "old"}, ExtraRWPaths: []string{"old"}}
 	d := newIsolatedDaemon(t, map[string]config.GameConfig{
 		"custom": {InstallPath: install, Executables: []config.Executable{original}},

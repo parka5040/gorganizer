@@ -40,6 +40,9 @@ func (md *ModService) ReinstallMod(gameID, modName string) (int, int, int, error
 	if err := md.s.refuseWhenShuttingDown("reinstall"); err != nil {
 		return 0, 0, 0, err
 	}
+	if err := md.s.deferredFor(gameID, dto.BusyOperationReinstall); err != nil {
+		return 0, 0, 0, err
+	}
 	if !md.s.gameConfigured(gameID) {
 		return 0, 0, 0, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
@@ -406,7 +409,7 @@ func removeReinstallIntent(path string) {
 
 // recoverInterruptedReinstalls resolves reinstall intents and reaps reinstall staging folders in every configured mods dir.
 func (s *session) recoverInterruptedReinstalls() {
-	for gameID := range s.config.Games {
+	for _, gameID := range s.recoverableGameIDs() {
 		recoverReinstalls(config.ModsDir(gameID))
 	}
 }

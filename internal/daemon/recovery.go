@@ -66,7 +66,7 @@ func (s *session) RecoverAll() {
 	s.recoverDataFarms()
 	heldLoaders := s.retryDeferredLoaderRecovery(deferredLoaders)
 	s.deactivateOrphanedRootDeployments(heldLoaders)
-	for _, gameID := range s.configuredGameIDs() {
+	for _, gameID := range s.recoverableGameIDs() {
 		s.sweepOrphanStageDirs(gameID)
 	}
 	s.sweepStaleExtractions()
@@ -130,6 +130,9 @@ func (s *session) rootRecoveryUnits() []rootRecoveryUnit {
 // recoverRootDeployments finishes interrupted game-root transactions outside s.mu and registers a pending recovery for every game sharing a deployment that drifted.
 func (s *session) recoverRootDeployments() {
 	for _, unit := range s.rootRecoveryUnits() {
+		if len(unit.gameIDs) == 0 || s.deferredFor(unit.gameIDs[0], "recovery") != nil {
+			continue
+		}
 		outcome, err := unit.manager.Recover()
 		if err != nil {
 			slog.Error("game-root crash recovery failed", "games", unit.gameIDs, "err", err)
@@ -182,10 +185,25 @@ func (s *session) recoverDataFarms() {
 
 	for _, dataPath := range pathOrder {
 		gameIDs := pathToGames[dataPath]
+		deferred := false
+		for _, gameID := range gameIDs {
+			if s.deferredFor(gameID, "recovery") != nil {
+				deferred = true
+				break
+			}
+		}
+		if deferred {
+			continue
+		}
 		outcome, err := managers[dataPath].RecoverIfNeeded()
 		if err != nil {
 			slog.Error("crash recovery failed", "data_path", dataPath, "games", gameIDs, "err", err)
 			continue
+		}
+		if outcome.Restored {
+			if err := removeLaunchTicket(dataPath); err != nil {
+				slog.Warn("removing launch record after farm recovery failed", "games", gameIDs, "err", err)
+			}
 		}
 		if outcome.Pending == nil {
 			continue
@@ -209,6 +227,9 @@ func (s *session) recoverDataFarms() {
 // deactivateOrphanedRootDeployments removes, following the root deployment's own restore rules, a committed game-root deployment that remains after recovery while none of the games sharing it is mounted or pending recovery and no mod-loader transaction lock is still held on its install.
 func (s *session) deactivateOrphanedRootDeployments(heldLoaderDirs map[string]bool) {
 	for _, unit := range s.rootRecoveryUnits() {
+		if len(unit.gameIDs) == 0 || s.deferredFor(unit.gameIDs[0], "recovery") != nil {
+			continue
+		}
 		if s.rootDeploymentInUse(unit.gameIDs) {
 			continue
 		}
