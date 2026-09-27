@@ -147,16 +147,22 @@ public:
     void retryDownload(const QString& downloadId);
 
     bool previewInstall(const QString& gameId, const QString& archiveRelPath,
-                        GrpcPreviewInstallResult& out, QString& errorOut);
+                        GrpcPreviewInstallResult& out, QString& errorOut,
+                        const QString& externalArchivePath = QString());
+    quint64 previewInstallAsync(const QString& gameId, const QString& archiveRelPath,
+                                const QString& externalArchivePath);
     bool discardPreview(const QString& previewId, QString& errorOut);
+    void discardPreviewAsync(const QString& previewId);
     // Queues an install on the install RPC worker and returns the id its installRequest* signals carry.
     quint64 startInstall(const QString& gameId, const QString& archiveRelPath,
                          GrpcInstallMode mode, const QString& targetMod,
                          const QString& previewId,
-                         const std::vector<GrpcFomodFile>& fomodSelectedFiles);
+                         const std::vector<GrpcFomodFile>& fomodSelectedFiles,
+                         bool fomodConfirmed = false, const QString& selectedRoot = QString());
     // Queues an install from an archive outside the Downloads index and returns its request id.
     quint64 startInstallExternal(const QString& gameId, const QString& externalArchivePath,
-                                 GrpcInstallMode mode, const QString& targetMod);
+                                 GrpcInstallMode mode, const QString& targetMod,
+                                 bool fomodConfirmed = false, const QString& selectedRoot = QString());
     // Synchronous StartInstall for modal flows.
     bool startInstallSync(const QString& gameId, const QString& archiveRelPath,
                           const QString& externalArchivePath,
@@ -281,6 +287,8 @@ signals:
     void gameLaunched(int pid);
     void gameLaunchFailed(const QString& error);
 
+    void previewInstallCompleted(quint64 requestId, const GrpcPreviewInstallResult& result);
+    void previewInstallFailed(quint64 requestId, const QString& error);
     void installRequestCompleted(quint64 requestId, const QString& modFolder, int fileCount);
     void installRequestFailed(quint64 requestId, const QString& error);
 
@@ -377,6 +385,7 @@ private:
     QTimer* m_connectionTimer = nullptr;
     bool m_connected = false;
     bool m_transferActive = false;
+    quint64 m_nextPreviewRequestId = 0;
     quint64 m_nextInstallRequestId = 0;
     quint64 m_nextModLoaderRequestId = 0;
     quint64 m_nextModListRequestId = 0;
@@ -400,7 +409,8 @@ private:
     quint64 postInstall(const QString& gameId, const QString& archiveRelPath,
                         const QString& externalArchivePath, GrpcInstallMode mode,
                         const QString& targetMod, const QString& previewId,
-                        const std::vector<GrpcFomodFile>& fomodSelectedFiles);
+                        const std::vector<GrpcFomodFile>& fomodSelectedFiles,
+                        bool fomodConfirmed, const QString& selectedRoot);
 
     template <typename Method, typename... Args>
     quint64 postModLoaderOperation(const QString& gameId, const QString& operation, Method method, Args... args);

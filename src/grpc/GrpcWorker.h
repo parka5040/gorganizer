@@ -58,10 +58,14 @@ public slots:
     void doCancelDownload(const QString& downloadId);
     void doRetryDownload(const QString& downloadId);
 
+    void doPreviewInstall(quint64 requestId, const QString& gameId, const QString& archiveRelPath,
+                          const QString& externalArchivePath);
+    void doDiscardPreview(const QString& previewId);
     void doStartInstall(quint64 requestId, const QString& gameId, const QString& archiveRelPath,
                         const QString& externalArchivePath, int mode,
                         const QString& targetMod, const QString& previewId,
-                        const std::vector<GrpcFomodFile>& fomodSelectedFiles);
+                        const std::vector<GrpcFomodFile>& fomodSelectedFiles,
+                        bool fomodConfirmed, const QString& selectedRoot);
 
     void doSetNexusAPIKey(const QString& apiKey);
 
@@ -119,6 +123,8 @@ signals:
     void downloadStarted(const QString& downloadId, int queuedAhead);
     void downloadCancelled(const QString& downloadId);
     void downloadRetried(const QString& downloadId, int queuedAhead);
+    void previewInstallCompleted(quint64 requestId, const GrpcPreviewInstallResult& result);
+    void previewInstallFailed(quint64 requestId, const QString& error);
     void installRequestCompleted(quint64 requestId, const QString& modFolder, int fileCount);
     void installRequestFailed(quint64 requestId, const QString& error);
 

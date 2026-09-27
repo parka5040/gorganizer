@@ -1,4 +1,5 @@
 #include "GrpcWorker.h"
+#include "GrpcInstallPreview.h"
 
 #include <grpcpp/grpcpp.h>
 #include <chrono>
@@ -814,11 +815,34 @@ void GrpcWorker::doRetryDownload(const QString& downloadId)
     emit downloadRetried(downloadId, resp.queued_ahead());
 }
 
+void GrpcWorker::doPreviewInstall(quint64 requestId, const QString& gameId,
+                                  const QString& archiveRelPath, const QString& externalArchivePath)
+{
+    auto req = previewInstallRequest(gameId, archiveRelPath, externalArchivePath);
+    gorganizer::v1::PreviewInstallResponse resp;
+    auto status = invoke(&Stub::PreviewInstall, req, resp, std::chrono::minutes(10));
+    if (!status.ok()) {
+        emit previewInstallFailed(requestId, QString::fromStdString(status.error_message()));
+        return;
+    }
+    emit previewInstallCompleted(requestId, previewInstallResultFromProto(resp));
+}
+
+void GrpcWorker::doDiscardPreview(const QString& previewId)
+{
+    gorganizer::v1::DiscardPreviewRequest req;
+    req.set_preview_id(previewId.toStdString());
+    gorganizer::v1::DiscardPreviewResponse resp;
+    auto status = invoke(&Stub::DiscardPreview, req, resp, std::chrono::seconds(30));
+    if (!status.ok()) qWarning("GrpcWorker: DiscardPreview failed: %s", status.error_message().c_str());
+}
+
 void GrpcWorker::doStartInstall(quint64 requestId, const QString& gameId,
                                  const QString& archiveRelPath,
                                  const QString& externalArchivePath, int mode,
                                  const QString& targetMod, const QString& previewId,
-                                 const std::vector<GrpcFomodFile>& fomodSelectedFiles)
+                                 const std::vector<GrpcFomodFile>& fomodSelectedFiles,
+                                 bool fomodConfirmed, const QString& selectedRoot)
 {
     gorganizer::v1::StartInstallRequest req;
     req.set_game_id(gameId.toStdString());
@@ -827,6 +851,8 @@ void GrpcWorker::doStartInstall(quint64 requestId, const QString& gameId,
     req.set_mode(static_cast<gorganizer::v1::InstallMode>(mode));
     req.set_target_mod(targetMod.toStdString());
     req.set_preview_id(previewId.toStdString());
+    req.set_fomod_confirmed(fomodConfirmed);
+    req.set_selected_root(selectedRoot.toStdString());
     for (const auto& f : fomodSelectedFiles) {
         auto* pb = req.add_fomod_selected_files();
         pb->set_source(f.source.toStdString());
