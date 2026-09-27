@@ -192,6 +192,8 @@ func TestFarmSiblingSuffixesNameEveryLifecycleSibling(t *testing.T) {
 		applyingIntentPath(dataPath):                           true,
 		stagingDirPath(dataPath):                               true,
 		oldFarmPath(dataPath):                                  true,
+		deactivationJournalPath(dataPath):                      true,
+		retiredFarmPath(dataPath):                              true,
 		NewMountManager(dataPath, "", "skyrimse").BackupPath(): true,
 	}
 	got := FarmSiblingSuffixes()

@@ -373,7 +373,7 @@ func TestLauncherChangedBeforeBackupRollsBack(t *testing.T) {
 // TestInstallRefusesFarmTransitions verifies loader operations refuse while a farm transition sibling or parked Mods backup exists.
 func TestInstallRefusesFarmTransitions(t *testing.T) {
 	art := writeArtifact(t, t.TempDir(), "4.5.2", testPayloadFiles("4.5.2"))
-	for _, sibling := range []string{"Mods.gorganizer-activating", "Mods.gorganizer-applying", "Mods.gorganizer-staging", "Mods.gorganizer-oldfarm", "Mods.orig"} {
+	for _, sibling := range []string{"Mods.gorganizer-activating", "Mods.gorganizer-applying", "Mods.gorganizer-staging", "Mods.gorganizer-oldfarm", "Mods.gorganizer-deactivating", "Mods.gorganizer-retired", "Mods.orig"} {
 		t.Run(sibling, func(t *testing.T) {
 			game := installed(t, art)
 			if err := os.Mkdir(filepath.Join(game, sibling), 0755); err != nil {

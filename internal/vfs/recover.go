@@ -117,6 +117,38 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 		return outcome, fmt.Errorf("resolving %q: %w", dataPath, err)
 	}
 	backupPath := resolved + farmBackupSuffix
+	journalPath := deactivationJournalPath(resolved)
+	if _, statErr := os.Lstat(journalPath); !errors.Is(statErr, os.ErrNotExist) {
+		outcome.Pending = &RecoveryPending{
+			DataPath:   resolved,
+			BackupPath: backupPath,
+			Reason:     "An interrupted mod removal left folders that do not match its record. Check Data, Data.orig and Data.gorganizer-retired before restoring.",
+		}
+		if statErr != nil {
+			return outcome, nil
+		}
+		j, readErr := readDeactivationJournal(journalPath)
+		if readErr != nil {
+			return outcome, nil
+		}
+		if err := resumeFarmRetirement(resolved, backupPath, j); err != nil {
+			if errors.Is(err, errDeactivationMismatch) {
+				return outcome, nil
+			}
+			return RecoveryOutcome{}, fmt.Errorf("resuming interrupted mod removal: %w", err)
+		}
+		outcome.Pending = nil
+		outcome.Restored = true
+		return outcome, nil
+	}
+	if _, statErr := os.Lstat(retiredFarmPath(resolved)); !errors.Is(statErr, os.ErrNotExist) {
+		outcome.Pending = &RecoveryPending{
+			DataPath:   resolved,
+			BackupPath: backupPath,
+			Reason:     "A retired mod folder has no removal record. Check Data and Data.gorganizer-retired before restoring.",
+		}
+		return outcome, nil
+	}
 
 	mount, err := DetectFuseMount(resolved)
 	if err != nil {
@@ -265,20 +297,11 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 						"path", resolved, "count", moved, "overwrite_root", s.OverwriteRoot)
 				}
 			}
-			if err := os.RemoveAll(resolved); err != nil {
-				return outcome, fmt.Errorf("removing crashed overlay at %s: %w", resolved, err)
+			if err := retireFarm(resolved, backupPath, s); err != nil {
+				return outcome, fmt.Errorf("retiring crashed overlay at %s: %w", resolved, err)
 			}
-			if _, statErr := os.Stat(s.BackupPath); statErr == nil {
-				if err := os.Rename(s.BackupPath, resolved); err != nil {
-					return outcome, fmt.Errorf("restoring %s from %s after crash: %w",
-						resolved, s.BackupPath, err)
-				}
-				slog.Info("overlay crash recovery complete", "path", resolved)
-				outcome.Restored = true
-				return outcome, nil
-			}
-			slog.Warn("sentinel backup_path missing — overlay torn down but no original to restore",
-				"path", resolved, "backup_path", s.BackupPath)
+			slog.Info("overlay crash recovery complete", "path", resolved)
+			outcome.Restored = true
 			return outcome, nil
 		} else if errors.Is(vErr, ErrSentinelInvalid) {
 			slog.Warn("Data/ contains a sentinel that failed validation — surfacing as recovery-pending",

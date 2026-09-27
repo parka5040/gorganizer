@@ -26,17 +26,19 @@ const CurrentSentinelSchema = 3
 const CurrentMaterializerVersion = 1
 
 const (
-	activatingSuffix = ".gorganizer-activating"
-	applyingSuffix   = ".gorganizer-applying"
-	stagingSuffix    = ".gorganizer-staging"
-	oldFarmSuffix    = ".gorganizer-oldfarm"
-	farmBackupSuffix = ".orig"
-	sentinelTempName = ".tmp-" + SentinelFilename + "-"
+	activatingSuffix   = ".gorganizer-activating"
+	applyingSuffix     = ".gorganizer-applying"
+	stagingSuffix      = ".gorganizer-staging"
+	oldFarmSuffix      = ".gorganizer-oldfarm"
+	deactivatingSuffix = ".gorganizer-deactivating"
+	retiredSuffix      = ".gorganizer-retired"
+	farmBackupSuffix   = ".orig"
+	sentinelTempName   = ".tmp-" + SentinelFilename + "-"
 )
 
 // FarmSiblingSuffixes returns the pending transition siblings and parked original next to a farm's deploy folder.
 func FarmSiblingSuffixes() []string {
-	return []string{activatingSuffix, applyingSuffix, stagingSuffix, oldFarmSuffix, farmBackupSuffix}
+	return []string{activatingSuffix, applyingSuffix, stagingSuffix, oldFarmSuffix, deactivatingSuffix, retiredSuffix, farmBackupSuffix}
 }
 
 // RetainedFarmSiblingSuffixes returns farm siblings that persist while a launched game may still use its deploy folder.

@@ -79,7 +79,7 @@ func testSpec() LoaderSpec {
 		Farm: FarmGuard{
 			DeployDir:       "Mods",
 			Sentinel:        ".gorganizer-overlay.json",
-			SiblingSuffixes: []string{".gorganizer-activating", ".gorganizer-applying", ".gorganizer-staging", ".gorganizer-oldfarm", ".orig"},
+			SiblingSuffixes: []string{".gorganizer-activating", ".gorganizer-applying", ".gorganizer-staging", ".gorganizer-oldfarm", ".gorganizer-deactivating", ".gorganizer-retired", ".orig"},
 		},
 	}
 }
