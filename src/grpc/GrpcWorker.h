@@ -37,6 +37,7 @@ public slots:
 
     void doListProfiles(const QString& gameId);
     void doCreateProfile(const QString& gameId, const QString& name);
+    void doCopyProfile(const QString& gameId, const QString& source, const QString& name);
     void doDeleteProfile(const QString& gameId, const QString& name);
     void doGetModList(const QString& gameId, const QString& profileName);
     void doSetModList(const QString& gameId, const QString& profileName,
@@ -118,6 +119,7 @@ signals:
     void modInfoReceived(const GrpcModInfo& info);
     void profilesListed(const std::vector<GrpcProfile>& profiles);
     void profileCreated(const GrpcProfile& profile);
+    void profileCopied(const QString& gameId, const GrpcProfile& profile);
     void profileDeleted();
     void modListReceived(const std::vector<GrpcModListEntry>& entries);
     void modListUpdated();

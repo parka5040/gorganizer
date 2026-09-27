@@ -77,7 +77,10 @@ func (es *ExecutableService) importLOOTLoadout(
 		}
 		loadout = append(loadout, profile.PluginLoadoutEntry{Filename: filename, Enabled: active})
 	}
-	if err := es.s.profileMgr.SavePluginLoadout(gameID, profileName, loadout); err != nil {
+	unlockProfiles := es.s.lockProfiles(gameID)
+	err = es.s.profileMgr.SavePluginLoadout(gameID, profileName, loadout)
+	unlockProfiles()
+	if err != nil {
 		return fmt.Errorf("saving LOOT profile loadout: %w", err)
 	}
 	return nil

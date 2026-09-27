@@ -25,8 +25,11 @@ func (in *IniService) ListProfileIniFiles(gameID, profileName string) (*dto.Prof
 		return nil, fmt.Errorf("loading profile: %w", err)
 	}
 	compatData, _ := tools.ResolveCompatDataPath(&gc, 0)
-	if err := in.s.iniMgr.SeedFromDocumentsAt(gameID, profileName, gc.SteamAppID, compatData); err != nil {
-		slog.Warn("seeding profile INIs failed", "err", err)
+	unlockProfiles := in.s.lockProfiles(gameID)
+	seedErr := in.s.iniMgr.SeedFromDocumentsAt(gameID, profileName, gc.SteamAppID, compatData)
+	unlockProfiles()
+	if seedErr != nil {
+		slog.Warn("seeding profile INIs failed", "err", seedErr)
 	}
 	docs, _ := inipkg.DocumentsPath(gc.SteamAppID, spec.MyGamesSubdir)
 
@@ -53,8 +56,11 @@ func (in *IniService) SaveProfileIniFile(gameID, profileName, filename, content 
 	if !in.s.gameConfigured(gameID) {
 		return fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
-	if err := in.s.iniMgr.Write(gameID, profileName, filename, content); err != nil {
-		return err
+	unlockProfiles := in.s.lockProfiles(gameID)
+	writeErr := in.s.iniMgr.Write(gameID, profileName, filename, content)
+	unlockProfiles()
+	if writeErr != nil {
+		return writeErr
 	}
 	p, _, err := in.s.profileMgr.Load(gameID, profileName)
 	if err == nil && p.UseCustomIni {
@@ -119,7 +125,9 @@ func (in *IniService) SetIniTweak(gameID, profileName, tweakID string, enabled b
 	if !in.s.gameConfigured(gameID) {
 		return nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
+	unlockProfiles := in.s.lockProfiles(gameID)
 	state, err := in.s.iniMgr.SetTweak(gameID, profileName, tweakID, enabled)
+	unlockProfiles()
 	if err != nil {
 		return nil, err
 	}

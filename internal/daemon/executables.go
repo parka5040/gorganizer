@@ -663,7 +663,10 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 			}
 		}
 		if code == 0 && outputPolicy == tools.OutputProfileSync && trustedToolID != "loot" && profileName != "" {
-			if importErr := es.s.iniMgr.PullFromDocumentsAt(gameID, profileName, eff.SteamAppID, profileSyncCompatData); importErr != nil {
+			unlockProfiles := es.s.lockProfiles(gameID)
+			importErr := es.s.iniMgr.PullFromDocumentsAt(gameID, profileName, eff.SteamAppID, profileSyncCompatData)
+			unlockProfiles()
+			if importErr != nil {
 				slog.Warn("importing tool-edited profile INIs failed", "run", runID, "err", importErr)
 				es.s.emitInfo(fmt.Sprintf("[%s:ini-import] failed: %v", runID, importErr))
 				code = -1

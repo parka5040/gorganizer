@@ -218,6 +218,7 @@ void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
     connect(worker, &GrpcWorker::modInfoReceived, this, &GrpcClient::modInfoReceived);
     connect(worker, &GrpcWorker::profilesListed, this, &GrpcClient::profilesListed);
     connect(worker, &GrpcWorker::profileCreated, this, &GrpcClient::profileCreated);
+    connect(worker, &GrpcWorker::profileCopied, this, &GrpcClient::profileCopied);
     connect(worker, &GrpcWorker::profileDeleted, this, &GrpcClient::profileDeleted);
     connect(worker, &GrpcWorker::modListReceived, this, &GrpcClient::modListReceived);
     connect(worker, &GrpcWorker::modListUpdated, this, &GrpcClient::modListUpdated);
@@ -487,6 +488,11 @@ bool GrpcClient::listProfilesSync(const QString& gameId, std::vector<GrpcProfile
 void GrpcClient::createProfile(const QString& gameId, const QString& name)
 {
     post(&GrpcWorker::doCreateProfile, gameId, name);
+}
+
+void GrpcClient::copyProfile(const QString& gameId, const QString& source, const QString& name)
+{
+    post(&GrpcWorker::doCopyProfile, gameId, source, name);
 }
 
 void GrpcClient::deleteProfile(const QString& gameId, const QString& name)

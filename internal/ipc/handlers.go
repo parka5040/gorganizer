@@ -141,6 +141,14 @@ func (s *gorganizerServer) CreateProfile(_ context.Context, req *pb.CreateProfil
 	return profileToProto(p), nil
 }
 
+func (s *gorganizerServer) CopyProfile(_ context.Context, req *pb.CopyProfileRequest) (*pb.Profile, error) {
+	p, err := s.ctrl.CopyProfile(req.GetGameId(), req.GetSourceName(), req.GetName())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return profileToProto(p), nil
+}
+
 func (s *gorganizerServer) DeleteProfile(_ context.Context, req *pb.DeleteProfileRequest) (*pb.DeleteProfileResponse, error) {
 	if err := s.ctrl.DeleteProfile(req.GetGameId(), req.GetName()); err != nil {
 		return nil, grpcError(err)
