@@ -106,6 +106,8 @@ func unescapeMountinfoField(s string) string {
 	return b.String()
 }
 
+var renameActivationBackup = os.Rename
+
 // CleanupStale heals dataPath after a prior daemon crash; returns Pending for ambiguous states.
 func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 	var outcome RecoveryOutcome
@@ -131,44 +133,118 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 		outcome.FuseUnmounted = true
 	}
 
-	_ = os.RemoveAll(stagingDirPath(resolved))
-	_ = os.RemoveAll(oldFarmPath(resolved))
-	_ = RemoveIntent(applyingIntentPath(resolved))
+	staging := stagingDirPath(resolved)
+	oldFarm := oldFarmPath(resolved)
+	applyPath := applyingIntentPath(resolved)
+	if _, statErr := os.Lstat(resolved); errors.Is(statErr, os.ErrNotExist) {
+		for _, candidate := range []string{oldFarm, staging} {
+			s, readErr := ReadSentinel(candidate)
+			if readErr != nil || ValidateSentinel(s) != nil {
+				continue
+			}
+			if err := os.Rename(candidate, resolved); err != nil {
+				return outcome, fmt.Errorf("restoring stranded farm from %s: %w", candidate, err)
+			}
+			slog.Info("restored stranded farm to Data", "from", candidate, "to", resolved)
+			break
+		}
+		if _, statErr := os.Lstat(resolved); errors.Is(statErr, os.ErrNotExist) {
+			for _, sibling := range []string{oldFarm, staging, applyPath} {
+				if _, err := os.Lstat(sibling); err == nil {
+					outcome.Pending = &RecoveryPending{
+						DataPath:   resolved,
+						BackupPath: backupPath,
+						Reason:     "Data/ is missing while folders from an unfinished mod change remain. Check these folders before restoring the original files.",
+					}
+					return outcome, nil
+				} else if !errors.Is(err, os.ErrNotExist) {
+					return outcome, fmt.Errorf("checking transition sibling %s: %w", sibling, err)
+				}
+			}
+		} else if statErr != nil {
+			return outcome, fmt.Errorf("checking %s: %w", resolved, statErr)
+		}
+	} else if statErr != nil {
+		return outcome, fmt.Errorf("checking %s: %w", resolved, statErr)
+	}
 
+	s, sErr := ReadSentinel(resolved)
+	var vErr error
+	if sErr == nil {
+		vErr = ValidateSentinel(s)
+	}
+	validFarm := sErr == nil && vErr == nil
 	activatingPath := activatingIntentPath(resolved)
 	if _, iErr := ReadIntent(activatingPath); iErr == nil {
-		backupExists := false
-		if _, err := os.Stat(backupPath); err == nil {
-			backupExists = true
-		}
-		_, dataStatErr := os.Stat(resolved)
-		dataExists := dataStatErr == nil
-
-		defer func() { _ = RemoveIntent(activatingPath) }()
-
-		if !backupExists {
-			slog.Info("interrupted activation with no backup — leaving Data as-is",
-				"path", resolved)
-			return outcome, nil
-		}
-		if dataExists {
+		if validFarm {
+			if err := RemoveIntent(activatingPath); err != nil {
+				return outcome, fmt.Errorf("removing committed activation intent: %w", err)
+			}
+		} else {
+			if _, err := os.Stat(backupPath); err != nil {
+				slog.Info("interrupted activation with no backup — leaving Data as-is", "path", resolved)
+				if err := RemoveIntent(activatingPath); err != nil {
+					return outcome, fmt.Errorf("removing activation intent: %w", err)
+				}
+				return outcome, nil
+			}
 			if err := os.RemoveAll(resolved); err != nil {
 				return outcome, fmt.Errorf("removing interrupted activation at %s: %w", resolved, err)
 			}
+			if err := renameActivationBackup(backupPath, resolved); err != nil {
+				return outcome, fmt.Errorf("rolling back interrupted activation of %s from %s: %w",
+					resolved, backupPath, err)
+			}
+			if err := RemoveIntent(activatingPath); err != nil {
+				return outcome, fmt.Errorf("removing rolled-back activation intent: %w", err)
+			}
+			slog.Info("rolled back interrupted activation", "path", resolved)
+			outcome.Restored = true
+			return outcome, nil
 		}
-		if err := os.Rename(backupPath, resolved); err != nil {
-			return outcome, fmt.Errorf("rolling back interrupted activation of %s from %s: %w",
-				resolved, backupPath, err)
-		}
-		slog.Info("rolled back interrupted activation", "path", resolved)
-		outcome.Restored = true
-		return outcome, nil
 	} else if !errors.Is(iErr, ErrIntentMissing) {
 		slog.Warn("could not read activation intent during recovery", "path", resolved, "err", iErr)
 	}
 
-	if s, sErr := ReadSentinel(resolved); sErr == nil {
-		if vErr := ValidateSentinel(s); vErr == nil {
+	plainOriginal := errors.Is(sErr, ErrSentinelMissing)
+	if plainOriginal {
+		entries, readErr := os.ReadDir(resolved)
+		plainOriginal = readErr == nil
+		if _, err := os.Stat(backupPath); err == nil {
+			plainOriginal = plainOriginal && len(entries) == 0
+		}
+		for _, entry := range entries {
+			if isSentinelFile(entry.Name()) {
+				plainOriginal = false
+			}
+		}
+	}
+	if !validFarm {
+		for _, candidate := range []string{oldFarm, staging} {
+			candidateSentinel, readErr := ReadSentinel(candidate)
+			if readErr == nil && ValidateSentinel(candidateSentinel) == nil {
+				outcome.Pending = &RecoveryPending{
+					DataPath:   resolved,
+					BackupPath: backupPath,
+					Reason:     "An unfinished mod change left a recoverable mod folder next to Data/. Check it before restoring the original files.",
+				}
+				return outcome, nil
+			}
+		}
+	}
+	if validFarm || plainOriginal {
+		for _, sibling := range []string{staging, oldFarm} {
+			if err := os.RemoveAll(sibling); err != nil {
+				return outcome, fmt.Errorf("removing transition sibling %s: %w", sibling, err)
+			}
+		}
+		if err := RemoveIntent(applyPath); err != nil {
+			return outcome, fmt.Errorf("removing apply intent: %w", err)
+		}
+	}
+
+	if sErr == nil {
+		if validFarm {
 			slog.Info("found valid overlay sentinel from prior run — restoring",
 				"path", resolved, "backup_path", s.BackupPath,
 				"prior_pid", s.ActivationPID, "started_at", s.ActivationStartedAt)
