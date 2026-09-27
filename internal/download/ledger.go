@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/parka/gorganizer/internal/config"
@@ -68,14 +69,31 @@ func ledgerLock(gameID string) *sync.Mutex {
 // LoadLedger returns every entry in the game's ledger; missing file = empty list.
 func LoadLedger(gameID string) ([]LedgerEntry, error) {
 	path := filepath.Join(config.DownloadsDir(gameID), ledgerFilename)
-	f, err := os.Open(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
+		return nil, fmt.Errorf("checking %s: %w", path, err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
 		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}
 	defer f.Close()
+	if info.Mode().IsRegular() && info.Mode().Perm()&0o077 != 0 {
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Uid == uint32(os.Getuid()) {
+			opened, err := f.Stat()
+			if err != nil {
+				return nil, fmt.Errorf("checking open ledger %s: %w", path, err)
+			}
+			if os.SameFile(info, opened) {
+				if err := f.Chmod(0o600); err != nil {
+					return nil, fmt.Errorf("securing ledger %s: %w", path, err)
+				}
+			}
+		}
+	}
 
 	var out []LedgerEntry
 	var cur *LedgerEntry
@@ -168,7 +186,7 @@ func SaveLedger(gameID string, entries []LedgerEntry) error {
 		}
 	}
 
-	return w.WriteAtomic(path, 0644)
+	return w.WriteAtomic(path, 0o600)
 }
 
 // UpsertLedgerEntry inserts or overwrites a single entry, keyed by ID.

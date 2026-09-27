@@ -127,7 +127,7 @@ func (m *Manager) StartDownloadForGame(uri, overrideGameID string) (id string, q
 		gameID = overrideGameID
 	}
 	if link.IsExpired(time.Now()) {
-		return "", 0, &NXMExpiredError{URI: uri}
+		return "", 0, &NXMExpiredError{URI: redactURL(uri)}
 	}
 
 	id = "dl-" + uuid.NewString()
@@ -198,7 +198,7 @@ func (m *Manager) RetryDownload(id string, gameIDs []string) (queuedAhead int, e
 				return 0, err
 			}
 			if link.IsExpired(time.Now()) {
-				return 0, &NXMExpiredError{URI: e.NXMURI}
+				return 0, &NXMExpiredError{URI: redactURL(e.NXMURI)}
 			}
 			dl := &Download{
 				ID: e.ID, GameID: e.GameID, GameSlug: e.GameSlug,
@@ -347,7 +347,7 @@ func (m *Manager) RehydrateLedger(gameIDs []string) {
 			}
 			link, parseErr := ParseNXM(e.NXMURI)
 			if parseErr != nil || link.IsExpired(time.Now()) {
-				slog.Warn("ledger NXM expired; marking failed", "id", e.ID, "uri", e.NXMURI)
+				slog.Warn("ledger NXM expired; marking failed", "id", e.ID, "uri", redactURL(e.NXMURI))
 				upd := e
 				upd.Status = LedgerFailed
 				upd.Error = "nxm_expired"
@@ -449,7 +449,7 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 	fileDetails, _ := m.nexus.GetFileDetails(link.GameSlug, link.ModID, link.FileID)
 	cdnURL, err := m.nexus.ResolveDownloadURL(link)
 	if err != nil {
-		m.fail(dl, fmt.Errorf("resolving CDN URL: %w", err))
+		m.fail(dl, fmt.Errorf("resolving CDN URL: %w", redactHTTPError(err)))
 		return
 	}
 
@@ -569,21 +569,21 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 func (m *Manager) streamToFile(ctx context.Context, cdnURL, destPath string, resumeFrom int64, dl *Download) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cdnURL, nil)
 	if err != nil {
-		return err
+		return redactHTTPError(err)
 	}
 	if resumeFrom > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", resumeFrom))
 	}
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrDownloadFailed, err)
+		return fmt.Errorf("%w: %w", ErrDownloadFailed, redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
 		if resumeFrom > 0 {
-			slog.Warn("server ignored Range header; restarting from 0")
+			slog.Warn("server ignored Range header; restarting from 0", "url", redactURL(cdnURL))
 			resumeFrom = 0
 			dl.BytesDownloaded = 0
 		}

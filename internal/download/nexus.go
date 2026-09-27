@@ -170,13 +170,13 @@ func (c *NexusClient) ResolveDownloadURL(link *NXMLink) (string, error) {
 
 	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
-		return "", err
+		return "", redactHTTPError(err)
 	}
 	c.setHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("nexus API request failed: %w", err)
+		return "", fmt.Errorf("nexus API request failed: %w", redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 
@@ -209,7 +209,7 @@ func (c *NexusClient) GetModInfo(gameSlug string, modID int) (*NexusModInfo, err
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("nexus API request failed: %w", err)
+		return nil, fmt.Errorf("nexus API request failed: %w", redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 
@@ -238,7 +238,7 @@ func (c *NexusClient) GetFileDetails(gameSlug string, modID, fileID int) (*Nexus
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("nexus API request failed: %w", err)
+		return nil, fmt.Errorf("nexus API request failed: %w", redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 
@@ -271,7 +271,7 @@ func (c *NexusClient) ListModFilesContext(ctx context.Context, gameSlug string, 
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("nexus API request failed: %w", err)
+		return nil, fmt.Errorf("nexus API request failed: %w", redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -291,13 +291,13 @@ func (c *NexusClient) ResolveDownloadURLByID(gameSlug string, modID, fileID int)
 		c.baseURL, gameSlug, modID, fileID)
 	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
-		return "", err
+		return "", redactHTTPError(err)
 	}
 	c.setHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("nexus API request failed: %w", err)
+		return "", fmt.Errorf("nexus API request failed: %w", redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -327,7 +327,7 @@ func (c *NexusClient) ValidateAPIKey(ctx context.Context) error {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("API key validation request failed: %w", err)
+		return fmt.Errorf("API key validation request failed: %w", redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 
@@ -353,7 +353,7 @@ func (c *NexusClient) ValidateUser(ctx context.Context) (*NexusUser, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("Nexus user validation request failed: %w", err)
+		return nil, fmt.Errorf("Nexus user validation request failed: %w", redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 	c.captureRateLimit(resp.Header)
@@ -416,7 +416,7 @@ func (c *NexusClient) GetModFile(ctx context.Context, gameDomain, gameScopedID s
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("nexus v3 mod-file request failed: %w", err)
+		return nil, fmt.Errorf("nexus v3 mod-file request failed: %w", redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 	c.captureRateLimit(resp.Header)
@@ -445,7 +445,7 @@ func (c *NexusClient) GetModFileDependencyRanges(ctx context.Context, globalFile
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("nexus v3 dep-ranges request failed: %w", err)
+		return nil, fmt.Errorf("nexus v3 dep-ranges request failed: %w", redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 	c.captureRateLimit(resp.Header)
