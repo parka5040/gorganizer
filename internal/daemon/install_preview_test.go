@@ -296,6 +296,50 @@ func TestPreviewSelectableRootsCapsAndHides(t *testing.T) {
 	}
 }
 
+// TestPreviewFlatListIsCapped returns the first 2000 sorted file names for flat and planned archives.
+func TestPreviewFlatListIsCapped(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		gameID string
+		prefix string
+	}{
+		{name: "data folder", gameID: "skyrimse", prefix: "meshes/"},
+		{name: "manifest layout", gameID: "stardewvalley", prefix: "Example/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			var d *Daemon
+			if tc.gameID == "skyrimse" {
+				d = previewTestDaemon(t)
+			} else {
+				d = newStardewDaemon(t)
+			}
+			files := make(map[string]string, 2501)
+			for i := range 2500 {
+				files[tc.prefix+fmt.Sprintf("file%04d.txt", i)] = "x"
+			}
+			if tc.gameID == "stardewvalley" {
+				files["Example/manifest.json"] = sampleManifest
+			}
+			archive := filepath.Join(t.TempDir(), "Many.zip")
+			writeZipFiles(t, archive, files)
+			preview, err := d.PreviewInstall(dto.PreviewInstallRequest{GameID: tc.gameID, ExternalArchivePath: archive})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(preview.FlatFileList) != 2000 || !slices.IsSorted(preview.FlatFileList) {
+				t.Fatalf("flat file list length/order = %d/%v", len(preview.FlatFileList), preview.FlatFileList[:min(len(preview.FlatFileList), 3)])
+			}
+			if got, want := preview.FlatFileList[0], tc.prefix+"file0000.txt"; got != want {
+				t.Errorf("first name = %q, want %q", got, want)
+			}
+			if got, want := preview.FlatFileList[1999], tc.prefix+"file1999.txt"; got != want {
+				t.Errorf("last name = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 // stringNumber formats a directory fixture index consistently.
 func stringNumber(n int) string {
 	return fmt.Sprintf("%03d", n)

@@ -1,11 +1,13 @@
 package download
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -303,8 +305,13 @@ func copyFlatten(gameID, extractRoot, contentRoot, stageDir, installID string, s
 		if rel == "." {
 			return nil
 		}
-		if excludeFomod && strings.EqualFold(rel, "fomod") && d.IsDir() {
-			return filepath.SkipDir
+		if excludeFomod {
+			if strings.EqualFold(rel, "fomod") && d.IsDir() {
+				return filepath.SkipDir
+			}
+			if !d.IsDir() && strings.EqualFold(filepath.Ext(rel), ".cs") {
+				return nil
+			}
 		}
 		installRel := routeOblivionRemasteredPath(rel, rootedOblivionRemastered)
 		dst := filepath.Join(stageDir, installRel)
@@ -343,17 +350,35 @@ func copyFlatten(gameID, extractRoot, contentRoot, stageDir, installID string, s
 	return written, err
 }
 
-// copyFomodSelection applies a FOMOD plugin's file/folder rules.
+// copyFomodSelection applies a FOMOD plugin's file/folder rules in priority order.
 func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile, installID string, sink ProgressSink) ([]string, error) {
+	resolvedRoot, err := filepath.EvalSymlinks(extractRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolving FOMOD extraction root: %w", err)
+	}
+	ordered := append([]FomodFile(nil), files...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Priority < ordered[j].Priority })
 	var written []string
-	for _, f := range files {
-		src, err := fsutil.SafeJoin(extractRoot, f.Source, false)
+	for _, f := range ordered {
+		src, err := resolveFomodSource(extractRoot, resolvedRoot, f.Source)
+		if errors.Is(err, os.ErrNotExist) {
+			slog.Warn("fomod file missing, skipping", "path", f.Source)
+			continue
+		}
 		if err != nil {
-			return written, fmt.Errorf("unsafe FOMOD source %q: %w", f.Source, err)
+			return written, err
+		}
+		info, err := os.Stat(src)
+		if err != nil {
+			return written, fmt.Errorf("reading FOMOD source %q: %w", f.Source, err)
 		}
 		destRel := f.Destination
 		if destRel == "" {
-			destRel = f.Source
+			if f.IsFolder || info.IsDir() {
+				destRel = "."
+			} else {
+				destRel = filepath.Base(src)
+			}
 		}
 		if gameID == "oblivionremastered" {
 			destRel = routeOblivionRemasteredPath(filepath.FromSlash(strings.ReplaceAll(destRel, `\`, `/`)), hasOblivionRemasteredRootMarkers(extractRoot))
@@ -362,20 +387,6 @@ func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile,
 		if err != nil {
 			return written, fmt.Errorf("unsafe FOMOD destination %q: %w", f.Destination, err)
 		}
-		info, err := os.Stat(src)
-		if err != nil {
-			slog.Warn("fomod file missing, skipping", "path", f.Source)
-			continue
-		}
-		resolvedSource, err := filepath.EvalSymlinks(src)
-		if err != nil {
-			return written, fmt.Errorf("resolving FOMOD source %q: %w", f.Source, err)
-		}
-		resolvedRoot, err := filepath.EvalSymlinks(extractRoot)
-		if err != nil || !fsutil.ContainedBy(resolvedRoot, resolvedSource) {
-			return written, fmt.Errorf("unsafe FOMOD source %q: resolves outside extraction root", f.Source)
-		}
-		src = resolvedSource
 		if f.IsFolder || info.IsDir() {
 			err := filepath.WalkDir(src, func(path string, d os.DirEntry, walkErr error) error {
 				if walkErr != nil {
@@ -420,7 +431,59 @@ func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile,
 			})
 		}
 	}
+	if len(written) == 0 {
+		return nil, ErrEmptyInstallSelection
+	}
 	return written, nil
+}
+
+// resolveFomodSource finds each source path component case-insensitively within the extraction root.
+func resolveFomodSource(extractRoot, resolvedRoot, source string) (string, error) {
+	joined, err := fsutil.SafeJoin(extractRoot, source, false)
+	if err != nil {
+		return "", fmt.Errorf("unsafe FOMOD source %q: %w", source, err)
+	}
+	rel, err := filepath.Rel(extractRoot, joined)
+	if err != nil {
+		return "", fmt.Errorf("unsafe FOMOD source %q: %w", source, err)
+	}
+	current := resolvedRoot
+	for _, component := range strings.Split(rel, string(filepath.Separator)) {
+		entries, err := os.ReadDir(current)
+		if err != nil {
+			return "", fmt.Errorf("reading FOMOD source %q: %w", source, err)
+		}
+		match := ""
+		ambiguous := false
+		for _, entry := range entries {
+			if entry.Name() == component {
+				match = component
+				ambiguous = false
+				break
+			}
+			if strings.EqualFold(entry.Name(), component) {
+				if match != "" {
+					ambiguous = true
+				}
+				match = entry.Name()
+			}
+		}
+		if ambiguous {
+			return "", fmt.Errorf("ambiguous FOMOD source %q: multiple entries match %q", source, component)
+		}
+		if match == "" {
+			return "", fmt.Errorf("FOMOD source %q: %w", source, os.ErrNotExist)
+		}
+		resolved, err := filepath.EvalSymlinks(filepath.Join(current, match))
+		if err != nil {
+			return "", fmt.Errorf("resolving FOMOD source %q: %w", source, err)
+		}
+		if !fsutil.ContainedBy(resolvedRoot, resolved) {
+			return "", fmt.Errorf("unsafe FOMOD source %q: resolves outside extraction root", source)
+		}
+		current = resolved
+	}
+	return current, nil
 }
 
 // mergeTree copies every file from src into dst, overwriting on collision.

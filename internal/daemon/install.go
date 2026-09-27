@@ -22,7 +22,10 @@ import (
 	"github.com/parka/gorganizer/internal/fsutil"
 )
 
-const extractionPrefix = "gorganizer-preview-*"
+const (
+	extractionPrefix    = "gorganizer-preview-*"
+	maxPreviewFlatFiles = 2000
+)
 
 func (is *InstallService) runPreviewSweeper() {
 	t := time.NewTicker(2 * time.Minute)
@@ -102,7 +105,7 @@ func (is *InstallService) PreviewInstall(req dto.PreviewInstallRequest) (*dto.Pr
 		if err != nil {
 			return nil, err
 		}
-		out.FlatFileList = files
+		out.FlatFileList = files[:min(len(files), maxPreviewFlatFiles)]
 		out.PreviewID = is.s.previews.put(entry)
 		cached = true
 		return out, nil
@@ -171,6 +174,8 @@ func (is *InstallService) PreviewInstall(req dto.PreviewInstallRequest) (*dto.Pr
 			return nil
 		})
 	}
+	sort.Strings(out.FlatFileList)
+	out.FlatFileList = out.FlatFileList[:min(len(out.FlatFileList), maxPreviewFlatFiles)]
 	out.PreviewID = is.s.previews.put(entry)
 	cached = true
 	return out, nil
