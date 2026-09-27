@@ -448,6 +448,20 @@ type ProfileIniListResult struct {
 	UseCustomIni bool
 }
 
+type ProfileIniSaveResult struct {
+	Outcome    IniSaveOutcome
+	ApplyError string
+}
+
+type IniSaveOutcome int
+
+const (
+	IniSaveUnspecified IniSaveOutcome = iota
+	IniSaveSaved
+	IniSaveSavedAndApplied
+	IniSaveSavedApplyFailed
+)
+
 type ProfileIniStatusResult struct {
 	GameID          string
 	ProfileName     string

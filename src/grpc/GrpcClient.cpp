@@ -190,6 +190,7 @@ GrpcClient::GrpcClient(QObject* parent)
 {
     qRegisterMetaType<GrpcPreviewInstallResult>();
     qRegisterMetaType<GrpcReinstallResult>();
+    qRegisterMetaType<GrpcIniSaveResult>();
     qRegisterMetaType<QStringList>();
     qRegisterMetaType<GrpcRecoveryPending>();
     qRegisterMetaType<quint64>();
@@ -322,6 +323,10 @@ void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
     connect(worker, &GrpcWorker::modDependencyFetchFailed, this, &GrpcClient::modDependencyFetchFailed);
     connect(worker, &GrpcWorker::dependencyEnableAcknowledged, this, &GrpcClient::dependencyEnableAcknowledged);
     connect(worker, &GrpcWorker::dependencyEnableAckFailed, this, &GrpcClient::dependencyEnableAckFailed);
+    connect(worker, &GrpcWorker::profileIniSaved, this, &GrpcClient::profileIniSaved);
+    connect(worker, &GrpcWorker::profileIniSaveFailed, this, &GrpcClient::profileIniSaveFailed);
+    connect(worker, &GrpcWorker::profileIniFilesApplied, this, &GrpcClient::profileIniFilesApplied);
+    connect(worker, &GrpcWorker::profileIniFilesApplyFailed, this, &GrpcClient::profileIniFilesApplyFailed);
     connect(worker, &GrpcWorker::installCompletedHintReceived, this, [this, generation](quint64 streamGeneration, const GrpcInstallCompleted& event) {
         if (generation == m_connectionGeneration && streamGeneration == m_streamStates[GrpcWorker::StreamInstall].generation)
             emit installCompletedHintReceived(event);
@@ -1763,16 +1768,31 @@ bool GrpcClient::listProfileIniFiles(const QString& gameId, const QString& profi
     return true;
 }
 
-bool GrpcClient::saveProfileIniFile(const QString& gameId, const QString& profileName,
-                                    const QString& filename, const QString& content, QString& errorOut)
+quint64 GrpcClient::saveProfileIniFile(const QString& gameId, const QString& profileName,
+                                       const QString& filename, const QString& content)
 {
-    gorganizer::v1::SaveProfileIniFileRequest req;
-    req.set_game_id(gameId.toStdString());
-    req.set_profile_name(profileName.toStdString());
-    req.set_filename(filename.toStdString());
-    req.set_content(content.toStdString());
-    gorganizer::v1::SaveProfileIniFileResponse resp;
-    return mapError(invokeUnary(m_syncStub.get(), &Stub::SaveProfileIniFile, req, resp), errorOut);
+    const quint64 requestId = ++m_nextIniRequestId;
+    if (!unaryWorker()) {
+        QMetaObject::invokeMethod(this, [this, requestId] {
+            emit profileIniSaveFailed(requestId, QStringLiteral("not connected"));
+        }, Qt::QueuedConnection);
+        return requestId;
+    }
+    post(&GrpcWorker::doSaveProfileIniFile, requestId, gameId, profileName, filename, content);
+    return requestId;
+}
+
+quint64 GrpcClient::applyProfileIniFiles(const QString& gameId, const QString& profileName)
+{
+    const quint64 requestId = ++m_nextIniRequestId;
+    if (!unaryWorker()) {
+        QMetaObject::invokeMethod(this, [this, requestId] {
+            emit profileIniFilesApplyFailed(requestId, QStringLiteral("not connected"));
+        }, Qt::QueuedConnection);
+        return requestId;
+    }
+    post(&GrpcWorker::doApplyProfileIniFiles, requestId, gameId, profileName);
+    return requestId;
 }
 
 bool GrpcClient::setProfileIniEnabled(const QString& gameId, const QString& profileName,

@@ -473,6 +473,13 @@ struct GrpcProfileIniFile {
     QString diskPath;
 };
 
+enum class GrpcIniSaveOutcome { Unspecified, Saved, SavedAndApplied, SavedApplyFailed };
+
+struct GrpcIniSaveResult {
+    GrpcIniSaveOutcome outcome = GrpcIniSaveOutcome::Unspecified;
+    QString applyError;
+};
+
 struct GrpcProfileIniStatus {
     QString gameId;
     QString profileName;

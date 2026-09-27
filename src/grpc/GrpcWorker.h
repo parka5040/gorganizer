@@ -110,6 +110,9 @@ public slots:
                                 const QStringList& uniqueIds);
     void doAckDependencyEnable(quint64 requestId, const QString& gameId, const QString& batchId,
                                const QStringList& uniqueIds);
+    void doSaveProfileIniFile(quint64 requestId, const QString& gameId, const QString& profileName,
+                              const QString& filename, const QString& content);
+    void doApplyProfileIniFiles(quint64 requestId, const QString& gameId, const QString& profileName);
 
 signals:
     void gamesListed(const std::vector<GrpcGame>& games);
@@ -201,6 +204,10 @@ signals:
                                       int acknowledged);
     void dependencyEnableAckFailed(quint64 requestId, const QString& gameId, const QString& batchId,
                                    const QString& error);
+    void profileIniSaved(quint64 requestId, const GrpcIniSaveResult& result);
+    void profileIniSaveFailed(quint64 requestId, const QString& error);
+    void profileIniFilesApplied(quint64 requestId, int appliedFileCount);
+    void profileIniFilesApplyFailed(quint64 requestId, const QString& error);
     void installCompletedHintReceived(quint64 generation, const GrpcInstallCompleted& event);
 
     void rpcError(const QString& method, const QString& error);

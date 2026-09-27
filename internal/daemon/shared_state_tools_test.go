@@ -106,7 +106,8 @@ func TestToolsConfigReadRPCsConcurrentConfigureGame(t *testing.T) {
 	}{
 		{"list ini", func(d *Daemon) error { _, err := d.ListProfileIniFiles("falloutnv", "Default"); return err }},
 		{"save ini", func(d *Daemon) error {
-			return d.SaveProfileIniFile("falloutnv", "Default", "FalloutCustom.ini", "[General]\n")
+			_, err := d.SaveProfileIniFile("falloutnv", "Default", "FalloutCustom.ini", "[General]\n")
+			return err
 		}},
 		{"enable ini", func(d *Daemon) error { _, err := d.SetProfileIniEnabled("falloutnv", "Default", true); return err }},
 		{"list tweaks", func(d *Daemon) error { _, err := d.ListIniTweaks("falloutnv", "Default"); return err }},
@@ -382,7 +383,7 @@ func TestToolsScopedConfigReadErrorCompatibility(t *testing.T) {
 	if _, err := d.ListProfileIniFiles("ttw", "Default"); err == nil || !strings.Contains(err.Error(), "missing parent") {
 		t.Fatalf("missing-parent error: %v", err)
 	}
-	if err := d.SaveProfileIniFile("absent", "Default", "FalloutCustom.ini", ""); !errors.Is(err, config.ErrInvalidGameID) {
+	if _, err := d.SaveProfileIniFile("absent", "Default", "FalloutCustom.ini", ""); !errors.Is(err, config.ErrInvalidGameID) {
 		t.Fatalf("save error: %v", err)
 	}
 	if _, err := d.SetProfileIniEnabled("ttw", "Default", true); err == nil || !strings.Contains(err.Error(), "missing parent") {
