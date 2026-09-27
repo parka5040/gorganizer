@@ -101,6 +101,9 @@ ModDependencyController::ModDependencyController(GrpcClient* grpc, SessionContro
     connect(m_modList, &ModListWidget::interactionFinished, this, &ModDependencyController::onListInteractionFinished);
     connect(m_modList, &ModListWidget::modListReadyForEnable, this,
             &ModDependencyController::onModListReadyForEnable);
+    connect(m_modList, &ModListWidget::modListAdopted, this, &ModDependencyController::onModListAdopted);
+    connect(m_modList, &ModListWidget::modListAdoptionDeferred, this,
+            &ModDependencyController::onModListAdoptionDeferred);
     connect(m_modList, &ModListWidget::modsEdited, this, &ModDependencyController::onModListPersisted);
     connect(m_modList, &ModListWidget::dependencyFetchRequested, this,
             &ModDependencyController::onModFetchRequested, Qt::QueuedConnection);
@@ -478,16 +481,51 @@ void ModDependencyController::onModListReadyForEnable()
 
 void ModDependencyController::applyJob(const std::vector<GrpcModListEntry>& entries)
 {
+    m_job->stage = EnableJob::Stage::WaitingForAdoption;
+    m_job->adoptionEntries = entries;
+    m_job->adoptionId = m_modList->adoptModList(entries);
+    if (m_job->adoptionId == 0)
+        finishJob(QStringLiteral("The mod list is not loaded, so no dependency was enabled."));
+}
+
+void ModDependencyController::onModListAdopted(quint64 adoptionId)
+{
+    if (!m_job || m_job->stage != EnableJob::Stage::WaitingForAdoption)
+        return;
+    if (m_job->adoptionId != adoptionId) {
+        requestJobModList();
+        return;
+    }
+    syncContext();
+    if (!jobCurrent()) {
+        finishJob();
+        return;
+    }
+    if (m_modList->editSerial() != m_job->listEditSerial || !m_modList->readyForDependencyEnable()) {
+        requestJobModList();
+        return;
+    }
+    finishApplyingJob(m_job->adoptionEntries);
+}
+
+void ModDependencyController::onModListAdoptionDeferred(quint64 adoptionId)
+{
+    if (!m_job || m_job->stage != EnableJob::Stage::WaitingForAdoption || m_job->adoptionId != adoptionId)
+        return;
+    syncContext();
+    if (jobCurrent())
+        requestJobModList();
+    else
+        finishJob();
+}
+
+void ModDependencyController::finishApplyingJob(const std::vector<GrpcModListEntry>& entries)
+{
     QHash<QString, bool> authoritative;
     for (const auto& entry : entries) {
         if (!authoritative.contains(entry.modName))
             authoritative.insert(entry.modName, entry.enabled);
     }
-    if (!m_modList->adoptModList(entries)) {
-        finishJob(QStringLiteral("The mod list is not loaded, so no dependency was enabled."));
-        return;
-    }
-
     QStringList toEnable;
     for (const auto& name : m_job->modNames) {
         if (m_modList->containsMod(name) && !toEnable.contains(name))
