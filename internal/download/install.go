@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"github.com/google/uuid"
+	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/fsutil"
 )
 
@@ -44,6 +45,7 @@ type InstallRequest struct {
 	LegacyFomodFlatCopy bool
 	Mode                InstallMode
 	TargetMod           string
+	RecordModName       string
 	SourceArchiveRef    SourceArchiveRef
 	DisplayName         string
 	Category            string
@@ -200,13 +202,17 @@ func Install(req InstallRequest) (*InstallResult, error) {
 	if ref.InstalledAt == "" {
 		ref.InstalledAt = time.Now().UTC().Format(time.RFC3339)
 	}
+	recordModName := req.TargetMod
+	if req.RecordModName != "" {
+		recordModName = req.RecordModName
+	}
 	record := func(dir string) (int, error) {
 		count, err := appendSourceArchive(
-			dir, req.TargetMod, ref,
+			dir, recordModName, ref,
 			req.DisplayName, req.Category, req.Version, req.ModPage, written,
 		)
 		if err != nil {
-			recordErr := &InstallRecordError{Mod: req.TargetMod, Err: err}
+			recordErr := &InstallRecordError{Mod: recordModName, Err: err}
 			emit(InstallProgress{Step: StageFailed, Error: recordErr.Error()})
 			return 0, recordErr
 		}
@@ -560,21 +566,27 @@ func mergeTree(src, dst string) error {
 		if d.IsDir() {
 			return os.MkdirAll(target, 0755)
 		}
+		if !d.Type().IsRegular() {
+			return &ArchiveRejectedError{Reason: ArchiveRejectedUnsafeEntry, Detail: rel}
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return err
+		}
+		if statErr == nil {
+			_, err := atomicfile.CopyFileDurable(path, target, 0644, true)
+			return err
+		}
 		in, err := os.Open(path)
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-			in.Close()
-			return err
-		}
-		out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0644)
+		out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0644)
 		if err != nil {
-			in.Close()
+			closeErr := in.Close()
 			if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EISDIR) {
-				return &ArchiveRejectedError{Reason: ArchiveRejectedUnsafeEntry, Detail: rel}
+				return errors.Join(&ArchiveRejectedError{Reason: ArchiveRejectedUnsafeEntry, Detail: rel}, closeErr)
 			}
-			return err
+			return errors.Join(err, closeErr)
 		}
 		_, err = io.Copy(out, in)
 		if closeErr := out.Close(); err == nil {

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/dto"
@@ -521,7 +522,8 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 		}
 	}
 
-	sink := func(p download.InstallProgress) {
+	var mergeComplete *download.InstallProgress
+	publishProgress := func(p download.InstallProgress) {
 		is.s.installBus.Publish(req.GameID, dto.InstallEventResult{
 			GameID: req.GameID,
 			Progress: &dto.InstallProgressResult{
@@ -537,6 +539,13 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 				GameID:         req.GameID,
 			},
 		})
+	}
+	sink := func(p download.InstallProgress) {
+		if req.Mode == dto.InstallMergeIntoMod && p.Step == download.StageComplete {
+			mergeComplete = &p
+			return
+		}
+		publishProgress(p)
 	}
 
 	var fomodFiles []download.FomodFile
@@ -570,13 +579,30 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 		}
 	}
 
+	var mergeToken, mergeStage string
+	var mergeSnapshot *download.ModMetadata
 	if req.Mode == dto.InstallMergeIntoMod {
 		if err := is.s.svc.mods.refuseMountedReinstall(req.GameID, target); err != nil {
 			return "", 0, err
 		}
+		var err error
+		mergeSnapshot, err = download.LoadModMetadata(filepath.Join(config.ModsDir(req.GameID), target))
+		if err != nil {
+			return "", 0, fmt.Errorf("reading mod metadata: %w", err)
+		}
+		mergeToken = uuid.NewString()
+		mergeStage = filepath.Join(config.ModsDir(req.GameID), reinstallStagePrefix+mergeToken)
+		if err := prepareMergeStage(filepath.Join(config.ModsDir(req.GameID), target), mergeStage); err != nil {
+			return "", 0, err
+		}
+		installReq.TargetMod = reinstallStagePrefix + mergeToken
+		installReq.RecordModName = target
 	}
 	result, err := download.Install(installReq)
 	if err != nil {
+		if mergeStage != "" {
+			_ = os.RemoveAll(mergeStage)
+		}
 		if path, ok := download.IsFomodMarker(err); ok {
 			return "", 0, &FomodRequiredError{
 				GameID: req.GameID, Path: path, PreviewID: req.PreviewID,
@@ -586,6 +612,16 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 			return "", 0, &ModCollisionError{Name: name}
 		}
 		return "", 0, err
+	}
+	if mergeStage != "" {
+		if err := is.publishPreparedMerge(req.GameID, target, mergeToken, mergeSnapshot); err != nil {
+			sink(download.InstallProgress{InstallID: result.InstallID, Step: download.StageFailed, Error: err.Error()})
+			return "", 0, err
+		}
+		if mergeComplete != nil {
+			publishProgress(*mergeComplete)
+		}
+		result.ModFolder = target
 	}
 
 	if req.PreviewID != "" {

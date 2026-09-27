@@ -256,6 +256,16 @@ func (md *ModService) commitReinstall(gameID, modName, modsDir, token string, sn
 		_ = os.RemoveAll(stageDir)
 		return 0, fmt.Errorf("writing reinstalled metadata: %w", err)
 	}
+	if err := md.publishReinstallStage(gameID, modName, modsDir, token, false); err != nil {
+		return 0, err
+	}
+	return final.FileCount, nil
+}
+
+// publishReinstallStage records and swaps an already completed stage; the caller holds the game's profile lock.
+func (md *ModService) publishReinstallStage(gameID, modName, modsDir, token string, discardOnIntentFailure bool) error {
+	stageDir := filepath.Join(modsDir, reinstallStagePrefix+token)
+	modDir := filepath.Join(modsDir, modName)
 	intent := reinstallIntent{
 		SchemaVersion: reinstallIntentVersion,
 		Mod:           modName,
@@ -265,15 +275,19 @@ func (md *ModService) commitReinstall(gameID, modName, modsDir, token string, sn
 	intentPath := filepath.Join(modsDir, reinstallIntentPrefix+token+reinstallIntentSuffix)
 	if err := writeReinstallIntent(intentPath, intent); err != nil {
 		_ = os.RemoveAll(stageDir)
-		return 0, fmt.Errorf("recording reinstall intent: %w", err)
+		if discardOnIntentFailure {
+			removeReinstallIntent(intentPath)
+		}
+		return fmt.Errorf("recording reinstall intent: %w", err)
 	}
 	if err := md.s.reinstallStep("intent-written"); err != nil {
-		return 0, err
+		if discardOnIntentFailure {
+			_ = os.RemoveAll(stageDir)
+			removeReinstallIntent(intentPath)
+		}
+		return err
 	}
-	if err := md.swapReinstalledMod(gameID, modName, modDir, stageDir, filepath.Join(modsDir, intent.Old), intentPath); err != nil {
-		return 0, err
-	}
-	return final.FileCount, nil
+	return md.swapReinstalledMod(gameID, modName, modDir, stageDir, filepath.Join(modsDir, intent.Old), intentPath)
 }
 
 // mergedReinstallMetadata combines the current non-file keys of the original metadata with the replayed source and file lists.
