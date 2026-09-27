@@ -751,6 +751,23 @@ func TestStartInstallRequestMapping(t *testing.T) {
 	mustEqualProto(t, resp, &pb.StartInstallResponse{ModFolder: "SkyUI", FileCount: 42})
 }
 
+// TestReplaceInstallRequestMapping passes the replace mode and target through the transport.
+func TestReplaceInstallRequestMapping(t *testing.T) {
+	fake := &fakeController{installFolder: "Existing", installCount: 2}
+	client := newTestClient(t, fake)
+	resp, err := client.StartInstall(t.Context(), &pb.StartInstallRequest{
+		GameId: "skyrimse", ArchiveRelPath: "Replacement.zip",
+		Mode: pb.InstallMode_INSTALL_MODE_REPLACE, TargetMod: "Existing",
+	})
+	if err != nil {
+		t.Fatalf("StartInstall: %v", err)
+	}
+	if fake.installReq.Mode != dto.InstallReplaceMod || fake.installReq.TargetMod != "Existing" {
+		t.Errorf("controller request = %+v, want replace of Existing", fake.installReq)
+	}
+	mustEqualProto(t, resp, &pb.StartInstallResponse{ModFolder: "Existing", FileCount: 2})
+}
+
 // TestSetPluginOrderArgMapping locks the SetPluginOrder request → controller argument mapping.
 func TestSetPluginOrderArgMapping(t *testing.T) {
 	fake := &fakeController{}

@@ -86,6 +86,51 @@ func (is *InstallService) publishPreparedMerge(gameID, modName, token string, sn
 	return is.s.svc.mods.publishReinstallStage(gameID, modName, modsDir, token, dto.GameRunningOperationMerge, true)
 }
 
+// publishPreparedReplace retains the original mod's settings and swaps a completed replacement under the game's profile lock.
+func (is *InstallService) publishPreparedReplace(gameID, modName, token string) error {
+	defer is.s.lockProfiles(gameID)()
+	modsDir := config.ModsDir(gameID)
+	stageDir := filepath.Join(modsDir, reinstallStagePrefix+token)
+	current, err := download.LoadModMetadata(filepath.Join(modsDir, modName))
+	if err != nil {
+		_ = os.RemoveAll(stageDir)
+		return fmt.Errorf("reading mod metadata: %w", err)
+	}
+	staged, err := download.LoadModMetadata(stageDir)
+	if err != nil {
+		_ = os.RemoveAll(stageDir)
+		return fmt.Errorf("reading replacement metadata: %w", err)
+	}
+	final := replaceStageMetadata(current, staged)
+	final.Folder = modName
+	if err := download.SaveModMetadata(stageDir, final); err != nil {
+		_ = os.RemoveAll(stageDir)
+		return fmt.Errorf("writing replacement metadata: %w", err)
+	}
+	return is.s.svc.mods.publishReinstallStage(gameID, modName, modsDir, token, dto.GameRunningOperationReinstall, true)
+}
+
+// replaceStageMetadata keeps the original settings and adopts the replacement's files, archive and supplied version or page.
+func replaceStageMetadata(current, staged *download.ModMetadata) *download.ModMetadata {
+	final := *current
+	final.SourceArchives = staged.SourceArchives
+	final.Files = staged.Files
+	final.FileCount = staged.FileCount
+	if final.Installed == "" {
+		final.Installed = staged.Installed
+	}
+	if final.Name == "" {
+		final.Name = staged.Name
+	}
+	if staged.Version != "" {
+		final.Version = staged.Version
+	}
+	if staged.ModPage != "" {
+		final.ModPage = staged.ModPage
+	}
+	return &final
+}
+
 // mergeStageMetadata retains metadata edits made to the original while the merged files were prepared.
 func mergeStageMetadata(snapshot, current, staged *download.ModMetadata) *download.ModMetadata {
 	final := *staged

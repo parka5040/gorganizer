@@ -447,7 +447,7 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 	if target == "" {
 		return "", 0, fmt.Errorf("could not determine target mod folder")
 	}
-	if req.Mode == dto.InstallMergeIntoMod {
+	if req.Mode == dto.InstallMergeIntoMod || req.Mode == dto.InstallReplaceMod {
 		if _, err := resolveExistingModDir(req.GameID, target); err != nil {
 			var missing *ModNotFoundError
 			if errors.As(err, &missing) {
@@ -463,7 +463,7 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 	if err := ensureModsDir(req.GameID); err != nil {
 		return "", 0, err
 	}
-	if req.Mode == dto.InstallMergeIntoMod {
+	if req.Mode == dto.InstallMergeIntoMod || req.Mode == dto.InstallReplaceMod {
 		if err := download.ValidateMergeTarget(config.ModsDir(req.GameID), target); err != nil {
 			return "", 0, err
 		}
@@ -519,7 +519,7 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 		}
 	}
 
-	var mergeComplete *download.InstallProgress
+	var stagedComplete *download.InstallProgress
 	publishProgress := func(p download.InstallProgress) {
 		is.s.installBus.Publish(req.GameID, dto.InstallEventResult{
 			GameID: req.GameID,
@@ -538,8 +538,8 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 		})
 	}
 	sink := func(p download.InstallProgress) {
-		if req.Mode == dto.InstallMergeIntoMod && p.Step == download.StageComplete {
-			mergeComplete = &p
+		if (req.Mode == dto.InstallMergeIntoMod || req.Mode == dto.InstallReplaceMod) && p.Step == download.StageComplete {
+			stagedComplete = &p
 			return
 		}
 		publishProgress(p)
@@ -576,26 +576,36 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 		}
 	}
 
-	var mergeToken, mergeStage string
+	var stageToken, stageDir string
 	var mergeSnapshot *download.ModMetadata
-	if req.Mode == dto.InstallMergeIntoMod {
-		var err error
-		mergeSnapshot, err = download.LoadModMetadata(filepath.Join(config.ModsDir(req.GameID), target))
-		if err != nil {
-			return "", 0, fmt.Errorf("reading mod metadata: %w", err)
+	if req.Mode == dto.InstallMergeIntoMod || req.Mode == dto.InstallReplaceMod {
+		if req.Mode == dto.InstallMergeIntoMod {
+			var err error
+			mergeSnapshot, err = download.LoadModMetadata(filepath.Join(config.ModsDir(req.GameID), target))
+			if err != nil {
+				return "", 0, fmt.Errorf("reading mod metadata: %w", err)
+			}
 		}
-		mergeToken = uuid.NewString()
-		mergeStage = filepath.Join(config.ModsDir(req.GameID), reinstallStagePrefix+mergeToken)
-		if err := prepareMergeStage(filepath.Join(config.ModsDir(req.GameID), target), mergeStage); err != nil {
-			return "", 0, err
+		stageToken = uuid.NewString()
+		stageDir = filepath.Join(config.ModsDir(req.GameID), reinstallStagePrefix+stageToken)
+		if req.Mode == dto.InstallMergeIntoMod {
+			if err := prepareMergeStage(filepath.Join(config.ModsDir(req.GameID), target), stageDir); err != nil {
+				return "", 0, err
+			}
+		} else {
+			if err := os.Mkdir(stageDir, 0755); err != nil {
+				return "", 0, fmt.Errorf("creating replace stage: %w", err)
+			}
+			installReq.DeferIndexUpdate = true
 		}
-		installReq.TargetMod = reinstallStagePrefix + mergeToken
+		installReq.Mode = download.ModeMergeIntoMod
+		installReq.TargetMod = reinstallStagePrefix + stageToken
 		installReq.RecordModName = target
 	}
 	result, err := download.Install(installReq)
 	if err != nil {
-		if mergeStage != "" {
-			_ = os.RemoveAll(mergeStage)
+		if stageDir != "" {
+			_ = os.RemoveAll(stageDir)
 		}
 		if path, ok := download.IsFomodMarker(err); ok {
 			return "", 0, &FomodRequiredError{
@@ -607,13 +617,24 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 		}
 		return "", 0, err
 	}
-	if mergeStage != "" {
-		if err := is.publishPreparedMerge(req.GameID, target, mergeToken, mergeSnapshot); err != nil {
-			sink(download.InstallProgress{InstallID: result.InstallID, Step: download.StageFailed, Error: err.Error()})
-			return "", 0, err
+	if stageDir != "" {
+		var publishErr error
+		if req.Mode == dto.InstallReplaceMod {
+			publishErr = is.publishPreparedReplace(req.GameID, target, stageToken)
+		} else {
+			publishErr = is.publishPreparedMerge(req.GameID, target, stageToken, mergeSnapshot)
 		}
-		if mergeComplete != nil {
-			publishProgress(*mergeComplete)
+		if publishErr != nil {
+			sink(download.InstallProgress{InstallID: result.InstallID, Step: download.StageFailed, Error: publishErr.Error()})
+			return "", 0, publishErr
+		}
+		if req.Mode == dto.InstallReplaceMod && req.ArchiveRelPath != "" {
+			if err := download.SetUninstalled(req.GameID, req.ArchiveRelPath, false); err != nil {
+				slog.Warn("updating download index failed", "err", err)
+			}
+		}
+		if stagedComplete != nil {
+			publishProgress(*stagedComplete)
 		}
 		result.ModFolder = target
 	}

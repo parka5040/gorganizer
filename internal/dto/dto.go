@@ -237,6 +237,7 @@ type InstallMode int
 const (
 	InstallAsNewMod     InstallMode = 0
 	InstallMergeIntoMod InstallMode = 1
+	InstallReplaceMod   InstallMode = 2
 )
 
 type InstallStep int
