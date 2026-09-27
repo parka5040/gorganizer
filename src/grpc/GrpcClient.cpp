@@ -184,6 +184,7 @@ GrpcClient::GrpcClient(QObject* parent)
     : QObject(parent)
 {
     qRegisterMetaType<GrpcPreviewInstallResult>();
+    qRegisterMetaType<GrpcRecoveryPending>();
     qRegisterMetaType<quint64>();
     m_connectionTimer = new QTimer(this);
     m_connectionTimer->setInterval(5000);
@@ -216,6 +217,7 @@ void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
     connect(worker, &GrpcWorker::vfsMounted, this, &GrpcClient::vfsMounted);
     connect(worker, &GrpcWorker::vfsUnmounted, this, &GrpcClient::vfsUnmounted);
     connect(worker, &GrpcWorker::vfsStatusReceived, this, &GrpcClient::vfsStatusReceived);
+    connect(worker, &GrpcWorker::vfsRecoveryRetried, this, &GrpcClient::vfsRecoveryRetried);
     connect(worker, &GrpcWorker::vfsStatusQueried, this, &GrpcClient::vfsStatusQueried);
     connect(worker, &GrpcWorker::vfsStatusQueryFailed, this, &GrpcClient::vfsStatusQueryFailed);
     connect(worker, &GrpcWorker::maintenanceUnmountFinished, this, &GrpcClient::maintenanceUnmountFinished);
@@ -496,9 +498,14 @@ void GrpcClient::mountVfsWithSwap(const QString& gameId, const QString& profileN
 
 void GrpcClient::unmountVfs(const QString& gameId) { post(&GrpcWorker::doUnmountVfs, gameId); }
 
-void GrpcClient::restoreFromBackup(const QString& gameId)
+void GrpcClient::restoreFromBackup(const QString& gameId, GrpcRecoveryKind kind, const QString& recoveryId)
 {
-    post(&GrpcWorker::doRestoreFromBackup, gameId);
+    post(&GrpcWorker::doRestoreFromBackup, gameId, kind, recoveryId);
+}
+
+void GrpcClient::retryVfsRecovery(const QString& gameId)
+{
+    post(&GrpcWorker::doRetryVfsRecovery, gameId);
 }
 
 void GrpcClient::getVfsStatus(const QString& gameId) { post(&GrpcWorker::doGetVfsStatus, gameId); }

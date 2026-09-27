@@ -5,6 +5,7 @@
 #include "GameDetector.h"
 #include "TTWInstallDialog.h"
 #include "Dialogs.h"
+#include "InstallErrorText.h"
 
 #include <QAction>
 #include <QInputDialog>
@@ -31,6 +32,7 @@ GameSetupController::GameSetupController(AppConfig& config, GrpcClient* grpc,
     , m_parentWindow(parentWindow)
 {
     connect(m_grpc, &GrpcClient::recoveryPending, this, &GameSetupController::onRecoveryPending);
+    connect(m_grpc, &GrpcClient::rpcError, this, &GameSetupController::onRpcError);
 }
 
 void GameSetupController::onActiveGameChanged(const GameInfo& game)
@@ -125,31 +127,104 @@ void GameSetupController::onInstallTTW()
     }
 }
 
-void GameSetupController::onRecoveryPending(const QString& gameId, const QString& dataPath,
-                                            const QString& backupPath, const QString& reason)
+void GameSetupController::onRecoveryPending(const GrpcRecoveryPending& recovery)
 {
-    QMessageBox box(m_parentWindow);
-    box.setWindowTitle("Recovery needed");
-    box.setIcon(QMessageBox::Warning);
-    box.setTextFormat(Qt::RichText);
-    box.setText(
-        QString("<b>Game: %1</b><br><br>%2<br><br>"
-                "Data:&nbsp;<code>%3</code><br>"
-                "Backup:&nbsp;<code>%4</code><br><br>"
-                "Restoring will <b>delete the current Data/</b> and "
-                "rename Data.orig/ back. Inspect the directories first "
-                "if you're not sure where they came from.")
-            .arg(gameId.toHtmlEscaped(),
-                 reason.toHtmlEscaped(),
-                 dataPath.toHtmlEscaped(),
-                 backupPath.toHtmlEscaped()));
-    auto* restoreBtn = box.addButton("Restore from Data.orig",
-                                     QMessageBox::DestructiveRole);
-    box.addButton("Cancel", QMessageBox::RejectRole);
-    box.exec();
-    if (box.clickedButton() == restoreBtn) {
-        m_grpc->restoreFromBackup(gameId);
+    m_latestRecoveries.insert(recovery.gameId, recovery);
+    m_lastRecoveryEventSeq.insert(recovery.gameId, ++m_recoveryEventSeq);
+    if (m_seenRecoveryIds.value(recovery.gameId).contains(recovery.recoveryId))
+        return;
+    m_seenRecoveryIds[recovery.gameId].insert(recovery.recoveryId);
+    queueRecovery(recovery);
+}
+
+void GameSetupController::reviewRecovery(const QString& gameId)
+{
+    if (!m_latestRecoveries.contains(gameId)) {
+        m_grpc->getVfsStatus(gameId);
+        m_statusBar->showMessage("Waiting for the recovery details from Gorganizer…", 5000);
+        return;
     }
+    const GrpcRecoveryPending recovery = m_latestRecoveries.value(gameId);
+    m_seenRecoveryIds[gameId].insert(recovery.recoveryId);
+    queueRecovery(recovery);
+}
+
+void GameSetupController::queueRecovery(const GrpcRecoveryPending& recovery)
+{
+    if (m_showingRecovery && m_showingRecoveryGameId == recovery.gameId
+        && m_showingRecoveryId == recovery.recoveryId)
+        return;
+    m_queuedRecoveries.insert(recovery.gameId, recovery);
+    if (m_showingRecovery)
+        return;
+    m_showingRecovery = true;
+    while (!m_queuedRecoveries.isEmpty()) {
+        const GrpcRecoveryPending next = m_queuedRecoveries.take(m_queuedRecoveries.cbegin().key());
+        m_showingRecoveryGameId = next.gameId;
+        m_showingRecoveryId = next.recoveryId;
+
+        QString gameName = next.gameId;
+        if (const auto known = GameInfo::findByShortName(next.gameId); known && !known->name.isEmpty())
+            gameName = known->name;
+        if (m_session->activeGame().shortName == next.gameId && !m_session->activeGame().name.isEmpty())
+            gameName = m_session->activeGame().name;
+
+        QMessageBox box(m_parentWindow);
+        box.setWindowTitle("Recovery needed");
+        box.setIcon(QMessageBox::Warning);
+        box.setTextFormat(Qt::PlainText);
+        box.setDetailedText(QString("Reason: %1\nGame folder: %2\nBackup folder: %3")
+                                .arg(next.reason, next.dataPath, next.backupPath));
+        QPushButton* action = nullptr;
+        switch (next.kind) {
+        case GrpcRecoveryKind::Data:
+            box.setText(QString("Restore the original game files for %1? This replaces the current "
+                                "managed game folder with its backup. Files not captured in the backup may be lost.")
+                            .arg(gameName));
+            action = box.addButton("Restore original files", QMessageBox::DestructiveRole);
+            break;
+        case GrpcRecoveryKind::ModLoader:
+            box.setText(QString("An interrupted SMAPI change for %1 needs recovery.").arg(gameName));
+            action = box.addButton("Retry SMAPI recovery", QMessageBox::ActionRole);
+            break;
+        case GrpcRecoveryKind::GameRoot:
+            box.setText(QString("Files added beside the %1 program need recovery.").arg(gameName));
+            action = box.addButton("Retry game-file recovery", QMessageBox::ActionRole);
+            break;
+        default:
+            box.setText(QString("Gorganizer found a recovery issue for %1 it cannot explain safely. "
+                                "Update Gorganizer before continuing.").arg(gameName));
+            box.addButton("Close", QMessageBox::RejectRole);
+            break;
+        }
+        if (action)
+            box.addButton("Cancel", QMessageBox::RejectRole);
+        box.exec();
+        if (action && box.clickedButton() == action) {
+            m_lastRestoreAttemptSeq.insert(next.gameId, m_recoveryEventSeq);
+            m_grpc->restoreFromBackup(next.gameId, next.kind, next.recoveryId);
+        }
+        m_showingRecoveryGameId.clear();
+        m_showingRecoveryId.clear();
+    }
+    m_showingRecovery = false;
+}
+
+void GameSetupController::onRpcError(const QString& method, const QString& error)
+{
+    if (method != QLatin1String("RestoreFromBackup"))
+        return;
+    const InstallError parsed = parseInstallError(error);
+    if (parsed.token != QLatin1String("recovery_stale"))
+        return;
+    const QString gameId = parsed.fields.value(QStringLiteral("game"));
+    const bool reannounced = m_latestRecoveries.contains(gameId)
+        && m_lastRecoveryEventSeq.value(gameId) > m_lastRestoreAttemptSeq.value(gameId);
+    m_seenRecoveryIds.remove(gameId);
+    dialogs::plainInfo(m_parentWindow, "Recovery changed", daemonErrorMessage(error));
+    if (reannounced && m_latestRecoveries.contains(gameId)
+        && !m_seenRecoveryIds.value(gameId).contains(m_latestRecoveries.value(gameId).recoveryId))
+        reviewRecovery(gameId);
 }
 
 }

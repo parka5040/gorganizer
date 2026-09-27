@@ -1,9 +1,12 @@
 #pragma once
 
+#include <QHash>
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include "AppConfig.h"
 #include "GameInfo.h"
+#include "GrpcTypes.h"
 
 class QAction;
 class QStatusBar;
@@ -29,13 +32,19 @@ public slots:
     void onAddNewGame();
     // Runs the TTW installer dialog; on success marks ttw managed and active before re-detection.
     void onInstallTTW();
+    // Reopens the latest recovery prompt for a game or requests its status while details are unavailable.
+    void reviewRecovery(const QString& gameId);
 
 private slots:
-    // Modal prompt for ambiguous Data/ state at daemon startup; restore is destructive and user-confirmed.
-    void onRecoveryPending(const QString& gameId, const QString& dataPath,
-                           const QString& backupPath, const QString& reason);
+    // Shows a recovery prompt once for each pending item identity.
+    void onRecoveryPending(const GrpcRecoveryPending& recovery);
+    // Explains that a recovery confirmation went stale without changing the game.
+    void onRpcError(const QString& method, const QString& error);
 
 private:
+    // Queues a recovery prompt without repeating the currently open dialog.
+    void queueRecovery(const GrpcRecoveryPending& recovery);
+
     AppConfig& m_config;
     GrpcClient* m_grpc;
     SessionController* m_session;
@@ -43,6 +52,15 @@ private:
     QAction* m_installTtwAction;
     QStatusBar* m_statusBar;
     QWidget* m_parentWindow;
+    QHash<QString, QSet<QString>> m_seenRecoveryIds;
+    QHash<QString, GrpcRecoveryPending> m_latestRecoveries;
+    QHash<QString, GrpcRecoveryPending> m_queuedRecoveries;
+    QHash<QString, quint64> m_lastRecoveryEventSeq;
+    QHash<QString, quint64> m_lastRestoreAttemptSeq;
+    quint64 m_recoveryEventSeq = 0;
+    QString m_showingRecoveryGameId;
+    QString m_showingRecoveryId;
+    bool m_showingRecovery = false;
 };
 
 }

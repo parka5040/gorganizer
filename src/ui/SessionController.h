@@ -9,7 +9,9 @@
 #include "GrpcTypes.h"
 #include <vector>
 
+class QAction;
 class QLabel;
+class QPushButton;
 class QStatusBar;
 class QToolButton;
 class QWidget;
@@ -35,6 +37,7 @@ public:
                       DownloadsLibraryView* downloadsLibrary,
                       RunButtonWidget* runButton,
                       QToolButton* applyButton,
+                      QAction* unmountAction,
                       QLabel* statusInfo,
                       QStatusBar* statusBar,
                       QWidget* parentWindow);
@@ -72,6 +75,7 @@ public slots:
 signals:
     void activeGameChanged(const GameInfo& game);
     void profileChanged(const QString& profileName);
+    void recoveryReviewRequested(const QString& gameId);
 
 private:
     // Rebuilds the managed-game list from a daemon detection pass (authoritative over local detection).
@@ -82,10 +86,18 @@ private:
     void onVfsStatusReceived(const GrpcVFSStatus& status);
     // Reverts a failed SetModList loudly (U-4), warns when Apply is refused because the game runs, and shows other RPC errors as readable status text.
     void onRpcError(const QString& method, const QString& error);
-    // Shows/enables the Apply button while the daemon reports the VFS dirty (U-2).
+    // Shows or disables Apply according to pending changes and recovery state.
     void setVfsDirty(bool dirty);
-    // Mounts the active game's current profile unless automatic mounting is suppressed for it.
+    // Updates the active game's recovery controls from a daemon status.
+    void updateVfsStatus(const GrpcVFSStatus& status);
+    // Reports whether recovery blocks changes to the named game.
+    bool recoveryBlocked(const QString& gameId) const;
+    // Mounts the active game's current profile unless automatic mounting is suppressed or recovery is blocked.
     void autoMountActiveProfile();
+    // Rechecks deferred recovery or requests a review of pending recovery for the active game.
+    void onRecoveryAction();
+    // Updates the persistent recovery indicator and its action for the active game.
+    void refreshRecoveryIndicator();
     // Sends the unmount RPC for gameId and reports it in the status bar.
     void requestUnmount(const QString& gameId);
     // Mounts profileName of gameId with auto-swap and reports it in the status bar, or keeps it pending until the daemon reconnects.
@@ -102,7 +114,10 @@ private:
     DownloadsLibraryView* m_downloadsLibrary;
     RunButtonWidget* m_runButton;
     QToolButton* m_applyButton;
+    QAction* m_unmountAction;
     QLabel* m_statusInfo;
+    QLabel* m_recoveryLabel;
+    QPushButton* m_recoveryButton;
     QStatusBar* m_statusBar;
     QWidget* m_parentWindow;
 
@@ -111,6 +126,11 @@ private:
     QString m_currentProfile = "Default";
     bool m_vfsDirty = false;
     bool m_vfsMounted = false;
+    QHash<QString, GrpcVFSLifecycleState> m_lifecycleStates;
+    QString m_lifecycleReason;
+    quint64 m_autoMountQueryId = 0;
+    QString m_retryGameId;
+    QSet<QString> m_recoveryMountSkipped;
     QSet<QString> m_autoMountSuppressed;
     QSet<QString> m_autoMountSkipped;
     QHash<QString, QString> m_pendingRemounts;

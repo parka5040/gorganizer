@@ -225,7 +225,7 @@ void MainWindow::createControllers()
 {
     m_session = new SessionController(m_config, m_grpc, m_gameSelector, m_profileSelector,
                                       m_modList, m_pluginList, m_downloadsLibrary, m_runButton,
-                                      m_applyButton, m_statusInfo, statusBar(), this);
+                                      m_applyButton, m_unmountAction, m_statusInfo, statusBar(), this);
     m_modLoader = new ModLoaderController(m_grpc, m_session, m_smapiMenu, statusBar(), this);
     m_launch = new LaunchController(m_config, m_grpc, m_session, m_modLoader, m_runButton, statusBar(), this);
     m_falloutPatch = new FalloutPatchController(m_grpc, m_session, m_runButton, m_patch4GBAction,
@@ -271,6 +271,8 @@ void MainWindow::wireConnections()
             m_falloutPatch, &FalloutPatchController::onActiveGameChanged);
     connect(m_session, &SessionController::activeGameChanged,
             m_gameSetup, &GameSetupController::onActiveGameChanged);
+    connect(m_session, &SessionController::recoveryReviewRequested,
+            m_gameSetup, &GameSetupController::reviewRecovery);
     connect(m_session, &SessionController::activeGameChanged, this,
             [this](const GameInfo&) { updateTransferActionsEnabled(); });
     connect(m_session, &SessionController::activeGameChanged,
