@@ -55,7 +55,7 @@ private:
 
     static GrpcArchiveRow rowFromModel(const struct DownloadRowData& d);
 
-    static void openNexusPage(const GrpcArchiveRow& row);
+    void openNexusPage(const GrpcArchiveRow& row);
 };
 
 }

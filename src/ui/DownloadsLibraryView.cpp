@@ -276,7 +276,7 @@ void DownloadsLibraryView::onContextMenu(const QPoint& pos)
             });
         }
         menu.addSeparator();
-        menu.addAction("Open Nexus Page", this, [row] { openNexusPage(row); });
+        menu.addAction("Open Nexus Page", this, [this, row] { openNexusPage(row); });
         if (!inFlight)
             menu.addAction("Delete Archive", this, [this, row] { actionDelete(row); });
         menu.addSeparator();
