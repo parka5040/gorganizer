@@ -63,3 +63,19 @@ type BundleRejectedError struct {
 func (e *BundleRejectedError) Error() string {
 	return fmt.Sprintf("export bundle rejected: %s: %q", e.Reason, e.Item)
 }
+
+type BundleIncompleteError struct {
+	Items    int
+	Recovery string
+	Err      error
+}
+
+// Error reports how many items an interrupted import committed and whether a replacement still needs recovery.
+func (e *BundleIncompleteError) Error() string {
+	return fmt.Sprintf("import stopped after %d items (recovery %s): %v", e.Items, e.Recovery, e.Err)
+}
+
+// Unwrap returns the failure that stopped the import.
+func (e *BundleIncompleteError) Unwrap() error {
+	return e.Err
+}
