@@ -1,5 +1,6 @@
 #include "DownloadsModel.h"
 #include "ThemeManager.h"
+#include "ErrorPresenter.h"
 
 #include <QColor>
 #include <QDateTime>
@@ -77,7 +78,7 @@ QVariant DownloadsModel::data(const QModelIndex& idx, int role) const
         }
         case Qt::ToolTipRole:
             if (r.phase == DownloadPhase::Failed && !r.error.isEmpty())
-                return r.error;
+                return errorSummary("download this archive", r.error);
             if (r.phase == DownloadPhase::Installing && !r.currentFile.isEmpty())
                 return r.currentFile;
             return {};

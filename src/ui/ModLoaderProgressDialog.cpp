@@ -1,4 +1,5 @@
 #include "ModLoaderProgressDialog.h"
+#include "ErrorPresenter.h"
 
 #include <QDialogButtonBox>
 #include <QLabel>
@@ -106,9 +107,11 @@ void ModLoaderProgressDialog::onDaemonInfo(const QString& info)
     if (phase == QLatin1String("failed"))
         m_lastFailure = capped(detail, kFailureLimit);
     const QString label = phaseLabel(phase);
+    const QString shown = phase == QLatin1String("failed") || phase == QLatin1String("warning")
+        ? errorSummary(QStringLiteral("change SMAPI"), detail, true) : detail;
     m_phase->setText(label);
-    m_detail->setText(capped(detail, kDetailLimit));
-    m_log->appendPlainText(detail.isEmpty() ? label : capped(QStringLiteral("%1: %2").arg(label, detail), kLogEntryLimit));
+    m_detail->setText(capped(shown, kDetailLimit));
+    m_log->appendPlainText(shown.isEmpty() ? label : capped(QStringLiteral("%1: %2").arg(label, shown), kLogEntryLimit));
 }
 
 QString ModLoaderProgressDialog::capped(const QString& text, int limit)

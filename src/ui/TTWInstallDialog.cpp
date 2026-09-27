@@ -1,6 +1,7 @@
 #include "TTWInstallDialog.h"
 #include "Dialogs.h"
 #include "InstallErrorText.h"
+#include "ErrorPresenter.h"
 #include "ModDependencyText.h"
 
 #include <QApplication>
@@ -268,8 +269,7 @@ void TTWInstallDialog::onRefreshPrereqs()
     GrpcTTWPrereqStatus st;
     QString err;
     if (!m_grpc->checkTTWPrereqs(currentBackend(), st, err)) {
-        dialogs::warn(this, "Pre-flight failed",
-            QString("CheckTTWPrereqs RPC failed: %1").arg(err));
+        presentError(this, "Pre-flight failed", "check Tale of Two Wastelands requirements", err);
         return;
     }
     renderPrereqs(st);
@@ -340,7 +340,7 @@ void TTWInstallDialog::onInstallMissing()
     if (currentBackend() == GrpcTTWBackendNative) {
         QString path, version, err;
         if (!m_grpc->ensureNativeMpiInstaller(path, version, err)) {
-            dialogs::warn(this, "Could not install mpi_installer", err);
+            presentError(this, "Install Failed", "install the Tale of Two Wastelands installer", err, true);
             return;
         }
         dialogs::info(this, "Installed",
@@ -350,7 +350,7 @@ void TTWInstallDialog::onInstallMissing()
     }
     QString id, err;
     if (!m_grpc->installTTWPrereqs(id, err)) {
-        dialogs::warn(this, "Could not install prereqs", err);
+        presentError(this, "Install Failed", "install Tale of Two Wastelands requirements", err, true);
         return;
     }
     appendLog(QString("[%1] protontricks started — watch the log tail").arg(id));
@@ -365,7 +365,7 @@ void TTWInstallDialog::onBootstrapPrefix()
     if (!m_grpc) return;
     QString err;
     if (!m_grpc->bootstrapFNVPrefix(err)) {
-        dialogs::warn(this, "Bootstrap failed", err);
+        presentError(this, "Setup Failed", "set up the Fallout game files", err, true);
         return;
     }
     dialogs::info(this, "Prefix bootstrapped",
@@ -445,7 +445,7 @@ void TTWInstallDialog::onPickMpi()
     GrpcTTWInstallerInfo info;
     QString err;
     if (!m_grpc->prepareTTWInstaller(picked, currentBackend(), info, err)) {
-        dialogs::warn(this, "Could not resolve .mpi", err);
+        presentError(this, "Installer Not Found", "find the Tale of Two Wastelands installer", err);
         return;
     }
 
@@ -516,15 +516,15 @@ void TTWInstallDialog::onConfigure()
             QString uerr;
             std::vector<QString> flagged;
             if (!m_grpc->uninstallMod("ttw", m_modName, true, flagged, uerr)) {
-                dialogs::warn(this, "Could not remove existing mod", uerr);
+                presentError(this, "Remove Failed", "uninstall this mod", uerr, true);
                 return;
             }
             if (!m_grpc->createBlankTTWMod(m_modName, modDir, err)) {
-                dialogs::warn(this, "Could not create TTW mod folder", err);
+                presentError(this, "Setup Failed", "create the Tale of Two Wastelands mod folder", err, true);
                 return;
             }
         } else {
-            dialogs::warn(this, "Could not create TTW mod folder", err);
+            presentError(this, "Setup Failed", "create the Tale of Two Wastelands mod folder", err, true);
             return;
         }
     }
@@ -655,7 +655,7 @@ void TTWInstallDialog::onRunInstaller()
 
     QString id, err;
     if (!m_grpc->launchTTWInstaller(info, m_modName, id, err)) {
-        dialogs::warn(this, "Could not launch installer", err);
+        presentError(this, "Install Failed", "install Tale of Two Wastelands", err, true);
         return;
     }
     m_inFlightInstallId = id;
@@ -681,7 +681,7 @@ void TTWInstallDialog::onCancelInstaller()
     }
     QString err;
     if (!m_grpc->cancelTTWInstaller(m_inFlightInstallId, err)) {
-        dialogs::warn(this, "Cancel failed", err);
+        presentError(this, "Cancel Failed", "cancel the installer", err, true);
         return;
     }
     appendLog(QString("[%1] cancel issued").arg(m_inFlightInstallId));
@@ -701,8 +701,6 @@ void TTWInstallDialog::onDaemonInfo(const QString& info)
         return;
     }
 
-    appendLog(info);
-
     static const QRegularExpression tagRe(
         QStringLiteral("^\\[([^:\\]]+):([^\\]]+)\\]\\s*(.*)$"));
     QString kind, payload;
@@ -713,6 +711,9 @@ void TTWInstallDialog::onDaemonInfo(const QString& info)
     } else {
         payload = info;
     }
+    const bool installFailed = kind == QLatin1String("exit")
+        && !payload.contains(QStringLiteral("code=0"));
+    appendLog(installFailed ? errorSummary("install Tale of Two Wastelands", payload, true) : info);
 
     if (!payload.isEmpty()
         && kind != "tick" && kind != "start" && kind != "exit") {
@@ -744,9 +745,9 @@ void TTWInstallDialog::onDaemonInfo(const QString& info)
         } else {
             m_runProgress->setRange(0, 100);
             m_runProgress->setValue(0);
-            m_runStatusLine->setText(QString("Failed. %1").arg(payload));
-            m_runElapsedLabel->setText(
-                QString("<b>Install failed.</b> %1 — see log above.").arg(payload.toHtmlEscaped()));
+            m_runStatusLine->setText(errorSummary("install Tale of Two Wastelands", payload, true));
+            m_runElapsedLabel->setText("Install failed. Show details for more information.");
+            presentError(this, "Install Failed", "install Tale of Two Wastelands", payload, true);
             m_runStartBtn->setVisible(true);
             m_runStartBtn->setEnabled(true);
             m_runCancelBtn->setEnabled(false);
@@ -850,7 +851,7 @@ void TTWInstallDialog::onActivate()
 
     QString err;
     if (!m_grpc->setTTWLauncherExe(m_chosenLauncherRel, err)) {
-        dialogs::warn(this, "Could not set launcher", err);
+        presentError(this, "Launcher Not Saved", "set the Tale of Two Wastelands launcher", err, true);
         return;
     }
 
@@ -905,7 +906,7 @@ void TTWInstallDialog::populateLauncherCandidates()
     if (!id.isEmpty() && m_grpc) {
         fetched = m_grpc->getTTWInstallResult(id, false, result, err);
         if (!fetched)
-            appendLog(QString("[dialog] could not fetch install result: %1").arg(err));
+            appendLog(errorSummary("fetch the install result", err));
     }
 
     auto isRecommendedName = [](const QString& base) {

@@ -16,9 +16,6 @@ void warn(QWidget* parent, const QString& title, const QString& text);
 // Shows an error as plain text.
 void error(QWidget* parent, const QString& title, const QString& text);
 
-// One-shot warning message box whose text always renders as rich text.
-void richWarn(QWidget* parent, const QString& title, const QString& text);
-
 // One-shot warning message box whose text always renders as plain text.
 void plainWarn(QWidget* parent, const QString& title, const QString& text);
 

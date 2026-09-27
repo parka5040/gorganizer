@@ -36,6 +36,7 @@ add_library(gorganizer_ui STATIC
     Dialogs.cpp
     SafeLinks.cpp
     InstallErrorText.cpp
+    ErrorPresenter.cpp
     ModDependencyText.cpp
     ModDependencyController.cpp
     DependencyFetchDialog.cpp

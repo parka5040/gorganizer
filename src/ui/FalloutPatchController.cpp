@@ -3,6 +3,7 @@
 #include "SessionController.h"
 #include "RunButtonWidget.h"
 #include "Dialogs.h"
+#include "ErrorPresenter.h"
 
 #include <QAction>
 #include <QMessageBox>
@@ -77,22 +78,11 @@ void FalloutPatchController::onPatchFalloutTo4GB()
     if (!m_grpc->install4GBPatcher(m_session->activeGame().shortName, patcherExePath, version, err)) {
         const QString lower = err.toLower();
         if (lower.contains("xnvse")) {
-            dialogs::warn(m_parentWindow, "xNVSE Required",
-                "xNVSE must be installed before applying the 4GB patch. "
-                "The patcher relies on the script extender being in place.\n\n"
-                "Open the Run combo and choose Install xNVSE..., then try "
-                "again.");
+            presentError(m_parentWindow, "xNVSE Required", "download the Fallout patcher", err, true);
         } else if (lower.contains("api key") || lower.contains("apikey")) {
-            dialogs::warn(m_parentWindow, "Nexus API Key Required",
-                "A Nexus Mods API key is required to download the 4GB patcher.\n\n"
-                "Open Tools → Settings and paste a key, then try "
-                "again.");
+            presentError(m_parentWindow, "Nexus API Key Required", "download the Fallout patcher", err, true);
         } else {
-            dialogs::warn(m_parentWindow, "Download Failed",
-                QString("%1\n\n"
-                        "If you are a non-premium Nexus user, open the mod page "
-                        "in a browser and click 'Download with Manager' to trigger "
-                        "an NXM download.").arg(err));
+            presentError(m_parentWindow, "Download Failed", "download the Fallout patcher", err, true);
         }
         m_statusBar->clearMessage();
         return;
@@ -118,9 +108,8 @@ void FalloutPatchController::onPatchFalloutTo4GB()
     m_statusBar->showMessage("Applying 4GB patch...");
     QString output, applyErr;
     if (!m_grpc->apply4GBPatch(m_session->activeGame().shortName, patcherExePath, output, applyErr)) {
-        dialogs::warn(m_parentWindow, "Patch Failed",
-            QString("%1\n\nPatcher output:\n%2")
-                .arg(applyErr, output));
+        presentError(m_parentWindow, "Patch Failed", "patch Fallout", applyErr, true,
+                     output.isEmpty() ? QString() : QStringLiteral("Patcher output:\n") + output);
         m_statusBar->clearMessage();
         return;
     }

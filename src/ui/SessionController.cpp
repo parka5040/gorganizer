@@ -9,6 +9,7 @@
 #include "GameDetector.h"
 #include "Dialogs.h"
 #include "InstallErrorText.h"
+#include "ErrorPresenter.h"
 
 #include <QAction>
 #include <QDir>
@@ -440,16 +441,20 @@ void SessionController::onRpcError(const QString& method, const QString& error)
     if (method == "SetModList") {
         if (m_activeGame.detected)
             m_modList->reloadAfterFailedSave(m_activeGame, m_currentProfile);
-        dialogs::warn(m_parentWindow, "Change not saved",
-            QString("A mod-list change could not be saved and was reverted:\n\n%1").arg(error));
+        presentError(m_parentWindow, "Change not saved", "save mod choices", error, true);
         return;
     }
-    const QString text = daemonErrorMessage(error);
     if (method == QLatin1String("RebuildVFS") && parseInstallError(error).token == QLatin1String("game_running")) {
-        dialogs::plainWarn(m_parentWindow, "Apply Changes", text);
+        presentError(m_parentWindow, "Apply Changes", "apply mod changes", error, true);
         return;
     }
-    m_statusBar->showMessage(QString("Error (%1): %2").arg(method, text), 5000);
+    const QString operation = method == QLatin1String("MountVFS") ? QStringLiteral("mount mods")
+        : method == QLatin1String("UnmountVFS") ? QStringLiteral("unmount mods")
+        : method == QLatin1String("RebuildVFS") ? QStringLiteral("apply mod changes")
+        : method == QLatin1String("RetryVFSRecovery") ? QStringLiteral("check recovery")
+        : method == QLatin1String("RestoreFromBackup") ? QStringLiteral("restore the game files")
+        : QStringLiteral("complete this request");
+    m_statusBar->showMessage(errorSummary(operation, error, true), 5000);
 }
 
 void SessionController::onRecoveryAction()

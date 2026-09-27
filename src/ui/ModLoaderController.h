@@ -128,7 +128,8 @@ private:
     // Clears the current operation, stops its timers and progress dialog, and announces the end of its activity.
     std::optional<Operation> releaseOperation();
     // Shows a warning whose Remount Mods button mounts profileName of gameId again, or a plain warning when no profile is known.
-    void warnWithRemount(const QString& title, const QString& message, const QString& gameId, const QString& profileName);
+    void warnWithRemount(const QString& title, const QString& message, const QString& gameId,
+                         const QString& profileName, const QString& rawError = QString());
     // Returns the profile to mount after the operation, which is the captured one when the mods were mounted at its start.
     static QString remountProfileFor(const Operation& op);
     // Ends the operation with its definitive RPC result, restoring the mount and showing the outcome.

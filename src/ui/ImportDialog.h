@@ -48,7 +48,6 @@ private:
     GrpcTransferPolicy selectedPolicy() const;
     QStringList checkedChildren(const QTreeWidgetItem* root) const;
     bool confirmAbortWhileRunning();
-    static QString friendlyTransferError(const QString& error);
 
     GrpcClient* m_grpc;
     QString m_gameId;

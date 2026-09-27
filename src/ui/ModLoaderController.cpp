@@ -2,6 +2,7 @@
 #include "Dialogs.h"
 #include "GrpcClient.h"
 #include "InstallErrorText.h"
+#include "ErrorPresenter.h"
 #include "ModLoaderProgressDialog.h"
 #include "SessionController.h"
 
@@ -38,9 +39,7 @@ bool versionNewer(const QString& candidate, const QString& installed)
 
 QString unmountErrorText(const QString& error)
 {
-    if (parseInstallError(error).token.startsWith(QLatin1String("modloader_")))
-        return modLoaderErrorMessage(error);
-    return error;
+    return errorSummary(QStringLiteral("unmount mods"), error, true);
 }
 
 bool repairable(GrpcModLoaderState state)
@@ -251,11 +250,11 @@ void ModLoaderController::onStatusFailed(quint64 requestId, const QString& gameI
     if (requestId == m_interactiveCheckId) {
         m_interactiveCheckId = 0;
         updateMenu();
-        showModLoaderError(m_parentWindow, "Check for SMAPI Updates", error);
+        presentError(m_parentWindow, "Check for SMAPI Updates", "check for SMAPI updates", error);
         return;
     }
     if (gameId == m_game.shortName)
-        m_statusBar->showMessage(QString("Could not read the SMAPI status: %1").arg(modLoaderErrorMessage(error)), 5000);
+        m_statusBar->showMessage(errorSummary("check SMAPI's status", error), 5000);
     updateMenu();
 }
 
@@ -286,7 +285,7 @@ void ModLoaderController::reportUpdateCheck(const GrpcModLoaderStatus& status)
     if (status.latestVersion.isEmpty()) {
         QString text = QStringLiteral("gorganizer could not find out which SMAPI release is the newest.");
         if (!status.detail.isEmpty())
-            text += QStringLiteral("\n\n%1").arg(capped(status.detail));
+            text += QStringLiteral("\n\n%1").arg(errorSummary("check for SMAPI updates", status.detail));
         dialogs::plainWarn(m_parentWindow, title, text);
         return;
     }
@@ -446,7 +445,7 @@ void ModLoaderController::onVfsStatusQueryFailed(quint64 requestId, const QStrin
         return;
     if (m_op->phase == Phase::Capturing && requestId == m_op->captureRequestId) {
         const QString message = QStringLiteral("gorganizer could not check whether the mods of %1 are mounted, so "
-                                               "SMAPI was not changed.\n\n%2").arg(m_op->gameName, capped(error));
+                                               "SMAPI was not changed.\n\n%2").arg(m_op->gameName, errorSummary("check mounted mods", error));
         abortOperation(message, QString(), true);
         return;
     }
@@ -554,7 +553,7 @@ void ModLoaderController::onPhaseTimeout()
         const std::optional<Operation> op = releaseOperation();
         m_session->finishMaintenance(op->gameId, QString(), false);
         m_statusBar->clearMessage();
-        warnWithRemount(operationTitle(op->kind), message, op->gameId, profile);
+        warnWithRemount(operationTitle(op->kind), message, op->gameId, profile, op->unmountError);
         return;
     }
     if (m_op->phase != Phase::Reconciling)
@@ -579,9 +578,9 @@ void ModLoaderController::onPhaseTimeout()
 }
 
 void ModLoaderController::warnWithRemount(const QString& title, const QString& message, const QString& gameId,
-                                          const QString& profileName)
+                                          const QString& profileName, const QString& rawError)
 {
-    if (profileName.isEmpty()) {
+    if (profileName.isEmpty() && rawError.isEmpty()) {
         dialogs::plainWarn(m_parentWindow, title, message);
         return;
     }
@@ -590,11 +589,16 @@ void ModLoaderController::warnWithRemount(const QString& title, const QString& m
     box.setIcon(QMessageBox::Warning);
     box.setTextFormat(Qt::PlainText);
     box.setText(message);
-    QPushButton* remount = box.addButton(QStringLiteral("Remount Mods"), QMessageBox::AcceptRole);
+    QPushButton* remount = nullptr;
+    if (!profileName.isEmpty()) {
+        remount = box.addButton(QStringLiteral("Remount Mods"), QMessageBox::AcceptRole);
+        box.setDefaultButton(remount);
+    }
     box.addButton(QMessageBox::Close);
-    box.setDefaultButton(remount);
+    if (!rawError.isEmpty())
+        attachErrorDetails(&box, title, QStringLiteral("unmount mods"), rawError);
     box.exec();
-    if (box.clickedButton() == remount)
+    if (remount && box.clickedButton() == remount)
         m_session->remountAfterMaintenance(gameId, profileName);
 }
 
@@ -740,12 +744,12 @@ void ModLoaderController::completeReconciled(const GrpcModLoaderStatus& status)
                                   "gorganizer daemon to finish.")
                        .arg(operationProgressive(op->kind).toLower(), op->gameName);
     if (!op->unknownOutcome.isEmpty())
-        text += QStringLiteral("\n\nReason: %1").arg(capped(op->unknownOutcome));
+        text += QStringLiteral("\n\n%1").arg(errorSummary("change SMAPI", op->unknownOutcome, true));
     if (!op->finalReport.isEmpty())
-        text += QStringLiteral("\n\nThe daemon last reported: %1").arg(op->finalReport);
+        text += QStringLiteral("\n\nGorganizer last reported a problem with SMAPI.");
     text += QStringLiteral("\n\nSMAPI now: %1").arg(describeStatus(shown));
     if (!shown.detail.isEmpty())
-        text += QStringLiteral("\n\nDetails: %1").arg(capped(shown.detail));
+        text += QStringLiteral("\n\n%1").arg(errorSummary("check SMAPI's status", shown.detail));
     m_statusBar->showMessage(describeStatus(shown), 5000);
     dialogs::plainInfo(m_parentWindow, operationTitle(op->kind), text);
 }
@@ -756,11 +760,8 @@ void ModLoaderController::reportOutcome(const Operation& op, bool ok, const Grpc
     const QString title = operationTitle(op.kind);
     if (!ok) {
         m_statusBar->showMessage(QStringLiteral("%1 SMAPI failed.").arg(operationProgressive(op.kind)), 5000);
-        QString text = capped(modLoaderErrorMessage(error));
-        if (!failureDetail.isEmpty() && failureDetail != error && failureDetail != text
-            && !parseInstallError(error).token.isEmpty())
-            text += QStringLiteral("\n\nDetails: %1").arg(capped(failureDetail));
-        dialogs::plainWarn(m_parentWindow, title, text);
+        presentError(m_parentWindow, title, title.toLower(), error, true,
+                     failureDetail == error ? QString() : failureDetail);
         return;
     }
     QString text;
@@ -784,7 +785,8 @@ void ModLoaderController::reportOutcome(const Operation& op, bool ok, const Grpc
     }
     m_statusBar->showMessage(text, 5000);
     if (op.kind != OperationKind::Uninstall && status.state != GrpcModLoaderStateOk && !status.detail.isEmpty())
-        text += QStringLiteral("\n\nSMAPI still reports: %1").arg(capped(status.detail));
+        text += QStringLiteral("\n\nSMAPI still needs attention. %1")
+                    .arg(errorSummary(QStringLiteral("check SMAPI's status"), status.detail));
     dialogs::plainInfo(m_parentWindow, title, text);
 }
 
@@ -858,7 +860,8 @@ void ModLoaderController::updateMenu()
     const bool unsupportedBuild = known && status.state == GrpcModLoaderStateUnsupportedBuild;
 
     m_statusAction->setText(statusLine());
-    const QString detail = known ? capped(status.detail) : QString();
+    const QString detail = known && !status.detail.isEmpty()
+        ? errorSummary(QStringLiteral("check SMAPI's status"), status.detail) : QString();
     m_statusAction->setToolTip(detail.isEmpty() ? QString() : Qt::convertFromPlainText(detail, Qt::WhiteSpaceNormal));
 
     if (known && status.updateAvailable && !status.latestVersion.isEmpty())

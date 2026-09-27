@@ -1,6 +1,7 @@
 #include "IniEditorDialog.h"
 #include "ThemeManager.h"
 #include "Dialogs.h"
+#include "ErrorPresenter.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -104,7 +105,8 @@ void IniEditorDialog::reload()
     GrpcProfileIniStatus status;
     QString err;
     if (!m_grpc->listProfileIniFiles(m_gameId, m_profileName, files, status, err)) {
-        m_statusLabel->setText(QString("<span style='color:%1;'>Error: %2</span>").arg(errHex(), err.toHtmlEscaped()));
+        m_statusLabel->setText(QString("<span style='color:%1;'>%2</span>")
+                                   .arg(errHex(), errorSummary("load profile INI files", err).toHtmlEscaped()));
         m_pathLabel->clear();
         return;
     }
@@ -230,7 +232,7 @@ void IniEditorDialog::onTweakToggled(const QString& tweakId, bool enabled)
     GrpcIniTweakState state;
     QString err;
     if (!m_grpc->setIniTweak(m_gameId, m_profileName, tweakId, enabled, state, err)) {
-        dialogs::warn(this, "Tweak Failed", err);
+        presentError(this, "Tweak Failed", "change this INI tweak", err, true);
         return;
     }
     m_statusLabel->setText(QString("<span style='color:%1;'>%2 %3 %4.</span>")
@@ -314,8 +316,7 @@ void IniEditorDialog::onSave()
             continue;
         QString err;
         if (!m_grpc->saveProfileIniFile(m_gameId, m_profileName, h.filename, current, err)) {
-            dialogs::warn(this, "Save Failed",
-                QString("Failed to save %1: %2").arg(h.filename, err));
+            presentError(this, "Save Failed", "save this INI file", err, true);
             return;
         }
         h.originalContent = current;
@@ -332,7 +333,7 @@ void IniEditorDialog::onToggleEnabled(bool checked)
     GrpcProfileIniStatus status;
     QString err;
     if (!m_grpc->setProfileIniEnabled(m_gameId, m_profileName, checked, status, err)) {
-        dialogs::warn(this, "Error", err);
+        presentError(this, "INI Settings", "change profile INI settings", err, true);
         m_suppressEnabledSignal = true;
         m_enabledCheck->setChecked(!checked);
         m_suppressEnabledSignal = false;
@@ -355,7 +356,7 @@ void IniEditorDialog::onApplyNow()
     GrpcProfileIniStatus status;
     QString err;
     if (!m_grpc->getProfileIniStatus(m_gameId, m_profileName, status, err)) {
-        dialogs::warn(this, "Error", err);
+        presentError(this, "INI Settings", "check profile INI settings", err);
         return;
     }
     if (status.useCustomIni) {
