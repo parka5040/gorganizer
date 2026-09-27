@@ -151,7 +151,7 @@ func TestRecoverGameRestoresInterruptedActivation(t *testing.T) {
 		t.Fatal(err)
 	}
 	intent := &vfs.ActivationIntent{
-		SchemaVersion: vfs.CurrentIntentSchema,
+		SchemaVersion: 1,
 		Magic:         vfs.IntentMagic,
 		Kind:          vfs.IntentActivating,
 		GameID:        "skyrimse",

@@ -5,15 +5,29 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 // writeActivatingIntent writes an activating intent marker beside dataPath to simulate a crash mid-Activate.
 func writeActivatingIntent(t *testing.T, dataPath, backupPath string) {
 	t.Helper()
-	err := WriteIntent(activatingIntentPath(dataPath), &ActivationIntent{
+	original, exists, err := directoryAt(backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		original, exists, err = directoryAt(dataPath)
+		if err != nil || !exists {
+			t.Fatalf("finding original directory: exists=%t err=%v", exists, err)
+		}
+	}
+	err = WriteIntent(activatingIntentPath(dataPath), &ActivationIntent{
 		SchemaVersion: CurrentIntentSchema,
 		Magic:         IntentMagic,
 		Kind:          IntentActivating,
+		OperationID:   uuid.NewString(),
+		Original:      original,
 		GameID:        "testgame",
 		DataPath:      dataPath,
 		BackupPath:    backupPath,

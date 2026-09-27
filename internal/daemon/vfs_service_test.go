@@ -51,7 +51,7 @@ func TestEnsureOptionalDataDir(t *testing.T) {
 			setup: func(t *testing.T, root string, mm *vfs.MountManager) {
 				t.Helper()
 				intent := &vfs.ActivationIntent{
-					SchemaVersion: vfs.CurrentIntentSchema,
+					SchemaVersion: 1,
 					Magic:         vfs.IntentMagic,
 					Kind:          vfs.IntentActivating,
 					GameID:        "stardewvalley",

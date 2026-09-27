@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/parka/gorganizer/internal/atomicfile"
 )
 
@@ -56,7 +57,7 @@ func IsFarmMetadataFile(name string) bool {
 
 const IntentMagic = "gorganizer-intent"
 
-const CurrentIntentSchema = 1
+const CurrentIntentSchema = 2
 
 type IntentKind string
 
@@ -66,15 +67,19 @@ const (
 )
 
 type ActivationIntent struct {
-	SchemaVersion int        `json:"schema_version"`
-	Magic         string     `json:"magic"`
-	Kind          IntentKind `json:"kind"`
-	GameID        string     `json:"game_id"`
-	DataPath      string     `json:"data_path"`
-	BackupPath    string     `json:"backup_path"`
-	OverwriteRoot string     `json:"overwrite_root"`
-	StagingPath   string     `json:"staging_path,omitempty"`
-	PID           int        `json:"pid"`
+	SchemaVersion int               `json:"schema_version"`
+	Magic         string            `json:"magic"`
+	Kind          IntentKind        `json:"kind"`
+	GameID        string            `json:"game_id"`
+	DataPath      string            `json:"data_path"`
+	BackupPath    string            `json:"backup_path"`
+	OverwriteRoot string            `json:"overwrite_root"`
+	StagingPath   string            `json:"staging_path,omitempty"`
+	OperationID   string            `json:"operation_id,omitempty"`
+	Original      directoryIdentity `json:"original,omitempty"`
+	LiveFarmID    string            `json:"live_farm_id,omitempty"`
+	StagingFarmID string            `json:"staging_farm_id,omitempty"`
+	PID           int               `json:"pid"`
 }
 
 func activatingIntentPath(dataPath string) string { return dataPath + activatingSuffix }
@@ -88,7 +93,9 @@ func oldFarmPath(dataPath string) string        { return dataPath + oldFarmSuffi
 
 var ErrIntentMissing = errors.New("vfs: activation intent missing")
 
-// WriteIntent atomically writes an intent marker.
+var writeIntentDurable = atomicfile.WriteFileDurable
+
+// WriteIntent durably writes an intent marker.
 func WriteIntent(markerPath string, in *ActivationIntent) error {
 	if in == nil {
 		return errors.New("vfs: WriteIntent: nil intent")
@@ -97,7 +104,8 @@ func WriteIntent(markerPath string, in *ActivationIntent) error {
 	if err != nil {
 		return fmt.Errorf("marshalling intent: %w", err)
 	}
-	return atomicfile.WriteFile(markerPath, body, 0644)
+	_, err = writeIntentDurable(markerPath, body, 0644)
+	return err
 }
 
 // ReadIntent loads an intent marker; returns ErrIntentMissing when absent.
@@ -113,8 +121,25 @@ func ReadIntent(markerPath string) (*ActivationIntent, error) {
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, fmt.Errorf("%w: intent parse: %v", ErrSentinelInvalid, err)
 	}
-	if in.Magic != IntentMagic {
-		return nil, fmt.Errorf("%w: bad intent magic %q", ErrSentinelInvalid, in.Magic)
+	if in.Magic != IntentMagic || in.SchemaVersion < 1 || in.SchemaVersion > CurrentIntentSchema {
+		return nil, fmt.Errorf("%w: invalid or unsupported intent", ErrSentinelInvalid)
+	}
+	if in.SchemaVersion == 2 {
+		if _, err := uuid.Parse(in.OperationID); err != nil {
+			return nil, fmt.Errorf("%w: invalid intent operation ID: %v", ErrSentinelInvalid, err)
+		}
+		switch in.Kind {
+		case IntentActivating:
+			if in.Original.Dev == 0 || in.Original.Ino == 0 {
+				return nil, fmt.Errorf("%w: missing original directory identity", ErrSentinelInvalid)
+			}
+		case IntentApplying:
+			if in.LiveFarmID == "" || in.StagingFarmID == "" || in.LiveFarmID == in.StagingFarmID {
+				return nil, fmt.Errorf("%w: missing or duplicate apply farm identities", ErrSentinelInvalid)
+			}
+		default:
+			return nil, fmt.Errorf("%w: invalid intent kind %q", ErrSentinelInvalid, in.Kind)
+		}
 	}
 	return &in, nil
 }

@@ -168,7 +168,10 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 	staging := stagingDirPath(resolved)
 	oldFarm := oldFarmPath(resolved)
 	applyPath := applyingIntentPath(resolved)
-	if _, statErr := os.Lstat(resolved); errors.Is(statErr, os.ErrNotExist) {
+	activatingPath := activatingIntentPath(resolved)
+	activation, activationErr := ReadIntent(activatingPath)
+	if _, statErr := os.Lstat(resolved); errors.Is(statErr, os.ErrNotExist) &&
+		!(activationErr == nil && activation.SchemaVersion == 2) {
 		for _, candidate := range []string{oldFarm, staging} {
 			s, readErr := ReadSentinel(candidate)
 			if readErr != nil || ValidateSentinel(s) != nil {
@@ -196,7 +199,7 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 		} else if statErr != nil {
 			return outcome, fmt.Errorf("checking %s: %w", resolved, statErr)
 		}
-	} else if statErr != nil {
+	} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 		return outcome, fmt.Errorf("checking %s: %w", resolved, statErr)
 	}
 
@@ -206,15 +209,48 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 		vErr = ValidateSentinel(s)
 	}
 	validFarm := sErr == nil && vErr == nil
-	activatingPath := activatingIntentPath(resolved)
-	if _, iErr := ReadIntent(activatingPath); iErr == nil {
+	if activationErr == nil {
 		if validFarm {
 			if err := RemoveIntent(activatingPath); err != nil {
 				return outcome, fmt.Errorf("removing committed activation intent: %w", err)
 			}
+		} else if activation.SchemaVersion == 2 {
+			if activation.Kind != IntentActivating || activation.DataPath != resolved || activation.BackupPath != backupPath {
+				outcome.Pending = &RecoveryPending{
+					DataPath: resolved, BackupPath: backupPath,
+					Reason: "An interrupted mod activation left folders that do not match its record. Check Data and Data.orig before restoring.",
+				}
+				return outcome, nil
+			}
+			data, dataExists, dataErr := directoryAt(resolved)
+			backup, backupExists, backupErr := directoryAt(backupPath)
+			if err := errors.Join(dataErr, backupErr); err != nil {
+				return outcome, fmt.Errorf("checking interrupted activation directories: %w", err)
+			}
+			switch {
+			case dataExists && data == activation.Original && !backupExists:
+				if err := syncFarmParent(filepath.Dir(resolved)); err != nil {
+					return outcome, fmt.Errorf("syncing original Data: %w", err)
+				}
+				if err := RemoveIntent(activatingPath); err != nil {
+					return outcome, fmt.Errorf("removing activation intent: %w", err)
+				}
+				return outcome, nil
+			case backupExists && backup == activation.Original && (!dataExists || data != activation.Original):
+				if err := rollbackActivation(resolved, backupPath, activatingPath, activation.Original); err != nil {
+					return outcome, fmt.Errorf("rolling back interrupted activation: %w", err)
+				}
+				outcome.Restored = true
+				return outcome, nil
+			default:
+				outcome.Pending = &RecoveryPending{
+					DataPath: resolved, BackupPath: backupPath,
+					Reason: "An interrupted mod activation left folders that do not match its record. Check Data and Data.orig before restoring.",
+				}
+				return outcome, nil
+			}
 		} else {
 			if _, err := os.Stat(backupPath); err != nil {
-				slog.Info("interrupted activation with no backup — leaving Data as-is", "path", resolved)
 				if err := RemoveIntent(activatingPath); err != nil {
 					return outcome, fmt.Errorf("removing activation intent: %w", err)
 				}
@@ -224,18 +260,41 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 				return outcome, fmt.Errorf("removing interrupted activation at %s: %w", resolved, err)
 			}
 			if err := renameActivationBackup(backupPath, resolved); err != nil {
-				return outcome, fmt.Errorf("rolling back interrupted activation of %s from %s: %w",
-					resolved, backupPath, err)
+				return outcome, fmt.Errorf("rolling back interrupted activation of %s from %s: %w", resolved, backupPath, err)
+			}
+			if err := syncFarmParent(filepath.Dir(resolved)); err != nil {
+				return outcome, fmt.Errorf("syncing restored Data: %w", err)
 			}
 			if err := RemoveIntent(activatingPath); err != nil {
 				return outcome, fmt.Errorf("removing rolled-back activation intent: %w", err)
 			}
-			slog.Info("rolled back interrupted activation", "path", resolved)
 			outcome.Restored = true
 			return outcome, nil
 		}
-	} else if !errors.Is(iErr, ErrIntentMissing) {
-		slog.Warn("could not read activation intent during recovery", "path", resolved, "err", iErr)
+	} else if !errors.Is(activationErr, ErrIntentMissing) {
+		outcome.Pending = &RecoveryPending{
+			DataPath: resolved, BackupPath: backupPath,
+			Reason: "An interrupted mod activation has a record Gorganizer cannot read. Check Data.gorganizer-activating before restoring.",
+		}
+		return outcome, nil
+	}
+
+	apply, applyErr := ReadIntent(applyPath)
+	if applyErr == nil && apply.SchemaVersion == 2 {
+		pending, err := reconcileApplyIntent(resolved, backupPath, staging, oldFarm, applyPath, s, validFarm, apply)
+		if err != nil {
+			return outcome, fmt.Errorf("reconciling interrupted apply: %w", err)
+		}
+		if pending != nil {
+			outcome.Pending = pending
+			return outcome, nil
+		}
+	} else if applyErr != nil && !errors.Is(applyErr, ErrIntentMissing) {
+		outcome.Pending = &RecoveryPending{
+			DataPath: resolved, BackupPath: backupPath,
+			Reason: "An unfinished mod change has a record Gorganizer cannot read. Check Data.gorganizer-applying before continuing.",
+		}
+		return outcome, nil
 	}
 
 	plainOriginal := errors.Is(sErr, ErrSentinelMissing)
@@ -264,7 +323,7 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 			}
 		}
 	}
-	if validFarm || plainOriginal {
+	if (validFarm || plainOriginal) && !(applyErr == nil && apply.SchemaVersion == 2) {
 		for _, sibling := range []string{staging, oldFarm} {
 			if err := os.RemoveAll(sibling); err != nil {
 				return outcome, fmt.Errorf("removing transition sibling %s: %w", sibling, err)
@@ -360,6 +419,58 @@ func CleanupStale(dataPath string) (RecoveryOutcome, error) {
 	}
 
 	return outcome, nil
+}
+
+// reconcileApplyIntent removes only the farm sibling identified by the recorded exchange.
+func reconcileApplyIntent(dataPath, backupPath, staging, oldFarm, applyPath string, live *Sentinel, validFarm bool, in *ActivationIntent) (*RecoveryPending, error) {
+	pending := &RecoveryPending{
+		DataPath: dataPath, BackupPath: backupPath,
+		Reason: "An unfinished mod change left a folder Gorganizer cannot identify. Check Data.gorganizer-staging before continuing.",
+	}
+	if !validFarm || in.Kind != IntentApplying || in.DataPath != dataPath || in.BackupPath != backupPath || in.StagingPath != staging {
+		return pending, nil
+	}
+	dataID, dataExists, err := directoryAt(dataPath)
+	if err != nil {
+		return nil, fmt.Errorf("checking active farm: %w", err)
+	}
+	if !dataExists || dataID.Dev == 0 {
+		return pending, nil
+	}
+	var siblingFarmID string
+	switch live.FarmID {
+	case in.StagingFarmID:
+		siblingFarmID = in.LiveFarmID
+	case in.LiveFarmID:
+		siblingFarmID = in.StagingFarmID
+	default:
+		return pending, nil
+	}
+	if _, err := os.Lstat(oldFarm); err == nil {
+		return pending, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("checking old farm sibling: %w", err)
+	}
+	stagingID, exists, err := directoryAt(staging)
+	if err != nil {
+		return nil, fmt.Errorf("checking staging sibling: %w", err)
+	}
+	if exists {
+		if stagingID.Dev == 0 || stagingID == dataID {
+			return pending, nil
+		}
+		candidate, err := ReadSentinel(staging)
+		if err != nil || ValidateSentinel(candidate) != nil || candidate.FarmID != siblingFarmID {
+			return pending, nil
+		}
+		if err := os.RemoveAll(staging); err != nil {
+			return nil, fmt.Errorf("removing recorded staging sibling: %w", err)
+		}
+	}
+	if err := RemoveIntent(applyPath); err != nil {
+		return nil, fmt.Errorf("removing apply intent: %w", err)
+	}
+	return nil, nil
 }
 
 // RestoreFromBackup performs the user-confirmed rm -rf Data, mv Data.orig → Data.
