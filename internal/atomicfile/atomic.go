@@ -2,6 +2,7 @@ package atomicfile
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 )
@@ -36,13 +37,12 @@ func WriteFile(path string, data []byte, perm os.FileMode) (err error) {
 		return fmt.Errorf("atomicfile: closing temp %s: %w", tmpName, err)
 	}
 
-	if err = os.Rename(tmpName, path); err != nil {
+	if err = renameFile(tmpName, path); err != nil {
 		return fmt.Errorf("atomicfile: renaming %s to %s: %w", tmpName, path, err)
 	}
 
-	if d, derr := os.Open(dir); derr == nil {
-		_ = d.Sync()
-		_ = d.Close()
+	if derr := SyncDir(dir); derr != nil {
+		slog.Warn("atomicfile: directory sync failed after publishing", "path", path, "err", derr)
 	}
 	return nil
 }
