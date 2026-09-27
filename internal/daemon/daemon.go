@@ -13,6 +13,7 @@ import (
 	"github.com/parka/gorganizer/internal/profile"
 	"github.com/parka/gorganizer/internal/steam"
 	"github.com/parka/gorganizer/internal/tools"
+	"github.com/parka/gorganizer/internal/transfer"
 	"github.com/parka/gorganizer/internal/vfs"
 )
 
@@ -141,6 +142,13 @@ func newWithClock(cfg *config.Config, now func() time.Time, scans ...func(string
 
 	download.SetModsDirResolver(config.ModsDir)
 	d.classifyStartupRecoveries()
+	for _, gameID := range d.configuredGameIDs() {
+		for _, root := range []string{config.ModsDir(gameID), config.ProfilesDir(gameID)} {
+			if err := transfer.RecoverTransfers(root); err != nil {
+				slog.Error("transfer recovery requires manual repair", "game", gameID, "root", root, "err", err)
+			}
+		}
+	}
 	d.recoverInterruptedReinstalls()
 	download.RecoverLandings(d.configuredGameIDs())
 	gameIDs := d.recoverableGameIDs()

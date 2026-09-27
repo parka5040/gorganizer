@@ -45,6 +45,7 @@ func defaultImportLimits() importLimits {
 
 type ImportOptions struct {
 	limits             *importLimits
+	commitOps          *transferCommitOps
 	GameID             string
 	ArchivePath        string
 	Policy             dto.CollisionPolicy
@@ -225,8 +226,23 @@ func Preview(ctx context.Context, gameID, archivePath string) (dto.ImportPreview
 }
 
 // Import applies an exported archive to the target instance under the configured collision policies.
-func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgress)) (dto.TransferSummary, error) {
-	summary := dto.TransferSummary{Renamed: map[string]string{}}
+func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgress)) (summary dto.TransferSummary, importErr error) {
+	summary = dto.TransferSummary{Renamed: map[string]string{}}
+	mergedFiles := 0
+	defer func() {
+		if importErr == nil {
+			return
+		}
+		var commitErr *transferCommitError
+		committed := int(summary.ModsImported+summary.ProfilesTransferred) + mergedFiles
+		if committed > 0 {
+			recovery := "none"
+			if errors.As(importErr, &commitErr) && commitErr.pending {
+				recovery = "pending"
+			}
+			importErr = &BundleIncompleteError{Items: committed, Recovery: recovery, Err: importErr}
+		}
+	}()
 	if emit == nil {
 		emit = func(dto.TransferProgress) {}
 	}
@@ -497,7 +513,9 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 		progress("finalize", name)
 	}
 
-	if err := mergeOverwrite(filepath.Join(stageMods, "__overwrite__"), filepath.Join(modsDir, profile.OverwriteModName)); err != nil {
+	merged, err := mergeOverwriteCount(filepath.Join(stageMods, "__overwrite__"), filepath.Join(modsDir, profile.OverwriteModName))
+	mergedFiles += merged
+	if err != nil {
 		return summary, err
 	}
 	stagedGS := filepath.Join(stageMods, "__gamesettings__", gsBase)
@@ -541,7 +559,9 @@ func finalizeMod(opts ImportOptions, folder, staged string, policy dto.Collision
 			newName := renameCandidate(folder, func(c string) bool {
 				return modFolderExists(opts.GameID, c)
 			})
-			relabelModMetadata(staged, folder, newName)
+			if err := relabelModMetadata(staged, folder, newName); err != nil {
+				return fmt.Errorf("preparing mod %q: %w", folder, err)
+			}
 			if err := os.Rename(staged, filepath.Join(config.ModsDir(opts.GameID), newName)); err != nil {
 				return fmt.Errorf("importing mod %q as %q: %w", folder, newName, err)
 			}
@@ -549,9 +569,21 @@ func finalizeMod(opts ImportOptions, folder, staged string, policy dto.Collision
 			summary.ModsImported++
 			return nil
 		case dto.PolicyOverwrite:
-			if err := os.RemoveAll(target); err != nil {
+			var replace error
+			if opts.commitOps != nil {
+				replace = replaceDirWithOps(config.ModsDir(opts.GameID), folder, staged, "mod", *opts.commitOps)
+			} else {
+				replace = replaceDir(config.ModsDir(opts.GameID), folder, staged)
+			}
+			if err := replace; err != nil {
+				var commitErr *transferCommitError
+				if errors.As(err, &commitErr) && commitErr.committed {
+					summary.ModsImported++
+				}
 				return fmt.Errorf("replacing mod %q: %w", folder, err)
 			}
+			summary.ModsImported++
+			return nil
 		default:
 			return &TransferCollisionError{Name: folder}
 		}
@@ -598,9 +630,21 @@ func finalizeProfile(opts ImportOptions, name, staged string, summary *dto.Trans
 		return fmt.Errorf("preparing profile %q: %w", name, err)
 	}
 	if collision && opts.Policy == dto.PolicyOverwrite {
-		if err := os.RemoveAll(target); err != nil {
+		var replace error
+		if opts.commitOps != nil {
+			replace = replaceDirWithOps(config.ProfilesDir(opts.GameID), name, staged, "profile", *opts.commitOps)
+		} else {
+			replace = replaceDir(config.ProfilesDir(opts.GameID), name, staged)
+		}
+		if err := replace; err != nil {
+			var commitErr *transferCommitError
+			if errors.As(err, &commitErr) && commitErr.committed {
+				summary.ProfilesTransferred++
+			}
 			return fmt.Errorf("replacing profile %q: %w", name, err)
 		}
+		summary.ProfilesTransferred++
+		return nil
 	}
 	if err := os.Rename(staged, target); err != nil {
 		return fmt.Errorf("importing profile %q: %w", name, err)
@@ -643,18 +687,25 @@ func rewriteModlist(path string, renamed map[string]string) error {
 	if err := mod.WriteModList(&buf, entries); err != nil {
 		return err
 	}
-	return os.WriteFile(path, buf.Bytes(), 0644)
+	return atomicfile.WriteFile(path, buf.Bytes(), 0644)
 }
 
 // mergeOverwrite moves every staged Overwrite file into the live Overwrite layer, replacing on conflict.
 func mergeOverwrite(stagedRoot, owDir string) error {
+	_, err := mergeOverwriteCount(stagedRoot, owDir)
+	return err
+}
+
+// mergeOverwriteCount moves staged Overwrite files and counts successful file replacements.
+func mergeOverwriteCount(stagedRoot, owDir string) (int, error) {
 	if _, err := os.Stat(stagedRoot); err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return 0, nil
 		}
-		return err
+		return 0, err
 	}
-	return filepath.WalkDir(stagedRoot, func(p string, d fs.DirEntry, err error) error {
+	count := 0
+	err := filepath.WalkDir(stagedRoot, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -688,29 +739,32 @@ func mergeOverwrite(stagedRoot, owDir string) error {
 		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 			return err
 		}
-		if err == nil {
-			if err := os.Remove(dest); err != nil {
-				return err
-			}
+		if err := os.Rename(p, dest); err != nil {
+			return err
 		}
-		return os.Rename(p, dest)
+		count++
+		return nil
 	})
+	return count, err
 }
 
-// relabelModMetadata rewrites a staged mod's metadata.yaml folder/name after a RENAME, best-effort.
-func relabelModMetadata(staged, oldName, newName string) {
+// relabelModMetadata rewrites a staged mod's metadata.yaml folder and name after a rename.
+func relabelModMetadata(staged, oldName, newName string) error {
 	meta, err := download.LoadModMetadata(staged)
-	if err != nil || meta == nil {
-		return
+	if err != nil {
+		return fmt.Errorf("reading staged metadata: %w", err)
 	}
-	if meta.Folder == "" && meta.Name == "" {
-		return
+	if meta == nil || meta.Folder == "" && meta.Name == "" {
+		return nil
 	}
 	meta.Folder = newName
 	if meta.Name == oldName {
 		meta.Name = newName
 	}
-	_ = download.SaveModMetadata(staged, meta)
+	if err := download.SaveModMetadata(staged, meta); err != nil {
+		return fmt.Errorf("writing staged metadata: %w", err)
+	}
+	return nil
 }
 
 // canonicalizeProfileJSON writes the final directory identity into staged profile.json.

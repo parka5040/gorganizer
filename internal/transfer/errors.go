@@ -64,6 +64,18 @@ func (e *BundleRejectedError) Error() string {
 	return fmt.Sprintf("export bundle rejected: %s: %q", e.Reason, e.Item)
 }
 
+type transferCommitError struct {
+	committed bool
+	pending   bool
+	err       error
+}
+
+// Error describes a failed replacement and whether its journal remains for recovery.
+func (e *transferCommitError) Error() string { return e.err.Error() }
+
+// Unwrap returns the filesystem error that stopped the replacement.
+func (e *transferCommitError) Unwrap() error { return e.err }
+
 type BundleIncompleteError struct {
 	Items    int
 	Recovery string
