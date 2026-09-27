@@ -32,12 +32,16 @@ func ToolDataDir(toolID, gameID, profileName string) string {
 	return filepath.Join(DataDir(), "tools-data", toolID, gameID, profileName)
 }
 
-// RuntimeDir returns $XDG_RUNTIME_DIR/gorganizer, falling back to /tmp/gorganizer-<uid>.
+// RuntimeDir returns the runtime folder under an absolute XDG runtime directory or an absolute temporary directory.
 func RuntimeDir() string {
-	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
+	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" && filepath.IsAbs(dir) {
 		return filepath.Join(dir, "gorganizer")
 	}
-	return filepath.Join(os.TempDir(), "gorganizer-"+strconv.Itoa(os.Getuid()))
+	tmp := os.TempDir()
+	if !filepath.IsAbs(tmp) {
+		tmp = "/tmp"
+	}
+	return filepath.Join(tmp, "gorganizer-"+strconv.Itoa(os.Getuid()))
 }
 
 func SocketPath() string {

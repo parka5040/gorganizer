@@ -7,10 +7,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	pb "github.com/parka/gorganizer/api/proto"
 	"github.com/parka/gorganizer/internal/dto"
+	"github.com/parka/gorganizer/internal/fsutil"
 	"google.golang.org/grpc"
 )
 
@@ -204,18 +206,33 @@ func NewServer(socketPath string, ctrl DaemonController) *Server {
 	}
 }
 
-// Start creates the socket directory, listens, and serves gRPC.
+// Start checks the socket directory and path, listens privately, and serves gRPC.
 func (s *Server) Start() error {
 	dir := filepath.Dir(s.socketPath)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("creating socket directory %s: %w", dir, err)
+	if err := fsutil.EnsurePrivateDir(dir); err != nil {
+		return fmt.Errorf("checking socket directory %s: %w", dir, err)
 	}
 
-	os.Remove(s.socketPath)
+	info, err := os.Lstat(s.socketPath)
+	if err == nil {
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if info.Mode()&os.ModeSocket == 0 || !ok || int(st.Uid) != os.Getuid() {
+			return fmt.Errorf("socket path %s is not a socket owned by this user", s.socketPath)
+		}
+		if err := os.Remove(s.socketPath); err != nil {
+			return fmt.Errorf("removing stale socket %s: %w", s.socketPath, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("checking socket %s: %w", s.socketPath, err)
+	}
 
 	lis, err := net.Listen("unix", s.socketPath)
 	if err != nil {
 		return fmt.Errorf("listening on %s: %w", s.socketPath, err)
+	}
+	if err := os.Chmod(s.socketPath, 0o600); err != nil {
+		_ = lis.Close()
+		return fmt.Errorf("setting socket permissions %s: %w", s.socketPath, err)
 	}
 
 	s.grpcServer = grpc.NewServer()

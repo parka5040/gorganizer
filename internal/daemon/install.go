@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/parka/gorganizer/internal/config"
@@ -158,16 +157,8 @@ func extractArchiveWithBudget(absArchive string, budget *download.ExtractBudget)
 func extractionRoot() (string, error) {
 	sum := sha256.Sum256([]byte(config.RuntimeDir()))
 	root := filepath.Join(os.TempDir(), fmt.Sprintf("gorganizer-extract-%d-%s", os.Getuid(), hex.EncodeToString(sum[:6])))
-	if err := os.Mkdir(root, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
-		return "", fmt.Errorf("creating the extraction root: %w", err)
-	}
-	info, err := os.Lstat(root)
-	if err != nil {
-		return "", fmt.Errorf("checking the extraction root: %w", err)
-	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !info.IsDir() || !ok || int(st.Uid) != os.Getuid() || info.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("extraction root %s is not a private directory of this user", root)
+	if err := fsutil.EnsurePrivateDir(root); err != nil {
+		return "", fmt.Errorf("extraction root: %w", err)
 	}
 	return root, nil
 }
