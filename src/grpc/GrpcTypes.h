@@ -496,7 +496,7 @@ struct GrpcIniTweakState {
     bool enabled = false;
 };
 
-enum GrpcInstallMode { GrpcInstallAsNewMod = 0, GrpcInstallMergeIntoMod = 1 };
+enum GrpcInstallMode { GrpcInstallAsNewMod = 0, GrpcInstallMergeIntoMod = 1, GrpcInstallReplaceMod = 2 };
 
 enum GrpcBulkHideScope { GrpcBulkHideAll = 0, GrpcBulkHideInstalled = 1, GrpcBulkHideUninstalled = 2 };
 

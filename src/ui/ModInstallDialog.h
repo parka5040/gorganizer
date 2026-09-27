@@ -72,6 +72,9 @@ private:
     InstallTarget m_target;
     QString m_previewId;
     QString m_selectedRoot;
+    QString m_installRoot;
+    std::vector<GrpcFomodFile> m_selectedFiles;
+    bool m_fomodConfirmed = false;
     QStringList m_selectableRoots;
     quint64 m_previewRequestId = 0;
     quint64 m_installRequestId = 0;

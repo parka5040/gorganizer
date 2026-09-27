@@ -5,6 +5,7 @@
 #include "ThemeManager.h"
 #include "Dialogs.h"
 #include "InstallErrorText.h"
+#include "InstallCollisionDialog.h"
 #include "ErrorPresenter.h"
 #include "SafeLinks.h"
 
@@ -364,22 +365,7 @@ void DownloadsLibraryView::onDoubleClicked(const QModelIndex& idx)
         if (clicked == cancelBtn)
             return;
         if (clicked == mergeBtn) {
-            QString modFolder, err;
-            int fileCount = 0;
-            if (!m_grpc->startInstallSync(m_game.shortName, row.archiveRelPath,
-                                          QString(), GrpcInstallMergeIntoMod,
-                                          existingFolder, QString(), {},
-                                          modFolder, fileCount, err)) {
-                if (parseInstallError(err).token == QLatin1String("fomod_required")
-                    && usesLocalDataRootInstall(m_game)) {
-                    showFomodInstallDialog(row, GrpcInstallMergeIntoMod, existingFolder);
-                    return;
-                }
-                presentError(this, "Merge Failed", "merge this archive into the mod", err, true);
-                return;
-            }
-            emit modInstalledFromDownload();
-            reloadFromDaemon();
+            installArchive(row, GrpcInstallMergeIntoMod, existingFolder, true);
             return;
         }
         (void)newBtn;
@@ -392,29 +378,39 @@ void DownloadsLibraryView::onDoubleClicked(const QModelIndex& idx)
 
 void DownloadsLibraryView::actionInstall(const GrpcArchiveRow& row, bool forceNewMod)
 {
-    QString modFolder, err;
-    int fileCount = 0;
-    GrpcInstallMode mode = GrpcInstallAsNewMod;
-    QString target;
+    const QString target = !forceNewMod && row.status == 5 ? row.installedModFolder : QString();
+    installArchive(row, GrpcInstallAsNewMod, target);
+}
 
-    if (!forceNewMod && row.status == 5 && !row.installedModFolder.isEmpty()) {
-        mode = GrpcInstallMergeIntoMod;
-        target = row.installedModFolder;
-    }
-
-    if (!m_grpc->startInstallSync(m_game.shortName, row.archiveRelPath, QString(),
-                                  mode, target, QString(), {},
-                                  modFolder, fileCount, err)) {
-        if (parseInstallError(err).token == QLatin1String("fomod_required")
-            && usesLocalDataRootInstall(m_game)) {
+void DownloadsLibraryView::installArchive(const GrpcArchiveRow& row, GrpcInstallMode mode,
+                                          QString target, bool explicitMerge)
+{
+    for (;;) {
+        QString modFolder, err;
+        int fileCount = 0;
+        if (m_grpc->startInstallSync(m_game.shortName, row.archiveRelPath, QString(),
+                                     mode, target, QString(), {}, modFolder, fileCount, err)) {
+            emit modInstalledFromDownload();
+            reloadFromDaemon();
+            return;
+        }
+        const QString token = parseInstallError(err).token;
+        if (token == QLatin1String("fomod_required") && usesLocalDataRootInstall(m_game)) {
             showFomodInstallDialog(row, mode, target);
             return;
         }
-        presentError(this, "Install Failed", "install this mod", err, true);
+        if (token == QLatin1String("mod_collision") && !explicitMerge) {
+            const auto choice = resolveInstallCollision(this, err, target);
+            if (!choice)
+                return;
+            mode = choice->mode;
+            target = choice->targetMod;
+            continue;
+        }
+        presentError(this, explicitMerge ? "Merge Failed" : "Install Failed",
+                     explicitMerge ? "merge this archive into the mod" : "install this mod", err, true);
         return;
     }
-    emit modInstalledFromDownload();
-    reloadFromDaemon();
 }
 
 void DownloadsLibraryView::showFomodInstallDialog(const GrpcArchiveRow& row,
@@ -462,21 +458,7 @@ void DownloadsLibraryView::actionMergeInto(const GrpcArchiveRow& row)
         dialogs::plainWarn(this, "Merge Into Existing Mod", problem);
     }
 
-    QString modFolder, err;
-    int fileCount = 0;
-    if (!m_grpc->startInstallSync(m_game.shortName, row.archiveRelPath, QString(),
-                                  GrpcInstallMergeIntoMod, target, QString(), {},
-                                  modFolder, fileCount, err)) {
-        if (parseInstallError(err).token == QLatin1String("fomod_required")
-            && usesLocalDataRootInstall(m_game)) {
-            showFomodInstallDialog(row, GrpcInstallMergeIntoMod, target);
-            return;
-        }
-        presentError(this, "Merge Failed", "merge this archive into the mod", err, true);
-        return;
-    }
-    emit modInstalledFromDownload();
-    reloadFromDaemon();
+    installArchive(row, GrpcInstallMergeIntoMod, target, true);
 }
 
 void DownloadsLibraryView::actionHide(const QString& archivePath, bool hidden)

@@ -45,6 +45,8 @@ private:
     bool m_suppressToggleSignal = false;
 
     void actionInstall(const GrpcArchiveRow& row, bool forceNewMod);
+    void installArchive(const GrpcArchiveRow& row, GrpcInstallMode mode, QString target,
+                        bool explicitMerge = false);
     void actionMergeInto(const GrpcArchiveRow& row);
     void showFomodInstallDialog(const GrpcArchiveRow& row, GrpcInstallMode mode, const QString& target);
     void actionHide(const QString& archivePath, bool hidden);
