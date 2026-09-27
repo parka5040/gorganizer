@@ -150,7 +150,7 @@ func TestCleanupStale_CaptureAwareRecovery(t *testing.T) {
 	mustFile(t, filepath.Join(dataPath, "Saves", "quicksave.ess"), "SAVEDATA")
 
 	s := &Sentinel{
-		SchemaVersion:       CurrentSentinelSchema,
+		SchemaVersion:       2,
 		Magic:               SentinelMagic,
 		GameID:              "testgame",
 		BackupPath:          backupPath,
@@ -346,7 +346,7 @@ func writeRecoverableFarm(t *testing.T, farmPath, backupPath, overwriteRoot stri
 	t.Helper()
 	mustDir(t, farmPath)
 	s := &Sentinel{
-		SchemaVersion:       CurrentSentinelSchema,
+		SchemaVersion:       2,
 		Magic:               SentinelMagic,
 		GameID:              "testgame",
 		BackupPath:          backupPath,
@@ -389,7 +389,7 @@ func TestValidateSentinel_V2HashMismatchRejected(t *testing.T) {
 	mustDir(t, backup)
 	layers := []SentinelLayer{{Name: "__base__", Root: backup, Enabled: true}}
 	s := &Sentinel{
-		SchemaVersion: CurrentSentinelSchema,
+		SchemaVersion: 2,
 		Magic:         SentinelMagic,
 		GameID:        "testgame",
 		BackupPath:    backup,
@@ -405,8 +405,8 @@ func TestValidateSentinel_V2HashMismatchRejected(t *testing.T) {
 	}
 }
 
-// TestActivate_CommitsNoIntentAndWritesV2 locks that Activate leaves no intent marker and writes a valid v2 sentinel.
-func TestActivate_CommitsNoIntentAndWritesV2(t *testing.T) {
+// TestActivateCommitsV3Sentinel checks that activation writes a valid v3 sentinel and removes its intent.
+func TestActivateCommitsV3Sentinel(t *testing.T) {
 	dir := t.TempDir()
 	dataPath := filepath.Join(dir, "Data")
 	mustDir(t, dataPath)

@@ -133,6 +133,10 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 		OverwriteRoot:       m.overwriteRoot,
 		Layers:              sentLayers,
 		MaterializerVersion: CurrentMaterializerVersion,
+		FarmID:              stats.FarmID,
+		Manifest:            stats.Manifest,
+		ManifestSHA256:      stats.ManifestSHA256,
+		ManifestEntries:     stats.ManifestEntries,
 	}
 	if err := WriteSentinel(dataPath, sentinel); err != nil {
 		_ = os.RemoveAll(dataPath)
@@ -280,7 +284,8 @@ func (m *MountManager) ReMaterialize() error {
 	staging := stagingDirPath(dataPath)
 	_ = os.RemoveAll(staging)
 	overwriteName := m.deriveOverwriteName(m.layers)
-	if _, err := BuildInto(staging, tree, m.layers, overwriteName); err != nil {
+	stats, err := BuildInto(staging, tree, m.layers, overwriteName)
+	if err != nil {
 		_ = os.RemoveAll(staging)
 		return fmt.Errorf("materializing staging overlay: %w", err)
 	}
@@ -299,6 +304,10 @@ func (m *MountManager) ReMaterialize() error {
 		OverwriteRoot:       m.overwriteRoot,
 		Layers:              sentLayers,
 		MaterializerVersion: CurrentMaterializerVersion,
+		FarmID:              stats.FarmID,
+		Manifest:            stats.Manifest,
+		ManifestSHA256:      stats.ManifestSHA256,
+		ManifestEntries:     stats.ManifestEntries,
 	}); err != nil {
 		_ = os.RemoveAll(staging)
 		return fmt.Errorf("writing staging sentinel: %w", err)

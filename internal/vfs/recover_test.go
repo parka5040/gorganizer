@@ -78,7 +78,7 @@ func TestCleanupStale_SentinelCrashRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &Sentinel{
-		SchemaVersion:       CurrentSentinelSchema,
+		SchemaVersion:       2,
 		Magic:               SentinelMagic,
 		GameID:              "falloutnv",
 		BackupPath:          backupPath,

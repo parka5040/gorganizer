@@ -16,6 +16,10 @@ type MaterializeStats struct {
 	FilesSymlinked  int
 	FilesCopied     int
 	DirsCreated     int
+	FarmID          string
+	Manifest        string
+	ManifestSHA256  string
+	ManifestEntries int
 }
 
 // BuildInto materializes a merged view as hardlinks with cross-filesystem symlink fallback.
@@ -40,12 +44,18 @@ func BuildInto(outDir string, tree *MergedTree, _ []Layer, _ string) (Materializ
 	if err != nil {
 		return stats, fmt.Errorf("stat outDir %q: %w", outDir, err)
 	}
+	manifest, err := newFarmManifestWriter(outDir)
+	if err != nil {
+		return stats, err
+	}
+	defer manifest.close()
 
 	type dirJob struct {
 		normalized string
 		dest       string
+		rel        string
 	}
-	queue := []dirJob{{normalized: "", dest: outDir}}
+	queue := []dirJob{{dest: outDir}}
 
 	for len(queue) > 0 {
 		job := queue[0]
@@ -61,6 +71,10 @@ func BuildInto(outDir string, tree *MergedTree, _ []Layer, _ string) (Materializ
 			if job.normalized != "" {
 				childNormVPath = job.normalized + "/" + normName
 			}
+			rel := child.Name
+			if job.rel != "" {
+				rel = job.rel + "/" + child.Name
+			}
 			destChild := filepath.Join(job.dest, child.Name)
 
 			if child.IsDir {
@@ -68,7 +82,7 @@ func BuildInto(outDir string, tree *MergedTree, _ []Layer, _ string) (Materializ
 					return stats, fmt.Errorf("mkdir %q: %w", destChild, err)
 				}
 				stats.DirsCreated++
-				queue = append(queue, dirJob{normalized: childNormVPath, dest: destChild})
+				queue = append(queue, dirJob{normalized: childNormVPath, dest: destChild, rel: rel})
 				continue
 			}
 
@@ -92,9 +106,17 @@ func BuildInto(outDir string, tree *MergedTree, _ []Layer, _ string) (Materializ
 			case linkErr != nil:
 				return stats, fmt.Errorf("hardlink %q -> %q: %w", destChild, realPath, linkErr)
 			}
+			if err := manifest.record(destChild, rel); err != nil {
+				return stats, err
+			}
 		}
 	}
 
+	stats.FarmID = manifest.farmID
+	stats.Manifest, stats.ManifestSHA256, stats.ManifestEntries, err = manifest.finish(outDir)
+	if err != nil {
+		return stats, err
+	}
 	return stats, nil
 }
 
@@ -127,14 +149,14 @@ func devID(path string) (uint64, error) {
 	return uint64(stat.Dev), nil
 }
 
-func devIDOf(path string) (uint64, error) { return devID(path) }
+var devIDOf = devID
 
 // CaptureNewFiles moves files not placed by the farm (st_nlink == 1) into overwriteRoot.
 func CaptureNewFiles(dataDir, overwriteRoot string) (int, error) {
 	return CaptureNewFilesInto(dataDir, overwriteRoot, false, false)
 }
 
-// CaptureNewFilesInto moves unplaced (st_nlink == 1) files other than the sentinel and its interrupted temporary copies from dataDir into targetRoot, optionally linking them back.
+// CaptureNewFilesInto moves unplaced (st_nlink == 1) files other than farm metadata from dataDir into targetRoot, optionally linking them back.
 func CaptureNewFilesInto(dataDir, targetRoot string, relink bool, _ bool) (int, error) {
 	if targetRoot == "" {
 		return 0, nil
@@ -148,7 +170,7 @@ func CaptureNewFilesInto(dataDir, targetRoot string, relink bool, _ bool) (int, 
 		if info.IsDir() {
 			return nil
 		}
-		if isSentinelFile(filepath.Base(path)) {
+		if IsFarmMetadataFile(filepath.Base(path)) {
 			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {

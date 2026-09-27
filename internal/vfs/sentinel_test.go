@@ -43,6 +43,9 @@ func TestSentinel_RoundTripWriteReadValidate(t *testing.T) {
 		OverwriteRoot:       filepath.Join(base, "mods", "Overwrite"),
 		Layers:              layers,
 		MaterializerVersion: CurrentMaterializerVersion,
+		FarmID:              "12345678-1234-1234-1234-123456789abc",
+		Manifest:            ".gorganizer-farm-12345678-1234-1234-1234-123456789abc.jsonl",
+		ManifestSHA256:      "test-digest",
 	}
 
 	if err := WriteSentinel(dataPath, want); err != nil {
@@ -54,7 +57,9 @@ func TestSentinel_RoundTripWriteReadValidate(t *testing.T) {
 	}
 	if got.GameID != want.GameID || got.Magic != want.Magic ||
 		got.BackupPath != want.BackupPath || got.OverwriteMod != want.OverwriteMod ||
-		got.ActivationPID != want.ActivationPID {
+		got.ActivationPID != want.ActivationPID || got.FarmID != want.FarmID ||
+		got.Manifest != want.Manifest || got.ManifestSHA256 != want.ManifestSHA256 ||
+		got.ManifestEntries != want.ManifestEntries {
 		t.Errorf("round-trip mismatch:\n want=%+v\n  got=%+v", want, got)
 	}
 	if len(got.Layers) != len(want.Layers) {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -20,7 +21,7 @@ const RetainedSessionSiblingSuffix = ".gorganizer-session"
 
 const SentinelMagic = "gorganizer-overlay"
 
-const CurrentSentinelSchema = 2
+const CurrentSentinelSchema = 3
 
 const CurrentMaterializerVersion = 1
 
@@ -43,9 +44,12 @@ func RetainedFarmSiblingSuffixes() []string {
 	return []string{RetainedSessionSiblingSuffix}
 }
 
-// isSentinelFile reports whether name is the sentinel or a temporary file of an interrupted atomic sentinel write.
-func isSentinelFile(name string) bool {
-	return name == SentinelFilename || strings.HasPrefix(name, sentinelTempName)
+var farmManifestName = regexp.MustCompile(`^\.gorganizer-farm-[0-9a-f-]{36}\.jsonl$`)
+
+// IsFarmMetadataFile reports whether name belongs to the farm's sentinel, manifest, or an interrupted temporary write.
+func IsFarmMetadataFile(name string) bool {
+	return name == SentinelFilename || strings.HasPrefix(name, sentinelTempName) ||
+		strings.HasPrefix(name, farmManifestPrefix) || strings.HasPrefix(name, ".tmp-"+farmManifestPrefix)
 }
 
 const IntentMagic = "gorganizer-intent"
@@ -149,6 +153,10 @@ type Sentinel struct {
 	OverwriteRoot       string          `json:"overwrite_root"`
 	Layers              []SentinelLayer `json:"layers"`
 	MaterializerVersion int             `json:"materializer_version"`
+	FarmID              string          `json:"farm_id,omitempty"`
+	Manifest            string          `json:"manifest,omitempty"`
+	ManifestSHA256      string          `json:"manifest_sha256,omitempty"`
+	ManifestEntries     int             `json:"manifest_entries,omitempty"`
 }
 
 var (
@@ -189,7 +197,7 @@ func ReadSentinel(dataPath string) (*Sentinel, error) {
 	return &s, nil
 }
 
-// ValidateSentinel checks a sentinel's magic, schema version, backup path, and v2 identity fields and layer hash.
+// ValidateSentinel checks a sentinel's version, backup, identity, and manifest reference.
 func ValidateSentinel(s *Sentinel) error {
 	if s == nil {
 		return fmt.Errorf("%w: nil", ErrSentinelInvalid)
@@ -217,6 +225,14 @@ func ValidateSentinel(s *Sentinel) error {
 		if got := ComputeLayerHash(s.Layers); got != s.Hash {
 			return fmt.Errorf("%w: layer hash mismatch (recorded %s, computed %s)",
 				ErrSentinelInvalid, s.Hash, got)
+		}
+	}
+	if s.SchemaVersion >= 3 {
+		if s.FarmID == "" || !farmManifestName.MatchString(s.Manifest) || s.Manifest != farmManifestPrefix+s.FarmID+".jsonl" {
+			return fmt.Errorf("%w: v3 sentinel has an invalid farm manifest reference", ErrSentinelInvalid)
+		}
+		if s.ManifestEntries < 0 {
+			return fmt.Errorf("%w: negative manifest_entries", ErrSentinelInvalid)
 		}
 	}
 	return nil
