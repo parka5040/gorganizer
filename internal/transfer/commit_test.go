@@ -25,6 +25,7 @@ func TestTransferReplacementFaultMatrix(t *testing.T) {
 	}{
 		{"stage", "mod", "stage", "old", "old"},
 		{"sync-stage", "mod", "sync-stage", "old", "old"},
+		{"sync-filesystem", "mod", "sync-filesystem", "old", "old"},
 		{"sync-swap", "mod", "sync-swap", "new", "new"},
 		{"sync-rollback", "mod", "sync-rollback", "old", "old"},
 		{"move-aside", "mod", "move-aside", "old", "old"},
@@ -68,10 +69,16 @@ func TestTransferReplacementFaultMatrix(t *testing.T) {
 			ops.sync = func(path string) error {
 				syncCalls++
 				if tc.fail == "sync-stage" && syncCalls == 1 ||
-					(tc.fail == "sync-swap" || tc.fail == "sync-rollback") && syncCalls == 2 {
+					(tc.fail == "sync-swap" || tc.fail == "sync-rollback") && syncCalls == 3 {
 					return errors.New("injected sync failure")
 				}
 				return atomicfile.SyncDir(path)
+			}
+			ops.syncFilesystem = func(path string) error {
+				if tc.fail == "sync-filesystem" {
+					return errors.New("injected filesystem sync failure")
+				}
+				return atomicfile.SyncFilesystem(path)
 			}
 			if err := replaceDirWithOps(root, name, staged, tc.kind, ops); err == nil {
 				t.Fatal("replacement succeeded despite injected fault")
@@ -149,6 +156,11 @@ func TestTransferRecoveryIdempotent(t *testing.T) {
 			for i := 0; i < 2; i++ {
 				if err := RecoverTransfers(root); err != nil {
 					t.Fatal(err)
+				}
+				if tc.target && tc.old {
+					if got := readFileT(t, filepath.Join(root, ".gorganizer-recovered-"+id, "content")); got != "old" {
+						t.Errorf("recovery %d preserved original = %q, want old", i, got)
+					}
 				}
 				if got := readFileT(t, filepath.Join(root, intent.Name, "content")); got != tc.want {
 					t.Errorf("recovery %d content = %q, want %q", i, got, tc.want)

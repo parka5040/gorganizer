@@ -28,6 +28,37 @@ var (
 	closeFile  = func(file *os.File) error { return file.Close() }
 )
 
+type DirectoryIdentity struct {
+	Dev uint64 `json:"dev"`
+	Ino uint64 `json:"ino"`
+}
+
+// Identity returns the device and inode of a real directory without following a final symlink.
+func Identity(path string) (DirectoryIdentity, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return DirectoryIdentity{}, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !info.IsDir() || !ok {
+		return DirectoryIdentity{}, fmt.Errorf("atomicfile: %s is not a real directory", path)
+	}
+	return DirectoryIdentity{Dev: uint64(stat.Dev), Ino: stat.Ino}, nil
+}
+
+// SyncFilesystem flushes all filesystem data and metadata containing a staging directory.
+func SyncFilesystem(path string) error {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("atomicfile: opening staging directory %s: %w", path, err)
+	}
+	defer unix.Close(fd)
+	if err := unix.Syncfs(fd); err != nil {
+		return fmt.Errorf("atomicfile: syncing filesystem at %s: %w", path, err)
+	}
+	return nil
+}
+
 // SyncDir flushes directory entries to disk.
 func SyncDir(dir string) error {
 	d, err := openDir(dir)

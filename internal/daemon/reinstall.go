@@ -16,6 +16,8 @@ import (
 	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/dto"
 	"github.com/parka/gorganizer/internal/fsutil"
+	"github.com/parka/gorganizer/internal/transfer"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -23,14 +25,39 @@ const (
 	reinstallOldPrefix     = ".reinstall-old-"
 	reinstallIntentPrefix  = ".gorganizer-reinstall-intent-"
 	reinstallIntentSuffix  = ".json"
-	reinstallIntentVersion = 1
+	reinstallIntentVersion = 2
 )
 
 type reinstallIntent struct {
-	SchemaVersion int    `json:"schema_version"`
-	Mod           string `json:"mod"`
-	Stage         string `json:"stage"`
-	Old           string `json:"old"`
+	SchemaVersion int                           `json:"schema_version"`
+	Mod           string                        `json:"mod"`
+	Stage         string                        `json:"stage"`
+	Old           string                        `json:"old"`
+	StageIdentity *atomicfile.DirectoryIdentity `json:"stage_identity,omitempty"`
+}
+
+// checkModReplacement refuses names reserved by an unfinished reinstall or transfer journal.
+func checkModReplacement(modsDir, name string) error {
+	entries, err := os.ReadDir(modsDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("checking reinstall journals: %w", err)
+	}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), reinstallIntentPrefix) || !strings.HasSuffix(entry.Name(), reinstallIntentSuffix) {
+			continue
+		}
+		intent, err := readReinstallIntent(filepath.Join(modsDir, entry.Name()))
+		if err != nil {
+			return fmt.Errorf("checking reinstall journal %q: %w", entry.Name(), err)
+		}
+		if intent.Mod == name {
+			return &download.ReplacementPendingError{Name: name}
+		}
+	}
+	return transfer.CheckPendingReplacement(modsDir, name)
 }
 
 // ReinstallMod waits for startup recovery, then rebuilds a mod from its recorded source archives in hidden staging and swaps it in only after every replay succeeds.
@@ -47,10 +74,6 @@ func (md *ModService) ReinstallMod(gameID, modName string) (int, int, int, error
 	if !md.s.gameConfigured(gameID) {
 		return 0, 0, 0, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
-	modDir, err := resolveExistingModDir(gameID, modName)
-	if err != nil {
-		return 0, 0, 0, err
-	}
 	release, err := md.s.acquireShared(gameID, dto.BusyOperationReinstall)
 	if err != nil {
 		return 0, 0, 0, err
@@ -60,7 +83,11 @@ func (md *ModService) ReinstallMod(gameID, modName string) (int, int, int, error
 		return 0, 0, 0, err
 	}
 	defer md.s.lockMods(gameID, modName)()
-	if err := requireRealModDir(gameID, modName, modDir); err != nil {
+	if err := checkModReplacement(config.ModsDir(gameID), modName); err != nil {
+		return 0, 0, 0, err
+	}
+	modDir, err := resolveExistingModDir(gameID, modName)
+	if err != nil {
 		return 0, 0, 0, err
 	}
 	modsDir := config.ModsDir(gameID)
@@ -241,6 +268,11 @@ func (md *ModService) publishReinstallStage(gameID, modName, modsDir, token, ope
 		Stage:         reinstallStagePrefix + token,
 		Old:           reinstallOldPrefix + token,
 	}
+	identity, err := atomicfile.Identity(stageDir)
+	if err != nil {
+		return fmt.Errorf("identifying reinstall stage: %w", err)
+	}
+	intent.StageIdentity = &identity
 	intentPath := filepath.Join(modsDir, reinstallIntentPrefix+token+reinstallIntentSuffix)
 	if err := writeReinstallIntent(intentPath, intent); err != nil {
 		_ = os.RemoveAll(stageDir)
@@ -255,6 +287,18 @@ func (md *ModService) publishReinstallStage(gameID, modName, modsDir, token, ope
 			removeReinstallIntent(intentPath)
 		}
 		return err
+	}
+	if err := md.s.reinstallStep("sync-filesystem"); err != nil {
+		return err
+	}
+	if err := atomicfile.SyncFilesystem(stageDir); err != nil {
+		return fmt.Errorf("syncing staged mod files: %w", err)
+	}
+	if err := md.s.reinstallStep("sync-stage-dir"); err != nil {
+		return err
+	}
+	if err := atomicfile.SyncDir(modsDir); err != nil {
+		return fmt.Errorf("syncing mods directory before swap: %w", err)
 	}
 	return md.swapReinstalledMod(gameID, modName, modDir, stageDir, filepath.Join(modsDir, intent.Old), intentPath, operation)
 }
@@ -288,7 +332,16 @@ func (md *ModService) swapReinstalledMod(gameID, modName, modDir, stageDir, oldD
 	if err := md.swapInReinstalledMod(gameID, modName, modDir, stageDir, oldDir, intentPath, operation); err != nil {
 		return err
 	}
+	if err := md.s.reinstallStep("sync-swap-dir"); err != nil {
+		return err
+	}
+	if err := atomicfile.SyncDir(filepath.Dir(modDir)); err != nil {
+		return fmt.Errorf("syncing mods directory after swap: %w", err)
+	}
 	if err := md.s.reinstallStep("installed"); err != nil {
+		return err
+	}
+	if err := md.s.reinstallStep("remove-old"); err != nil {
 		return err
 	}
 	if err := os.RemoveAll(oldDir); err != nil {
@@ -431,8 +484,12 @@ func readReinstallIntent(path string) (reinstallIntent, error) {
 	if err := json.Unmarshal(data, &intent); err != nil {
 		return intent, fmt.Errorf("parsing reinstall intent: %w", err)
 	}
-	if intent.SchemaVersion != reinstallIntentVersion {
+	if intent.SchemaVersion != 1 && intent.SchemaVersion != reinstallIntentVersion {
 		return intent, fmt.Errorf("unsupported reinstall intent schema %d", intent.SchemaVersion)
+	}
+	if intent.SchemaVersion == reinstallIntentVersion && intent.StageIdentity == nil ||
+		intent.StageIdentity != nil && intent.StageIdentity.Ino == 0 {
+		return intent, fmt.Errorf("reinstall intent has an invalid staging identity")
 	}
 	if err := download.ValidateTargetModName(intent.Mod); err != nil {
 		return intent, err
@@ -447,7 +504,7 @@ func readReinstallIntent(path string) (reinstallIntent, error) {
 
 // removeReinstallIntent deletes a reinstall intent record, logging a failure for startup recovery to clean up.
 func removeReinstallIntent(path string) {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if err := atomicfile.RemoveDurable(path); err != nil {
 		slog.Warn("reinstall: removing intent failed; startup recovery cleans it up", "path", path, "err", err)
 	}
 }
@@ -486,7 +543,7 @@ func recoverReinstalls(modsDir string) {
 			claimed[reinstallOldPrefix+token] = true
 			continue
 		}
-		if err := os.Remove(intentPath); err != nil && !os.IsNotExist(err) {
+		if err := atomicfile.RemoveDurable(intentPath); err != nil {
 			slog.Warn("reinstall recovery: removing intent failed", "intent", intentPath, "err", err)
 		}
 	}
@@ -501,6 +558,28 @@ func resolveReinstallIntent(modsDir string, intent reinstallIntent) error {
 	present, err := pathPresent(modDir)
 	if err != nil {
 		return err
+	}
+	oldPresent, err := pathPresent(oldDir)
+	if err != nil {
+		return err
+	}
+	if present && oldPresent {
+		identity, err := atomicfile.Identity(modDir)
+		if err != nil {
+			return fmt.Errorf("identifying reinstall target: %w", err)
+		}
+		if intent.StageIdentity == nil || identity != *intent.StageIdentity {
+			if err := preserveReinstallOld(modsDir, oldDir, intent.Mod, strings.TrimPrefix(intent.Old, reinstallOldPrefix)); err != nil {
+				return err
+			}
+		} else {
+			if err := atomicfile.SyncFilesystem(modDir); err != nil {
+				return err
+			}
+			if err := atomicfile.SyncDir(modsDir); err != nil {
+				return err
+			}
+		}
 	}
 	if !present {
 		oldPresent, err := pathPresent(oldDir)
@@ -525,6 +604,9 @@ func resolveReinstallIntent(modsDir string, intent reinstallIntent) error {
 		default:
 			return fmt.Errorf("mod %q is missing and neither %s nor %s exists", intent.Mod, intent.Old, intent.Stage)
 		}
+		if err := atomicfile.SyncDir(modsDir); err != nil {
+			return err
+		}
 	}
 	if err := os.RemoveAll(stageDir); err != nil {
 		return fmt.Errorf("removing reinstall staging %s: %w", intent.Stage, err)
@@ -532,6 +614,24 @@ func resolveReinstallIntent(modsDir string, intent reinstallIntent) error {
 	if err := os.RemoveAll(oldDir); err != nil {
 		return fmt.Errorf("removing previous mod folder %s: %w", intent.Old, err)
 	}
+	return nil
+}
+
+// preserveReinstallOld moves an ambiguous original into a hidden inspectable sibling.
+func preserveReinstallOld(modsDir, oldDir, name, token string) error {
+	recovered := filepath.Join(modsDir, ".gorganizer-recovered-"+token)
+	if exists, err := pathPresent(recovered); err != nil {
+		return err
+	} else if exists {
+		return fmt.Errorf("recovered mod folder %q already exists", recovered)
+	}
+	if err := unix.Renameat2(unix.AT_FDCWD, oldDir, unix.AT_FDCWD, recovered, unix.RENAME_NOREPLACE); err != nil {
+		return fmt.Errorf("preserving previous mod folder: %w", err)
+	}
+	if err := atomicfile.SyncDir(modsDir); err != nil {
+		return err
+	}
+	slog.Warn("reinstall recovery: preserved previous mod folder", "mod", name, "path", recovered)
 	return nil
 }
 
@@ -575,8 +675,8 @@ func recoverOrphanOldDir(modsDir, oldDir string) {
 		return
 	}
 	if present {
-		if err := os.RemoveAll(oldDir); err != nil {
-			slog.Warn("reinstall recovery: removing previous mod folder failed", "path", oldDir, "err", err)
+		if err := preserveReinstallOld(modsDir, oldDir, meta.Folder, strings.TrimPrefix(filepath.Base(oldDir), reinstallOldPrefix)); err != nil {
+			slog.Error("reinstall recovery: leaving ambiguous previous mod folder", "path", oldDir, "err", err)
 		}
 		return
 	}

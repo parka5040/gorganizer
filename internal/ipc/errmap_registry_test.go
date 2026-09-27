@@ -68,6 +68,7 @@ func registeredTokenSamples() map[string]error {
 		tokenInstallRecordFailed:        &download.InstallRecordError{Mod: "SkyUI", Err: fmt.Errorf("disk full")},
 		tokenSteamMaintenanceRequired:   &dto.SteamMaintenanceError{GameID: "skyrimse", Reason: "verify"},
 		tokenBundleIncomplete:           &transfer.BundleIncompleteError{Items: 2, Recovery: "none", Err: fmt.Errorf("disk full")},
+		tokenReplacementPending:         &download.ReplacementPendingError{Name: "SkyUI"},
 	}
 }
 

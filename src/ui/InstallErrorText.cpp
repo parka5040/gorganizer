@@ -279,6 +279,9 @@ QString knownTokenMessage(const InstallError& parsed)
         return QStringLiteral("%1 still has an unfinished mod change from before. Gorganizer will finish it "
                               "after the game closes. Close the game, then try again.")
             .arg(gameName(field("game"), QStringLiteral("This game")));
+    if (token == QLatin1String("replacement_pending"))
+        return QStringLiteral("An earlier change to \"%1\" did not finish. Restart Gorganizer so it can finish it, "
+                              "then try again.").arg(field("name").isEmpty() ? QStringLiteral("this item") : field("name"));
     if (token == QLatin1String("bundle_incomplete")) {
         if (field("recovery") == QLatin1String("pending"))
             return QStringLiteral("The import stopped after %1 items. Those items remain imported. Your previous files "
@@ -418,6 +421,7 @@ bool tokenValuesPercentEscaped(const QString& token)
         QStringLiteral("install_record_failed"),
         QStringLiteral("steam_maintenance_required"),
         QStringLiteral("bundle_incomplete"),
+        QStringLiteral("replacement_pending"),
     };
     return escaped.contains(token);
 }

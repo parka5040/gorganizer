@@ -70,6 +70,7 @@ const (
 	tokenInstallRecordFailed        = "install_record_failed:"
 	tokenSteamMaintenanceRequired   = "steam_maintenance_required:"
 	tokenBundleIncomplete           = "bundle_incomplete:"
+	tokenReplacementPending         = "replacement_pending:"
 )
 
 var errorTokens = []string{
@@ -84,6 +85,7 @@ var errorTokens = []string{
 	tokenArchiveRejected, tokenBundleRejected, tokenProfileIdentityInvalid, tokenInstallSelectionEmpty,
 	tokenPluginStateFailed, tokenFarmRecoveryDeferred, tokenRecoveryStale,
 	tokenInstallRecordFailed, tokenSteamMaintenanceRequired, tokenBundleIncomplete,
+	tokenReplacementPending,
 }
 
 // MapError turns a structured error into a gRPC status; unrecognized errors pass through with ok=false.
@@ -103,6 +105,10 @@ func MapError(err error) (error, bool) {
 	if errors.As(err, &deferred) {
 		msg := tokenFarmRecoveryDeferred + fmt.Sprintf("game=%s:operation=%s", escapeTokenValue(deferred.GameID), escapeTokenValue(deferred.Operation))
 		return status.Error(codes.FailedPrecondition, msg), true
+	}
+	var pendingReplacement *download.ReplacementPendingError
+	if errors.As(err, &pendingReplacement) {
+		return status.Error(codes.FailedPrecondition, tokenReplacementPending+"name="+escapeTokenValue(pendingReplacement.Name)), true
 	}
 	var incomplete *transfer.BundleIncompleteError
 	if errors.As(err, &incomplete) {

@@ -447,6 +447,14 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 	if target == "" {
 		return "", 0, fmt.Errorf("could not determine target mod folder")
 	}
+	if err := download.ValidateTargetModName(target); err != nil {
+		return "", 0, err
+	}
+
+	defer is.s.lockMods(req.GameID, target)()
+	if err := checkModReplacement(config.ModsDir(req.GameID), target); err != nil {
+		return "", 0, err
+	}
 	if req.Mode == dto.InstallMergeIntoMod || req.Mode == dto.InstallReplaceMod {
 		if _, err := resolveExistingModDir(req.GameID, target); err != nil {
 			var missing *ModNotFoundError
@@ -455,11 +463,7 @@ func (is *InstallService) startInstallFrom(req dto.StartInstallRequest, extracte
 			}
 			return "", 0, err
 		}
-	} else if err := download.ValidateTargetModName(target); err != nil {
-		return "", 0, err
 	}
-
-	defer is.s.lockMods(req.GameID, target)()
 	if err := ensureModsDir(req.GameID); err != nil {
 		return "", 0, err
 	}

@@ -110,6 +110,15 @@ func (e *ManifestLayoutError) Error() string {
 	return fmt.Sprintf("mod %q does not have a valid SMAPI manifest-folder layout: %s", e.Mod, e.Reason)
 }
 
+type ReplacementPendingError struct {
+	Name string
+}
+
+// Error tells the user to restart before changing a name reserved by an unfinished replacement.
+func (e *ReplacementPendingError) Error() string {
+	return fmt.Sprintf("An earlier change to %q did not finish. Restart Gorganizer so it can finish it, then try again.", e.Name)
+}
+
 type ReinstallSourceMissingError struct {
 	Mod  string
 	Path string

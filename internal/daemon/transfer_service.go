@@ -69,6 +69,12 @@ func (ts *TransferService) ImportInstance(ctx context.Context, req dto.ImportReq
 		LockProfiles: func() func() {
 			return ts.s.lockProfiles(req.GameID)
 		},
+		CheckReplacement: func(root, name string) error {
+			if root == config.ModsDir(req.GameID) {
+				return checkModReplacement(root, name)
+			}
+			return nil
+		},
 	}
 	summary, ierr := transfer.Import(ctx, opts, emit)
 	ts.s.invalidateInstalledArchiveCache(req.GameID)

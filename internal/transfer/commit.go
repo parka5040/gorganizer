@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,29 +14,33 @@ import (
 	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/fsutil"
+	"golang.org/x/sys/unix"
 )
 
 const (
-	transferIntentPrefix = ".gorganizer-transfer-intent-"
-	transferIntentSuffix = ".json"
-	transferStagePrefix  = ".transfer-stage-"
-	transferOldPrefix    = ".transfer-old-"
+	transferIntentPrefix  = ".gorganizer-transfer-intent-"
+	transferIntentSuffix  = ".json"
+	transferStagePrefix   = ".transfer-stage-"
+	transferOldPrefix     = ".transfer-old-"
+	transferIntentVersion = 2
 )
 
 type transferIntent struct {
-	SchemaVersion int    `json:"schema_version"`
-	OpID          string `json:"op_id"`
-	Kind          string `json:"kind"`
-	Name          string `json:"name"`
-	Staged        string `json:"staged"`
-	Old           string `json:"old"`
+	SchemaVersion int                           `json:"schema_version"`
+	OpID          string                        `json:"op_id"`
+	Kind          string                        `json:"kind"`
+	Name          string                        `json:"name"`
+	Staged        string                        `json:"staged"`
+	Old           string                        `json:"old"`
+	StageIdentity *atomicfile.DirectoryIdentity `json:"stage_identity,omitempty"`
 }
 
 type transferCommitOps struct {
-	rename       func(step, from, to string) error
-	remove       func(step, path string) error
-	removeIntent func(string) error
-	sync         func(string) error
+	rename         func(step, from, to string) error
+	remove         func(step, path string) error
+	removeIntent   func(string) error
+	sync           func(string) error
+	syncFilesystem func(string) error
 }
 
 // replaceDir replaces a mod or profile directory with a journaled same-root swap.
@@ -50,10 +55,11 @@ func replaceDir(root, name, staged string) error {
 // defaultTransferCommitOps supplies the filesystem operations used by replacement.
 func defaultTransferCommitOps() transferCommitOps {
 	return transferCommitOps{
-		rename:       func(_ string, from, to string) error { return os.Rename(from, to) },
-		remove:       func(_ string, path string) error { return os.RemoveAll(path) },
-		removeIntent: atomicfile.RemoveDurable,
-		sync:         atomicfile.SyncDir,
+		rename:         func(_ string, from, to string) error { return os.Rename(from, to) },
+		remove:         func(_ string, path string) error { return os.RemoveAll(path) },
+		removeIntent:   atomicfile.RemoveDurable,
+		sync:           atomicfile.SyncDir,
+		syncFilesystem: atomicfile.SyncFilesystem,
 	}
 }
 
@@ -88,22 +94,18 @@ func replaceDirWithOps(root, name, staged, kind string, ops transferCommitOps) e
 	if err := transferRealDir(staged); err != nil {
 		return fmt.Errorf("checking transfer stage: %w", err)
 	}
+	if err := CheckPendingReplacement(root, name); err != nil {
+		return &transferCommitError{pending: true, err: err}
+	}
 	if err := transferRealDir(filepath.Join(root, name)); err != nil {
 		return fmt.Errorf("checking transfer target: %w", err)
-	}
-	pending, err := pendingTransferFor(root, name)
-	if err != nil {
-		return &transferCommitError{pending: true, err: fmt.Errorf("checking previous transfer: %w", err)}
-	}
-	if pending {
-		return &transferCommitError{pending: true, err: fmt.Errorf("a previous replacement of %q still needs recovery", name)}
 	}
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		return fmt.Errorf("creating transfer identity: %w", err)
 	}
 	id := hex.EncodeToString(random[:])
-	intent := transferIntent{SchemaVersion: 1, OpID: id, Kind: kind, Name: name,
+	intent := transferIntent{SchemaVersion: transferIntentVersion, OpID: id, Kind: kind, Name: name,
 		Staged: transferStagePrefix + id, Old: transferOldPrefix + id}
 	stagePath := filepath.Join(root, intent.Staged)
 	target := filepath.Join(root, name)
@@ -125,6 +127,12 @@ func replaceDirWithOps(root, name, staged, kind string, ops transferCommitOps) e
 		_ = ops.rename("unstage", stagePath, staged)
 		return fmt.Errorf("syncing transfer stage: %w", err)
 	}
+	identity, err := atomicfile.Identity(stagePath)
+	if err != nil {
+		_ = ops.rename("unstage", stagePath, staged)
+		return fmt.Errorf("identifying transfer stage: %w", err)
+	}
+	intent.StageIdentity = &identity
 	data, err := json.Marshal(intent)
 	if err != nil {
 		return fmt.Errorf("encoding transfer intent: %w", err)
@@ -153,6 +161,12 @@ func replaceDirWithOps(root, name, staged, kind string, ops transferCommitOps) e
 		}
 		return cause
 	}
+	if err := ops.syncFilesystem(stagePath); err != nil {
+		return failBeforeSwap(fmt.Errorf("syncing staged transfer files: %w", err), false)
+	}
+	if err := ops.sync(root); err != nil {
+		return failBeforeSwap(fmt.Errorf("syncing transfer directory: %w", err), false)
+	}
 	if err := ops.rename("move-aside", target, oldPath); err != nil {
 		return failBeforeSwap(fmt.Errorf("moving original aside: %w", err), false)
 	}
@@ -167,6 +181,18 @@ func replaceDirWithOps(root, name, staged, kind string, ops transferCommitOps) e
 	}
 	if err := ops.removeIntent(intentPath); err != nil {
 		return &transferCommitError{committed: true, pending: true, err: fmt.Errorf("removing transfer intent: %w", err)}
+	}
+	return nil
+}
+
+// CheckPendingReplacement refuses a name claimed by an unfinished transfer journal.
+func CheckPendingReplacement(root, name string) error {
+	pending, err := pendingTransferFor(root, name)
+	if err != nil {
+		return fmt.Errorf("checking previous transfer: %w", err)
+	}
+	if pending {
+		return &download.ReplacementPendingError{Name: name}
 	}
 	return nil
 }
@@ -219,11 +245,13 @@ func loadTransferIntent(path string, entry os.DirEntry) (transferIntent, error) 
 // validateTransferIntent requires a single safe segment for every recorded name and binds the record to its filename.
 func validateTransferIntent(intent transferIntent, fileName string) error {
 	id := strings.TrimSuffix(strings.TrimPrefix(fileName, transferIntentPrefix), transferIntentSuffix)
-	if len(id) != 32 || strings.Trim(id, "0123456789abcdef") != "" || intent.OpID != id || intent.SchemaVersion != 1 ||
+	if len(id) != 32 || strings.Trim(id, "0123456789abcdef") != "" || intent.OpID != id || (intent.SchemaVersion != 1 && intent.SchemaVersion != transferIntentVersion) ||
 		(intent.Kind != "mod" && intent.Kind != "profile") || fsutil.ValidateName(intent.Name) != nil || strings.HasPrefix(intent.Name, ".") ||
 		intent.Kind == "mod" && download.ValidateTargetModName(intent.Name) != nil ||
 		fsutil.ValidateName(intent.Staged) != nil || fsutil.ValidateName(intent.Old) != nil ||
-		intent.Staged != transferStagePrefix+id || intent.Old != transferOldPrefix+id {
+		intent.Staged != transferStagePrefix+id || intent.Old != transferOldPrefix+id ||
+		intent.SchemaVersion == transferIntentVersion && intent.StageIdentity == nil ||
+		intent.StageIdentity != nil && intent.StageIdentity.Ino == 0 {
 		return fmt.Errorf("unsafe transfer intent %q", fileName)
 	}
 	return nil
@@ -293,6 +321,35 @@ func resolveTransferIntent(root string, intent transferIntent) error {
 		}
 		if err := atomicfile.SyncDir(root); err != nil {
 			return err
+		}
+	}
+	oldPresent, _ := transferPathPresent(old)
+	if present && oldPresent {
+		identity, err := atomicfile.Identity(target)
+		if err != nil {
+			return fmt.Errorf("identifying transfer target: %w", err)
+		}
+		if intent.StageIdentity == nil || identity != *intent.StageIdentity {
+			recovered := filepath.Join(root, ".gorganizer-recovered-"+intent.OpID)
+			if exists, err := transferPathPresent(recovered); err != nil {
+				return err
+			} else if exists {
+				return fmt.Errorf("recovered transfer folder %q already exists", recovered)
+			}
+			if err := unix.Renameat2(unix.AT_FDCWD, old, unix.AT_FDCWD, recovered, unix.RENAME_NOREPLACE); err != nil {
+				return fmt.Errorf("preserving previous transfer folder: %w", err)
+			}
+			if err := atomicfile.SyncDir(root); err != nil {
+				return err
+			}
+			slog.Warn("transfer recovery: preserved previous folder", "name", intent.Name, "path", recovered)
+		} else {
+			if err := atomicfile.SyncFilesystem(target); err != nil {
+				return err
+			}
+			if err := atomicfile.SyncDir(root); err != nil {
+				return err
+			}
 		}
 	}
 	if err := os.RemoveAll(stage); err != nil {
