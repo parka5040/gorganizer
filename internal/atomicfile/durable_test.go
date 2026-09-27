@@ -110,6 +110,25 @@ func TestWriteFileKeepsContractOnDirSyncFailure(t *testing.T) {
 	}
 }
 
+// TestCopyFileDurableWithProgress checks that a copy reports every byte written.
+func TestCopyFileDurableWithProgress(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	src, dst := filepath.Join(dir, "source"), filepath.Join(dir, "destination")
+	body := make([]byte, 1<<20)
+	if err := os.WriteFile(src, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var written int64
+	outcome, err := CopyFileDurableWithProgress(src, dst, 0o600, false, func(n int64) { written += n })
+	if err != nil || outcome != Durable || written != int64(len(body)) {
+		t.Fatalf("copy = %v, %v; reported %d bytes, want %d", outcome, err, written, len(body))
+	}
+	if info, err := os.Stat(dst); err != nil || info.Size() != written {
+		t.Fatalf("destination = %v, %v", info, err)
+	}
+}
+
 // TestCopyFileDurable checks copying, exclusive publication, validation, and cleanup on failures.
 func TestCopyFileDurable(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())

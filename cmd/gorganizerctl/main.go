@@ -31,6 +31,8 @@ func main() {
 	args := os.Args[2:]
 
 	switch subcommand {
+	case "migrate-data":
+		os.Exit(runMigrateData(args))
 	case "recover":
 		os.Exit(runRecover(args))
 	case "recover-confirm":
@@ -104,6 +106,9 @@ func usage() {
 	fmt.Fprint(os.Stderr, `gorganizerctl — gorganizer maintenance CLI
 
 Subcommands:
+  migrate-data --from <path> [--dry-run] [--yes]
+                               Move mods and downloads to your personal data folder.
+  migrate-data --resume        Finish an interrupted move.
   recover --game <id>          Repair interrupted SMAPI, game-root files and
                                the Data folder for a configured game.
   recover --data-path <path>   Check only the specified Data folder.

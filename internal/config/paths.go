@@ -62,6 +62,11 @@ func ModsDir(gameID string) string {
 		}
 		return filepath.Join(root, gameID+"_Mods")
 	}
+	return XDGModsDir(gameID)
+}
+
+// XDGModsDir returns the personal mods directory without the developer root override.
+func XDGModsDir(gameID string) string {
 	return filepath.Join(DataDir(), gameID, "mods")
 }
 
