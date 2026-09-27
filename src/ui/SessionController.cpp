@@ -13,7 +13,9 @@
 
 #include <QAction>
 #include <QDir>
+#include <QEvent>
 #include <QLabel>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QSet>
 #include <QSizePolicy>
@@ -56,6 +58,7 @@ SessionController::SessionController(AppConfig& config, GrpcClient* grpc,
     , m_parentWindow(parentWindow)
 {
     m_modStatusLabel->setTextFormat(Qt::PlainText);
+    m_modStatusLabel->installEventFilter(this);
     m_modStatusLabel->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
     m_statusBar->addPermanentWidget(m_modStatusLabel);
     m_statusBar->addPermanentWidget(m_recoveryButton);
@@ -127,6 +130,7 @@ SessionController::SessionController(AppConfig& config, GrpcClient* grpc,
         m_vfsMounted = false;
         m_hasModStatus = false;
         m_steamMaintenance = GrpcSteamMaintenanceState::Unspecified;
+        m_hasSavedSteamFiles = false;
         updateProfileSwitchControls();
         const bool pending = m_lifecycleStates.value(m_activeGame.shortName)
             == GrpcVFSLifecycleState::RecoveryPending;
@@ -208,6 +212,7 @@ void SessionController::switchToGame(uint32_t appId)
         m_vfsMounted = false;
         m_hasModStatus = false;
         m_steamMaintenance = GrpcSteamMaintenanceState::Unspecified;
+        m_hasSavedSteamFiles = false;
         setVfsDirty(false);
         updateProfileSwitchControls();
         if (wasSwitching)
@@ -493,6 +498,7 @@ void SessionController::updateVfsStatus(const GrpcVFSStatus& status)
     const bool wasBlocked = recoveryBlocked(gameId);
     m_lifecycleStates.insert(gameId, status.lifecycleState);
     m_steamMaintenance = status.steamMaintenance;
+    m_hasSavedSteamFiles = !status.preservedBatches.empty();
     m_hasModStatus = true;
     if (recoveryBlocked(gameId))
         m_recoveryMountSkipped.insert(gameId);
@@ -651,6 +657,7 @@ void SessionController::onConnected()
 {
     m_hasModStatus = false;
     m_steamMaintenance = GrpcSteamMaintenanceState::Unspecified;
+    m_hasSavedSteamFiles = false;
     refreshRecoveryIndicator();
     const QHash<QString, QString> pending = m_pendingRemounts;
     for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
@@ -758,6 +765,21 @@ void SessionController::refreshRecoveryIndicator()
     refreshStatusInfo();
 }
 
+bool SessionController::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == m_modStatusLabel && event->type() == QEvent::MouseButtonRelease
+        && m_grpc->isConnected() && m_hasModStatus && m_activeGame.detected
+        && (m_steamMaintenance == GrpcSteamMaintenanceState::VerifyRequired
+            || m_steamMaintenance == GrpcSteamMaintenanceState::UserRequested
+            || m_steamMaintenance == GrpcSteamMaintenanceState::SteamBusy
+            || m_hasSavedSteamFiles)
+        && static_cast<QMouseEvent*>(event)->button() == Qt::LeftButton) {
+        emit steamHelpRequested();
+        return true;
+    }
+    return QObject::eventFilter(watched, event);
+}
+
 void SessionController::refreshStatusInfo()
 {
     m_statusInfo->setText(m_activeGame.detected
@@ -794,8 +816,15 @@ void SessionController::refreshStatusInfo()
         tip = QStringLiteral("Mods are active for this game.");
     }
     m_modStatusLabel->setText(text);
-    m_modStatusLabel->setToolTip(tip);
     m_modStatusLabel->setAccessibleName(text);
+    const bool steamHelp = m_grpc->isConnected() && m_hasModStatus && m_activeGame.detected
+        && (m_steamMaintenance == GrpcSteamMaintenanceState::VerifyRequired
+            || m_steamMaintenance == GrpcSteamMaintenanceState::UserRequested
+            || m_steamMaintenance == GrpcSteamMaintenanceState::SteamBusy
+            || m_hasSavedSteamFiles);
+    m_modStatusLabel->setToolTip(steamHelp ? tip + (m_hasSavedSteamFiles
+        ? "\nClick for Steam update help and saved files." : "\nClick for Steam update help.") : tip);
+    m_modStatusLabel->setCursor(steamHelp ? Qt::PointingHandCursor : Qt::ArrowCursor);
 }
 
 }

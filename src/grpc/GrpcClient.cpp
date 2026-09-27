@@ -229,6 +229,12 @@ void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
     connect(worker, &GrpcWorker::vfsRecoveryRetried, this, &GrpcClient::vfsRecoveryRetried);
     connect(worker, &GrpcWorker::vfsStatusQueried, this, &GrpcClient::vfsStatusQueried);
     connect(worker, &GrpcWorker::vfsStatusQueryFailed, this, &GrpcClient::vfsStatusQueryFailed);
+    connect(worker, &GrpcWorker::steamMaintenanceSet, this, &GrpcClient::steamMaintenanceSet);
+    connect(worker, &GrpcWorker::steamMaintenanceSetFailed, this, &GrpcClient::steamMaintenanceSetFailed);
+    connect(worker, &GrpcWorker::preservedFilesImported, this, &GrpcClient::preservedFilesImported);
+    connect(worker, &GrpcWorker::preservedFilesImportFailed, this, &GrpcClient::preservedFilesImportFailed);
+    connect(worker, &GrpcWorker::preservedBatchDeleted, this, &GrpcClient::preservedBatchDeleted);
+    connect(worker, &GrpcWorker::preservedBatchDeleteFailed, this, &GrpcClient::preservedBatchDeleteFailed);
     connect(worker, &GrpcWorker::maintenanceUnmountFinished, this, &GrpcClient::maintenanceUnmountFinished);
     connect(worker, &GrpcWorker::vfsRebuilt, this, &GrpcClient::vfsRebuilt);
     connect(worker, &GrpcWorker::conflictsReceived, this, &GrpcClient::conflictsReceived);
@@ -546,6 +552,46 @@ quint64 GrpcClient::queryVfsStatus(const QString& gameId)
         return requestId;
     }
     post(&GrpcWorker::doQueryVfsStatus, requestId, gameId);
+    return requestId;
+}
+
+quint64 GrpcClient::setSteamMaintenance(const QString& gameId, bool enabled, bool verificationConfirmed)
+{
+    const quint64 requestId = ++m_nextSteamRequestId;
+    if (!installRpcWorker() || !isConnected()) {
+        QMetaObject::invokeMethod(this, [this, requestId, gameId] {
+            emit steamMaintenanceSetFailed(requestId, gameId, QStringLiteral("not connected"));
+        }, Qt::QueuedConnection);
+        return requestId;
+    }
+    postTo(installRpcWorker(), &GrpcWorker::doSetSteamMaintenance, requestId, gameId, enabled, verificationConfirmed);
+    return requestId;
+}
+
+quint64 GrpcClient::importPreservedFiles(const QString& gameId, const QString& batchId,
+                                         const QString& modName, const QStringList& relativePaths)
+{
+    const quint64 requestId = ++m_nextSteamRequestId;
+    if (!unaryWorker() || !isConnected()) {
+        QMetaObject::invokeMethod(this, [this, requestId, gameId] {
+            emit preservedFilesImportFailed(requestId, gameId, QStringLiteral("not connected"));
+        }, Qt::QueuedConnection);
+        return requestId;
+    }
+    post(&GrpcWorker::doImportPreservedFiles, requestId, gameId, batchId, modName, relativePaths);
+    return requestId;
+}
+
+quint64 GrpcClient::deletePreservedBatch(const QString& gameId, const QString& batchId)
+{
+    const quint64 requestId = ++m_nextSteamRequestId;
+    if (!unaryWorker() || !isConnected()) {
+        QMetaObject::invokeMethod(this, [this, requestId, gameId] {
+            emit preservedBatchDeleteFailed(requestId, gameId, QStringLiteral("not connected"));
+        }, Qt::QueuedConnection);
+        return requestId;
+    }
+    post(&GrpcWorker::doDeletePreservedBatch, requestId, gameId, batchId);
     return requestId;
 }
 

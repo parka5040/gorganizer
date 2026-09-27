@@ -533,6 +533,15 @@ GrpcVFSStatus GrpcWorker::vfsStatusFromProto(const gorganizer::v1::VFSStatus& s)
         .lifecycleReason = QString::fromStdString(s.lifecycle_reason()),
         .steamMaintenance = steamMaintenanceFromProto(s.steam_maintenance()),
     };
+    for (const auto& batch : s.preserved_batches()) {
+        out.preservedBatches.push_back({
+            QString::fromStdString(batch.batch_id()),
+            QString::fromStdString(batch.created_at()),
+            batch.file_count(),
+            QString::fromStdString(batch.reason()),
+            QString::fromStdString(batch.path()),
+        });
+    }
     if (s.has_pending_recovery()) {
         const auto& pending = s.pending_recovery();
         out.hasPendingRecovery = true;
@@ -874,6 +883,62 @@ void GrpcWorker::doQueryVfsStatus(quint64 requestId, const QString& gameId)
         out.gameId = gameId;
     emit vfsStatusReceived(out);
     emit vfsStatusQueried(requestId, out);
+}
+
+void GrpcWorker::doSetSteamMaintenance(quint64 requestId, const QString& gameId, bool enabled,
+                                       bool verificationConfirmed)
+{
+    gorganizer::v1::SetSteamMaintenanceRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_enabled(enabled);
+    req.set_verification_confirmed(verificationConfirmed);
+    gorganizer::v1::VFSStatus resp;
+    auto status = invoke(&Stub::SetSteamMaintenance, req, resp, std::chrono::minutes(10));
+    if (!status.ok()) {
+        emit steamMaintenanceSetFailed(requestId, gameId, QString::fromStdString(status.error_message()));
+        return;
+    }
+    auto result = vfsStatusFromProto(resp);
+    if (result.gameId.isEmpty())
+        result.gameId = gameId;
+    emit vfsStatusReceived(result);
+    emit steamMaintenanceSet(requestId, result);
+}
+
+void GrpcWorker::doImportPreservedFiles(quint64 requestId, const QString& gameId, const QString& batchId,
+                                        const QString& modName, const QStringList& relativePaths)
+{
+    gorganizer::v1::ImportPreservedFilesRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_batch_id(batchId.toStdString());
+    req.set_mod_name(modName.toStdString());
+    for (const auto& path : relativePaths)
+        req.add_relative_paths(path.toStdString());
+    gorganizer::v1::ImportPreservedFilesResponse resp;
+    auto status = invoke(&Stub::ImportPreservedFiles, req, resp, std::chrono::minutes(10));
+    if (!status.ok()) {
+        emit preservedFilesImportFailed(requestId, gameId, QString::fromStdString(status.error_message()));
+        return;
+    }
+    emit preservedFilesImported(requestId, gameId, QString::fromStdString(resp.mod_name()), resp.file_count());
+}
+
+void GrpcWorker::doDeletePreservedBatch(quint64 requestId, const QString& gameId, const QString& batchId)
+{
+    gorganizer::v1::DeletePreservedBatchRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_batch_id(batchId.toStdString());
+    gorganizer::v1::VFSStatus resp;
+    auto status = invoke(&Stub::DeletePreservedBatch, req, resp);
+    if (!status.ok()) {
+        emit preservedBatchDeleteFailed(requestId, gameId, QString::fromStdString(status.error_message()));
+        return;
+    }
+    auto result = vfsStatusFromProto(resp);
+    if (result.gameId.isEmpty())
+        result.gameId = gameId;
+    emit vfsStatusReceived(result);
+    emit preservedBatchDeleted(requestId, result);
 }
 
 void GrpcWorker::doRebuildVfs(const QString& gameId)
