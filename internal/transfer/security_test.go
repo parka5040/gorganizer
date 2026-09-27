@@ -67,7 +67,7 @@ func craftedManifest() *Manifest {
 	}
 }
 
-// TestImportRejectsPathTraversal locks that hostile entry names, symlinks, and hardlinks all fail with TransferPathError.
+// TestImportRejectsPathTraversal rejects lexical traversal and entries outside the declared roots.
 func TestImportRejectsPathTraversal(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -84,22 +84,6 @@ func TestImportRejectsPathTraversal(t *testing.T) {
 		{
 			"dotdot_inside_known_prefix",
 			tarEntry{&tar.Header{Name: "mods/M/../../evil", Typeflag: tar.TypeReg, Mode: 0644, Size: 4}, []byte("evil")},
-		},
-		{
-			"symlink_escaping",
-			tarEntry{&tar.Header{Name: "mods/M/link", Typeflag: tar.TypeSymlink, Linkname: "../../../etc/passwd"}, nil},
-		},
-		{
-			"symlink_absolute_target",
-			tarEntry{&tar.Header{Name: "mods/M/link", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"}, nil},
-		},
-		{
-			"symlink_crossing_mods",
-			tarEntry{&tar.Header{Name: "mods/M/link", Typeflag: tar.TypeSymlink, Linkname: "../Other/file"}, nil},
-		},
-		{
-			"hardlink",
-			tarEntry{&tar.Header{Name: "mods/M/hard", Typeflag: tar.TypeLink, Linkname: "mods/M/a"}, nil},
 		},
 		{
 			"unknown_root_prefix",

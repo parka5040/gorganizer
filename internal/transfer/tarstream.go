@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -12,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -158,28 +160,43 @@ func splitEntryName(name string) (prefix, rest string, err error) {
 	return "", "", &TransferPathError{Entry: name}
 }
 
-// validateSymlink rejects symlink entries whose target resolves outside the entry's containment root.
-func validateSymlink(entryName, linkname string) error {
-	if linkname == "" || strings.HasPrefix(linkname, "/") {
-		return &TransferPathError{Entry: entryName}
+// validateEntryType rejects links and special tar entries.
+func validateEntryType(hdr *tar.Header) error {
+	switch hdr.Typeflag {
+	case tar.TypeDir, tar.TypeReg, tar.TypeRegA:
+		return nil
+	case tar.TypeSymlink, tar.TypeLink:
+		return &BundleRejectedError{Reason: BundleRejectedLink, Item: hdr.Name}
+	default:
+		return &BundleRejectedError{Reason: BundleRejectedSpecial, Item: hdr.Name}
 	}
-	prefix, rest, err := splitEntryName(entryName)
-	if err != nil {
-		return err
-	}
-	root := prefix
-	if prefix == "mods" || prefix == "profiles" {
-		first, _, ok := strings.Cut(rest, "/")
-		if !ok {
-			return &TransferPathError{Entry: entryName}
+}
+
+// recordEntry rejects duplicate file paths and conflicting directory entries across the archive.
+func recordEntry(seen map[string]byte, hdr *tar.Header) error {
+	name := strings.TrimSuffix(hdr.Name, "/")
+	for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
+		if seen[parent] == 'f' {
+			return &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: hdr.Name}
 		}
-		root = prefix + "/" + first
+		if seen[parent] == 0 {
+			seen[parent] = 'i'
+		}
 	}
-	resolved := path.Clean(path.Join(path.Dir(path.Clean(entryName)), linkname))
-	if resolved != root && !strings.HasPrefix(resolved, root+"/") {
-		return &TransferPathError{Entry: entryName}
+	if seen[name] == 'f' || seen[name] == 'd' || (seen[name] == 'i' && hdr.Typeflag != tar.TypeDir) {
+		return &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: hdr.Name}
+	}
+	if hdr.Typeflag == tar.TypeDir {
+		seen[name] = 'd'
+	} else {
+		seen[name] = 'f'
 	}
 	return nil
+}
+
+// duplicatePathError reports whether a file or directory already occupies a staging path.
+func duplicatePathError(err error) bool {
+	return os.IsExist(err) || errors.Is(err, syscall.ENOTDIR)
 }
 
 // extractEntry writes one validated tar entry beneath destRoot, preserving the entry's relative path.
@@ -187,17 +204,39 @@ func extractEntry(tr *tar.Reader, hdr *tar.Header, destRoot, rel string) (int64,
 	dest := filepath.Join(destRoot, filepath.FromSlash(rel))
 	switch hdr.Typeflag {
 	case tar.TypeDir:
-		return 0, os.MkdirAll(dest, 0755)
-	case tar.TypeReg:
+		if info, err := os.Lstat(dest); err == nil {
+			if !info.IsDir() {
+				return 0, &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: hdr.Name}
+			}
+			return 0, nil
+		} else if duplicatePathError(err) {
+			return 0, &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: hdr.Name}
+		} else if !os.IsNotExist(err) {
+			return 0, err
+		}
+		if err := os.MkdirAll(dest, 0755); err != nil {
+			if duplicatePathError(err) {
+				return 0, &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: hdr.Name}
+			}
+			return 0, err
+		}
+		return 0, nil
+	case tar.TypeReg, tar.TypeRegA:
 		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+			if duplicatePathError(err) {
+				return 0, &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: hdr.Name}
+			}
 			return 0, err
 		}
 		mode := fs.FileMode(hdr.Mode).Perm()
 		if mode == 0 {
 			mode = 0644
 		}
-		f, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+		f, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
 		if err != nil {
+			if duplicatePathError(err) {
+				return 0, &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: hdr.Name}
+			}
 			return 0, err
 		}
 		n, err := io.Copy(f, tr)
@@ -208,18 +247,7 @@ func extractEntry(tr *tar.Reader, hdr *tar.Header, destRoot, rel string) (int64,
 			return n, fmt.Errorf("extracting %s: %w", hdr.Name, err)
 		}
 		return n, nil
-	case tar.TypeSymlink:
-		if err := validateSymlink(hdr.Name, hdr.Linkname); err != nil {
-			return 0, err
-		}
-		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-			return 0, err
-		}
-		if err := os.Symlink(hdr.Linkname, dest); err != nil && !os.IsExist(err) {
-			return 0, err
-		}
-		return 0, nil
 	default:
-		return 0, &TransferPathError{Entry: hdr.Name}
+		return 0, validateEntryType(hdr)
 	}
 }
