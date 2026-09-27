@@ -120,7 +120,7 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
     connect(m_grpc, &GrpcClient::nexusAPIKeySet, this, &SettingsDialog::onKeyValidated);
     connect(m_grpc, &GrpcClient::rpcError, this, [this](const QString& method, const QString& error) {
         if (method == "SetNexusAPIKey") {
-            m_statusLabel->setText(QString("<b style='color:%1;'>Error: %2</b>").arg(errHex(), error));
+            m_statusLabel->setText(QString("<b style='color:%1;'>Error: %2</b>").arg(errHex(), error.toHtmlEscaped()));
             m_saveBtn->setEnabled(true);
         }
     });
@@ -149,7 +149,7 @@ void SettingsDialog::onKeyValidated(bool valid, const QString& errorMessage)
         m_statusLabel->setText(QString("<b style='color:%1;'>Validated!</b>").arg(okHex()));
     } else {
         m_statusLabel->setText(
-            QString("<b style='color:%1;'>Invalid: %2</b>").arg(errHex(), errorMessage));
+            QString("<b style='color:%1;'>Invalid: %2</b>").arg(errHex(), errorMessage.toHtmlEscaped()));
     }
 }
 
@@ -166,7 +166,7 @@ void SettingsDialog::populateProtonCombo()
     QString err;
     if (!m_grpc->detectProtonVersions(versions, err)) {
         m_protonStatus->setText(
-            QString("<span style='color:%1;'>Cannot detect Proton: %2</span>").arg(errHex(), err));
+            QString("<span style='color:%1;'>Cannot detect Proton: %2</span>").arg(errHex(), err.toHtmlEscaped()));
         return;
     }
     for (const auto& v : versions)
@@ -236,11 +236,11 @@ void SettingsDialog::onTestNxm()
     if (p.waitForFinished(3000)) {
         const QString got = QString::fromUtf8(p.readAllStandardOutput()).trimmed();
         if (got == desktopId)
-            pass(QString("xdg-mime default = <code>%1</code>").arg(got));
+            pass(QString("xdg-mime default = <code>%1</code>").arg(got.toHtmlEscaped()));
         else if (got.isEmpty())
             fail("xdg-mime returned no default for x-scheme-handler/nxm");
         else
-            fail(QString("xdg-mime default = <code>%1</code> (expected <code>%2</code>)").arg(got, desktopId));
+            fail(QString("xdg-mime default = <code>%1</code> (expected <code>%2</code>)").arg(got.toHtmlEscaped(), desktopId.toHtmlEscaped()));
     } else {
         warn("xdg-mime not available — skipping query check");
     }
@@ -249,11 +249,11 @@ void SettingsDialog::onTestNxm()
     if (mf.open(QIODevice::ReadOnly | QIODevice::Text)) {
         const QString contents = QString::fromUtf8(mf.readAll());
         if (contents.contains(QString("x-scheme-handler/nxm=%1").arg(desktopId)))
-            pass(QString("<code>%1</code> contains nxm entry").arg(mimeapps));
+            pass(QString("<code>%1</code> contains nxm entry").arg(mimeapps.toHtmlEscaped()));
         else
-            fail(QString("<code>%1</code> missing nxm entry").arg(mimeapps));
+            fail(QString("<code>%1</code> missing nxm entry").arg(mimeapps.toHtmlEscaped()));
     } else {
-        fail(QString("<code>%1</code> not readable").arg(mimeapps));
+        fail(QString("<code>%1</code> not readable").arg(mimeapps.toHtmlEscaped()));
     }
 
     QFile df(desktopFile);
@@ -267,7 +267,7 @@ void SettingsDialog::onTestNxm()
             }
         }
         if (execLine.isEmpty()) {
-            fail(QString("<code>%1</code> has no Exec= line").arg(desktopFile));
+            fail(QString("<code>%1</code> has no Exec= line").arg(desktopFile.toHtmlEscaped()));
         } else if (!script.isEmpty() && !execLine.contains(script)) {
             fail(QString("Exec= points elsewhere: <code>%1</code><br>"
                          "&nbsp;&nbsp;Expected to contain: <code>%2</code>")
@@ -276,7 +276,7 @@ void SettingsDialog::onTestNxm()
             pass(QString("Exec= = <code>%1</code>").arg(execLine.toHtmlEscaped()));
         }
     } else {
-        fail(QString("<code>%1</code> missing").arg(desktopFile));
+        fail(QString("<code>%1</code> missing").arg(desktopFile.toHtmlEscaped()));
     }
 
     if (script.isEmpty()) {
@@ -284,9 +284,9 @@ void SettingsDialog::onTestNxm()
     } else {
         QFileInfo fi(script);
         if (fi.isExecutable())
-            pass(QString("<code>%1</code> is executable").arg(script));
+            pass(QString("<code>%1</code> is executable").arg(script.toHtmlEscaped()));
         else
-            fail(QString("<code>%1</code> exists but is not executable").arg(script));
+            fail(QString("<code>%1</code> exists but is not executable").arg(script.toHtmlEscaped()));
     }
 
     m_nxmStatus->setText(rows.join("<br>"));
@@ -344,7 +344,7 @@ void SettingsDialog::onSaveProton()
     QString err;
     if (!m_grpc->setPreferredProton(path, err)) {
         m_protonStatus->setText(
-            QString("<b style='color:%1;'>Save failed: %2</b>").arg(errHex(), err));
+            QString("<b style='color:%1;'>Save failed: %2</b>").arg(errHex(), err.toHtmlEscaped()));
         return;
     }
     m_protonStatus->setText(QString("<b style='color:%1;'>Saved.</b>").arg(okHex()));

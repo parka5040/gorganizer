@@ -8,14 +8,13 @@
 #include "ModListWidget.h"
 #include "SessionController.h"
 #include "SmapiModsWidget.h"
+#include "SafeLinks.h"
 
-#include <QDesktopServices>
 #include <QMap>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QStatusBar>
 #include <QTimer>
-#include <QUrl>
 #include <algorithm>
 
 namespace gorganizer {
@@ -822,7 +821,7 @@ void ModDependencyController::onFetchFinished(quint64 requestId, const QString&,
             text += QStringLiteral("\n\nWhy not automatically: %1").arg(openReasons.join(QLatin1Char(' ')));
         if (askPlain(m_parentWindow, QStringLiteral("Open Nexus Mods Pages"), text, QStringLiteral("Open Pages"))) {
             for (const auto& url : urls)
-                QDesktopServices::openUrl(QUrl(url));
+                openWebLink(m_parentWindow, url);
         }
     }
 

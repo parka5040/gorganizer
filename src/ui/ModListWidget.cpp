@@ -4,6 +4,7 @@
 #include "Dialogs.h"
 #include "InstallErrorText.h"
 #include "ModDependencyText.h"
+#include "SafeLinks.h"
 
 #include <QApplication>
 #include <QVBoxLayout>
@@ -459,11 +460,11 @@ void ModListWidget::showConflictDetailsForMod(const QString& modName)
                             const QList<QPair<QString, QString>>& rows,
                             const QString& emptyText, const QString& otherCol) {
         auto* lbl = new QLabel(QString("<b><span style='color:%2'>%1</span></b>")
-                                   .arg(heading, accent.name()));
+                                   .arg(heading.toHtmlEscaped(), accent.name()));
         lbl->setTextFormat(Qt::RichText);
         layout->addWidget(lbl);
         if (rows.isEmpty()) {
-            auto* none = new QLabel(QString("<i>%1</i>").arg(emptyText));
+            auto* none = new QLabel(QString("<i>%1</i>").arg(emptyText.toHtmlEscaped()));
             none->setTextFormat(Qt::RichText);
             layout->addWidget(none);
             return;
@@ -1036,7 +1037,7 @@ void ModListWidget::addDependencyActions(QMenu& menu, const QString& folder)
     update->setEnabled(!updateUrl.isEmpty());
     if (!updateUrl.isEmpty())
         update->setToolTip(plainToolTip(updateUrl));
-    connect(update, &QAction::triggered, this, [updateUrl] { QDesktopServices::openUrl(QUrl(updateUrl)); });
+    connect(update, &QAction::triggered, this, [this, updateUrl] { openWebLink(this, updateUrl); });
 }
 
 void ModListWidget::onItemDoubleClicked(const QModelIndex& index)
@@ -1225,8 +1226,8 @@ void ModListWidget::showContextMenu(const QPoint& pos)
     }
 
     if (!meta.nexusUrl.isEmpty()) {
-        menu.addAction("Visit Mod Page", [url = meta.nexusUrl] {
-            QDesktopServices::openUrl(QUrl(url));
+        menu.addAction("Visit Mod Page", [this, url = meta.nexusUrl] {
+            openWebLink(this, url);
         });
     }
     menu.addAction(meta.nexusUrl.isEmpty() ? "Set Mod Page URL..." : "Change Mod Page URL...",
@@ -1896,7 +1897,7 @@ void ModListWidget::onOverwriteContextMenu(const QPoint& globalPos)
     if (ok && !hasFiles)
         extractAll->setToolTip("Overwrite is empty.");
     if (!ok)
-        extractAll->setToolTip(QString("Daemon not reachable: %1").arg(err));
+        extractAll->setToolTip(plainToolTip(QString("Daemon not reachable: %1").arg(err)));
     connect(extractAll, &QAction::triggered, this, &ModListWidget::extractOverwriteAll);
 
     auto* extractSel = menu.addAction("Extract Selected Files to New Mod...");

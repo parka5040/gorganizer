@@ -5,6 +5,7 @@
 #include "ThemeManager.h"
 #include "Dialogs.h"
 #include "InstallErrorText.h"
+#include "SafeLinks.h"
 
 #include <QVBoxLayout>
 #include <QHeaderView>
@@ -12,8 +13,6 @@
 #include <QMessageBox>
 #include <QInputDialog>
 #include <QPushButton>
-#include <QDesktopServices>
-#include <QUrl>
 #include <QDir>
 #include <QFileInfo>
 #include <QSettings>
@@ -331,6 +330,7 @@ void DownloadsLibraryView::onDoubleClicked(const QModelIndex& idx)
         QMessageBox box(this);
         box.setWindowTitle("Multi-Archive Mod");
         box.setIcon(QMessageBox::Question);
+        box.setTextFormat(Qt::PlainText);
         QString displayName = row.modName.isEmpty() ? row.fileArchiveName : row.modName;
         box.setText(QString("An archive for \"%1\" is already installed as mod \"%2\".")
                         .arg(displayName, existingFolder));
@@ -490,7 +490,7 @@ void DownloadsLibraryView::openNexusPage(const GrpcArchiveRow& row)
         return;
     QString url = QString("https://www.nexusmods.com/%1/mods/%2")
                       .arg(row.gameDomain).arg(row.modId);
-    QDesktopServices::openUrl(QUrl(url));
+    openWebLink(this, url);
 }
 
 void DownloadsLibraryView::onDownloadProgress(const GrpcDownloadProgress& progress)

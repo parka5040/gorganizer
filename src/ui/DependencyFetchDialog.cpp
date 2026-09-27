@@ -1,5 +1,6 @@
 #include "DependencyFetchDialog.h"
 #include "ModDependencyText.h"
+#include "SafeLinks.h"
 
 #include <QDialogButtonBox>
 #include <QHeaderView>
@@ -25,8 +26,9 @@ QLabel* linkLabel(const QString& url, const QString& text)
 {
     auto* label = new QLabel(QStringLiteral("<a href=\"%1\">%2</a>").arg(url.toHtmlEscaped(), text.toHtmlEscaped()));
     label->setTextFormat(Qt::RichText);
-    label->setOpenExternalLinks(true);
     label->setToolTip(plainToolTip(url));
+    QObject::connect(label, &QLabel::linkActivated, label,
+                     [label](const QString& link) { openWebLink(label, link); });
     return label;
 }
 

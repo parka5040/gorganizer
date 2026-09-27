@@ -57,6 +57,7 @@ IniEditorDialog::IniEditorDialog(GrpcClient* grpc,
     layout->addWidget(m_enabledCheck);
 
     m_pathLabel->setWordWrap(true);
+    m_pathLabel->setTextFormat(Qt::PlainText);
     m_pathLabel->setObjectName("monoHintLabel");
     m_pathLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     layout->addWidget(m_pathLabel);
@@ -67,6 +68,7 @@ IniEditorDialog::IniEditorDialog(GrpcClient* grpc,
 
     buildFindBar(layout);
 
+    m_statusLabel->setTextFormat(Qt::RichText);
     m_statusLabel->setObjectName("hintLabel");
     layout->addWidget(m_statusLabel);
 
@@ -102,7 +104,7 @@ void IniEditorDialog::reload()
     GrpcProfileIniStatus status;
     QString err;
     if (!m_grpc->listProfileIniFiles(m_gameId, m_profileName, files, status, err)) {
-        m_statusLabel->setText(QString("<span style='color:%1;'>Error: %2</span>").arg(errHex(), err));
+        m_statusLabel->setText(QString("<span style='color:%1;'>Error: %2</span>").arg(errHex(), err.toHtmlEscaped()));
         m_pathLabel->clear();
         return;
     }
@@ -233,9 +235,9 @@ void IniEditorDialog::onTweakToggled(const QString& tweakId, bool enabled)
     }
     m_statusLabel->setText(QString("<span style='color:%1;'>%2 %3 %4.</span>")
         .arg(okHex())
-        .arg(state.name)
+        .arg(state.name.toHtmlEscaped())
         .arg(state.enabled ? "enabled" : "disabled")
-        .arg("(" + state.targetFile + ")"));
+        .arg(("(" + state.targetFile + ")").toHtmlEscaped()));
 
     for (int i = 0; i < m_handles.size(); ++i) {
         if (m_handles[i].filename == state.targetFile) {
@@ -274,7 +276,7 @@ void IniEditorDialog::onTabChanged(int index)
     int handleIdx = index - prefix;
     if (handleIdx < 0 || handleIdx >= m_handles.size())
         return;
-    m_statusLabel->setText("File on disk: " + m_handles[handleIdx].diskPath);
+    m_statusLabel->setText("File on disk: " + m_handles[handleIdx].diskPath.toHtmlEscaped());
 }
 
 void IniEditorDialog::markDirty(int handleIndex, bool dirty)
@@ -361,7 +363,7 @@ void IniEditorDialog::onApplyNow()
             const auto& h = m_handles.first();
             m_grpc->saveProfileIniFile(m_gameId, m_profileName, h.filename, h.originalContent, err);
         }
-        m_statusLabel->setText(QString("<span style='color:%1;'>Applied to %2</span>").arg(okHex(), status.myGamesDir));
+        m_statusLabel->setText(QString("<span style='color:%1;'>Applied to %2</span>").arg(okHex(), status.myGamesDir.toHtmlEscaped()));
         return;
     }
     m_grpc->setProfileIniEnabled(m_gameId, m_profileName, true, status, err);
@@ -543,7 +545,7 @@ void IniEditorDialog::onApplyResolution()
     applyResolutionTo(target, w, h);
     m_resolutionStatus->setText(
         QString("<span style='color:%1;'>Staged %2×%3 into [Display] of %4. "
-                "Click Save to persist.</span>").arg(okHex()).arg(w).arg(h).arg(target));
+                "Click Save to persist.</span>").arg(okHex()).arg(w).arg(h).arg(target.toHtmlEscaped()));
 }
 
 void IniEditorDialog::applyResolutionTo(const QString& filename, int width, int height)

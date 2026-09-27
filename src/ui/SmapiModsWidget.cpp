@@ -2,8 +2,8 @@
 #include "ModDependencyText.h"
 #include "SmapiComponentModel.h"
 #include "ThemeManager.h"
+#include "SafeLinks.h"
 
-#include <QDesktopServices>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
@@ -11,7 +11,6 @@
 #include <QPushButton>
 #include <QTreeView>
 #include <QTreeWidget>
-#include <QUrl>
 #include <QVBoxLayout>
 
 namespace gorganizer {
@@ -317,7 +316,7 @@ void SmapiModsWidget::onItemClicked(const QModelIndex& index)
         return;
     const QString url = index.data(SmapiComponentModel::UpdateUrlRole).toString();
     if (url.startsWith(QLatin1String("https://")))
-        QDesktopServices::openUrl(QUrl(url));
+        openWebLink(this, url);
 }
 
 }

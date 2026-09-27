@@ -88,6 +88,7 @@ QWidget* ImportDialog::buildArchivePage()
     lay->addLayout(row);
 
     m_archiveErrorLabel = new QLabel;
+    m_archiveErrorLabel->setTextFormat(Qt::PlainText);
     m_archiveErrorLabel->setWordWrap(true);
     m_archiveErrorLabel->setStyleSheet(QString("color: %1;").arg(errHex()));
     m_archiveErrorLabel->setVisible(false);
@@ -121,6 +122,7 @@ QWidget* ImportDialog::buildSelectionPage()
     auto* lay = new QVBoxLayout(page);
 
     m_manifestLabel = new QLabel;
+    m_manifestLabel->setTextFormat(Qt::RichText);
     m_manifestLabel->setWordWrap(true);
     lay->addWidget(m_manifestLabel);
 
@@ -141,6 +143,7 @@ QWidget* ImportDialog::buildSelectionPage()
     lay->addWidget(policyBox);
 
     m_selectionErrorLabel = new QLabel;
+    m_selectionErrorLabel->setTextFormat(Qt::PlainText);
     m_selectionErrorLabel->setWordWrap(true);
     m_selectionErrorLabel->setStyleSheet(QString("color: %1;").arg(errHex()));
     m_selectionErrorLabel->setVisible(false);
@@ -249,9 +252,9 @@ void ImportDialog::onPreview()
 void ImportDialog::populatePreview()
 {
     QString header = QString("<b>Game:</b> %1 &nbsp; <b>Gorganizer:</b> %2")
-                         .arg(m_preview.gameId, m_preview.gorganizerVersion);
+                         .arg(m_preview.gameId.toHtmlEscaped(), m_preview.gorganizerVersion.toHtmlEscaped());
     if (!m_preview.exportedAt.isEmpty())
-        header += QString(" &nbsp; <b>Exported:</b> %1").arg(m_preview.exportedAt);
+        header += QString(" &nbsp; <b>Exported:</b> %1").arg(m_preview.exportedAt.toHtmlEscaped());
     QStringList extras;
     if (m_preview.includesOverwrite) extras << "Overwrite folder";
     if (m_preview.includesGameSettings) extras << "game settings";
