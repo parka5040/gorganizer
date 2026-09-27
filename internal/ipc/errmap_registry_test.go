@@ -61,6 +61,7 @@ func registeredTokenSamples() map[string]error {
 		tokenArchiveRejected:            &download.ArchiveRejectedError{Reason: download.ArchiveRejectedNestedInstaller, Detail: "...fomod"},
 		tokenBundleRejected:             &transfer.BundleRejectedError{Reason: transfer.BundleRejectedLink, Item: "mods/M/a"},
 		tokenProfileIdentityInvalid:     &profile.IdentityInvalidError{Name: "../.."},
+		tokenInstallSelectionEmpty:      download.ErrEmptyInstallSelection,
 	}
 }
 

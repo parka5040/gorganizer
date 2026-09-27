@@ -256,6 +256,8 @@ QString knownTokenMessage(const InstallError& parsed)
                                   "Ask for a smaller export bundle.");
         return QStringLiteral("This backup contains unsafe names or file links, so nothing was imported.");
     }
+    if (token == QLatin1String("install_selection_empty"))
+        return QStringLiteral("No files are selected. Go back and choose at least one option to install.");
     if (token == QLatin1String("profile_identity_invalid"))
         return QStringLiteral("The profile \"%1\" has an invalid name or folder, so it was not changed.")
             .arg(field("name"));
@@ -321,6 +323,7 @@ bool tokenValuesPercentEscaped(const QString& token)
         QStringLiteral("archive_rejected"),
         QStringLiteral("bundle_rejected"),
         QStringLiteral("profile_identity_invalid"),
+        QStringLiteral("install_selection_empty"),
     };
     return escaped.contains(token);
 }

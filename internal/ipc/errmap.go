@@ -63,6 +63,7 @@ const (
 	tokenArchiveRejected            = "archive_rejected:"
 	tokenBundleRejected             = "bundle_rejected:"
 	tokenProfileIdentityInvalid     = "profile_identity_invalid:"
+	tokenInstallSelectionEmpty      = "install_selection_empty:"
 )
 
 var errorTokens = []string{
@@ -74,7 +75,7 @@ var errorTokens = []string{
 	tokenPreviewNotFound, tokenVFSMutex, tokenLinkedParentMissing, tokenTTWDrift, tokenPrefixMissing,
 	tokenSteamNotRunning, tokenTTWRequiresVanillaFNV, tokenXNVSEMissingForTTW, tokenFNV4GBNotAppliedForTTW,
 	tokenTransferGameMismatch, tokenTransferSchema, tokenTransferPath, tokenTransferCollision, tokenTransferOverwriteMounted,
-	tokenArchiveRejected, tokenBundleRejected, tokenProfileIdentityInvalid,
+	tokenArchiveRejected, tokenBundleRejected, tokenProfileIdentityInvalid, tokenInstallSelectionEmpty,
 }
 
 // MapError turns a structured error into a gRPC status; unrecognized errors pass through with ok=false.
@@ -275,6 +276,9 @@ func MapError(err error) (error, bool) {
 	if errors.As(err, &overwriteMounted) {
 		msg := tokenTransferOverwriteMounted + fmt.Sprintf("name=%s", overwriteMounted.Name)
 		return status.Error(codes.FailedPrecondition, msg), true
+	}
+	if errors.Is(err, download.ErrEmptyInstallSelection) {
+		return status.Error(codes.InvalidArgument, tokenInstallSelectionEmpty), true
 	}
 	var archiveRejected *download.ArchiveRejectedError
 	if errors.As(err, &archiveRejected) {

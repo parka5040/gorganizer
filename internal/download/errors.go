@@ -17,6 +17,7 @@ var (
 	ErrCrossHostRedirect      = errors.New("download: refusing redirect to a different host")
 
 	ErrFomodNotSupportedForLayout = errors.New("download: FOMOD selections are not supported for this install layout")
+	ErrEmptyInstallSelection      = errors.New("download: the installer selection contains no files")
 )
 
 type NXMExpiredError struct {
