@@ -4,6 +4,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QInputDialog>
+#include <QSignalBlocker>
 
 namespace gorganizer {
 
@@ -65,6 +66,16 @@ QString ProfileSelectorWidget::currentProfile() const
     return m_combo->currentData().toString();
 }
 
+void ProfileSelectorWidget::selectProfileSilently(const QString& profileName)
+{
+    m_pendingPreferred = profileName;
+    const int index = m_combo->findData(profileName);
+    if (index >= 0) {
+        const QSignalBlocker blocker(m_combo);
+        m_combo->setCurrentIndex(index);
+    }
+}
+
 void ProfileSelectorWidget::onProfilesListed(const std::vector<GrpcProfile>& profiles)
 {
     m_combo->blockSignals(true);
@@ -84,7 +95,8 @@ void ProfileSelectorWidget::onProfilesListed(const std::vector<GrpcProfile>& pro
 
     m_deleteBtn->setEnabled(m_combo->count() > 1);
 
-    emit profileChanged(m_combo->currentData().toString());
+    if (isEnabled())
+        emit profileChanged(m_combo->currentData().toString());
 }
 
 void ProfileSelectorWidget::onProfileCreated(const GrpcProfile&)

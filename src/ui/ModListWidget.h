@@ -57,6 +57,7 @@ public:
     QString loadedProfileName() const { return m_profileName; }
     // Reports whether a context menu or dialog opened from the list is running; outside reloads wait until it closes.
     bool isInteracting() const { return m_interactionDepth > 0; }
+    bool modListSavesIdle() const;
     // Returns a counter that grows whenever the list sends a mod-list change or reloads from disk.
     quint64 editSerial() const { return m_editSerial; }
     // Reports whether a mod folder is part of the loaded list.
@@ -92,6 +93,7 @@ signals:
     void modListReadyForEnable();
     void modListAdopted(quint64 adoptionId);
     void modListAdoptionDeferred(quint64 adoptionId);
+    void modListSavesDrained();
 
 private slots:
     void onConflictsReceived(const std::vector<GrpcFileConflict>& conflicts);

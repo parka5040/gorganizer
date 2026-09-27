@@ -19,6 +19,7 @@
 #include <QSizePolicy>
 #include <QStatusBar>
 #include <QToolButton>
+#include <QTimer>
 
 #include <algorithm>
 
@@ -50,6 +51,7 @@ SessionController::SessionController(AppConfig& config, GrpcClient* grpc,
     , m_statusInfo(statusInfo)
     , m_recoveryLabel(new QLabel(statusBar))
     , m_recoveryButton(new QPushButton("Check Again", statusBar))
+    , m_profileSwitchTimer(new QTimer(this))
     , m_statusBar(statusBar)
     , m_parentWindow(parentWindow)
 {
@@ -60,10 +62,41 @@ SessionController::SessionController(AppConfig& config, GrpcClient* grpc,
     m_recoveryLabel->hide();
     m_statusBar->addPermanentWidget(m_recoveryButton);
     m_recoveryButton->hide();
+    connect(m_statusBar, &QStatusBar::messageChanged, this, [this](const QString& message) {
+        if (!profileSwitchPending())
+            return;
+        const QString switching = m_retargetStatusQueryId && m_requestedProfile.isEmpty()
+            ? QStringLiteral("Checking which profile is active…")
+            : QString("Switching to profile \"%1\"…").arg(m_requestedProfile);
+        if (message != switching)
+            m_statusBar->showMessage(switching);
+    });
     connect(m_recoveryButton, &QPushButton::clicked, this, &SessionController::onRecoveryAction);
     connect(m_grpc, &GrpcClient::gamesDetected, this, &SessionController::onGamesDetected);
     connect(m_grpc, &GrpcClient::vfsStatusChanged, this, &SessionController::onVfsStatusChanged);
     connect(m_grpc, &GrpcClient::vfsStatusReceived, this, &SessionController::onVfsStatusReceived);
+    connect(m_grpc, &GrpcClient::vfsRetargeted, this, &SessionController::onVfsRetargeted);
+    connect(m_grpc, &GrpcClient::vfsRetargetFailed, this, &SessionController::onVfsRetargetFailed);
+    m_profileSwitchTimer->setSingleShot(true);
+    connect(m_profileSwitchTimer, &QTimer::timeout, this, &SessionController::startProfileSwitch);
+    connect(m_modList, &ModListWidget::modListSavesDrained, this, [this] {
+        updateProfileSwitchControls();
+        startProfileSwitch();
+    });
+    connect(m_grpc, &GrpcClient::modListSaveFailed, this,
+            [this](quint64, const QString& gameId, const QString& profileName, const QString& error) {
+        if (!m_waitingForSaves || gameId != m_activeGame.shortName || profileName != m_currentProfile)
+            return;
+        m_waitingForSaves = false;
+        m_profileSwitchTimer->stop();
+        m_requestedProfile = m_appliedProfile;
+        showProfile(m_appliedProfile);
+        updateProfileSwitchControls();
+        m_statusBar->showMessage("Couldn't save your mod choices. The active profile hasn't changed.", 5000);
+        presentError(m_parentWindow, "Change not saved", "save mod choices", error, true);
+    });
+    connect(m_grpc, &GrpcClient::vfsStatusQueried, this, &SessionController::onRetargetStatusQueried);
+    connect(m_grpc, &GrpcClient::vfsStatusQueryFailed, this, &SessionController::onRetargetStatusQueryFailed);
     connect(m_grpc, &GrpcClient::vfsStatusQueried, this, [this](quint64 requestId, const GrpcVFSStatus& status) {
         if (requestId != m_autoMountQueryId || !m_activeGame.detected || status.gameId != m_activeGame.shortName)
             return;
@@ -87,6 +120,14 @@ SessionController::SessionController(AppConfig& config, GrpcClient* grpc,
     connect(m_grpc, &GrpcClient::rpcError, this, &SessionController::onRpcError);
     connect(m_grpc, &GrpcClient::connected, this, &SessionController::onConnected);
     connect(m_grpc, &GrpcClient::disconnected, this, [this] {
+        m_waitingForSaves = false;
+        m_profileSwitchTimer->stop();
+        m_retargetRequestId = 0;
+        m_retargetStatusQueryId = 0;
+        m_retargetGameId.clear();
+        m_appliedProfile.clear();
+        m_vfsMounted = false;
+        updateProfileSwitchControls();
         const bool pending = m_lifecycleStates.value(m_activeGame.shortName)
             == GrpcVFSLifecycleState::RecoveryPending;
         m_lifecycleStates.clear();
@@ -155,9 +196,19 @@ void SessionController::switchToGame(uint32_t appId)
     m_activeGame = found.value_or(GameInfo{});
     m_config.setActiveGameShortName(m_activeGame.shortName);
     if (m_activeGame.shortName != previousGame) {
+        const bool wasSwitching = profileSwitchPending();
+        m_waitingForSaves = false;
+        m_profileSwitchTimer->stop();
+        m_retargetRequestId = 0;
+        m_retargetStatusQueryId = 0;
+        m_retargetGameId.clear();
+        m_appliedProfile.clear();
         m_vfsMounted = false;
         m_lifecycleReason.clear();
         setVfsDirty(false);
+        updateProfileSwitchControls();
+        if (wasSwitching)
+            m_statusBar->clearMessage();
     }
     m_autoMountQueryId = 0;
 
@@ -176,11 +227,15 @@ void SessionController::switchToGame(uint32_t appId)
         QString modsDir = GameInfo::modsDirPathFor(m_activeGame.shortName);
         QDir().mkpath(modsDir);
 
-        QString preferred = m_config.lastProfileFor(m_activeGame.shortName);
-        if (!preferred.isEmpty())
+        QString preferred = m_vfsMounted && !m_appliedProfile.isEmpty()
+            ? m_appliedProfile : m_config.lastProfileFor(m_activeGame.shortName);
+        if (previousGame != m_activeGame.shortName && !preferred.isEmpty())
             m_currentProfile = preferred;
+        if (!profileSwitchPending())
+            m_requestedProfile = m_currentProfile;
 
-        m_profileSelector->loadForGame(m_activeGame.shortName, preferred);
+        m_profileSelector->loadForGame(m_activeGame.shortName, m_currentProfile);
+        m_pluginList->setActiveProfile(m_currentProfile);
         m_modList->loadForGame(m_activeGame, m_currentProfile);
         if (m_downloadsLibrary)
             m_downloadsLibrary->setGame(m_activeGame);
@@ -196,24 +251,210 @@ void SessionController::switchToGame(uint32_t appId)
     refreshRecoveryIndicator();
 }
 
-void SessionController::onProfileChanged(const QString& profileName)
+void SessionController::showProfile(const QString& profileName)
 {
+    m_profileSelector->selectProfileSilently(profileName);
+    if (m_currentProfile == profileName)
+        return;
     m_currentProfile = profileName;
-    if (m_activeGame.detected)
-        m_config.setLastProfileFor(m_activeGame.shortName, profileName);
     m_modList->loadForGame(m_activeGame, profileName);
     m_pluginList->setActiveProfile(profileName);
     refreshStatusInfo();
     emit profileChanged(profileName);
 }
 
+void SessionController::updateProfileSwitchControls()
+{
+    const bool switching = profileSwitchPending();
+    m_profileSelector->setEnabled(!m_retargetRequestId && !m_retargetStatusQueryId
+                                  && (!m_waitingForSaves || m_modList->modListSavesIdle()));
+    if (m_applyButton)
+        m_applyButton->setEnabled(m_vfsDirty && !switching && !recoveryBlocked(m_activeGame.shortName));
+    if (m_unmountAction)
+        m_unmountAction->setEnabled(m_activeGame.detected && !switching && !recoveryBlocked(m_activeGame.shortName));
+    emit profileSwitchActivityChanged();
+}
+
+void SessionController::startProfileSwitch()
+{
+    if (!m_waitingForSaves || m_retargetRequestId || m_retargetStatusQueryId
+        || m_profileSwitchTimer->isActive() || !m_modList->modListSavesIdle())
+        return;
+    if (!m_activeGame.detected || !m_grpc->isConnected() || !m_vfsMounted
+        || recoveryBlocked(m_activeGame.shortName)
+        || m_autoMountSuppressed.contains(m_activeGame.shortName)) {
+        m_waitingForSaves = false;
+        m_requestedProfile = m_appliedProfile;
+        if (!m_appliedProfile.isEmpty())
+            showProfile(m_appliedProfile);
+        updateProfileSwitchControls();
+        if (recoveryBlocked(m_activeGame.shortName))
+            m_statusBar->showMessage("Gorganizer needs to finish recovering this game's mods before switching profiles.", 5000);
+        else if (m_autoMountSuppressed.contains(m_activeGame.shortName))
+            m_statusBar->showMessage("Mods stay unmounted while SMAPI is being changed; they are mounted when it finishes.", 5000);
+        else if (!m_grpc->isConnected())
+            m_statusBar->showMessage("The background service disconnected before profiles could be switched.", 5000);
+        else
+            m_statusBar->showMessage("The game's mods are not mounted. Select a profile to use next time.", 5000);
+        return;
+    }
+    if (m_requestedProfile == m_appliedProfile) {
+        m_waitingForSaves = false;
+        showProfile(m_appliedProfile);
+        updateProfileSwitchControls();
+        m_statusBar->clearMessage();
+        return;
+    }
+    m_waitingForSaves = false;
+    showProfile(m_requestedProfile);
+    m_retargetGameId = m_activeGame.shortName;
+    m_retargetRequestId = m_grpc->retargetVfs(m_retargetGameId, m_requestedProfile);
+    updateProfileSwitchControls();
+}
+
+void SessionController::onProfileChanged(const QString& profileName)
+{
+    if (!m_activeGame.detected || profileName.isEmpty())
+        return;
+    if (!profileSwitchPending() && profileName == m_currentProfile)
+        emit profileChanged(profileName);
+    if (!m_vfsMounted || m_appliedProfile.isEmpty()) {
+        m_requestedProfile = profileName;
+        showProfile(profileName);
+        m_config.setLastProfileFor(m_activeGame.shortName, profileName);
+        if (m_autoMountSuppressed.contains(m_activeGame.shortName))
+            m_statusBar->showMessage("Mods stay unmounted while SMAPI is being changed; they are mounted when it finishes.", 5000);
+        else if (recoveryBlocked(m_activeGame.shortName))
+            refreshRecoveryIndicator();
+        return;
+    }
+    if (recoveryBlocked(m_activeGame.shortName)) {
+        refreshRecoveryIndicator();
+        m_statusBar->showMessage("Gorganizer needs to finish recovering this game's mods before switching profiles.", 5000);
+        showProfile(m_appliedProfile);
+        return;
+    }
+    if (m_autoMountSuppressed.contains(m_activeGame.shortName)) {
+        m_statusBar->showMessage("Mods stay unmounted while SMAPI is being changed; they are mounted when it finishes.", 5000);
+        showProfile(m_appliedProfile);
+        return;
+    }
+    m_requestedProfile = profileName;
+    if (m_retargetRequestId || m_retargetStatusQueryId)
+        return;
+    if (profileName == m_appliedProfile) {
+        const bool wasWaiting = m_waitingForSaves;
+        m_waitingForSaves = false;
+        m_profileSwitchTimer->stop();
+        showProfile(profileName);
+        updateProfileSwitchControls();
+        if (wasWaiting)
+            m_statusBar->clearMessage();
+        return;
+    }
+    m_waitingForSaves = true;
+    m_profileSwitchTimer->start(150);
+    m_statusBar->showMessage(QString("Switching to profile \"%1\"…").arg(profileName));
+    updateProfileSwitchControls();
+}
+
+void SessionController::onVfsRetargeted(quint64 requestId, const GrpcVFSStatus& status)
+{
+    if (requestId != m_retargetRequestId || status.gameId != m_retargetGameId
+        || status.gameId != m_activeGame.shortName)
+        return;
+    m_retargetRequestId = 0;
+    m_retargetGameId.clear();
+    m_vfsMounted = status.mounted;
+    m_appliedProfile = status.mounted ? status.profileName : QString();
+    updateVfsStatus(status);
+    setVfsDirty(status.mounted && status.dirty);
+    m_pluginList->refresh();
+    if (!m_appliedProfile.isEmpty())
+        m_config.setLastProfileFor(status.gameId, m_appliedProfile);
+    if (!m_requestedProfile.isEmpty() && m_requestedProfile != m_appliedProfile) {
+        m_waitingForSaves = true;
+        m_statusBar->showMessage(QString("Switching to profile \"%1\"…").arg(m_requestedProfile));
+        updateProfileSwitchControls();
+        startProfileSwitch();
+        return;
+    }
+    m_requestedProfile = m_appliedProfile;
+    if (!m_appliedProfile.isEmpty())
+        showProfile(m_appliedProfile);
+    updateProfileSwitchControls();
+    m_statusBar->showMessage(QString("Profile \"%1\" is now active.").arg(m_appliedProfile), 5000);
+}
+
+void SessionController::onVfsRetargetFailed(quint64 requestId, const QString& gameId,
+                                            const QString& profileName, const QString& error)
+{
+    if (requestId != m_retargetRequestId || gameId != m_retargetGameId
+        || gameId != m_activeGame.shortName)
+        return;
+    presentError(m_parentWindow, "Switch Profile", "switch profiles", error, true);
+    if (requestId != m_retargetRequestId || gameId != m_activeGame.shortName)
+        return;
+    m_retargetRequestId = 0;
+    m_retargetGameId.clear();
+    if (m_requestedProfile == profileName)
+        m_requestedProfile.clear();
+    m_retargetStatusQueryId = m_grpc->queryVfsStatus(gameId);
+    updateProfileSwitchControls();
+    if (m_requestedProfile.isEmpty())
+        m_statusBar->showMessage("Checking which profile is active…");
+}
+
+void SessionController::onRetargetStatusQueried(quint64 requestId, const GrpcVFSStatus& status)
+{
+    if (requestId != m_retargetStatusQueryId || status.gameId != m_activeGame.shortName)
+        return;
+    m_retargetStatusQueryId = 0;
+    m_vfsMounted = status.mounted;
+    m_appliedProfile = status.mounted ? status.profileName : QString();
+    if (status.mounted && !m_appliedProfile.isEmpty())
+        showProfile(m_appliedProfile);
+    m_pluginList->refresh();
+    if (m_requestedProfile.isEmpty() || m_requestedProfile == m_appliedProfile || !status.mounted) {
+        m_requestedProfile = m_appliedProfile;
+        updateProfileSwitchControls();
+        if (status.mounted && !m_appliedProfile.isEmpty())
+            m_statusBar->showMessage(QString("Couldn't switch profiles. Showing the active profile \"%1\".")
+                                         .arg(m_appliedProfile), 5000);
+        else
+            m_statusBar->showMessage("Couldn't switch profiles. The game's mods are not mounted.", 5000);
+        return;
+    }
+    m_waitingForSaves = true;
+    m_statusBar->showMessage(QString("Switching to profile \"%1\"…").arg(m_requestedProfile));
+    updateProfileSwitchControls();
+    startProfileSwitch();
+}
+
+void SessionController::onRetargetStatusQueryFailed(quint64 requestId, const QString& gameId, const QString&)
+{
+    if (requestId != m_retargetStatusQueryId || gameId != m_activeGame.shortName)
+        return;
+    m_retargetStatusQueryId = 0;
+    m_requestedProfile = m_appliedProfile;
+    if (!m_appliedProfile.isEmpty())
+        showProfile(m_appliedProfile);
+    updateProfileSwitchControls();
+    m_statusBar->showMessage("Couldn't check which profile is active. Reconnect to check your mods.", 5000);
+}
+
 void SessionController::onVfsStatusChanged(const GrpcVFSStatus& status)
 {
     if (!m_activeGame.detected || status.gameId != m_activeGame.shortName)
         return;
-    updateVfsStatus(status);
     m_vfsMounted = status.mounted;
-    setVfsDirty(status.dirty);
+    m_appliedProfile = status.mounted ? status.profileName : QString();
+    updateVfsStatus(status);
+    setVfsDirty(status.mounted && status.dirty);
+    if (!profileSwitchPending() && status.mounted && !m_appliedProfile.isEmpty()) {
+        m_requestedProfile = m_appliedProfile;
+        showProfile(m_appliedProfile);
+    }
     m_pluginList->refresh();
 }
 
@@ -221,12 +462,17 @@ void SessionController::onVfsStatusReceived(const GrpcVFSStatus& status)
 {
     if (!m_activeGame.detected || status.gameId != m_activeGame.shortName)
         return;
+    const bool wasMounted = m_vfsMounted;
+    m_vfsMounted = status.mounted;
+    m_appliedProfile = status.mounted ? status.profileName : QString();
     updateVfsStatus(status);
     setVfsDirty(status.mounted && status.dirty);
-    if (m_vfsMounted == status.mounted)
-        return;
-    m_vfsMounted = status.mounted;
-    m_pluginList->refresh();
+    if (!profileSwitchPending() && status.mounted && !m_appliedProfile.isEmpty()) {
+        m_requestedProfile = m_appliedProfile;
+        showProfile(m_appliedProfile);
+    }
+    if (wasMounted != status.mounted)
+        m_pluginList->refresh();
 }
 
 bool SessionController::recoveryBlocked(const QString& gameId) const
@@ -245,9 +491,9 @@ void SessionController::updateVfsStatus(const GrpcVFSStatus& status)
     if (recoveryBlocked(gameId))
         m_recoveryMountSkipped.insert(gameId);
     if (m_unmountAction)
-        m_unmountAction->setEnabled(!recoveryBlocked(gameId));
+        m_unmountAction->setEnabled(!profileSwitchPending() && !recoveryBlocked(gameId));
     refreshRecoveryIndicator();
-    if (status.lifecycleState != GrpcVFSLifecycleState::Ready
+    if (status.mounted || status.lifecycleState != GrpcVFSLifecycleState::Ready
         || (!wasBlocked && !m_recoveryMountSkipped.contains(gameId) && !m_pendingRemounts.contains(gameId)))
         return;
     if (m_pendingRemounts.contains(gameId) && !m_autoMountSuppressed.contains(gameId)) {
@@ -266,16 +512,16 @@ void SessionController::setVfsDirty(bool dirty)
     m_vfsDirty = dirty;
     if (m_applyButton) {
         m_applyButton->setVisible(dirty);
-        m_applyButton->setEnabled(dirty && !recoveryBlocked(m_activeGame.shortName));
+        m_applyButton->setEnabled(dirty && !profileSwitchPending() && !recoveryBlocked(m_activeGame.shortName));
     }
-    if (dirty && !recoveryBlocked(m_activeGame.shortName))
+    if (dirty && !profileSwitchPending() && !recoveryBlocked(m_activeGame.shortName))
         m_statusBar->showMessage("Mod changes pending — click \"Apply Changes\" or just launch.", 4000);
 }
 
 void SessionController::onApplyChanges()
 {
     if (!m_activeGame.detected || m_currentProfile.isEmpty() || !m_grpc->isConnected()
-        || recoveryBlocked(m_activeGame.shortName))
+        || recoveryBlocked(m_activeGame.shortName) || profileSwitchPending())
         return;
     if (m_autoMountSuppressed.contains(m_activeGame.shortName)) {
         m_statusBar->showMessage("Mod changes can't be applied while SMAPI is being changed; try again when it finishes.", 5000);
@@ -292,7 +538,7 @@ void SessionController::onApplyChanges()
 void SessionController::onUnmountMods()
 {
     if (!m_activeGame.detected || !m_grpc->isConnected()
-        || recoveryBlocked(m_activeGame.shortName))
+        || recoveryBlocked(m_activeGame.shortName) || profileSwitchPending())
         return;
     const QString gameId = m_activeGame.shortName;
     const auto refusedForLoader = [this, &gameId] {
@@ -310,7 +556,7 @@ void SessionController::onUnmountMods()
             "are captured into Overwrite first. Do this when you've finished playing."))
         return;
     if (!m_activeGame.detected || m_activeGame.shortName != gameId || !m_grpc->isConnected()
-        || recoveryBlocked(gameId))
+        || recoveryBlocked(gameId) || profileSwitchPending())
         return;
     if (refusedForLoader())
         return;
@@ -336,6 +582,15 @@ void SessionController::suppressAutoMount(const QString& gameId)
     if (gameId.isEmpty())
         return;
     m_autoMountSuppressed.insert(gameId);
+    if (gameId == m_activeGame.shortName && m_waitingForSaves) {
+        m_waitingForSaves = false;
+        m_profileSwitchTimer->stop();
+        m_requestedProfile = m_appliedProfile;
+        if (!m_appliedProfile.isEmpty())
+            showProfile(m_appliedProfile);
+        updateProfileSwitchControls();
+        m_statusBar->showMessage("Mods stay unmounted while SMAPI is being changed; they are mounted when it finishes.", 5000);
+    }
     m_autoMountSkipped.remove(gameId);
     m_pendingRemounts.remove(gameId);
 }
@@ -392,11 +647,14 @@ void SessionController::onConnected()
             continue;
         mountForMaintenance(it.key(), it.value());
     }
+    if (m_activeGame.detected)
+        m_autoMountQueryId = m_grpc->queryVfsStatus(m_activeGame.shortName);
 }
 
 void SessionController::autoMountActiveProfile()
 {
-    if (!m_activeGame.detected || !m_grpc->isConnected() || m_currentProfile.isEmpty())
+    if (!m_activeGame.detected || !m_grpc->isConnected() || m_currentProfile.isEmpty()
+        || profileSwitchPending() || m_vfsMounted)
         return;
     if (m_lifecycleStates.value(m_activeGame.shortName) != GrpcVFSLifecycleState::Ready) {
         m_recoveryMountSkipped.insert(m_activeGame.shortName);

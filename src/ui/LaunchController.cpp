@@ -34,6 +34,7 @@ LaunchController::LaunchController(AppConfig& config, GrpcClient* grpc,
     connect(m_modLoader, &ModLoaderController::operationActivityChanged, this,
             &LaunchController::onModLoaderActivityChanged);
     connect(m_session, &SessionController::activeGameChanged, this, &LaunchController::onActiveGameChanged);
+    connect(m_session, &SessionController::profileSwitchActivityChanged, this, &LaunchController::updateRunEnabled);
     updateRunEnabled();
 }
 
@@ -41,7 +42,7 @@ void LaunchController::updateRunEnabled()
 {
     const bool loaderBusy = m_modLoader->operationActiveFor(m_session->activeGame().shortName);
     const bool connected = m_grpc->isConnected();
-    m_runButton->setEnabled(connected && !m_launchPending && !loaderBusy);
+    m_runButton->setEnabled(connected && !m_launchPending && !loaderBusy && !m_session->profileSwitchPending());
     m_runButton->setToolTip(connected ? QString()
         : QStringLiteral("Run is unavailable until Gorganizer's background service reconnects."));
 }
@@ -61,6 +62,8 @@ void LaunchController::onActiveGameChanged(const GameInfo& game)
 
 void LaunchController::onRunGame()
 {
+    if (m_session->profileSwitchPending())
+        return;
     if (!m_grpc->isConnected()) {
         dialogs::warn(m_parentWindow, "Not Connected",
             "Gorganizer's background service is not connected, so it cannot check your mods before starting the game. Wait for the connection indicator to turn green, then press Run again.");

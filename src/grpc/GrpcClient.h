@@ -76,6 +76,7 @@ public:
     void mountVfs(const QString& gameId, const QString& profileName);
     // Auto-swap unmounts the conflicting game in the same mutex group (FNV/TTW).
     void mountVfsWithSwap(const QString& gameId, const QString& profileName);
+    quint64 retargetVfs(const QString& gameId, const QString& profileName);
     void unmountVfs(const QString& gameId);
     // Queues a maintenance unmount with the long mount deadline on the unary worker and returns the id maintenanceUnmountFinished carries.
     quint64 unmountVfsForMaintenance(const QString& gameId);
@@ -278,6 +279,8 @@ signals:
     void modListUpdated();
 
     void vfsMounted(const GrpcVFSStatus& status);
+    void vfsRetargeted(quint64 requestId, const GrpcVFSStatus& status);
+    void vfsRetargetFailed(quint64 requestId, const QString& gameId, const QString& profileName, const QString& error);
     void vfsUnmounted();
     void vfsStatusReceived(const GrpcVFSStatus& status);
     void vfsRecoveryRetried(const QString& gameId);

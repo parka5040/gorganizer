@@ -771,6 +771,22 @@ void GrpcWorker::doMountVfsWithSwap(const QString& gameId, const QString& profil
     emit vfsMounted(vfsStatusFromProto(resp.status()));
 }
 
+void GrpcWorker::doRetargetVfs(quint64 requestId, const QString& gameId, const QString& profileName)
+{
+    gorganizer::v1::MountVFSRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_profile_name(profileName.toStdString());
+    req.set_auto_swap(true);
+    req.set_retarget_if_mounted(true);
+    gorganizer::v1::MountVFSResponse resp;
+    auto status = invoke(&Stub::MountVFS, req, resp, std::chrono::minutes(10));
+    if (!status.ok()) {
+        emit vfsRetargetFailed(requestId, gameId, profileName, QString::fromStdString(status.error_message()));
+        return;
+    }
+    emit vfsRetargeted(requestId, vfsStatusFromProto(resp.status()));
+}
+
 void GrpcWorker::doUnmountVfs(const QString& gameId)
 {
     gorganizer::v1::UnmountVFSRequest req;
