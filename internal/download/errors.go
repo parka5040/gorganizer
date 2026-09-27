@@ -9,6 +9,8 @@ var (
 	ErrInvalidNXMURI          = errors.New("download: invalid NXM URI")
 	ErrUnknownSlug            = errors.New("download: unknown game slug")
 	ErrDownloadFailed         = errors.New("download: HTTP download failed")
+	ErrRetryInProgress        = errors.New("download retry already in progress")
+	ErrArchiveDownloadBusy    = errors.New("this archive is already being downloaded")
 	ErrUnsupportedArchive     = errors.New("download: unsupported archive format")
 	ErrUnsafeArchive          = errors.New("download: unsafe archive")
 	ErrNoMainFile             = errors.New("download: no MAIN-category file")
