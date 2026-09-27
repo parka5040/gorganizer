@@ -345,6 +345,11 @@ ModListWidget::ModListWidget(GrpcClient* grpc, QWidget* parent)
     m_placeholder->show();
 }
 
+bool ModListWidget::modListSavesIdle() const
+{
+    return m_saveQueue->isIdle();
+}
+
 void ModListWidget::loadForGame(const GameInfo& game)
 {
     loadForGame(game, "Default");
@@ -1249,6 +1254,7 @@ void ModListWidget::onModListSaveFailed(quint64 requestId)
 
 void ModListWidget::onModListSavesDrained()
 {
+    emit modListSavesDrained();
     if (m_profileListPending && !isInteracting()) {
         requestProfileModList();
         return;

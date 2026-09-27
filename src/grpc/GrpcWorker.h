@@ -44,6 +44,7 @@ public slots:
 
     void doMountVfs(const QString& gameId, const QString& profileName);
     void doMountVfsWithSwap(const QString& gameId, const QString& profileName);
+    void doRetargetVfs(quint64 requestId, const QString& gameId, const QString& profileName);
     void doUnmountVfs(const QString& gameId);
     // Unmounts gameId for a maintenance flow with the long mount deadline and reports the outcome under requestId.
     void doUnmountVfsForMaintenance(quint64 requestId, const QString& gameId);
@@ -117,6 +118,8 @@ signals:
     void modListReceived(const std::vector<GrpcModListEntry>& entries);
     void modListUpdated();
     void vfsMounted(const GrpcVFSStatus& status);
+    void vfsRetargeted(quint64 requestId, const GrpcVFSStatus& status);
+    void vfsRetargetFailed(quint64 requestId, const QString& gameId, const QString& profileName, const QString& error);
     void vfsUnmounted();
     void vfsStatusReceived(const GrpcVFSStatus& status);
     void vfsRecoveryRetried(const QString& gameId);

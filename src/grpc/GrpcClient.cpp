@@ -217,6 +217,8 @@ void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
     connect(worker, &GrpcWorker::modListReceived, this, &GrpcClient::modListReceived);
     connect(worker, &GrpcWorker::modListUpdated, this, &GrpcClient::modListUpdated);
     connect(worker, &GrpcWorker::vfsMounted, this, &GrpcClient::vfsMounted);
+    connect(worker, &GrpcWorker::vfsRetargeted, this, &GrpcClient::vfsRetargeted);
+    connect(worker, &GrpcWorker::vfsRetargetFailed, this, &GrpcClient::vfsRetargetFailed);
     connect(worker, &GrpcWorker::vfsUnmounted, this, &GrpcClient::vfsUnmounted);
     connect(worker, &GrpcWorker::vfsStatusReceived, this, &GrpcClient::vfsStatusReceived);
     connect(worker, &GrpcWorker::vfsRecoveryRetried, this, &GrpcClient::vfsRecoveryRetried);
@@ -500,6 +502,19 @@ void GrpcClient::mountVfs(const QString& gameId, const QString& profileName)
 void GrpcClient::mountVfsWithSwap(const QString& gameId, const QString& profileName)
 {
     post(&GrpcWorker::doMountVfsWithSwap, gameId, profileName);
+}
+
+quint64 GrpcClient::retargetVfs(const QString& gameId, const QString& profileName)
+{
+    const quint64 requestId = ++m_nextVfsRequestId;
+    if (!installRpcWorker() || !isConnected()) {
+        QMetaObject::invokeMethod(this, [this, requestId, gameId, profileName] {
+            emit vfsRetargetFailed(requestId, gameId, profileName, QStringLiteral("not connected"));
+        }, Qt::QueuedConnection);
+        return requestId;
+    }
+    postTo(installRpcWorker(), &GrpcWorker::doRetargetVfs, requestId, gameId, profileName);
+    return requestId;
 }
 
 void GrpcClient::unmountVfs(const QString& gameId) { post(&GrpcWorker::doUnmountVfs, gameId); }

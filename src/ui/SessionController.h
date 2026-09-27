@@ -14,6 +14,7 @@ class QLabel;
 class QPushButton;
 class QStatusBar;
 class QToolButton;
+class QTimer;
 class QWidget;
 
 namespace gorganizer {
@@ -46,6 +47,7 @@ public:
     QString currentProfile() const { return m_currentProfile; }
     bool vfsMounted() const { return m_vfsMounted; }
     bool vfsDirty() const { return m_vfsDirty; }
+    bool profileSwitchPending() const { return m_waitingForSaves || m_retargetRequestId || m_retargetStatusQueryId; }
 
     // Seeds the game selector from locally detected games and restores the persisted active game.
     void loadManagedGames();
@@ -65,7 +67,7 @@ public:
 public slots:
     // Switches the active game; synthetic appId==0 games (TTW) fall back to the selector's current entry.
     void switchToGame(uint32_t appId);
-    // Applies a profile switch: persists the per-game last profile and reloads mod/plugin views.
+    // Selects a profile and switches the deployed mods when the game is mounted.
     void onProfileChanged(const QString& profileName);
     // U-2: rebuilds the on-disk farm for pending changes, or mount/swaps when not yet mounted.
     void onApplyChanges();
@@ -76,6 +78,7 @@ signals:
     void activeGameChanged(const GameInfo& game);
     void profileChanged(const QString& profileName);
     void recoveryReviewRequested(const QString& gameId);
+    void profileSwitchActivityChanged();
 
 private:
     // Rebuilds the managed-game list from a daemon detection pass (authoritative over local detection).
@@ -104,6 +107,14 @@ private:
     void mountForMaintenance(const QString& gameId, const QString& profileName);
     // Sends the maintenance remount that waited for the daemon when its game is still active and not suppressed.
     void onConnected();
+    void showProfile(const QString& profileName);
+    void updateProfileSwitchControls();
+    void startProfileSwitch();
+    void onVfsRetargeted(quint64 requestId, const GrpcVFSStatus& status);
+    void onVfsRetargetFailed(quint64 requestId, const QString& gameId, const QString& profileName,
+                             const QString& error);
+    void onRetargetStatusQueried(quint64 requestId, const GrpcVFSStatus& status);
+    void onRetargetStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error);
 
     AppConfig& m_config;
     GrpcClient* m_grpc;
@@ -118,12 +129,19 @@ private:
     QLabel* m_statusInfo;
     QLabel* m_recoveryLabel;
     QPushButton* m_recoveryButton;
+    QTimer* m_profileSwitchTimer;
     QStatusBar* m_statusBar;
     QWidget* m_parentWindow;
 
     std::vector<GameInfo> m_managedGames;
     GameInfo m_activeGame;
     QString m_currentProfile = "Default";
+    QString m_requestedProfile;
+    QString m_appliedProfile;
+    QString m_retargetGameId;
+    quint64 m_retargetRequestId = 0;
+    quint64 m_retargetStatusQueryId = 0;
+    bool m_waitingForSaves = false;
     bool m_vfsDirty = false;
     bool m_vfsMounted = false;
     QHash<QString, GrpcVFSLifecycleState> m_lifecycleStates;

@@ -16,6 +16,7 @@ public:
     void loadForGame(const QString& gameId);
     void loadForGame(const QString& gameId, const QString& preferred);
     QString currentProfile() const;
+    void selectProfileSilently(const QString& profileName);
 
 signals:
     void profileChanged(const QString& profileName);
