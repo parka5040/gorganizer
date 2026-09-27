@@ -37,13 +37,6 @@ void error(QWidget* parent, const QString& title, const QString& text)
     box.exec();
 }
 
-void richWarn(QWidget* parent, const QString& title, const QString& text)
-{
-    QMessageBox box(QMessageBox::Warning, title, text, QMessageBox::Ok, parent);
-    box.setTextFormat(Qt::RichText);
-    box.exec();
-}
-
 void plainWarn(QWidget* parent, const QString& title, const QString& text)
 {
     QMessageBox box(parent);

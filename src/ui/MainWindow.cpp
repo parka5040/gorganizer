@@ -25,6 +25,7 @@
 #include "ThemeManager.h"
 #include "Dialogs.h"
 #include "InstallErrorText.h"
+#include "ErrorPresenter.h"
 
 #include <QToolBar>
 #include <QToolButton>
@@ -313,10 +314,13 @@ void MainWindow::wireConnections()
     connect(m_grpc, &GrpcClient::installRequestFailed, this, &MainWindow::onInstallRequestFailed);
 
     connect(m_grpc, &GrpcClient::daemonInfo, this, [this](const QString& info) {
-        statusBar()->showMessage(info, 5000);
+        const bool failed = info.startsWith(QLatin1String("[smapi:failed]"));
+        const bool warning = info.startsWith(QLatin1String("[smapi:warning]"));
+        statusBar()->showMessage(failed || warning
+            ? errorSummary("change SMAPI", info.mid(failed ? 14 : 15).trimmed(), true) : info, 5000);
     });
     connect(m_grpc, &GrpcClient::daemonError, this, [this](const QString& err) {
-        statusBar()->showMessage(err, 10000);
+        statusBar()->showMessage(errorSummary("complete this request", err), 10000);
     });
 }
 
@@ -470,7 +474,7 @@ void MainWindow::onInstallRequestFailed(quint64 requestId, const QString& error)
     }
     if (parseInstallError(error).token == QLatin1String("fomod_required"))
         return;
-    statusBar()->showMessage(QString("Install failed: %1").arg(installErrorMessage(error)), 5000);
+    statusBar()->showMessage(errorSummary("install this mod", error, true), 5000);
 }
 
 void MainWindow::onExternalInstallFailed(const PendingExternalInstall& request, const QString& error)
@@ -487,7 +491,7 @@ void MainWindow::onExternalInstallFailed(const PendingExternalInstall& request, 
         return;
     }
     if (parsed.token == QLatin1String("invalid_target_mod") && request.mode == GrpcInstallAsNewMod) {
-        showInstallError(this, "Install Mod", error);
+        presentError(this, "Install Mod", "install this mod", error, true);
         PendingExternalInstall retry = request;
         retry.name = askModName("Install Mod", "Mod name:", request.name);
         if (!retry.name.isEmpty())
@@ -495,10 +499,10 @@ void MainWindow::onExternalInstallFailed(const PendingExternalInstall& request, 
         return;
     }
     if (!parsed.token.isEmpty()) {
-        showInstallError(this, "Install Mod", error);
+        presentError(this, "Install Mod", "install this mod", error, true);
         return;
     }
-    statusBar()->showMessage(QString("Install failed: %1").arg(error), 5000);
+    presentError(this, "Install Mod", "install this mod", error, true);
 }
 
 void MainWindow::resolveExternalInstallCollision(const PendingExternalInstall& request,

@@ -3,6 +3,7 @@
 #include "GrpcClient.h"
 #include "ThemeManager.h"
 #include "Dialogs.h"
+#include "ErrorPresenter.h"
 
 #include <QVBoxLayout>
 #include <QHeaderView>
@@ -280,9 +281,8 @@ void PluginListWidget::persistLoadoutToDaemon()
     const auto loadout = m_model->orderedLoadout();
     QString err;
     if (!m_grpc->setPluginLoadout(m_game.shortName, m_activeProfile, loadout, err)) {
-        qWarning().noquote() << "setPluginLoadout failed:" << err;
-        dialogs::warn(this, "Plugin state not saved",
-            QString("The plugin order and activation state could not be saved:\n\n%1").arg(err));
+        qWarning().noquote() << errorSummary("save plugin choices", err, true);
+        presentError(this, "Plugin state not saved", "save plugin choices", err, true);
         resubscribeStream();
         return;
     }

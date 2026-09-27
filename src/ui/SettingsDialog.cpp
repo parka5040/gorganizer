@@ -1,6 +1,7 @@
 #include "SettingsDialog.h"
 #include "AppConfig.h"
 #include "GrpcClient.h"
+#include "ErrorPresenter.h"
 #include "ThemeManager.h"
 
 #include <QVBoxLayout>
@@ -121,7 +122,9 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
     connect(m_grpc, &GrpcClient::nexusAPIKeySet, this, &SettingsDialog::onKeyValidated);
     connect(m_grpc, &GrpcClient::rpcError, this, [this](const QString& method, const QString& error) {
         if (method == "SetNexusAPIKey") {
-            m_statusLabel->setText(QString("<b style='color:%1;'>Error: %2</b>").arg(errHex(), error.toHtmlEscaped()));
+            m_statusLabel->setText(QString("<b style='color:%1;'>%2</b>")
+                                       .arg(errHex(), errorSummary("save the Nexus API key", error, true).toHtmlEscaped()));
+            presentError(this, "API Key Not Saved", "save the Nexus API key", error, true);
             m_saveBtn->setEnabled(true);
         }
     });
@@ -150,7 +153,9 @@ void SettingsDialog::onKeyValidated(bool valid, const QString& errorMessage)
         m_statusLabel->setText(QString("<b style='color:%1;'>Validated!</b>").arg(okHex()));
     } else {
         m_statusLabel->setText(
-            QString("<b style='color:%1;'>Invalid: %2</b>").arg(errHex(), errorMessage.toHtmlEscaped()));
+            QString("<b style='color:%1;'>%2</b>")
+                .arg(errHex(), errorSummary("validate the Nexus API key", errorMessage).toHtmlEscaped()));
+        presentError(this, "API Key Not Validated", "validate the Nexus API key", errorMessage);
     }
 }
 
@@ -167,7 +172,8 @@ void SettingsDialog::populateProtonCombo()
     QString err;
     if (!m_grpc->detectProtonVersions(versions, err)) {
         m_protonStatus->setText(
-            QString("<span style='color:%1;'>Cannot detect Proton: %2</span>").arg(errHex(), err.toHtmlEscaped()));
+            QString("<span style='color:%1;'>%2</span>")
+                .arg(errHex(), errorSummary("detect Proton versions", err).toHtmlEscaped()));
         return;
     }
     for (const auto& v : versions)
@@ -314,8 +320,10 @@ void SettingsDialog::onReregisterNxm()
                 m_nxmRegisterProcess = nullptr;
                 m_reregNxmBtn->setEnabled(true);
                 if (exitStatus != QProcess::NormalExit || exitCode != 0) {
-                    m_nxmStatus->setText(QString("<span style='color:%1;'>Re-registration failed: %2</span>")
-                                             .arg(errHex(), QString::fromUtf8(process->readAllStandardError()).toHtmlEscaped()));
+                    const QString error = QString::fromUtf8(process->readAllStandardError());
+                    m_nxmStatus->setText(QString("<span style='color:%1;'>%2</span>")
+                                             .arg(errHex(), errorSummary("register Nexus download links", error).toHtmlEscaped()));
+                    presentError(this, "Registration Failed", "register Nexus download links", error);
                 } else {
                     m_nxmStatus->setText(QString("<span style='color:%1;'>&#10003; Nexus download links are enabled. Use &quot;Test NXM Handler&quot; to check.</span>").arg(okHex()));
                 }
@@ -330,8 +338,9 @@ void SettingsDialog::onReregisterNxm()
                 QString detail = QString::fromUtf8(process->readAllStandardError());
                 if (detail.isEmpty())
                     detail = process->errorString();
-                m_nxmStatus->setText(QString("<span style='color:%1;'>Re-registration failed: %2</span>")
-                                         .arg(errHex(), detail.toHtmlEscaped()));
+                m_nxmStatus->setText(QString("<span style='color:%1;'>%2</span>")
+                                         .arg(errHex(), errorSummary("register Nexus download links", detail).toHtmlEscaped()));
+                presentError(this, "Registration Failed", "register Nexus download links", detail);
                 process->kill();
                 process->deleteLater();
             });
@@ -377,7 +386,9 @@ void SettingsDialog::onSaveProton()
     QString err;
     if (!m_grpc->setPreferredProton(path, err)) {
         m_protonStatus->setText(
-            QString("<b style='color:%1;'>Save failed: %2</b>").arg(errHex(), err.toHtmlEscaped()));
+            QString("<b style='color:%1;'>%2</b>")
+                .arg(errHex(), errorSummary("save the Proton version", err, true).toHtmlEscaped()));
+        presentError(this, "Proton Not Saved", "save the Proton version", err, true);
         return;
     }
     m_protonStatus->setText(QString("<b style='color:%1;'>Saved.</b>").arg(okHex()));

@@ -1,6 +1,7 @@
 #include "ExportDialog.h"
 #include "Dialogs.h"
 #include "GrpcClient.h"
+#include "ErrorPresenter.h"
 #include "ThemeManager.h"
 
 #include <QCheckBox>
@@ -191,7 +192,7 @@ void ExportDialog::loadSelections()
     QString err;
     std::vector<GrpcProfile> profiles;
     if (!m_grpc->listProfilesSync(m_gameId, profiles, err))
-        m_loadError = QString("Could not list profiles: %1").arg(err);
+        m_loadError = errorSummary("list profiles for export", err);
     for (const auto& p : profiles) {
         auto* item = new QListWidgetItem(p.name, m_profileList);
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
@@ -199,7 +200,7 @@ void ExportDialog::loadSelections()
     }
 
     if (!m_grpc->listModsSync(m_gameId, m_mods, err))
-        m_loadError = QString("Could not list mods: %1").arg(err);
+        m_loadError = errorSummary("list mods for export", err);
     for (const auto& m : m_mods) {
         auto* item = new QListWidgetItem(
             QString("%1  (%2 files, %3)").arg(m.name).arg(m.fileCount).arg(humanBytes(m.totalSize)),
@@ -360,7 +361,8 @@ void ExportDialog::onTransferFailed(const QString& error)
     } else {
         m_stepLabel->setText("Export failed.");
         m_resultLabel->setStyleSheet(QString("color: %1;").arg(errHex()));
-        m_resultLabel->setText(error);
+        m_resultLabel->setText(errorSummary("export these mods", error, true));
+        presentError(this, "Export Failed", "export these mods", error, true);
     }
     m_resultLabel->setVisible(true);
     m_cancelBtn->setVisible(false);

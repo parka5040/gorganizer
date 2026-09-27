@@ -1,7 +1,7 @@
 #include "ModInstallDialog.h"
 #include "FomodInstallerDialog.h"
 #include "GrpcClient.h"
-#include "InstallErrorText.h"
+#include "ErrorPresenter.h"
 #include "ThemeManager.h"
 
 #include <QBrush>
@@ -187,8 +187,10 @@ void ModInstallDialog::onPreviewFailed(quint64 requestId, const QString& error)
         QDialog::reject();
         return;
     }
-    if (m_phase == Previewing)
-        showFailure(installErrorMessage(error));
+    if (m_phase == Previewing) {
+        showFailure(errorSummary("read this archive", error));
+        presentError(this, "Archive Could Not Be Read", "read this archive", error);
+    }
 }
 
 void ModInstallDialog::showRoots(const QStringList& selectableRoots)
@@ -276,7 +278,8 @@ void ModInstallDialog::onInstallFailed(quint64 requestId, const QString& error)
     if (m_phase != Installing || requestId != m_installRequestId)
         return;
     discardPreview();
-    showFailure(installErrorMessage(error));
+    showFailure(errorSummary("install this mod", error, true));
+    presentError(this, "Install Failed", "install this mod", error, true);
 }
 
 void ModInstallDialog::closeEvent(QCloseEvent* event)

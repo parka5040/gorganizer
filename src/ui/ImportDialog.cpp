@@ -1,7 +1,7 @@
 #include "ImportDialog.h"
 #include "Dialogs.h"
 #include "GrpcClient.h"
-#include "InstallErrorText.h"
+#include "ErrorPresenter.h"
 #include "ThemeManager.h"
 
 #include <QApplication>
@@ -238,8 +238,9 @@ void ImportDialog::onPreview()
     m_previewBtn->setEnabled(true);
 
     if (!ok) {
-        m_archiveErrorLabel->setText(friendlyTransferError(err));
+        m_archiveErrorLabel->setText(errorSummary("read this backup", err));
         m_archiveErrorLabel->setVisible(true);
+        presentError(this, "Backup Could Not Be Read", "read this backup", err);
         return;
     }
 
@@ -430,31 +431,13 @@ void ImportDialog::onTransferFailed(const QString& error)
     } else {
         m_stepLabel->setText("Import failed.");
         m_resultLabel->setStyleSheet(QString("color: %1;").arg(errHex()));
-        m_resultLabel->setText(friendlyTransferError(error));
+        m_resultLabel->setText(errorSummary("import this backup", error, true));
+        presentError(this, "Import Failed", "import this backup", error, true);
     }
     m_resultLabel->setVisible(true);
     m_cancelBtn->setVisible(false);
     m_backBtn->setVisible(true);
     m_closeBtn->setVisible(true);
-}
-
-// Maps the daemon's machine-readable transfer errors to user-facing text.
-QString ImportDialog::friendlyTransferError(const QString& error)
-{
-    const QString token = parseInstallError(error).token;
-    if (token == QLatin1String("transfer_game_mismatch"))
-        return QString("This archive was exported from a different game and cannot be "
-                       "imported here.\n\n(%1)").arg(error);
-    if (token == QLatin1String("transfer_schema"))
-        return QString("This archive uses an export format this version of gorganizer "
-                       "does not understand.\n\n(%1)").arg(error);
-    if (token == QLatin1String("transfer_overwrite_mounted"))
-        return QString("A mod cannot be overwritten while the game's mod view is mounted. "
-                       "Unmount mods first, or choose Rename/Skip.\n\n(%1)").arg(error);
-    if (token == QLatin1String("transfer_collision"))
-        return QString("An item in the archive already exists in this instance and the "
-                       "chosen policy aborts on collisions.\n\n(%1)").arg(error);
-    return error;
 }
 
 bool ImportDialog::confirmAbortWhileRunning()

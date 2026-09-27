@@ -6,6 +6,7 @@
 #include "TTWInstallDialog.h"
 #include "Dialogs.h"
 #include "InstallErrorText.h"
+#include "ErrorPresenter.h"
 
 #include <QAction>
 #include <QInputDialog>
@@ -270,7 +271,7 @@ void GameSetupController::onRpcError(const QString& method, const QString& error
     for (const QString& id : m_seenRecoveryIds.value(gameId))
         m_shownRecoveryIds.remove(id);
     m_seenRecoveryIds.remove(gameId);
-    dialogs::plainInfo(m_parentWindow, "Recovery changed", daemonErrorMessage(error));
+    presentError(m_parentWindow, "Recovery changed", "restore the game files", error, true);
     if (reannounced && m_latestRecoveries.contains(gameId)
         && !m_seenRecoveryIds.value(gameId).contains(m_latestRecoveries.value(gameId).recoveryId))
         reviewRecovery(gameId);

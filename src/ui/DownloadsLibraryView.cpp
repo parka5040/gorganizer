@@ -5,6 +5,7 @@
 #include "ThemeManager.h"
 #include "Dialogs.h"
 #include "InstallErrorText.h"
+#include "ErrorPresenter.h"
 #include "SafeLinks.h"
 
 #include <QVBoxLayout>
@@ -69,7 +70,7 @@ DownloadsLibraryView::DownloadsLibraryView(GrpcClient* grpc, QWidget* parent)
         GrpcGameSettings s;
         QString err;
         if (!m_grpc->setGameSettings(m_game.shortName, checked, s, err))
-            dialogs::warn(this, "Settings Error", err);
+            presentError(this, "Settings Error", "save settings", err, true);
     });
     header->addWidget(m_autoInstallToggle);
 
@@ -249,7 +250,7 @@ void DownloadsLibraryView::onContextMenu(const QPoint& pos)
                     return;
                 QString err;
                 if (!m_grpc->removeArchive(m_game.shortName, row.archiveRelPath, row.downloadId, err)) {
-                    dialogs::warn(this, "Remove Failed", err);
+                    presentError(this, "Remove Failed", "remove this download", err, true);
                     return;
                 }
                 m_model->removeTransientByDownloadId(row.downloadId);
@@ -283,7 +284,7 @@ void DownloadsLibraryView::onContextMenu(const QPoint& pos)
                 QString err;
                 GrpcArchiveRow fresh;
                 if (!m_grpc->refreshArchiveMetadata(m_game.shortName, row.archiveRelPath, fresh, err)) {
-                    dialogs::warn(this, "Refresh Failed", err);
+                    presentError(this, "Refresh Failed", "refresh this archive's information", err);
                     return;
                 }
                 reloadFromDaemon();
@@ -374,7 +375,7 @@ void DownloadsLibraryView::onDoubleClicked(const QModelIndex& idx)
                     showFomodInstallDialog(row, GrpcInstallMergeIntoMod, existingFolder);
                     return;
                 }
-                showInstallError(this, "Merge Failed", err);
+                presentError(this, "Merge Failed", "merge this archive into the mod", err, true);
                 return;
             }
             emit modInstalledFromDownload();
@@ -409,7 +410,7 @@ void DownloadsLibraryView::actionInstall(const GrpcArchiveRow& row, bool forceNe
             showFomodInstallDialog(row, mode, target);
             return;
         }
-        showInstallError(this, "Install Failed", err);
+        presentError(this, "Install Failed", "install this mod", err, true);
         return;
     }
     emit modInstalledFromDownload();
@@ -471,7 +472,7 @@ void DownloadsLibraryView::actionMergeInto(const GrpcArchiveRow& row)
             showFomodInstallDialog(row, GrpcInstallMergeIntoMod, target);
             return;
         }
-        showInstallError(this, "Merge Failed", err);
+        presentError(this, "Merge Failed", "merge this archive into the mod", err, true);
         return;
     }
     emit modInstalledFromDownload();
@@ -482,7 +483,7 @@ void DownloadsLibraryView::actionHide(const QString& archivePath, bool hidden)
 {
     QString err;
     if (!m_grpc->setArchiveHidden(m_game.shortName, archivePath, hidden, err)) {
-        dialogs::warn(this, "Hide Failed", err);
+        presentError(this, "Hide Failed", "hide this archive", err, true);
         return;
     }
     m_model->setHidden(archivePath, hidden);
@@ -494,7 +495,7 @@ void DownloadsLibraryView::actionBulkHide(GrpcBulkHideScope scope, bool hidden)
     QString err;
     int affected = 0;
     if (!m_grpc->setArchivesHiddenBulk(m_game.shortName, hidden, scope, affected, err)) {
-        dialogs::warn(this, "Bulk Hide Failed", err);
+        presentError(this, "Bulk Hide Failed", "hide these archives", err, true);
         return;
     }
     reloadFromDaemon();
@@ -507,7 +508,7 @@ void DownloadsLibraryView::actionDelete(const GrpcArchiveRow& row)
         return;
     QString err;
     if (!m_grpc->removeArchive(m_game.shortName, row.archiveRelPath, row.downloadId, err)) {
-        dialogs::warn(this, "Delete Failed", err);
+        presentError(this, "Delete Failed", "delete this archive", err, true);
         return;
     }
     m_model->removeTransientByDownloadId(row.downloadId);

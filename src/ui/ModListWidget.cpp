@@ -4,6 +4,7 @@
 #include "ThemeManager.h"
 #include "Dialogs.h"
 #include "InstallErrorText.h"
+#include "ErrorPresenter.h"
 #include "ModDependencyText.h"
 #include "SafeLinks.h"
 
@@ -854,7 +855,7 @@ void ModListWidget::updateEditLock()
         m_profileStateLabel->setText(m_restoringSavedProfile
             ? QStringLiteral("Couldn't reload the saved profile. Try again.")
             : QStringLiteral("Couldn't load this profile. Mod changes are disabled."));
-        m_profileStateLabel->setToolTip(plainToolTip(m_profileLoadError));
+        m_profileStateLabel->setToolTip(plainToolTip(errorSummary("load this profile", m_profileLoadError)));
     } else if (m_restoringSavedProfile) {
         m_profileStateLabel->setText(QStringLiteral("Couldn't save your mod choices. Reloading the saved profile…"));
         m_profileStateLabel->setToolTip(QString());
@@ -1391,7 +1392,7 @@ void ModListWidget::showContextMenu(const QPoint& pos)
                 }
                 if (!installed) {
                     failed++;
-                    errors.append(QString("• %1: %2").arg(selectedNames[i], installErrorMessage(err)));
+                    errors.append(QString("• %1: %2").arg(selectedNames[i], err));
                 } else {
                     ok++;
                 }
@@ -1399,8 +1400,8 @@ void ModListWidget::showContextMenu(const QPoint& pos)
             reloadMods();
             emit modsEdited();
             if (failed > 0) {
-                dialogs::warn(this, "Bulk Reinstall — Partial",
-                    QString("Reinstalled %1, failed %2:\n\n%3").arg(ok).arg(failed).arg(errors.join("\n")));
+                presentError(this, "Bulk Reinstall — Partial", "reinstall these mods",
+                             QString("Reinstalled %1, failed %2:\n%3").arg(ok).arg(failed).arg(errors.join("\n")), true);
             } else {
                 dialogs::info(this, "Bulk Reinstall Complete",
                     QString("Reinstalled %1 mods.").arg(ok));
@@ -1480,7 +1481,7 @@ void ModListWidget::showContextMenu(const QPoint& pos)
                     return;
                 }
                 if (!installed) {
-                    showInstallError(this, "Reinstall Failed", err);
+                    presentError(this, "Reinstall Failed", "reinstall this mod", err, true);
                     return;
                 }
                 reloadMods();
@@ -1513,7 +1514,7 @@ void ModListWidget::showContextMenu(const QPoint& pos)
             return;
         }
         if (!renamed) {
-            dialogs::warn(this, "Rename Failed", err);
+            presentError(this, "Rename Failed", "rename this mod", err, true);
             return;
         }
         reloadMods();
@@ -1553,7 +1554,7 @@ void ModListWidget::showContextMenu(const QPoint& pos)
             }
         }
         if (!ok) {
-            dialogs::warn(this, "Uninstall Failed", err);
+            presentError(this, "Uninstall Failed", "uninstall this mod", err, true);
             return;
         }
         reloadMods();
@@ -2114,7 +2115,7 @@ void ModListWidget::onOverwriteContextMenu(const ActionContext& context, const Q
     if (ok && !hasFiles)
         extractAll->setToolTip("Overwrite is empty.");
     if (!ok)
-        extractAll->setToolTip(plainToolTip(QString("Daemon not reachable: %1").arg(err)));
+        extractAll->setToolTip(plainToolTip(errorSummary("list Overwrite files", err)));
     connect(extractAll, &QAction::triggered, this, [this, context] { extractOverwriteAll(context); });
 
     auto* extractSel = menu.addAction("Extract Selected Files to New Mod...");
@@ -2140,7 +2141,7 @@ void ModListWidget::extractOverwriteAll(const ActionContext& context)
     if (!matchesContext(context))
         return;
     if (!extracted) {
-        dialogs::warn(this, "Extract Failed", err);
+        presentError(this, "Extract Failed", "extract Overwrite files into a mod", err, true);
         return;
     }
     dialogs::info(this, "Extract Complete",
@@ -2159,7 +2160,7 @@ void ModListWidget::extractOverwriteSelected(const ActionContext& context)
     if (!matchesContext(context))
         return;
     if (!listed) {
-        dialogs::warn(this, "Extract Failed", err);
+        presentError(this, "Extract Failed", "list Overwrite files", err);
         return;
     }
 
@@ -2242,7 +2243,7 @@ void ModListWidget::extractOverwriteSelected(const ActionContext& context)
     if (!matchesContext(context))
         return;
     if (!extracted) {
-        dialogs::warn(this, "Extract Failed", rpcErr);
+        presentError(this, "Extract Failed", "extract selected Overwrite files into a mod", rpcErr, true);
         return;
     }
     reloadMods();
