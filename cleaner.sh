@@ -1,6 +1,6 @@
 #!/bin/bash
 # cleaner.sh — Reset gorganizer to a clean first-time-user state.
-# Removes all build artifacts, mod folders, config, and runtime data.
+# Removes build artifacts, mod folders, config, and temporary extraction data.
 # Source code is untouched.
 #
 # Usage:
@@ -24,6 +24,8 @@ warn() { echo -e "${CYAN}[cleaner]${RESET} ${YELLOW}⚠${RESET} $*"; }
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+# shellcheck source=scripts/deploy-check.sh
+. "$SCRIPT_DIR/scripts/deploy-check.sh"
 
 KEEP_MODS=false
 ASSUME_YES=false
@@ -34,7 +36,7 @@ for arg in "$@"; do
         --help|-h)
             echo "Usage: $0 [--keep-mods] [--yes]"
             echo ""
-            echo "  (no args)     Remove everything: build, mods, config, runtime"
+            echo "  (no args)     Remove build, mods, config, data and temporary extracts"
             echo "  --keep-mods   Keep mod folders (*_Mods/), clean everything else"
             echo "  --yes, -y     Skip the destructive-action confirmation prompt"
             exit 0
@@ -50,12 +52,12 @@ done
 if ! $ASSUME_YES; then
     if $KEEP_MODS; then
         warn "About to remove: build artifacts, config (~/.config/gorganizer),"
-        warn "                 data (~/.local/share/gorganizer), runtime, desktop entries."
+        warn "                 data (~/.local/share/gorganizer), temporary extracts, desktop entries."
         warn "Mod folders (*_Mods/) will be KEPT."
     else
         warn "About to remove: build artifacts, ALL *_Mods/ folders in $SCRIPT_DIR,"
         warn "                 config (~/.config/gorganizer),"
-        warn "                 data (~/.local/share/gorganizer), runtime, desktop entries."
+        warn "                 data (~/.local/share/gorganizer), temporary extracts, desktop entries."
     fi
     if [ -t 0 ]; then
         read -r -p "$(echo -e "${CYAN}[cleaner]${RESET} Type 'yes' to proceed: ")" reply || reply=""
@@ -69,22 +71,11 @@ if ! $ASSUME_YES; then
     fi
 fi
 
-# Stop a running daemon before deleting anything. SIGTERM lets it capture
-# new writes and restore each game's vanilla Data/ on the way out; wait out
-# the daemon's own 45s shutdown watchdog instead of killing it mid-teardown.
-if pgrep -x gorganizerd >/dev/null 2>&1; then
-    warn "Stopping running gorganizerd..."
-    pkill -TERM -x gorganizerd 2>/dev/null || true
-    for _ in $(seq 1 460); do
-        pgrep -x gorganizerd >/dev/null 2>&1 || break
-        sleep 0.1
-    done
-    if pgrep -x gorganizerd >/dev/null 2>&1; then
-        warn "gorganizerd did not exit. Nothing was removed; stop it and re-run."
-        exit 1
-    fi
-    ok "Daemon stopped."
+if pgrep -u "$(id -u)" -x gorganizerd >/dev/null 2>&1; then
+    warn "Close Gorganizer first (or run ./gorganizer.sh stop)."
+    exit 1
 fi
+verify_games_restored || exit 1
 
 # Build artifacts.
 log "Removing build artifacts..."
@@ -113,12 +104,12 @@ log "Removing data..."
 rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/gorganizer"
 ok "Data removed."
 
-# Runtime (socket, pid files).
-log "Removing runtime..."
-rm -rf "${XDG_RUNTIME_DIR:-/tmp}/gorganizer"
-rm -rf "/tmp/gorganizer-$(id -u)"
-rm -rf /tmp/gorganizer-extract-*
-ok "Runtime removed."
+# Leave the daemon's socket and lock alone; remove only this user's extraction cache.
+log "Removing temporary extracts..."
+temp_base="${TMPDIR:-/tmp}"
+temp_base="${temp_base%/}"
+rm -rf "$temp_base/gorganizer-extract-$(id -u)-"*
+ok "Temporary extracts removed."
 
 # Desktop file registrations.
 log "Removing desktop registrations..."
