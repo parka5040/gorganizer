@@ -262,11 +262,11 @@ func TestConfigSnapshotsOwnExecutableStorage(t *testing.T) {
 	if err != nil || effective.InstallPath != install {
 		t.Fatalf("linked effective snapshot = %+v, %v", effective, err)
 	}
-	admitted, _, release, err := d.svc.launch.admitLaunch("custom")
+	admitted, _, reservation, err := d.svc.launch.admitLaunch("custom")
 	if err != nil {
 		t.Fatal(err)
 	}
-	release()
+	reservation.Release()
 	if nilConfig, _ := d.gameConfigSnapshot("nil"); nilConfig.Executables != nil {
 		t.Fatal("nil executable slice changed into a non-nil slice")
 	}
@@ -341,9 +341,9 @@ func TestLifecycleStateReadersConcurrentSettings(t *testing.T) {
 		"list":   func() error { _, err := d.ListConfiguredGames(); return err },
 		"status": func() error { _, err := d.GetVFSStatus("child"); return err },
 		"admission": func() error {
-			_, _, release, err := d.svc.launch.admitLaunch("parent")
+			_, _, reservation, err := d.svc.launch.admitLaunch("parent")
 			if err == nil {
-				release()
+				reservation.Release()
 			}
 			return err
 		},
@@ -386,11 +386,11 @@ func TestLifecycleStateReadersConcurrentSettings(t *testing.T) {
 			if err != nil || !status.Mounted {
 				return fmt.Errorf("GetVFSStatus: %v, %v", status, err)
 			}
-			_, _, release, err := d.svc.launch.admitLaunch("parent")
+			_, _, reservation, err := d.svc.launch.admitLaunch("parent")
 			if err != nil {
 				return err
 			}
-			release()
+			reservation.Release()
 		}
 		return nil
 	})

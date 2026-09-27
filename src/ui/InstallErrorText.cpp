@@ -241,11 +241,16 @@ QString knownTokenMessage(const InstallError& parsed)
     if (token == QLatin1String("mod_dependencies_unsupported"))
         return QStringLiteral("%1 does not use SMAPI mod dependencies, so gorganizer cannot check them.")
             .arg(gameName(field("game"), QStringLiteral("This game")));
-    if (token == QLatin1String("game_running"))
+    if (token == QLatin1String("game_running")) {
+        if (field("operation") == QLatin1String("unmount"))
+            return QStringLiteral("%1 is still running, or was started less than two minutes ago, so its mods "
+                                  "cannot be unmounted. Close the game, then try again.")
+                .arg(gameName(field("game"), QStringLiteral("The game")));
         return QStringLiteral("%1 is still running, or was started less than two minutes ago, so gorganizer "
                               "cannot apply your pending mod changes. Close the game, then press Run (or Apply) "
                               "again.")
             .arg(gameName(field("game"), QStringLiteral("The game")));
+    }
     if (token == QLatin1String("daemon_shutting_down"))
         return QStringLiteral("The gorganizer daemon is shutting down. Start gorganizer again to continue.");
     if (token == QLatin1String("archive_rejected"))

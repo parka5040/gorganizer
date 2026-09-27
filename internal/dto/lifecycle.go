@@ -3,8 +3,9 @@ package dto
 import "fmt"
 
 const (
-	GameRunningOperationLaunch = "launch"
-	GameRunningOperationApply  = "apply"
+	GameRunningOperationLaunch  = "launch"
+	GameRunningOperationApply   = "apply"
+	GameRunningOperationUnmount = "unmount"
 )
 
 type ShuttingDownError struct {
@@ -24,8 +25,11 @@ type GameRunningError struct {
 	Operation string
 }
 
-// Error reports that pending mod changes cannot be applied because the game is running or was just started.
+// Error reports that a game running or recently launched prevents changing its deployed mods.
 func (e *GameRunningError) Error() string {
+	if e.Operation == GameRunningOperationUnmount {
+		return fmt.Sprintf("%s is still running, or was started less than two minutes ago, so its mods cannot be unmounted; close it first", e.GameID)
+	}
 	return fmt.Sprintf("%s is still running, or was started less than two minutes ago, so its pending mod changes cannot be applied (%s); close it first", e.GameID, e.Operation)
 }
 

@@ -53,7 +53,8 @@ type session struct {
 
 	fenceMu        sync.Mutex
 	fenceExclusive map[string]fenceHolder
-	fenceShared    map[string]map[fenceHolder]int
+	fenceShared    map[string]map[uint64]fenceHolder
+	nextFenceID    uint64
 
 	installLocks   map[string]*sync.Mutex
 	installLocksMu sync.Mutex
