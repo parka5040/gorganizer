@@ -97,7 +97,8 @@ void LaunchController::onRunGame()
         }
         m_statusBar->showMessage(
             QString("Downloading %1 from Nexus...").arg(target.label));
-        QString name, err;
+        QString name;
+        GrpcError err;
         if (!m_grpc->installScriptExtender(m_session->activeGame().shortName, name, err)) {
             presentError(m_parentWindow, "Install Failed", "install the script extender", err, true);
             return;

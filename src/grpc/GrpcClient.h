@@ -100,26 +100,26 @@ public:
     void getConflicts(const QString& gameId, const QString& profileName);
 
     void launchGame(const QString& gameId, bool useTool, const QString& profileName);
-    bool installScriptExtender(const QString& gameId, QString& nameOut, QString& errorOut);
+    bool installScriptExtender(const QString& gameId, QString& nameOut, GrpcError& errorOut);
 
     // External executables (MO2-style tools). Synchronous, deadline-bounded.
-    bool listExecutables(const QString& gameId, QList<GrpcExecutable>& out, QString& errorOut);
+    bool listExecutables(const QString& gameId, QList<GrpcExecutable>& out, GrpcError& errorOut);
     bool upsertExecutable(const QString& gameId, const GrpcExecutable& exe,
-                          GrpcExecutable& savedOut, QString& errorOut);
-    bool removeExecutable(const QString& gameId, const QString& id, QString& errorOut);
-    bool detectExecutables(const QString& gameId, QList<GrpcDetectedExecutable>& out, QString& errorOut);
+                          GrpcExecutable& savedOut, GrpcError& errorOut);
+    bool removeExecutable(const QString& gameId, const QString& id, GrpcError& errorOut);
+    bool detectExecutables(const QString& gameId, QList<GrpcDetectedExecutable>& out, GrpcError& errorOut);
     bool launchExecutable(const QString& gameId, const QString& execId, const QString& profileName,
-                          int& pidOut, QString& runIdOut, QString& errorOut, bool autoSort = false);
-    bool cancelExecutable(const QString& runId, QString& errorOut);
-    bool getManagedToolStatus(const QString& toolId, GrpcManagedToolStatus& statusOut, QString& errorOut);
-    bool installManagedTool(const QString& toolId, GrpcManagedToolStatus& statusOut, QString& errorOut);
-    bool rollbackManagedTool(const QString& toolId, GrpcManagedToolStatus& statusOut, QString& errorOut);
+                          int& pidOut, QString& runIdOut, GrpcError& errorOut, bool autoSort = false);
+    bool cancelExecutable(const QString& runId, GrpcError& errorOut);
+    bool getManagedToolStatus(const QString& toolId, GrpcManagedToolStatus& statusOut, GrpcError& errorOut);
+    bool installManagedTool(const QString& toolId, GrpcManagedToolStatus& statusOut, GrpcError& errorOut);
+    bool rollbackManagedTool(const QString& toolId, GrpcManagedToolStatus& statusOut, GrpcError& errorOut);
 
     // FNV 4GB patcher (FNV only): two-step install + apply, plus marker-file probe.
     bool install4GBPatcher(const QString& gameId, QString& patcherExePathOut,
-                           QString& versionOut, QString& errorOut);
+                           QString& versionOut, GrpcError& errorOut);
     bool apply4GBPatch(const QString& gameId, const QString& patcherExePath,
-                       QString& outputOut, QString& errorOut);
+                       QString& outputOut, GrpcError& errorOut);
     bool is4GBPatched(const QString& gameId);
     bool detectProtonVersions(std::vector<GrpcProtonVersion>& out, GrpcError& errorOut);
     bool getPreferredProton(QString& pathOut, GrpcError& errorOut);
@@ -127,24 +127,24 @@ public:
     // Tells daemon which game the UI is showing for NXM download routing. Fire-and-forget.
     void setActiveGame(const QString& gameId);
 
-    bool checkTTWPrereqs(int backend, GrpcTTWPrereqStatus& out, QString& errorOut);
-    bool checkTTWDiskSpace(int64_t& availableOut, int64_t& requiredOut, QString& errorOut);
-    bool checkFNVNotMounted(QString& errorOut);
+    bool checkTTWPrereqs(int backend, GrpcTTWPrereqStatus& out, GrpcError& errorOut);
+    bool checkTTWDiskSpace(int64_t& availableOut, int64_t& requiredOut, GrpcError& errorOut);
+    bool checkFNVNotMounted(GrpcError& errorOut);
     bool prepareTTWInstaller(const QString& userPath, int backend,
-                             GrpcTTWInstallerInfo& out, QString& errorOut);
-    bool createBlankTTWMod(const QString& modName, QString& modDirOut, QString& errorOut);
-    bool ensureNativeMpiInstaller(QString& pathOut, QString& versionOut, QString& errorOut);
-    bool bootstrapFNVPrefix(QString& errorOut);
-    bool installTTWPrereqs(QString& installIdOut, QString& errorOut);
+                             GrpcTTWInstallerInfo& out, GrpcError& errorOut);
+    bool createBlankTTWMod(const QString& modName, QString& modDirOut, GrpcError& errorOut);
+    bool ensureNativeMpiInstaller(QString& pathOut, QString& versionOut, GrpcError& errorOut);
+    bool bootstrapFNVPrefix(GrpcError& errorOut);
+    bool installTTWPrereqs(QString& installIdOut, GrpcError& errorOut);
     bool launchTTWInstaller(const GrpcTTWInstallerInfo& info, const QString& dataModName,
-                            QString& installIdOut, QString& errorOut);
-    bool cancelTTWInstaller(const QString& installId, QString& errorOut);
+                            QString& installIdOut, GrpcError& errorOut);
+    bool cancelTTWInstaller(const QString& installId, GrpcError& errorOut);
     bool getTTWInstallResult(const QString& installId, bool block,
-                             GrpcTTWInstallResult& out, QString& errorOut);
-    bool setTTWLauncherExe(const QString& relPath, QString& errorOut);
-    bool verifyTTWIntegrity(QString& errorOut);
+                             GrpcTTWInstallResult& out, GrpcError& errorOut);
+    bool setTTWLauncherExe(const QString& relPath, GrpcError& errorOut);
+    bool verifyTTWIntegrity(GrpcError& errorOut);
     bool translateWinePath(const QString& gameId, const QString& unixPath,
-                           QString& winePathOut, QString& errorOut);
+                           QString& winePathOut, GrpcError& errorOut);
 
     bool listArchives(const QString& gameId, std::vector<GrpcArchiveRow>& rowsOut, GrpcError& errorOut);
     bool setArchiveHidden(const QString& gameId, const QString& archiveRelPath, bool hidden, GrpcError& errorOut);
@@ -225,19 +225,19 @@ public:
 
     bool listProfileIniFiles(const QString& gameId, const QString& profileName,
                              std::vector<GrpcProfileIniFile>& filesOut,
-                             GrpcProfileIniStatus& statusOut, QString& errorOut);
+                             GrpcProfileIniStatus& statusOut, GrpcError& errorOut);
     quint64 saveProfileIniFile(const QString& gameId, const QString& profileName,
                                const QString& filename, const QString& content);
     quint64 applyProfileIniFiles(const QString& gameId, const QString& profileName);
     bool setProfileIniEnabled(const QString& gameId, const QString& profileName,
-                              bool enabled, GrpcProfileIniStatus& statusOut, QString& errorOut);
+                              bool enabled, GrpcProfileIniStatus& statusOut, GrpcError& errorOut);
     bool getProfileIniStatus(const QString& gameId, const QString& profileName,
-                             GrpcProfileIniStatus& statusOut, QString& errorOut);
+                             GrpcProfileIniStatus& statusOut, GrpcError& errorOut);
     bool listIniTweaks(const QString& gameId, const QString& profileName,
-                       std::vector<GrpcIniTweakState>& tweaksOut, QString& errorOut);
+                       std::vector<GrpcIniTweakState>& tweaksOut, GrpcError& errorOut);
     bool setIniTweak(const QString& gameId, const QString& profileName,
                      const QString& tweakId, bool enabled,
-                     GrpcIniTweakState& stateOut, QString& errorOut);
+                     GrpcIniTweakState& stateOut, GrpcError& errorOut);
 
     void startWatching();
     void stopWatching();
@@ -259,12 +259,12 @@ public:
     quint64 saveNexusAPIKey(const QString& apiKey);
 
     void shutdownDaemon();
-    bool getShutdownPlanSync(int timeoutMs, std::vector<GrpcShutdownPlanItem>& items, QString& errorOut);
+    bool getShutdownPlanSync(int timeoutMs, std::vector<GrpcShutdownPlanItem>& items, GrpcError& errorOut);
     // Synchronous shutdown for app exit; polls socket file for graceful daemon exit.
-    bool shutdownDaemonSync(int rpcTimeoutMs, int pollTimeoutMs, QString& errorOut);
+    bool shutdownDaemonSync(int rpcTimeoutMs, int pollTimeoutMs, GrpcError& errorOut);
 
     // Cold-start readiness probe used by the splash screen.
-    bool health(GrpcReadiness& out, QString& errorOut);
+    bool health(GrpcReadiness& out, GrpcError& errorOut);
 
 signals:
     void connected();

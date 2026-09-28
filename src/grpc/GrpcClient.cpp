@@ -55,13 +55,6 @@ grpc::Status invokeUnary(GrpcSyncStub* stub, Method method, const Req& req, Resp
     return ((*stub->stub).*method)(&ctx, req, &resp);
 }
 
-bool mapError(const grpc::Status& status, QString& errorOut)
-{
-    if (status.ok()) return true;
-    errorOut = QString::fromStdString(status.error_message());
-    return false;
-}
-
 bool mapError(const grpc::Status& status, const QString& method, GrpcError& errorOut)
 {
     errorOut = grpcErrorFromStatus(status, method);
@@ -959,12 +952,12 @@ void GrpcClient::shutdownDaemon()
     post(&GrpcWorker::doShutdownDaemon);
 }
 
-bool GrpcClient::getShutdownPlanSync(int timeoutMs, std::vector<GrpcShutdownPlanItem>& items, QString& errorOut)
+bool GrpcClient::getShutdownPlanSync(int timeoutMs, std::vector<GrpcShutdownPlanItem>& items, GrpcError& errorOut)
 {
     gorganizer::v1::GetShutdownPlanRequest req;
     gorganizer::v1::ShutdownPlan resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::GetShutdownPlan, req, resp,
-                              std::chrono::milliseconds(timeoutMs)), errorOut)) return false;
+                              std::chrono::milliseconds(timeoutMs)), "GetShutdownPlan", errorOut)) return false;
     items.clear();
     for (const auto& item : resp.items()) {
         items.push_back({QString::fromStdString(item.game_id()),
@@ -974,16 +967,18 @@ bool GrpcClient::getShutdownPlanSync(int timeoutMs, std::vector<GrpcShutdownPlan
     return true;
 }
 
-bool GrpcClient::shutdownDaemonSync(int rpcTimeoutMs, int pollTimeoutMs, QString& errorOut)
+bool GrpcClient::shutdownDaemonSync(int rpcTimeoutMs, int pollTimeoutMs, GrpcError& errorOut)
 {
-    if (!m_syncStub) { errorOut = "not connected"; return false; }
+    if (!m_syncStub) {
+        errorOut = {GrpcStatusUnavailable, QStringLiteral("Shutdown"), QStringLiteral("not connected")};
+        return false;
+    }
     gorganizer::v1::ShutdownRequest req;
     gorganizer::v1::ShutdownResponse resp;
     auto s = invokeUnary(m_syncStub.get(), &Stub::Shutdown, req, resp,
                          std::chrono::milliseconds(rpcTimeoutMs));
-    if (!s.ok()) {
-        errorOut = QString::fromStdString(s.error_message());
-    }
+    if (!s.ok())
+        errorOut = grpcErrorFromStatus(s, QStringLiteral("Shutdown"));
 
     QString sockPath = socketPath();
     QElapsedTimer t;
@@ -992,7 +987,9 @@ bool GrpcClient::shutdownDaemonSync(int rpcTimeoutMs, int pollTimeoutMs, QString
         if (!QFileInfo::exists(sockPath)) return true;
         QThread::msleep(50);
     }
-    if (errorOut.isEmpty()) errorOut = "daemon did not exit within timeout";
+    if (errorOut.message.isEmpty())
+        errorOut = {GrpcStatusDeadlineExceeded, QStringLiteral("Shutdown"),
+                    QStringLiteral("daemon did not exit within timeout")};
     return false;
 }
 
@@ -1313,56 +1310,56 @@ void GrpcClient::setActiveGame(const QString& gameId)
     invokeUnary(m_syncStub.get(), &Stub::SetActiveGame, req, resp);
 }
 
-bool GrpcClient::installScriptExtender(const QString& gameId, QString& nameOut, QString& errorOut)
+bool GrpcClient::installScriptExtender(const QString& gameId, QString& nameOut, GrpcError& errorOut)
 {
     gorganizer::v1::InstallScriptExtenderRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::InstallScriptExtenderResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::InstallScriptExtender, req, resp,
-                              std::chrono::minutes(5)), errorOut)) return false;
+                              std::chrono::minutes(5)), "InstallScriptExtender", errorOut)) return false;
     nameOut = QString::fromStdString(resp.name());
     return true;
 }
 
-bool GrpcClient::listExecutables(const QString& gameId, QList<GrpcExecutable>& out, QString& errorOut)
+bool GrpcClient::listExecutables(const QString& gameId, QList<GrpcExecutable>& out, GrpcError& errorOut)
 {
     gorganizer::v1::ListExecutablesRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::ListExecutablesResponse resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::ListExecutables, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::ListExecutables, req, resp), "ListExecutables", errorOut)) return false;
     out.clear();
     for (const auto& e : resp.executables()) out << execFromProto(e);
     return true;
 }
 
 bool GrpcClient::upsertExecutable(const QString& gameId, const GrpcExecutable& exe,
-                                  GrpcExecutable& savedOut, QString& errorOut)
+                                  GrpcExecutable& savedOut, GrpcError& errorOut)
 {
     gorganizer::v1::UpsertExecutableRequest req;
     req.set_game_id(gameId.toStdString());
     execToProto(exe, req.mutable_executable());
     gorganizer::v1::Executable resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::UpsertExecutable, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::UpsertExecutable, req, resp), "UpsertExecutable", errorOut)) return false;
     savedOut = execFromProto(resp);
     return true;
 }
 
-bool GrpcClient::removeExecutable(const QString& gameId, const QString& id, QString& errorOut)
+bool GrpcClient::removeExecutable(const QString& gameId, const QString& id, GrpcError& errorOut)
 {
     gorganizer::v1::RemoveExecutableRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_id(id.toStdString());
     gorganizer::v1::RemoveExecutableResponse resp;
-    return mapError(invokeUnary(m_syncStub.get(), &Stub::RemoveExecutable, req, resp), errorOut);
+    return mapError(invokeUnary(m_syncStub.get(), &Stub::RemoveExecutable, req, resp), "RemoveExecutable", errorOut);
 }
 
-bool GrpcClient::detectExecutables(const QString& gameId, QList<GrpcDetectedExecutable>& out, QString& errorOut)
+bool GrpcClient::detectExecutables(const QString& gameId, QList<GrpcDetectedExecutable>& out, GrpcError& errorOut)
 {
     gorganizer::v1::DetectExecutablesRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::DetectExecutablesResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::DetectExecutables, req, resp,
-                              std::chrono::seconds(60)), errorOut)) return false;
+                              std::chrono::seconds(60)), "DetectExecutables", errorOut)) return false;
     out.clear();
     for (const auto& d : resp.detected()) {
         GrpcDetectedExecutable g;
@@ -1382,7 +1379,7 @@ bool GrpcClient::detectExecutables(const QString& gameId, QList<GrpcDetectedExec
 }
 
 bool GrpcClient::launchExecutable(const QString& gameId, const QString& execId, const QString& profileName,
-                                  int& pidOut, QString& runIdOut, QString& errorOut, bool autoSort)
+                                  int& pidOut, QString& runIdOut, GrpcError& errorOut, bool autoSort)
 {
     gorganizer::v1::LaunchExecutableRequest req;
     req.set_game_id(gameId.toStdString());
@@ -1391,7 +1388,7 @@ bool GrpcClient::launchExecutable(const QString& gameId, const QString& execId, 
     req.set_auto_sort(autoSort);
     gorganizer::v1::LaunchExecutableResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::LaunchExecutable, req, resp,
-                              std::chrono::minutes(2)), errorOut)) return false;
+                              std::chrono::minutes(2)), "LaunchExecutable", errorOut)) return false;
     pidOut = resp.pid();
     runIdOut = QString::fromStdString(resp.run_id());
     return true;
@@ -1411,67 +1408,67 @@ GrpcManagedToolStatus managedToolStatusFromProto(const gorganizer::v1::ManagedTo
 }
 }
 
-bool GrpcClient::getManagedToolStatus(const QString& toolId, GrpcManagedToolStatus& statusOut, QString& errorOut)
+bool GrpcClient::getManagedToolStatus(const QString& toolId, GrpcManagedToolStatus& statusOut, GrpcError& errorOut)
 {
     gorganizer::v1::GetManagedToolStatusRequest req;
     req.set_tool_id(toolId.toStdString());
     gorganizer::v1::ManagedToolStatus resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::GetManagedToolStatus, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::GetManagedToolStatus, req, resp), "GetManagedToolStatus", errorOut)) return false;
     statusOut = managedToolStatusFromProto(resp);
     return true;
 }
 
-bool GrpcClient::installManagedTool(const QString& toolId, GrpcManagedToolStatus& statusOut, QString& errorOut)
+bool GrpcClient::installManagedTool(const QString& toolId, GrpcManagedToolStatus& statusOut, GrpcError& errorOut)
 {
     gorganizer::v1::InstallManagedToolRequest req;
     req.set_tool_id(toolId.toStdString());
     gorganizer::v1::ManagedToolStatus resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::InstallManagedTool, req, resp,
-                              std::chrono::minutes(10)), errorOut)) return false;
+                              std::chrono::minutes(10)), "InstallManagedTool", errorOut)) return false;
     statusOut = managedToolStatusFromProto(resp);
     return true;
 }
 
-bool GrpcClient::rollbackManagedTool(const QString& toolId, GrpcManagedToolStatus& statusOut, QString& errorOut)
+bool GrpcClient::rollbackManagedTool(const QString& toolId, GrpcManagedToolStatus& statusOut, GrpcError& errorOut)
 {
     gorganizer::v1::RollbackManagedToolRequest req;
     req.set_tool_id(toolId.toStdString());
     gorganizer::v1::ManagedToolStatus resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::RollbackManagedTool, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::RollbackManagedTool, req, resp), "RollbackManagedTool", errorOut)) return false;
     statusOut = managedToolStatusFromProto(resp);
     return true;
 }
 
-bool GrpcClient::cancelExecutable(const QString& runId, QString& errorOut)
+bool GrpcClient::cancelExecutable(const QString& runId, GrpcError& errorOut)
 {
     gorganizer::v1::CancelExecutableRequest req;
     req.set_run_id(runId.toStdString());
     gorganizer::v1::CancelExecutableResponse resp;
-    return mapError(invokeUnary(m_syncStub.get(), &Stub::CancelExecutable, req, resp), errorOut);
+    return mapError(invokeUnary(m_syncStub.get(), &Stub::CancelExecutable, req, resp), "CancelExecutable", errorOut);
 }
 
 bool GrpcClient::install4GBPatcher(const QString& gameId, QString& patcherExePathOut,
-                                    QString& versionOut, QString& errorOut)
+                                    QString& versionOut, GrpcError& errorOut)
 {
     gorganizer::v1::Install4GBPatcherRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::Install4GBPatcherResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::Install4GBPatcher, req, resp,
-                              std::chrono::minutes(5)), errorOut)) return false;
+                              std::chrono::minutes(5)), "Install4GBPatcher", errorOut)) return false;
     patcherExePathOut = QString::fromStdString(resp.patcher_exe_path());
     versionOut = QString::fromStdString(resp.version());
     return true;
 }
 
 bool GrpcClient::apply4GBPatch(const QString& gameId, const QString& patcherExePath,
-                                QString& outputOut, QString& errorOut)
+                                QString& outputOut, GrpcError& errorOut)
 {
     gorganizer::v1::Apply4GBPatchRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_patcher_exe_path(patcherExePath.toStdString());
     gorganizer::v1::Apply4GBPatchResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::Apply4GBPatch, req, resp,
-                              std::chrono::minutes(2)), errorOut)) return false;
+                              std::chrono::minutes(2)), "Apply4GBPatch", errorOut)) return false;
     outputOut = QString::fromStdString(resp.output());
     return true;
 }
@@ -1487,13 +1484,13 @@ bool GrpcClient::is4GBPatched(const QString& gameId)
     return resp.patched();
 }
 
-bool GrpcClient::checkTTWPrereqs(int backend, GrpcTTWPrereqStatus& out, QString& errorOut)
+bool GrpcClient::checkTTWPrereqs(int backend, GrpcTTWPrereqStatus& out, GrpcError& errorOut)
 {
     gorganizer::v1::CheckTTWPrereqsRequest req;
     req.set_backend(static_cast<gorganizer::v1::TTWBackend>(backend));
     gorganizer::v1::CheckTTWPrereqsResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::CheckTTWPrereqs, req, resp,
-                              std::chrono::seconds(15)), errorOut)) return false;
+                              std::chrono::seconds(15)), "CheckTTWPrereqs", errorOut)) return false;
     out.backend = static_cast<int>(resp.backend());
     out.gstreamerInstalled = resp.gstreamer_installed();
     out.gstreamerCodecsHint = QString::fromStdString(resp.gstreamer_codecs_hint());
@@ -1519,34 +1516,34 @@ bool GrpcClient::checkTTWPrereqs(int backend, GrpcTTWPrereqStatus& out, QString&
     return true;
 }
 
-bool GrpcClient::checkTTWDiskSpace(int64_t& availableOut, int64_t& requiredOut, QString& errorOut)
+bool GrpcClient::checkTTWDiskSpace(int64_t& availableOut, int64_t& requiredOut, GrpcError& errorOut)
 {
     gorganizer::v1::CheckTTWDiskSpaceRequest req;
     gorganizer::v1::CheckTTWDiskSpaceResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::CheckTTWDiskSpace, req, resp,
-                              std::chrono::seconds(5)), errorOut)) return false;
+                              std::chrono::seconds(5)), "CheckTTWDiskSpace", errorOut)) return false;
     availableOut = resp.available();
     requiredOut = resp.required();
     return true;
 }
 
-bool GrpcClient::checkFNVNotMounted(QString& errorOut)
+bool GrpcClient::checkFNVNotMounted(GrpcError& errorOut)
 {
     gorganizer::v1::CheckFNVNotMountedRequest req;
     gorganizer::v1::CheckFNVNotMountedResponse resp;
     return mapError(invokeUnary(m_syncStub.get(), &Stub::CheckFNVNotMounted, req, resp,
-                                std::chrono::seconds(5)), errorOut);
+                                std::chrono::seconds(5)), "CheckFNVNotMounted", errorOut);
 }
 
 bool GrpcClient::prepareTTWInstaller(const QString& userPath, int backend,
-                                     GrpcTTWInstallerInfo& out, QString& errorOut)
+                                     GrpcTTWInstallerInfo& out, GrpcError& errorOut)
 {
     gorganizer::v1::PrepareTTWInstallerRequest req;
     req.set_user_path(userPath.toStdString());
     req.set_backend(static_cast<gorganizer::v1::TTWBackend>(backend));
     gorganizer::v1::PrepareTTWInstallerResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::PrepareTTWInstaller, req, resp,
-                              std::chrono::seconds(15)), errorOut)) return false;
+                              std::chrono::seconds(15)), "PrepareTTWInstaller", errorOut)) return false;
     out.backend = static_cast<int>(resp.backend());
     out.mpiFile = QString::fromStdString(resp.mpi_file());
     out.installerExe = QString::fromStdString(resp.installer_exe());
@@ -1557,48 +1554,48 @@ bool GrpcClient::prepareTTWInstaller(const QString& userPath, int backend,
     return true;
 }
 
-bool GrpcClient::createBlankTTWMod(const QString& modName, QString& modDirOut, QString& errorOut)
+bool GrpcClient::createBlankTTWMod(const QString& modName, QString& modDirOut, GrpcError& errorOut)
 {
     gorganizer::v1::CreateBlankTTWModRequest req;
     req.set_mod_name(modName.toStdString());
     gorganizer::v1::CreateBlankTTWModResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::CreateBlankTTWMod, req, resp,
-                              std::chrono::seconds(10)), errorOut)) return false;
+                              std::chrono::seconds(10)), "CreateBlankTTWMod", errorOut)) return false;
     modDirOut = QString::fromStdString(resp.mod_dir());
     return true;
 }
 
-bool GrpcClient::ensureNativeMpiInstaller(QString& pathOut, QString& versionOut, QString& errorOut)
+bool GrpcClient::ensureNativeMpiInstaller(QString& pathOut, QString& versionOut, GrpcError& errorOut)
 {
     gorganizer::v1::EnsureNativeMpiInstallerRequest req;
     gorganizer::v1::EnsureNativeMpiInstallerResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::EnsureNativeMpiInstaller, req, resp,
-                              std::chrono::minutes(2)), errorOut)) return false;
+                              std::chrono::minutes(2)), "EnsureNativeMpiInstaller", errorOut)) return false;
     pathOut = QString::fromStdString(resp.path());
     versionOut = QString::fromStdString(resp.version());
     return true;
 }
 
-bool GrpcClient::bootstrapFNVPrefix(QString& errorOut)
+bool GrpcClient::bootstrapFNVPrefix(GrpcError& errorOut)
 {
     gorganizer::v1::BootstrapFNVPrefixRequest req;
     gorganizer::v1::BootstrapFNVPrefixResponse resp;
     return mapError(invokeUnary(m_syncStub.get(), &Stub::BootstrapFNVPrefix, req, resp,
-                                std::chrono::minutes(2)), errorOut);
+                                std::chrono::minutes(2)), "BootstrapFNVPrefix", errorOut);
 }
 
-bool GrpcClient::installTTWPrereqs(QString& installIdOut, QString& errorOut)
+bool GrpcClient::installTTWPrereqs(QString& installIdOut, GrpcError& errorOut)
 {
     gorganizer::v1::InstallTTWPrereqsRequest req;
     gorganizer::v1::InstallTTWPrereqsResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::InstallTTWPrereqs, req, resp,
-                              std::chrono::seconds(10)), errorOut)) return false;
+                              std::chrono::seconds(10)), "InstallTTWPrereqs", errorOut)) return false;
     installIdOut = QString::fromStdString(resp.install_id());
     return true;
 }
 
 bool GrpcClient::launchTTWInstaller(const GrpcTTWInstallerInfo& info, const QString& dataModName,
-                                    QString& installIdOut, QString& errorOut)
+                                    QString& installIdOut, GrpcError& errorOut)
 {
     gorganizer::v1::LaunchTTWInstallerRequest req;
     auto* infoMsg = req.mutable_info();
@@ -1611,28 +1608,28 @@ bool GrpcClient::launchTTWInstaller(const GrpcTTWInstallerInfo& info, const QStr
     req.set_data_mod_name(dataModName.toStdString());
     gorganizer::v1::LaunchTTWInstallerResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::LaunchTTWInstaller, req, resp,
-                              std::chrono::seconds(15)), errorOut)) return false;
+                              std::chrono::seconds(15)), "LaunchTTWInstaller", errorOut)) return false;
     installIdOut = QString::fromStdString(resp.install_id());
     return true;
 }
 
-bool GrpcClient::cancelTTWInstaller(const QString& installId, QString& errorOut)
+bool GrpcClient::cancelTTWInstaller(const QString& installId, GrpcError& errorOut)
 {
     gorganizer::v1::CancelTTWInstallerRequest req;
     req.set_install_id(installId.toStdString());
     gorganizer::v1::CancelTTWInstallerResponse resp;
-    return mapError(invokeUnary(m_syncStub.get(), &Stub::CancelTTWInstaller, req, resp), errorOut);
+    return mapError(invokeUnary(m_syncStub.get(), &Stub::CancelTTWInstaller, req, resp), "CancelTTWInstaller", errorOut);
 }
 
 bool GrpcClient::getTTWInstallResult(const QString& installId, bool block,
-                                     GrpcTTWInstallResult& out, QString& errorOut)
+                                     GrpcTTWInstallResult& out, GrpcError& errorOut)
 {
     gorganizer::v1::GetTTWInstallResultRequest req;
     req.set_install_id(installId.toStdString());
     req.set_block(block);
     gorganizer::v1::GetTTWInstallResultResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::GetTTWInstallResult, req, resp,
-                              std::chrono::seconds(block ? 3600 : 5)), errorOut)) return false;
+                              std::chrono::seconds(block ? 3600 : 5)), "GetTTWInstallResult", errorOut)) return false;
     out.installerExitCode = resp.installer_exit_code();
     out.layoutFixed = resp.layout_fixed();
     out.dataModFileCount = resp.data_mod_file_count();
@@ -1660,32 +1657,32 @@ bool GrpcClient::getTTWInstallResult(const QString& installId, bool block,
     return true;
 }
 
-bool GrpcClient::setTTWLauncherExe(const QString& relPath, QString& errorOut)
+bool GrpcClient::setTTWLauncherExe(const QString& relPath, GrpcError& errorOut)
 {
     gorganizer::v1::SetTTWLauncherExeRequest req;
     req.set_rel_path(relPath.toStdString());
     gorganizer::v1::SetTTWLauncherExeResponse resp;
     return mapError(invokeUnary(m_syncStub.get(), &Stub::SetTTWLauncherExe, req, resp,
-                                std::chrono::seconds(5)), errorOut);
+                                std::chrono::seconds(5)), "SetTTWLauncherExe", errorOut);
 }
 
-bool GrpcClient::verifyTTWIntegrity(QString& errorOut)
+bool GrpcClient::verifyTTWIntegrity(GrpcError& errorOut)
 {
     gorganizer::v1::VerifyTTWIntegrityRequest req;
     gorganizer::v1::VerifyTTWIntegrityResponse resp;
     return mapError(invokeUnary(m_syncStub.get(), &Stub::VerifyTTWIntegrity, req, resp,
-                                std::chrono::seconds(5)), errorOut);
+                                std::chrono::seconds(5)), "VerifyTTWIntegrity", errorOut);
 }
 
 bool GrpcClient::translateWinePath(const QString& gameId, const QString& unixPath,
-                                   QString& winePathOut, QString& errorOut)
+                                   QString& winePathOut, GrpcError& errorOut)
 {
     gorganizer::v1::TranslateWinePathRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_unix_path(unixPath.toStdString());
     gorganizer::v1::TranslateWinePathResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::TranslateWinePath, req, resp,
-                              std::chrono::seconds(5)), errorOut)) return false;
+                              std::chrono::seconds(5)), "TranslateWinePath", errorOut)) return false;
     winePathOut = QString::fromStdString(resp.wine_path());
     return true;
 }
@@ -1769,13 +1766,13 @@ bool GrpcClient::setGameSettings(const QString& gameId, bool autoInstall, GrpcGa
 
 bool GrpcClient::listProfileIniFiles(const QString& gameId, const QString& profileName,
                                      std::vector<GrpcProfileIniFile>& filesOut,
-                                     GrpcProfileIniStatus& statusOut, QString& errorOut)
+                                     GrpcProfileIniStatus& statusOut, GrpcError& errorOut)
 {
     gorganizer::v1::ListProfileIniFilesRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
     gorganizer::v1::ListProfileIniFilesResponse resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::ListProfileIniFiles, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::ListProfileIniFiles, req, resp), "ListProfileIniFiles", errorOut)) return false;
     filesOut.clear();
     for (const auto& f : resp.files()) {
         filesOut.push_back(GrpcProfileIniFile{
@@ -1820,38 +1817,38 @@ quint64 GrpcClient::applyProfileIniFiles(const QString& gameId, const QString& p
 }
 
 bool GrpcClient::setProfileIniEnabled(const QString& gameId, const QString& profileName,
-                                      bool enabled, GrpcProfileIniStatus& statusOut, QString& errorOut)
+                                      bool enabled, GrpcProfileIniStatus& statusOut, GrpcError& errorOut)
 {
     gorganizer::v1::SetProfileIniEnabledRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
     req.set_enabled(enabled);
     gorganizer::v1::ProfileIniStatus resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::SetProfileIniEnabled, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::SetProfileIniEnabled, req, resp), "SetProfileIniEnabled", errorOut)) return false;
     statusOut = iniStatusFromProto(resp);
     return true;
 }
 
 bool GrpcClient::getProfileIniStatus(const QString& gameId, const QString& profileName,
-                                     GrpcProfileIniStatus& statusOut, QString& errorOut)
+                                     GrpcProfileIniStatus& statusOut, GrpcError& errorOut)
 {
     gorganizer::v1::GetProfileIniStatusRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
     gorganizer::v1::ProfileIniStatus resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::GetProfileIniStatus, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::GetProfileIniStatus, req, resp), "GetProfileIniStatus", errorOut)) return false;
     statusOut = iniStatusFromProto(resp);
     return true;
 }
 
 bool GrpcClient::listIniTweaks(const QString& gameId, const QString& profileName,
-                               std::vector<GrpcIniTweakState>& tweaksOut, QString& errorOut)
+                               std::vector<GrpcIniTweakState>& tweaksOut, GrpcError& errorOut)
 {
     gorganizer::v1::ListIniTweaksRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
     gorganizer::v1::ListIniTweaksResponse resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::ListIniTweaks, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::ListIniTweaks, req, resp), "ListIniTweaks", errorOut)) return false;
     tweaksOut.clear();
     for (const auto& t : resp.tweaks()) tweaksOut.push_back(iniTweakFromProto(t));
     return true;
@@ -1859,7 +1856,7 @@ bool GrpcClient::listIniTweaks(const QString& gameId, const QString& profileName
 
 bool GrpcClient::setIniTweak(const QString& gameId, const QString& profileName,
                              const QString& tweakId, bool enabled,
-                             GrpcIniTweakState& stateOut, QString& errorOut)
+                             GrpcIniTweakState& stateOut, GrpcError& errorOut)
 {
     gorganizer::v1::SetIniTweakRequest req;
     req.set_game_id(gameId.toStdString());
@@ -1867,17 +1864,17 @@ bool GrpcClient::setIniTweak(const QString& gameId, const QString& profileName,
     req.set_tweak_id(tweakId.toStdString());
     req.set_enabled(enabled);
     gorganizer::v1::IniTweakState resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::SetIniTweak, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::SetIniTweak, req, resp), "SetIniTweak", errorOut)) return false;
     stateOut = iniTweakFromProto(resp);
     return true;
 }
 
-bool GrpcClient::health(GrpcReadiness& out, QString& errorOut)
+bool GrpcClient::health(GrpcReadiness& out, GrpcError& errorOut)
 {
     gorganizer::v1::HealthRequest req;
     gorganizer::v1::Readiness resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::Health, req, resp,
-                              std::chrono::seconds(2)), errorOut)) return false;
+                              std::chrono::seconds(2)), "Health", errorOut)) return false;
     out.socketReady = resp.socket_ready();
     out.recoveryDone = resp.recovery_done();
     out.gamesWarmed = resp.games_warmed();

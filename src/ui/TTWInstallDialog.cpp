@@ -275,9 +275,9 @@ void TTWInstallDialog::onRefreshPrereqs()
 {
     if (!m_grpc) return;
     GrpcTTWPrereqStatus st;
-    QString err;
+    GrpcError err;
     if (!m_grpc->checkTTWPrereqs(currentBackend(), st, err)) {
-        presentError(this, "Pre-flight failed", "check Tale of Two Wastelands requirements", err);
+        presentError(this, "Pre-flight failed", "check Tale of Two Wastelands requirements", err, false);
         return;
     }
     renderPrereqs(st);
@@ -346,7 +346,8 @@ void TTWInstallDialog::onInstallMissing()
 {
     if (!m_grpc) return;
     if (currentBackend() == GrpcTTWBackendNative) {
-        QString path, version, err;
+        QString path, version;
+        GrpcError err;
         if (!m_grpc->ensureNativeMpiInstaller(path, version, err)) {
             presentError(this, "Install Failed", "install the Tale of Two Wastelands installer", err, true);
             return;
@@ -356,7 +357,8 @@ void TTWInstallDialog::onInstallMissing()
         onRefreshPrereqs();
         return;
     }
-    QString id, err;
+    QString id;
+    GrpcError err;
     if (!m_grpc->installTTWPrereqs(id, err)) {
         presentError(this, "Install Failed", "install Tale of Two Wastelands requirements", err, true);
         return;
@@ -371,7 +373,7 @@ void TTWInstallDialog::onInstallMissing()
 void TTWInstallDialog::onBootstrapPrefix()
 {
     if (!m_grpc) return;
-    QString err;
+    GrpcError err;
     if (!m_grpc->bootstrapFNVPrefix(err)) {
         presentError(this, "Setup Failed", "set up the Fallout game files", err, true);
         return;
@@ -451,9 +453,9 @@ void TTWInstallDialog::onPickMpi()
 
     if (!m_grpc) return;
     GrpcTTWInstallerInfo info;
-    QString err;
+    GrpcError err;
     if (!m_grpc->prepareTTWInstaller(picked, currentBackend(), info, err)) {
-        presentError(this, "Installer Not Found", "find the Tale of Two Wastelands installer", err);
+        presentError(this, "Installer Not Found", "find the Tale of Two Wastelands installer", err, true);
         return;
     }
 
@@ -515,9 +517,10 @@ void TTWInstallDialog::onConfigure()
         return;
     }
 
-    QString modDir, err;
+    QString modDir;
+    GrpcError err;
     if (!m_grpc->createBlankTTWMod(m_modName, modDir, err)) {
-        if (parseInstallError(err).token == QLatin1String("mod_collision")) {
+        if (parseInstallError(err.message).token == QLatin1String("mod_collision")) {
             if (!dialogs::confirm(this, "Replace existing TTW mod?",
                 QString("A mod folder named %1 already exists. Replace it?").arg(m_modName),
                 QMessageBox::No)) return;
@@ -552,11 +555,14 @@ void TTWInstallDialog::onConfigure()
             winePathBtn = new QPushButton("Copy (Wine path)");
             connect(winePathBtn, &QPushButton::clicked, [this, path]() {
                 if (!m_grpc) return;
-                QString winePath, err;
-                if (m_grpc->translateWinePath(m_fnvShortName, path, winePath, err) && !winePath.isEmpty())
-                    QApplication::clipboard()->setText(winePath);
-                else
+                QString winePath;
+                GrpcError err;
+                if (m_grpc->translateWinePath(m_fnvShortName, path, winePath, err)) {
+                    QApplication::clipboard()->setText(winePath.isEmpty() ? path : winePath);
+                } else {
                     QApplication::clipboard()->setText(path);
+                    presentError(this, "Wine Path Unavailable", "translate this path for Wine", err, false);
+                }
             });
         }
         auto* row = new QHBoxLayout;
@@ -661,7 +667,8 @@ void TTWInstallDialog::onRunInstaller()
     info.installerExe = m_installerExe;
     info.version = m_installVersion;
 
-    QString id, err;
+    QString id;
+    GrpcError err;
     if (!m_grpc->launchTTWInstaller(info, m_modName, id, err)) {
         presentError(this, "Install Failed", "install Tale of Two Wastelands", err, true);
         return;
@@ -687,7 +694,7 @@ void TTWInstallDialog::onCancelInstaller()
         if (m_runTicker) m_runTicker->stop();
         return;
     }
-    QString err;
+    GrpcError err;
     if (!m_grpc->cancelTTWInstaller(m_inFlightInstallId, err)) {
         presentError(this, "Cancel Failed", "cancel the installer", err, true);
         return;
@@ -857,7 +864,7 @@ void TTWInstallDialog::onActivate()
         return;
     }
 
-    QString err;
+    GrpcError err;
     if (!m_grpc->setTTWLauncherExe(m_chosenLauncherRel, err)) {
         presentError(this, "Launcher Not Saved", "set the Tale of Two Wastelands launcher", err, true);
         return;
@@ -910,12 +917,12 @@ void TTWInstallDialog::populateLauncherCandidates()
                                                    : m_lastFinishedInstallId;
 
     GrpcTTWInstallResult result;
-    QString err;
+    GrpcError err;
     bool fetched = false;
     if (!id.isEmpty() && m_grpc) {
         fetched = m_grpc->getTTWInstallResult(id, false, result, err);
         if (!fetched)
-            appendLog(errorSummary("fetch the install result", err));
+            appendLog(errorSummary("fetch the install result", err, false));
     }
 
     auto isRecommendedName = [](const QString& base) {

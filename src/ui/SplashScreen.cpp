@@ -1,5 +1,6 @@
 #include "SplashScreen.h"
 #include "GrpcClient.h"
+#include "ErrorPresenter.h"
 
 #include <QVBoxLayout>
 #include <QLabel>
@@ -76,7 +77,7 @@ void SplashScreen::poll()
     if (m_done) return;
 
     GrpcReadiness r;
-    QString err;
+    GrpcError err;
     if (m_grpc->health(r, err)) {
         if (!r.lastInitStep.isEmpty())
             m_stepLabel->setText(r.lastInitStep);
@@ -87,7 +88,8 @@ void SplashScreen::poll()
             return;
         }
     } else {
-        m_stepLabel->setText("Waiting for daemon...");
+        m_stepLabel->setText(err.unavailable() ? QStringLiteral("Starting Gorganizer's background service…")
+                                                : errorSummary("check the background service", err, false));
     }
 
     m_elapsedMs += kPollIntervalMs;

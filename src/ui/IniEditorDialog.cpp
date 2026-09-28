@@ -108,10 +108,10 @@ void IniEditorDialog::reload()
 
     std::vector<GrpcProfileIniFile> files;
     GrpcProfileIniStatus status;
-    QString err;
+    GrpcError err;
     if (!m_grpc->listProfileIniFiles(m_gameId, m_profileName, files, status, err)) {
         m_statusLabel->setText(QString("<span style='color:%1;'>%2</span>")
-                                   .arg(errHex(), errorSummary("load profile INI files", err).toHtmlEscaped()));
+                                   .arg(errHex(), errorSummary("load profile INI files", err, false).toHtmlEscaped()));
         m_pathLabel->clear();
         m_saveBtn->setEnabled(false);
         m_applyBtn->setEnabled(false);
@@ -171,8 +171,10 @@ void IniEditorDialog::reload()
 void IniEditorDialog::buildTweaksTab()
 {
     std::vector<GrpcIniTweakState> tweaks;
-    QString err;
+    GrpcError err;
     if (!m_grpc->listIniTweaks(m_gameId, m_profileName, tweaks, err)) {
+        m_statusLabel->setText(QString("<span style='color:%1;'>%2</span>")
+                                   .arg(errHex(), errorSummary("load INI tweaks", err, false).toHtmlEscaped()));
         return;
     }
     if (tweaks.empty())
@@ -239,7 +241,7 @@ void IniEditorDialog::buildTweaksTab()
 void IniEditorDialog::onTweakToggled(const QString& tweakId, bool enabled)
 {
     GrpcIniTweakState state;
-    QString err;
+    GrpcError err;
     if (!m_grpc->setIniTweak(m_gameId, m_profileName, tweakId, enabled, state, err)) {
         presentError(this, "Tweak Failed", "change this INI tweak", err, true);
         return;
@@ -254,7 +256,7 @@ void IniEditorDialog::onTweakToggled(const QString& tweakId, bool enabled)
         if (m_handles[i].filename == state.targetFile) {
             std::vector<GrpcProfileIniFile> files;
             GrpcProfileIniStatus st;
-            QString lerr;
+            GrpcError lerr;
             if (m_grpc->listProfileIniFiles(m_gameId, m_profileName, files, st, lerr)) {
                 for (const auto& f : files) {
                     if (f.filename == state.targetFile) {
@@ -269,6 +271,9 @@ void IniEditorDialog::onTweakToggled(const QString& tweakId, bool enabled)
                         break;
                     }
                 }
+            } else {
+                m_statusLabel->setText(QString("<span style='color:%1;'>%2</span>")
+                                           .arg(errHex(), errorSummary("refresh profile INI files", lerr, false).toHtmlEscaped()));
             }
             break;
         }
@@ -425,7 +430,7 @@ void IniEditorDialog::onToggleEnabled(bool checked)
     if (m_suppressEnabledSignal)
         return;
     GrpcProfileIniStatus status;
-    QString err;
+    GrpcError err;
     if (!m_grpc->setProfileIniEnabled(m_gameId, m_profileName, checked, status, err)) {
         presentError(this, "INI Settings", "change profile INI settings", err, true);
         m_suppressEnabledSignal = true;

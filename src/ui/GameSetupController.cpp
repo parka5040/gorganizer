@@ -72,8 +72,10 @@ void GameSetupController::onActiveGameChanged(const GameInfo& game)
         const bool isTTW = (game.shortName == "ttw" && game.detected);
         bool ttwInstalled = false;
         if (isTTW && m_grpc->isConnected()) {
-            QString verr;
+            GrpcError verr;
             ttwInstalled = m_grpc->verifyTTWIntegrity(verr);
+            if (!ttwInstalled && verr.outcomeUnknown())
+                m_statusBar->showMessage(errorSummary("verify Tale of Two Wastelands", verr, true), 5000);
         }
         m_installTtwAction->setVisible(isTTW && !ttwInstalled);
     }

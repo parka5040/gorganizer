@@ -459,7 +459,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
     const bool interrupted = !paragraphs.isEmpty();
     if (m_grpc->isConnected()) {
         std::vector<GrpcShutdownPlanItem> items;
-        QString error;
+        GrpcError error;
         if (m_grpc->getShutdownPlanSync(2000, items, error)) {
             for (const auto& item : items) {
                 if (item.willUnmount) continue;
@@ -486,6 +486,8 @@ void MainWindow::closeEvent(QCloseEvent* event)
                 paragraphs.append(QStringLiteral("Gorganizer's background service keeps running after this window closes, "
                                                  "so your mods stay active until you choose Deactivate Mods."));
             }
+        } else {
+            statusBar()->showMessage(errorSummary("check which mods will stay active", error, false), 5000);
         }
     }
     if (paragraphs.isEmpty()) {

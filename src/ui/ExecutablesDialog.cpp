@@ -166,10 +166,10 @@ int ExecutablesDialog::currentIndex() const
 
 void ExecutablesDialog::reload()
 {
-    QString err;
+    GrpcError err;
     m_executables.clear();
     if (!m_grpc->listExecutables(m_gameId, m_executables, err)) {
-        presentError(this, "Tools", "load tools", err);
+        presentError(this, "Tools", "load tools", err, false);
     }
     m_list->clear();
     for (const auto& e : m_executables) {
@@ -281,7 +281,7 @@ void ExecutablesDialog::onSave()
         dialogs::warn(this, "Tools", "A title and an executable path are required.");
         return;
     }
-    QString err;
+    GrpcError err;
     GrpcExecutable saved;
     if (!m_grpc->upsertExecutable(m_gameId, e, saved, err)) {
         presentError(this, "Tools", "save this tool", err, true);
@@ -298,7 +298,7 @@ void ExecutablesDialog::onRemove()
     if (m_editingId.isEmpty()) return;
     if (!dialogs::confirm(this, "Remove tool", "Remove this tool from the list?"))
         return;
-    QString err;
+    GrpcError err;
     if (!m_grpc->removeExecutable(m_gameId, m_editingId, err)) {
         presentError(this, "Tools", "remove this tool", err, true);
         return;
@@ -309,10 +309,10 @@ void ExecutablesDialog::onRemove()
 
 void ExecutablesDialog::onDetect()
 {
-    QString err;
+    GrpcError err;
     QList<GrpcDetectedExecutable> found;
     if (!m_grpc->detectExecutables(m_gameId, found, err)) {
-        presentError(this, "Detect tools", "detect installed tools", err);
+        presentError(this, "Detect tools", "detect installed tools", err, false);
         return;
     }
     if (found.isEmpty()) {
@@ -339,8 +339,12 @@ void ExecutablesDialog::onDetect()
         e.sanitizeEnv = true;
         e.autoDetected = true;
         GrpcExecutable saved;
-        QString serr;
-        if (m_grpc->upsertExecutable(m_gameId, e, saved, serr)) added++;
+        GrpcError serr;
+        if (!m_grpc->upsertExecutable(m_gameId, e, saved, serr)) {
+            presentError(this, "Detect tools", "save this tool", serr, true);
+            break;
+        }
+        added++;
     }
     reload();
     dialogs::info(this, "Detect tools",
@@ -355,7 +359,8 @@ void ExecutablesDialog::onRun()
     }
     m_runBtn->setEnabled(false);
     int pid = 0;
-    QString runId, err;
+    QString runId;
+    GrpcError err;
     bool ok = m_grpc->launchExecutable(m_gameId, m_editingId, m_profileName, pid, runId, err, false);
     m_runBtn->setEnabled(true);
     if (!ok) {
@@ -372,7 +377,8 @@ void ExecutablesDialog::onSortLOOT()
     if (m_toolId != "loot" || m_gameId == "ttw") return;
     m_sortBtn->setEnabled(false);
     int pid = 0;
-    QString runId, err;
+    QString runId;
+    GrpcError err;
     const bool ok = m_grpc->launchExecutable(m_gameId, m_editingId, m_profileName,
                                               pid, runId, err, true);
     m_sortBtn->setEnabled(true);
@@ -383,9 +389,9 @@ void ExecutablesDialog::onSortLOOT()
 void ExecutablesDialog::onInstallLOOT()
 {
     GrpcManagedToolStatus status;
-    QString err;
+    GrpcError err;
     if (!m_grpc->getManagedToolStatus("loot", status, err)) {
-        presentError(this, "LOOT", "check LOOT's status", err);
+        presentError(this, "LOOT", "check LOOT's status", err, false);
         return;
     }
     const QString prompt = status.installed
@@ -404,7 +410,7 @@ void ExecutablesDialog::onRollbackLOOT()
 {
     if (!dialogs::confirm(this, "Rollback LOOT", "Reactivate the previously installed LOOT version?")) return;
     GrpcManagedToolStatus status;
-    QString err;
+    GrpcError err;
     if (!m_grpc->rollbackManagedTool("loot", status, err)) {
         presentError(this, "LOOT", "roll back LOOT", err, true);
         return;

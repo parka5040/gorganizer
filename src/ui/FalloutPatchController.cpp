@@ -74,9 +74,10 @@ void FalloutPatchController::onPatchFalloutTo4GB()
         return;
 
     m_statusBar->showMessage("Downloading FNV 4GB patcher from Nexus...");
-    QString patcherExePath, version, err;
+    QString patcherExePath, version;
+    GrpcError err;
     if (!m_grpc->install4GBPatcher(m_session->activeGame().shortName, patcherExePath, version, err)) {
-        const QString lower = err.toLower();
+        const QString lower = err.message.toLower();
         if (lower.contains("xnvse")) {
             presentError(m_parentWindow, "xNVSE Required", "download the Fallout patcher", err, true);
         } else if (lower.contains("api key") || lower.contains("apikey")) {
@@ -106,7 +107,8 @@ void FalloutPatchController::onPatchFalloutTo4GB()
     }
 
     m_statusBar->showMessage("Applying 4GB patch...");
-    QString output, applyErr;
+    QString output;
+    GrpcError applyErr;
     if (!m_grpc->apply4GBPatch(m_session->activeGame().shortName, patcherExePath, output, applyErr)) {
         presentError(m_parentWindow, "Patch Failed", "patch Fallout", applyErr, true,
                      output.isEmpty() ? QString() : QStringLiteral("Patcher output:\n") + output);

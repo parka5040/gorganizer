@@ -208,7 +208,7 @@ int main(int argc, char* argv[])
                         "  $XDG_STATE_HOME/gorganizer/daemon.log\n"
                         "  (or ~/.local/state/gorganizer/daemon.log)").arg(lastStepSeen));
             if (daemonOwned) {
-                QString shutdownErr;
+                gorganizer::GrpcError shutdownErr;
                 grpcClient.shutdownDaemonSync(3000, 10000, shutdownErr);
             }
             return 1;
@@ -219,7 +219,7 @@ int main(int argc, char* argv[])
         gorganizer::SetupWizard wizard(config, &grpcClient);
         if (wizard.exec() == QDialog::Rejected) {
             if (daemonOwned) {
-                QString shutdownErr;
+                gorganizer::GrpcError shutdownErr;
                 grpcClient.shutdownDaemonSync(3000, 10000, shutdownErr);
             }
             return 0;
@@ -233,10 +233,10 @@ int main(int argc, char* argv[])
     int exitCode = app.exec();
 
     if (daemonOwned) {
-        QString shutdownErr;
+        gorganizer::GrpcError shutdownErr;
         if (!grpcClient.shutdownDaemonSync(3000, 10000, shutdownErr)) {
             qWarning("daemon shutdown not confirmed: %s — relying on shell wrapper to reap it",
-                     qUtf8Printable(shutdownErr));
+                     qUtf8Printable(shutdownErr.message));
         }
     }
 
