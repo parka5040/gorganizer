@@ -40,7 +40,8 @@ void fitToScreen(QWidget* window, QSize preferred, QSize minimum)
     const QRect available = screen->availableGeometry();
     const QSize limit(std::max(1, available.width() * 95 / 100),
                       std::max(1, available.height() * 95 / 100));
-    window->setMinimumSize(minimum.boundedTo(limit));
+    if (minimum.isValid())
+        window->setMinimumSize(minimum.boundedTo(limit));
     window->resize(preferred.boundedTo(limit));
     window->move(available.center() - QPoint(window->width() / 2, window->height() / 2));
     QTimer::singleShot(0, window, [window] {
