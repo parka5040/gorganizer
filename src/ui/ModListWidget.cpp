@@ -15,6 +15,9 @@
 #include <QHeaderView>
 #include <QLabel>
 #include <QDropEvent>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QMimeData>
 #include <QComboBox>
 #include <QCheckBox>
 #include <QPushButton>
@@ -138,9 +141,31 @@ int ModListTreeView::dropTargetRow(QDropEvent* event) const
     return target;
 }
 
+void ModListTreeView::dragEnterEvent(QDragEnterEvent* event)
+{
+    if (event->mimeData()->hasUrls()) {
+        event->ignore();
+        return;
+    }
+    QTreeView::dragEnterEvent(event);
+}
+
+void ModListTreeView::dragMoveEvent(QDragMoveEvent* event)
+{
+    if (event->mimeData()->hasUrls()) {
+        event->ignore();
+        return;
+    }
+    QTreeView::dragMoveEvent(event);
+}
+
 // Moves the multi-selected draggable rows to the computed target, then persists the new order.
 void ModListTreeView::dropEvent(QDropEvent* event)
 {
+    if (event->mimeData()->hasUrls()) {
+        event->ignore();
+        return;
+    }
     if (!model())
         return;
 

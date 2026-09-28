@@ -12,6 +12,8 @@
 #include <vector>
 
 class QDropEvent;
+class QDragEnterEvent;
+class QDragMoveEvent;
 class QCheckBox;
 class QLabel;
 class QMenu;
@@ -31,6 +33,8 @@ public:
     explicit ModListTreeView(ModListWidget* owner, QWidget* parent = nullptr);
 
 protected:
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dragMoveEvent(QDragMoveEvent* event) override;
     void dropEvent(QDropEvent* event) override;
     // Runs the drag loop as a list interaction so outside reloads wait until the drop finished.
     void startDrag(Qt::DropActions supportedActions) override;

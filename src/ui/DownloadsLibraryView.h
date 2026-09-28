@@ -10,6 +10,10 @@
 #include "GameInfo.h"
 
 class QProgressDialog;
+class QDragEnterEvent;
+class QDragMoveEvent;
+class QDropEvent;
+class QLabel;
 
 namespace gorganizer {
 
@@ -40,8 +44,15 @@ private slots:
 signals:
     void modInstalledFromDownload(const QString& gameId);
     void modStateNeedsRefresh(const QString& gameId);
+    void archivesDropped(const QStringList& paths, const QStringList& rejected);
+    void archivesRejected(const QStringList& rejected);
     void fomodWizardOpened(const QString& archivePath, const QString& modName);
     void fomodWizardClosed(const QString& archivePath);
+
+protected:
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dragMoveEvent(QDragMoveEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
 
 private:
     struct Attempt {
@@ -53,11 +64,13 @@ private:
         QPointer<QProgressDialog> progress;
     };
     void finishAttempt(quint64 requestId);
+    void updateEmptyState();
 
     GrpcClient* m_grpc;
     InstallController* m_installs;
     QHash<quint64, Attempt> m_attempts;
     QTreeView* m_view;
+    QLabel* m_emptyLabel;
     DownloadsModel* m_model;
     DownloadsRowDelegate* m_delegate;
     QSortFilterProxyModel* m_proxy;

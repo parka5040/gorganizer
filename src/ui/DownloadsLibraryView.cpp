@@ -1,4 +1,5 @@
 #include "DownloadsLibraryView.h"
+#include "ArchiveDrop.h"
 #include "DownloadsModel.h"
 #include "DownloadsRowDelegate.h"
 #include "ModInstallDialog.h"
@@ -22,6 +23,11 @@
 #include <QFileInfo>
 #include <QSettings>
 #include <QSortFilterProxyModel>
+#include <QLabel>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
+#include <QMimeData>
 
 namespace gorganizer {
 
@@ -50,6 +56,7 @@ DownloadsLibraryView::DownloadsLibraryView(GrpcClient* grpc, InstallController* 
     , m_grpc(grpc)
     , m_installs(installs)
 {
+    setAcceptDrops(true);
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
 
@@ -89,6 +96,8 @@ DownloadsLibraryView::DownloadsLibraryView(GrpcClient* grpc, InstallController* 
     m_delegate = new DownloadsRowDelegate(this);
 
     m_view = new QTreeView;
+    m_view->setAcceptDrops(false);
+    m_view->viewport()->setAcceptDrops(false);
     m_view->setModel(m_proxy);
     m_view->setItemDelegateForColumn(DownloadsModel::ColStatus, m_delegate);
     m_view->setRootIsDecorated(false);
@@ -136,7 +145,15 @@ DownloadsLibraryView::DownloadsLibraryView(GrpcClient* grpc, InstallController* 
     connect(m_view, &QTreeView::customContextMenuRequested, this, &DownloadsLibraryView::onContextMenu);
     connect(m_view, &QTreeView::doubleClicked, this, &DownloadsLibraryView::onDoubleClicked);
 
-    layout->addWidget(m_view);
+    layout->addWidget(m_view, 1);
+    m_emptyLabel = new QLabel("Drop mod archives here to install them.");
+    m_emptyLabel->setAlignment(Qt::AlignCenter);
+    m_emptyLabel->setObjectName("hintLabel");
+    layout->addWidget(m_emptyLabel, 1);
+    connect(m_proxy, &QAbstractItemModel::modelReset, this, &DownloadsLibraryView::updateEmptyState);
+    connect(m_proxy, &QAbstractItemModel::rowsInserted, this, &DownloadsLibraryView::updateEmptyState);
+    connect(m_proxy, &QAbstractItemModel::rowsRemoved, this, &DownloadsLibraryView::updateEmptyState);
+    updateEmptyState();
 
     connect(m_grpc, &GrpcClient::archiveEventReceived, this,
             [this](const GrpcArchiveEvent& evt) {
@@ -170,6 +187,50 @@ DownloadsLibraryView::DownloadsLibraryView(GrpcClient* grpc, InstallController* 
             it->progress->setLabelText("Checking whether this archive was installed…");
         }
     });
+}
+
+void DownloadsLibraryView::dragEnterEvent(QDragEnterEvent* event)
+{
+    const ArchiveDrop drop = inspectArchiveDrop(event->mimeData());
+    if (drop.paths.isEmpty()) {
+        if (!drop.rejected.isEmpty())
+            emit archivesRejected(drop.rejected);
+        event->ignore();
+        return;
+    }
+    event->setDropAction(Qt::CopyAction);
+    event->accept();
+}
+
+void DownloadsLibraryView::dragMoveEvent(QDragMoveEvent* event)
+{
+    if (inspectArchiveDrop(event->mimeData()).paths.isEmpty()) {
+        event->ignore();
+        return;
+    }
+    event->setDropAction(Qt::CopyAction);
+    event->accept();
+}
+
+void DownloadsLibraryView::dropEvent(QDropEvent* event)
+{
+    const ArchiveDrop drop = inspectArchiveDrop(event->mimeData());
+    if (drop.paths.isEmpty()) {
+        event->ignore();
+        if (!drop.rejected.isEmpty())
+            emit archivesRejected(drop.rejected);
+        return;
+    }
+    event->setDropAction(Qt::CopyAction);
+    event->accept();
+    emit archivesDropped(drop.paths, drop.rejected);
+}
+
+void DownloadsLibraryView::updateEmptyState()
+{
+    const bool empty = m_proxy->rowCount() == 0;
+    m_view->setVisible(!empty);
+    m_emptyLabel->setVisible(empty);
 }
 
 void DownloadsLibraryView::setGame(const GameInfo& game)

@@ -9,6 +9,9 @@
 #include "GrpcTypes.h"
 
 class QCloseEvent;
+class QDragEnterEvent;
+class QDragMoveEvent;
+class QDropEvent;
 class QToolButton;
 
 namespace gorganizer {
@@ -31,6 +34,7 @@ class ModLoaderController;
 class ModDependencyController;
 class SteamMaintenanceController;
 class SmapiModsWidget;
+struct ArchiveDrop;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -43,6 +47,9 @@ public:
 protected:
     // Asks before closing while a SMAPI operation or an asynchronous mod install that quitting could interrupt is still running.
     void closeEvent(QCloseEvent* event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dragMoveEvent(QDragMoveEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
 
 private slots:
     void onInstallMod();
@@ -59,6 +66,13 @@ private slots:
     void onInstallUnknown(quint64 requestId);
 
 private:
+    enum class ArchiveInstallResult { Started, Succeeded, Failed, Unknown };
+
+    struct DropQueue {
+        GameInfo game;
+        QStringList remaining;
+    };
+
     struct PendingExternalInstall {
         quint64 requestId = 0;
         QString gameId;
@@ -74,8 +88,13 @@ private:
     void refreshAfterImport();
     // Shows or hides game-specific tabs and actions from the active game's daemon capabilities.
     void applyGameCapabilities(const GameInfo& game);
+    bool canInstallArchive(const GameInfo& game);
+    ArchiveInstallResult installArchiveFromPath(const QString& path, const GameInfo& game);
+    void handleArchiveDrop(const ArchiveDrop& drop);
+    void startNextDroppedArchive();
+    void finishDroppedArchive(bool succeeded);
     // Installs an archive for a manifest-layout game through the daemon, asking only for the mod name.
-    void installThroughDaemonLayout(const QString& gameId, const QString& path);
+    bool installThroughDaemonLayout(const QString& gameId, const QString& path);
     // Asks for a mod name until it passes local validation, returning an empty string on cancel.
     QString askModName(const QString& title, const QString& label, const QString& initial);
     // Issues an asynchronous external-archive install and records it as pending under its request id.
@@ -124,6 +143,7 @@ private:
     QMenu* m_smapiMenu = nullptr;
 
     std::optional<PendingExternalInstall> m_pendingExternalInstall;
+    std::optional<DropQueue> m_dropQueue;
     bool m_restorePluginsTab = false;
     bool m_daemonOwned = false;
 };

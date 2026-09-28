@@ -512,7 +512,7 @@ QWizardPage* SetupWizard::createFinishPage()
                     "directly from the main window: pick the extender in the Run "
                     "dropdown and the first click downloads + installs it. Next "
                     "click runs the game through it.\n\n"
-                    "Use \"Install Mod…\" and choose a downloaded archive to install it. "
+                    "Use Install Mod or drop an archive onto the window to install it. "
                     "Then tick the mod to enable it.")
                 .arg(m_selectedGames.size())
                 .arg(apiKeyMsg));

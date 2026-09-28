@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "ArchiveDrop.h"
 #include "GrpcClient.h"
 #include "InstallController.h"
 #include "GameSelectorWidget.h"
@@ -32,6 +33,7 @@
 
 #include <QToolBar>
 #include <QToolButton>
+#include <QPushButton>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QMenuBar>
@@ -42,6 +44,11 @@
 #include <QCheckBox>
 #include <QSettings>
 #include <QMessageBox>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QTimer>
 
 namespace gorganizer {
 
@@ -52,6 +59,8 @@ MainWindow::MainWindow(AppConfig& config, GrpcClient* grpc, QWidget* parent)
     , m_installs(new InstallController(grpc, this))
 {
     setWindowTitle("Gorganizer");
+    setAccessibleDescription("Drop .zip, .7z or .rar mod archives onto the window to install them.");
+    setAcceptDrops(true);
     setMinimumSize(900, 600);
     resize(1200, 750);
 
@@ -275,6 +284,15 @@ void MainWindow::wireConnections()
         if (m_session->activeGame().detected && m_session->activeGame().shortName == gameId)
             m_modList->loadForGame(m_session->activeGame(), m_session->currentProfile());
     });
+    connect(m_downloadsLibrary, &DownloadsLibraryView::archivesDropped, this,
+            [this](const QStringList& paths, const QStringList& rejected) {
+                handleArchiveDrop({paths, rejected});
+            });
+    connect(m_downloadsLibrary, &DownloadsLibraryView::archivesRejected, this,
+            [this](const QStringList& rejected) {
+                statusBar()->showMessage(QStringLiteral("Archives not installed: %1")
+                                             .arg(rejected.join(QStringLiteral("; "))), 10000);
+            });
     connect(m_downloadsLibrary, &DownloadsLibraryView::modStateNeedsRefresh, this, [this](const QString& gameId) {
         if (m_session->activeGame().shortName == gameId)
             m_modList->reloadMods();
@@ -360,6 +378,44 @@ void MainWindow::wireConnections()
     connect(m_grpc, &GrpcClient::daemonError, this, [this](const QString& err) {
         statusBar()->showMessage(errorSummary("complete this request", err), 10000);
     });
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent* event)
+{
+    const ArchiveDrop drop = inspectArchiveDrop(event->mimeData());
+    if (drop.paths.isEmpty()) {
+        if (!drop.rejected.isEmpty())
+            statusBar()->showMessage(QStringLiteral("Archives not installed: %1")
+                                         .arg(drop.rejected.join(QStringLiteral("; "))), 10000);
+        event->ignore();
+        return;
+    }
+    event->setDropAction(Qt::CopyAction);
+    event->accept();
+}
+
+void MainWindow::dragMoveEvent(QDragMoveEvent* event)
+{
+    if (inspectArchiveDrop(event->mimeData()).paths.isEmpty()) {
+        event->ignore();
+        return;
+    }
+    event->setDropAction(Qt::CopyAction);
+    event->accept();
+}
+
+void MainWindow::dropEvent(QDropEvent* event)
+{
+    const ArchiveDrop drop = inspectArchiveDrop(event->mimeData());
+    if (drop.paths.isEmpty()) {
+        event->ignore();
+        if (!drop.rejected.isEmpty())
+            handleArchiveDrop(drop);
+        return;
+    }
+    event->setDropAction(Qt::CopyAction);
+    event->accept();
+    handleArchiveDrop(drop);
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)
@@ -453,42 +509,51 @@ void MainWindow::closeEvent(QCloseEvent* event)
 
 void MainWindow::onInstallMod()
 {
-    const GameInfo game = m_session->activeGame();
-    if (game.shortName.isEmpty()) {
-        dialogs::warn(this, "No Game Selected", "Select a game first.");
+    if (m_dropQueue) {
+        dialogs::info(this, "Install Mod", "Another mod install is still running. Try again when it finishes.");
         return;
     }
+    const GameInfo game = m_session->activeGame();
+    if (!canInstallArchive(game))
+        return;
 
-    const bool localInstall = usesLocalDataRootInstall(game);
-    if (!localInstall) {
-        if (!game.capabilitiesKnown) {
-            dialogs::info(this, "Install Mod", "Waiting for Gorganizer's background service — try again in a moment.");
-            return;
-        }
-        if (m_pendingExternalInstall) {
-            dialogs::info(this, "Install Mod", "Another mod install is still running. Try again when it finishes.");
-            return;
-        }
-        if (!m_grpc->isConnected()) {
-            dialogs::warn(this, "Install Mod", "Gorganizer's background service must be running to install mods for this game.");
-            return;
-        }
-    }
-
-    QString path = QFileDialog::getOpenFileName(
+    const QString path = QFileDialog::getOpenFileName(
         this, "Install Mod from Archive", QDir::homePath(),
         "Archives (*.zip *.7z *.rar);;All files (*)");
+    if (!path.isEmpty())
+        installArchiveFromPath(path, game);
+}
 
-    if (path.isEmpty())
-        return;
-
-    if (!localInstall) {
-        installThroughDaemonLayout(game.shortName, path);
-        return;
+bool MainWindow::canInstallArchive(const GameInfo& game)
+{
+    if (game.shortName.isEmpty()) {
+        dialogs::warn(this, "No Game Selected", "Select a game first.");
+        return false;
     }
+    if (!usesLocalDataRootInstall(game) && !game.capabilitiesKnown) {
+        dialogs::info(this, "Install Mod", "Waiting for Gorganizer's background service — try again in a moment.");
+        return false;
+    }
+    if (m_pendingExternalInstall) {
+        dialogs::info(this, "Install Mod", "Another mod install is still running. Try again when it finishes.");
+        return false;
+    }
+    if (!usesLocalDataRootInstall(game) && !m_grpc->isConnected()) {
+        dialogs::warn(this, "Install Mod", "Gorganizer's background service must be running to install mods for this game.");
+        return false;
+    }
+    return true;
+}
 
-    QString modName = QFileInfo(path).completeBaseName();
+MainWindow::ArchiveInstallResult MainWindow::installArchiveFromPath(const QString& path, const GameInfo& game)
+{
+    if (!canInstallArchive(game))
+        return ArchiveInstallResult::Failed;
+    if (!usesLocalDataRootInstall(game))
+        return installThroughDaemonLayout(game.shortName, path)
+            ? ArchiveInstallResult::Started : ArchiveInstallResult::Failed;
 
+    const QString modName = QFileInfo(path).completeBaseName();
     ModInstallDialog dlg(game.shortName, modName, m_grpc, m_installs,
                          ModInstallDialog::ArchiveSource::fromExternal(path), this);
     if (dlg.exec() == QDialog::Accepted) {
@@ -499,23 +564,98 @@ void MainWindow::onInstallMod()
             5000);
         if (m_session->activeGame().shortName == game.shortName)
             m_modList->loadForGame(m_session->activeGame(), m_session->currentProfile());
-    } else if (dlg.installUnconfirmed() && m_session->activeGame().shortName == game.shortName) {
-        m_modList->reloadMods();
-        m_downloadsLibrary->refresh();
+        return ArchiveInstallResult::Succeeded;
     }
+    if (dlg.installUnconfirmed()) {
+        if (m_session->activeGame().shortName == game.shortName) {
+            m_modList->reloadMods();
+            m_downloadsLibrary->refresh();
+        }
+        return ArchiveInstallResult::Unknown;
+    }
+    return ArchiveInstallResult::Failed;
 }
 
-void MainWindow::installThroughDaemonLayout(const QString& gameId, const QString& path)
+bool MainWindow::installThroughDaemonLayout(const QString& gameId, const QString& path)
 {
     const QString name = askModName("Install Mod", "Mod name:", QFileInfo(path).completeBaseName());
     if (name.isEmpty())
-        return;
+        return false;
     PendingExternalInstall request;
     request.gameId = gameId;
     request.path = path;
     request.name = name;
     request.mode = GrpcInstallAsNewMod;
     startExternalInstall(request);
+    return m_pendingExternalInstall.has_value();
+}
+
+void MainWindow::handleArchiveDrop(const ArchiveDrop& drop)
+{
+    const GameInfo game = m_session->activeGame();
+    if (!drop.rejected.isEmpty())
+        dialogs::plainWarn(this, "Archives Not Installed", drop.rejected.join(QLatin1Char('\n')));
+    if (drop.paths.isEmpty())
+        return;
+    if (game.shortName.isEmpty()) {
+        dialogs::info(this, "Install Mod", "Choose a game before dropping archives.");
+        return;
+    }
+    if (m_dropQueue || m_pendingExternalInstall) {
+        dialogs::info(this, "Install Mod", "Another mod install is still running. Try again when it finishes.");
+        return;
+    }
+    m_dropQueue = DropQueue{game, drop.paths};
+    startNextDroppedArchive();
+}
+
+void MainWindow::startNextDroppedArchive()
+{
+    if (!m_dropQueue)
+        return;
+    if (m_dropQueue->remaining.isEmpty()) {
+        m_dropQueue.reset();
+        return;
+    }
+    if (m_session->activeGame().shortName != m_dropQueue->game.shortName) {
+        QStringList names;
+        for (const QString& path : m_dropQueue->remaining)
+            names.append(QFileInfo(path).fileName());
+        m_dropQueue.reset();
+        dialogs::plainWarn(this, "Install Stopped",
+            QStringLiteral("The selected game changed, so the remaining archives were not installed: %1")
+                .arg(names.join(QStringLiteral(", "))));
+        return;
+    }
+    const QString path = m_dropQueue->remaining.takeFirst();
+    const ArchiveInstallResult result = installArchiveFromPath(path, m_dropQueue->game);
+    if (result == ArchiveInstallResult::Unknown)
+        m_dropQueue.reset();
+    else if (result != ArchiveInstallResult::Started)
+        finishDroppedArchive(result == ArchiveInstallResult::Succeeded);
+}
+
+void MainWindow::finishDroppedArchive(bool succeeded)
+{
+    if (!m_dropQueue)
+        return;
+    if (!succeeded && !m_dropQueue->remaining.isEmpty()) {
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Question);
+        box.setWindowTitle("Install Mod");
+        box.setTextFormat(Qt::PlainText);
+        box.setText(QStringLiteral("Continue with the remaining %1 archives?")
+                        .arg(m_dropQueue->remaining.size()));
+        auto* continueButton = box.addButton("Continue", QMessageBox::AcceptRole);
+        auto* stopButton = box.addButton("Stop", QMessageBox::RejectRole);
+        box.setDefaultButton(static_cast<QPushButton*>(stopButton));
+        box.exec();
+        if (box.clickedButton() != continueButton) {
+            m_dropQueue.reset();
+            return;
+        }
+    }
+    QTimer::singleShot(0, this, &MainWindow::startNextDroppedArchive);
 }
 
 QString MainWindow::askModName(const QString& title, const QString& label, const QString& initial)
@@ -556,6 +696,7 @@ void MainWindow::onInstallRequestCompleted(quint64 requestId, const QString& mod
         QString("Installed \"%1\" (%2 files)").arg(modFolder, QString::number(fileCount)), 5000);
     if (m_session->activeGame().detected && m_session->activeGame().shortName == gameId)
         m_modList->reloadMods();
+    finishDroppedArchive(true);
 }
 
 void MainWindow::onInstallRequestFailed(quint64 requestId, const QString& error)
@@ -565,6 +706,8 @@ void MainWindow::onInstallRequestFailed(quint64 requestId, const QString& error)
         m_pendingExternalInstall.reset();
         m_cancelInstallButton->hide();
         onExternalInstallFailed(request, error);
+        if (!m_pendingExternalInstall)
+            finishDroppedArchive(false);
         return;
     }
 }
@@ -575,6 +718,7 @@ void MainWindow::onInstallCancelled(quint64 requestId)
     m_pendingExternalInstall.reset();
     m_cancelInstallButton->hide();
     statusBar()->showMessage("Install cancelled. Nothing was installed.", 10000);
+    finishDroppedArchive(false);
 }
 
 void MainWindow::onInstallUnknown(quint64 requestId)
@@ -588,6 +732,7 @@ void MainWindow::onInstallUnknown(quint64 requestId)
         m_modList->reloadMods();
         m_downloadsLibrary->refresh();
     }
+    m_dropQueue.reset();
     dialogs::plainWarn(this, "Install Result Unknown",
         "Gorganizer could not confirm whether this mod was installed. Check Mods and Downloads before trying again.");
 }

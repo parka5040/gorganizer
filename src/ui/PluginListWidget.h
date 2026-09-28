@@ -8,6 +8,8 @@
 #include "PluginListModel.h"
 
 class QDropEvent;
+class QDragEnterEvent;
+class QDragMoveEvent;
 class QLabel;
 
 namespace gorganizer {
@@ -21,6 +23,8 @@ public:
     explicit LoadOrderTreeView(PluginListWidget* owner, QWidget* parent = nullptr);
 
 protected:
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dragMoveEvent(QDragMoveEvent* event) override;
     void dropEvent(QDropEvent* event) override;
 
 private:

@@ -9,6 +9,9 @@
 #include <QHeaderView>
 #include <QLabel>
 #include <QDropEvent>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QMimeData>
 #include <QDebug>
 
 namespace gorganizer {
@@ -33,9 +36,31 @@ int LoadOrderTreeView::dropTargetRow(QDropEvent* event) const
     return aboveHalf ? idx.row() : idx.row() + 1;
 }
 
+void LoadOrderTreeView::dragEnterEvent(QDragEnterEvent* event)
+{
+    if (event->mimeData()->hasUrls()) {
+        event->ignore();
+        return;
+    }
+    QTreeView::dragEnterEvent(event);
+}
+
+void LoadOrderTreeView::dragMoveEvent(QDragMoveEvent* event)
+{
+    if (event->mimeData()->hasUrls()) {
+        event->ignore();
+        return;
+    }
+    QTreeView::dragMoveEvent(event);
+}
+
 // Applies a legal load-order move, explaining any rejection instead of silently ignoring it.
 void LoadOrderTreeView::dropEvent(QDropEvent* event)
 {
+    if (event->mimeData()->hasUrls()) {
+        event->ignore();
+        return;
+    }
     if (!model())
         return;
 
