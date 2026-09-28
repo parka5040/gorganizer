@@ -1,4 +1,5 @@
 #include "ModListWidget.h"
+#include "WindowFit.h"
 #include "InstallController.h"
 #include "ModListSaveQueue.h"
 #include "ModListRowDelegate.h"
@@ -297,6 +298,7 @@ ModListWidget::ModListWidget(GrpcClient* grpc, InstallController* installs, QWid
     m_model = new ModListModel(this);
 
     m_view = new ModListTreeView(this);
+    setFocusProxy(m_view);
     m_view->setModel(m_model);
     m_view->setItemDelegate(new ModListRowDelegate(m_view));
     m_view->setRootIsDecorated(false);
@@ -665,7 +667,6 @@ void ModListWidget::showConflictDetailsForMod(const QString& modName)
     auto* dlg = new QDialog(this);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     dlg->setWindowTitle(QString("Conflicts: %1").arg(modName));
-    dlg->resize(720, 480);
     auto* layout = new QVBoxLayout(dlg);
 
     auto buildSection = [&](const QString& heading, const QColor& accent,
@@ -705,7 +706,9 @@ void ModListWidget::showConflictDetailsForMod(const QString& modName)
 
     auto* close = new QPushButton("Close");
     connect(close, &QPushButton::clicked, dlg, &QDialog::accept);
+    close->setDefault(true);
     layout->addWidget(close, 0, Qt::AlignRight);
+    fitToScreen(dlg, QSize(720, 480));
     dlg->show();
 }
 
@@ -1466,6 +1469,8 @@ void ModListWidget::onItemDoubleClicked(const QModelIndex& index)
     auto* okBtn = new QPushButton("OK");
     dlgLayout->addWidget(okBtn);
     connect(okBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+    okBtn->setDefault(true);
+    fitToScreen(&dlg, QSize(360, 160));
 
     beginInteraction();
     if (dlg.exec() == QDialog::Accepted)
@@ -2678,7 +2683,6 @@ void ModListWidget::extractOverwriteSelected(const ActionContext& context)
 
     QDialog dlg(this);
     dlg.setWindowTitle("Extract Files from Overwrite");
-    dlg.resize(720, 520);
     auto* outer = new QVBoxLayout(&dlg);
 
     auto* hint = new QLabel(
@@ -2731,6 +2735,8 @@ void ModListWidget::extractOverwriteSelected(const ActionContext& context)
     outer->addWidget(btns);
     connect(btns, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
     connect(btns, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    btns->button(QDialogButtonBox::Ok)->setDefault(true);
+    fitToScreen(&dlg, QSize(720, 520));
 
     if (dlg.exec() != QDialog::Accepted || !matchesContext(context) || refuseModAction())
         return;

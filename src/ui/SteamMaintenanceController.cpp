@@ -3,6 +3,7 @@
 #include "ErrorPresenter.h"
 #include "GrpcClient.h"
 #include "SessionController.h"
+#include "WindowFit.h"
 
 #include <QAction>
 #include <QDate>
@@ -44,7 +45,6 @@ SteamMaintenanceController::SteamMaintenanceController(GrpcClient* grpc, Session
     m_explanation = new QLabel(m_panel);
     m_explanation->setTextFormat(Qt::PlainText);
     m_explanation->setWordWrap(true);
-    m_explanation->setMinimumWidth(440);
     panelLayout->addWidget(m_explanation);
     auto* panelButtons = new QHBoxLayout;
     m_pauseButton = new QPushButton("Pause Mods", m_panel);
@@ -61,6 +61,8 @@ SteamMaintenanceController::SteamMaintenanceController(GrpcClient* grpc, Session
     connect(m_finishButton, &QPushButton::clicked, this, &SteamMaintenanceController::finishSteam);
     connect(m_showFilesButton, &QPushButton::clicked, this, &SteamMaintenanceController::showSavedFiles);
     connect(closePanel, &QPushButton::clicked, m_panel, &QDialog::hide);
+    closePanel->setDefault(true);
+    fitToScreen(m_panel, QSize(650, 380));
 
     m_savedDialog = new QDialog(parentWindow);
     m_savedDialog->setWindowTitle("Saved Steam Files");
@@ -89,7 +91,8 @@ SteamMaintenanceController::SteamMaintenanceController(GrpcClient* grpc, Session
     savedButtons->addStretch();
     savedButtons->addWidget(closeSaved);
     savedLayout->addLayout(savedButtons);
-    m_savedDialog->resize(650, 420);
+    closeSaved->setDefault(true);
+    fitToScreen(m_savedDialog, QSize(650, 420));
     connect(m_batches, &QListWidget::currentRowChanged, this, &SteamMaintenanceController::showBatchFiles);
     connect(m_openButton, &QPushButton::clicked, this, &SteamMaintenanceController::openBatchFolder);
     connect(m_recoverButton, &QPushButton::clicked, this, &SteamMaintenanceController::recoverFiles);

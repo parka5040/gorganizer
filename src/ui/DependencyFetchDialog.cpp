@@ -1,6 +1,7 @@
 #include "DependencyFetchDialog.h"
 #include "ModDependencyText.h"
 #include "SafeLinks.h"
+#include "WindowFit.h"
 
 #include <QDialogButtonBox>
 #include <QHeaderView>
@@ -40,7 +41,6 @@ DependencyFetchDialog::DependencyFetchDialog(const std::vector<GrpcMissingDepend
     : QDialog(parent)
 {
     setWindowTitle(QStringLiteral("Fetch Missing Dependencies"));
-    resize(760, 420);
     auto* layout = new QVBoxLayout(this);
 
     auto* intro = new QLabel(
@@ -117,6 +117,8 @@ DependencyFetchDialog::DependencyFetchDialog(const std::vector<GrpcMissingDepend
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     connect(m_tree, &QTreeWidget::itemChanged, this, &DependencyFetchDialog::onItemChanged);
     updateFetchButton();
+    m_fetchButton->setDefault(true);
+    fitToScreen(this, QSize(760, 420));
 }
 
 QStringList DependencyFetchDialog::selectedIds() const

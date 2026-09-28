@@ -3,6 +3,7 @@
 #include "GrpcClient.h"
 #include "ErrorPresenter.h"
 #include "ThemeManager.h"
+#include "WindowFit.h"
 
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -17,6 +18,7 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QStackedWidget>
+#include <QScrollArea>
 #include <QVBoxLayout>
 
 namespace gorganizer {
@@ -49,7 +51,6 @@ ExportDialog::ExportDialog(GrpcClient* grpc, const QString& gameId, QWidget* par
     , m_gameId(gameId)
 {
     setWindowTitle(QString("Export Mods — %1").arg(m_gameId));
-    resize(640, 560);
     setModal(true);
 
     auto* root = new QVBoxLayout(this);
@@ -64,24 +65,31 @@ ExportDialog::ExportDialog(GrpcClient* grpc, const QString& gameId, QWidget* par
 
     loadSelections();
     m_stack->setCurrentIndex(PAGE_CONFIG);
+    fitToScreen(this, QSize(640, 560));
 }
 
 QWidget* ExportDialog::buildConfigPage()
 {
     auto* page = new QWidget;
     auto* lay = new QVBoxLayout(page);
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    auto* content = new QWidget;
+    auto* contentLay = new QVBoxLayout(content);
 
     auto* profileBox = new QGroupBox("Profiles");
     auto* profileLay = new QVBoxLayout(profileBox);
     m_profileList = new QListWidget;
     m_profileList->setSelectionMode(QAbstractItemView::NoSelection);
+    m_profileList->setMinimumHeight(110);
     profileLay->addWidget(m_profileList);
-    lay->addWidget(profileBox, 1);
+    contentLay->addWidget(profileBox, 1);
 
     auto* modBox = new QGroupBox("Mods");
     auto* modLay = new QVBoxLayout(modBox);
     m_modList = new QListWidget;
     m_modList->setSelectionMode(QAbstractItemView::NoSelection);
+    m_modList->setMinimumHeight(110);
     modLay->addWidget(m_modList, 1);
 
     auto* modBtnRow = new QHBoxLayout;
@@ -93,15 +101,15 @@ QWidget* ExportDialog::buildConfigPage()
     modBtnRow->addStretch(1);
     modBtnRow->addWidget(m_selectionLabel);
     modLay->addLayout(modBtnRow);
-    lay->addWidget(modBox, 2);
+    contentLay->addWidget(modBox, 2);
 
     m_overwriteCheck = new QCheckBox("Include Overwrite folder");
     m_overwriteCheck->setChecked(true);
-    lay->addWidget(m_overwriteCheck);
+    contentLay->addWidget(m_overwriteCheck);
 
     m_settingsCheck = new QCheckBox("Include game settings (profile INIs, load order)");
     m_settingsCheck->setChecked(true);
-    lay->addWidget(m_settingsCheck);
+    contentLay->addWidget(m_settingsCheck);
 
     auto* destRow = new QHBoxLayout;
     destRow->addWidget(new QLabel("Destination:"));
@@ -111,13 +119,15 @@ QWidget* ExportDialog::buildConfigPage()
     auto* browseBtn = new QPushButton("Browse...");
     destRow->addWidget(m_destinationEdit, 1);
     destRow->addWidget(browseBtn);
-    lay->addLayout(destRow);
+    contentLay->addLayout(destRow);
 
     m_configErrorLabel = new QLabel;
     m_configErrorLabel->setWordWrap(true);
     m_configErrorLabel->setStyleSheet(QString("color: %1;").arg(errHex()));
     m_configErrorLabel->setVisible(false);
-    lay->addWidget(m_configErrorLabel);
+    contentLay->addWidget(m_configErrorLabel);
+    scroll->setWidget(content);
+    lay->addWidget(scroll, 1);
 
     auto* btnRow = new QHBoxLayout;
     m_closeConfigBtn = new QPushButton("Close");
@@ -292,6 +302,7 @@ void ExportDialog::onStartExport()
     m_closeBtn->setVisible(false);
     m_cancelBtn->setVisible(true);
     m_cancelBtn->setEnabled(true);
+    m_cancelBtn->setDefault(true);
     m_stack->setCurrentIndex(PAGE_PROGRESS);
 
     m_grpc->startExport(m_gameId, m_destinationEdit->text().trimmed(),
@@ -368,6 +379,7 @@ void ExportDialog::onTransferFailed(const QString& error)
     m_cancelBtn->setVisible(false);
     m_backBtn->setVisible(true);
     m_closeBtn->setVisible(true);
+    m_closeBtn->setDefault(true);
 }
 
 bool ExportDialog::confirmAbortWhileRunning()

@@ -30,6 +30,7 @@
 #include "InstallErrorText.h"
 #include "InstallCollisionDialog.h"
 #include "ErrorPresenter.h"
+#include "WindowFit.h"
 
 #include <QToolBar>
 #include <QToolButton>
@@ -43,6 +44,7 @@
 #include <QCloseEvent>
 #include <QCheckBox>
 #include <QSettings>
+#include <QScreen>
 #include <QMessageBox>
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
@@ -61,12 +63,20 @@ MainWindow::MainWindow(AppConfig& config, GrpcClient* grpc, QWidget* parent)
     setWindowTitle("Gorganizer");
     setAccessibleDescription("Drop .zip, .7z or .rar mod archives onto the window to install them.");
     setAcceptDrops(true);
-    setMinimumSize(900, 600);
-    resize(1200, 750);
 
     setupUi();
     createControllers();
     wireConnections();
+
+    QSettings settings;
+    const QByteArray geometry = settings.value("mainWindow/geometry").toByteArray();
+    if (geometry.isEmpty() || !restoreGeometry(geometry))
+        fitToScreen(this, QSize(1200, 750), QSize(760, 480));
+    else {
+        setMinimumSize(QSize(760, 480).boundedTo(screen()->availableGeometry().size()));
+        clampToScreen(this);
+        QTimer::singleShot(0, this, [this] { clampToScreen(this); });
+    }
 
     m_session->loadManagedGames();
 
@@ -150,7 +160,7 @@ void MainWindow::setupUi()
 
     toolbar->addWidget(new QLabel(" Game: "));
     m_gameSelector = new GameSelectorWidget;
-    m_gameSelector->setMinimumWidth(200);
+    m_gameSelector->setMinimumWidth(160);
     toolbar->addWidget(m_gameSelector);
 
     toolbar->addSeparator();
@@ -217,17 +227,19 @@ void MainWindow::setupUi()
 
     splitter->setStretchFactor(0, 2);
     splitter->setStretchFactor(1, 1);
-    splitter->setSizes({800, 400});
 
     vsplit->addWidget(splitter);
     m_activityLog = new ActivityLogPanel(m_grpc);
     vsplit->addWidget(m_activityLog);
     vsplit->setStretchFactor(0, 4);
     vsplit->setStretchFactor(1, 1);
-    vsplit->setSizes({600, 150});
 
     centralLayout->addWidget(vsplit, 1);
     setCentralWidget(central);
+    setTabOrder(m_gameSelector, m_profileSelector);
+    setTabOrder(m_profileSelector, m_modList);
+    setTabOrder(m_modList, m_pluginList);
+    setTabOrder(m_pluginList, m_runButton);
 
     m_statusInfo = new QLabel;
     m_statusInfo->setTextFormat(Qt::PlainText);
@@ -478,6 +490,8 @@ void MainWindow::closeEvent(QCloseEvent* event)
     }
     if (paragraphs.isEmpty()) {
         QMainWindow::closeEvent(event);
+        if (event->isAccepted())
+            QSettings().setValue("mainWindow/geometry", saveGeometry());
         return;
     }
     if (!interrupted) {
@@ -505,6 +519,8 @@ void MainWindow::closeEvent(QCloseEvent* event)
         }
     }
     QMainWindow::closeEvent(event);
+    if (event->isAccepted())
+        QSettings().setValue("mainWindow/geometry", saveGeometry());
 }
 
 void MainWindow::onInstallMod()

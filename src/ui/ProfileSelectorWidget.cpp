@@ -23,23 +23,27 @@ ProfileSelectorWidget::ProfileSelectorWidget(GrpcClient* grpc, QWidget* parent)
 
     m_combo = new QComboBox;
     m_combo->setMinimumWidth(120);
+    setFocusProxy(m_combo);
     layout->addWidget(m_combo);
 
     m_createBtn = new QToolButton;
     m_createBtn->setText("+");
-    m_createBtn->setToolTip("Create new profile");
+    m_createBtn->setToolTip("Create profile");
+    m_createBtn->setAccessibleName("Create profile");
     m_createBtn->setFixedWidth(28);
     layout->addWidget(m_createBtn);
 
     m_deleteBtn = new QToolButton;
     m_deleteBtn->setText("-");
-    m_deleteBtn->setToolTip("Delete current profile");
+    m_deleteBtn->setToolTip("Delete profile");
+    m_deleteBtn->setAccessibleName("Delete profile");
     m_deleteBtn->setFixedWidth(28);
     layout->addWidget(m_deleteBtn);
 
     m_copyBtn = new QToolButton;
     m_copyBtn->setText("Copy");
-    m_copyBtn->setToolTip("Copy current profile");
+    m_copyBtn->setToolTip("Copy profile");
+    m_copyBtn->setAccessibleName("Copy profile");
     layout->addWidget(m_copyBtn);
 
     connect(m_combo, &QComboBox::currentIndexChanged, this, &ProfileSelectorWidget::onComboChanged);

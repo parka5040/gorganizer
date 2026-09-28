@@ -13,6 +13,7 @@ class QProgressDialog;
 class QDragEnterEvent;
 class QDragMoveEvent;
 class QDropEvent;
+class QShowEvent;
 class QLabel;
 
 namespace gorganizer {
@@ -53,6 +54,7 @@ protected:
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dragMoveEvent(QDragMoveEvent* event) override;
     void dropEvent(QDropEvent* event) override;
+    void showEvent(QShowEvent* event) override;
 
 private:
     struct Attempt {
@@ -78,6 +80,7 @@ private:
     QCheckBox* m_showHiddenToggle = nullptr;
     GameInfo m_game;
     bool m_suppressToggleSignal = false;
+    bool m_fitColumnsOnFirstShow = true;
 
     void actionInstall(const GrpcArchiveRow& row, bool forceNewMod);
     void installArchive(const GrpcArchiveRow& row, GrpcInstallMode mode, QString target,

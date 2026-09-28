@@ -1,6 +1,7 @@
 #include "IniEditorDialog.h"
 #include "ThemeManager.h"
 #include "ErrorPresenter.h"
+#include "WindowFit.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -45,7 +46,6 @@ IniEditorDialog::IniEditorDialog(GrpcClient* grpc,
     , m_applyBtn(new QPushButton("Apply to Game"))
 {
     setWindowTitle(QString("INI Editor — %1 / %2").arg(gameDisplayName, profileName));
-    resize(900, 640);
 
     auto* layout = new QVBoxLayout(this);
 
@@ -68,6 +68,7 @@ IniEditorDialog::IniEditorDialog(GrpcClient* grpc,
     buildFindBar(layout);
 
     m_statusLabel->setTextFormat(Qt::RichText);
+    m_statusLabel->setWordWrap(true);
     m_statusLabel->setObjectName("hintLabel");
     layout->addWidget(m_statusLabel);
 
@@ -82,6 +83,7 @@ IniEditorDialog::IniEditorDialog(GrpcClient* grpc,
     connect(m_saveBtn, &QPushButton::clicked, this, &IniEditorDialog::onSave);
     buttons->addWidget(m_saveBtn);
     auto* closeBtn = new QPushButton("Close");
+    closeBtn->setDefault(true);
     connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
     buttons->addWidget(closeBtn);
     layout->addLayout(buttons);
@@ -92,6 +94,7 @@ IniEditorDialog::IniEditorDialog(GrpcClient* grpc,
     connect(m_grpc, &GrpcClient::profileIniFilesApplyFailed, this, &IniEditorDialog::onIniApplyFailed);
 
     reload();
+    fitToScreen(this, QSize(900, 640));
 }
 
 void IniEditorDialog::reload()
@@ -601,9 +604,13 @@ void IniEditorDialog::buildResolutionTab(const std::vector<GrpcProfileIniFile>& 
     outer->addWidget(m_resolutionStatus);
     outer->addStretch();
 
-    m_resolutionTab = container;
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setWidget(container);
+    m_resolutionTab = scroll;
     m_resolutionTabIndex = m_tabs->count();
-    m_tabs->addTab(container, "Resolution");
+    m_tabs->addTab(scroll, "Resolution");
 }
 
 void IniEditorDialog::onApplyResolution()
@@ -649,7 +656,8 @@ void IniEditorDialog::buildFindBar(QVBoxLayout* parentLayout)
     row->addWidget(nextBtn);
     auto* closeBtn = new QPushButton("×");
     closeBtn->setFixedWidth(28);
-    closeBtn->setToolTip("Close (Esc)");
+    closeBtn->setToolTip("Close");
+    closeBtn->setAccessibleName("Close");
     row->addWidget(closeBtn);
     m_findStatus = new QLabel;
     m_findStatus->setObjectName("hintLabel");

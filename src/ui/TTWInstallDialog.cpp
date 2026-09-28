@@ -3,6 +3,7 @@
 #include "InstallErrorText.h"
 #include "ErrorPresenter.h"
 #include "ModDependencyText.h"
+#include "WindowFit.h"
 
 #include <QApplication>
 #include <QButtonGroup>
@@ -52,6 +53,15 @@ QString prereqRow(bool ok, const QString& label)
                                   label);
 }
 
+QWidget* scrollPage(QWidget* content)
+{
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setWidget(content);
+    return scroll;
+}
+
 }
 
 TTWInstallDialog::TTWInstallDialog(GrpcClient* grpc, QString fnvShortName,
@@ -62,18 +72,17 @@ TTWInstallDialog::TTWInstallDialog(GrpcClient* grpc, QString fnvShortName,
       m_currentProfile(std::move(currentProfile))
 {
     setWindowTitle("Install Tale of Two Wastelands");
-    resize(720, 560);
     setModal(true);
 
     auto* root = new QVBoxLayout(this);
 
     m_stack = new QStackedWidget;
-    m_stack->addWidget(buildBackendPage());
-    m_stack->addWidget(buildPrereqsPage());
-    m_stack->addWidget(buildMpiPage());
-    m_stack->addWidget(buildConfigurePage());
-    m_stack->addWidget(buildRunPage());
-    m_stack->addWidget(buildLauncherPage());
+    m_stack->addWidget(scrollPage(buildBackendPage()));
+    m_stack->addWidget(scrollPage(buildPrereqsPage()));
+    m_stack->addWidget(scrollPage(buildMpiPage()));
+    m_stack->addWidget(scrollPage(buildConfigurePage()));
+    m_stack->addWidget(scrollPage(buildRunPage()));
+    m_stack->addWidget(scrollPage(buildLauncherPage()));
     root->addWidget(m_stack, 1);
 
     auto* nav = new QHBoxLayout;
@@ -115,6 +124,7 @@ TTWInstallDialog::TTWInstallDialog(GrpcClient* grpc, QString fnvShortName,
                 setNavButtons(false, false, "Install");
                 m_nextBtn->setVisible(false);
                 m_runStartBtn->setEnabled(true);
+                m_runStartBtn->setDefault(true);
                 break;
             case PAGE_RUN:
                 break;
@@ -131,6 +141,7 @@ TTWInstallDialog::TTWInstallDialog(GrpcClient* grpc, QString fnvShortName,
 
     m_stack->setCurrentIndex(PAGE_BACKEND);
     setNavButtons(false, true);
+    fitToScreen(this, QSize(720, 560));
 }
 
 void TTWInstallDialog::closeEvent(QCloseEvent* ev)
@@ -874,6 +885,7 @@ void TTWInstallDialog::setNavButtons(bool backEnabled, bool nextEnabled,
     if (m_nextBtn) {
         m_nextBtn->setEnabled(nextEnabled);
         m_nextBtn->setText(nextText);
+        m_nextBtn->setDefault(m_stack->currentIndex() != PAGE_RUN);
     }
 }
 

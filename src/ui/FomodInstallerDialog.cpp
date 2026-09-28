@@ -1,4 +1,5 @@
 #include "FomodInstallerDialog.h"
+#include "WindowFit.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -62,7 +63,6 @@ FomodInstallerDialog::FomodInstallerDialog(const FomodPlan& plan, QWidget* paren
     , m_descriptionText(new QTextEdit)
 {
     setWindowTitle(titleFor(plan));
-    resize(780, 560);
 
     auto* outer = new QVBoxLayout(this);
 
@@ -90,6 +90,8 @@ FomodInstallerDialog::FomodInstallerDialog(const FomodPlan& plan, QWidget* paren
 
     buildPages();
     showStep(0);
+    m_nextBtn->setDefault(true);
+    fitToScreen(this, QSize(780, 560));
 }
 
 void FomodInstallerDialog::buildPages()
@@ -115,7 +117,7 @@ void FomodInstallerDialog::buildPages()
             pm.loadFromData(m_plan.screenshotData);
             if (!pm.isNull()) {
                 auto* img = new QLabel;
-                img->setPixmap(pm.scaled(QSize(640, 360),
+                img->setPixmap(pm.scaled(QSize(420, 240),
                                          Qt::KeepAspectRatio,
                                          Qt::SmoothTransformation));
                 img->setAlignment(Qt::AlignCenter);
@@ -132,7 +134,10 @@ void FomodInstallerDialog::buildPages()
         layout->addWidget(note);
         layout->addStretch();
 
-        m_stack->addWidget(page);
+        auto* scroll = new QScrollArea;
+        scroll->setWidgetResizable(true);
+        scroll->setWidget(page);
+        m_stack->addWidget(scroll);
         m_stepWidgets.append(StepWidgets{});
         m_descriptionText->setPlainText(m_plan.description);
         return;

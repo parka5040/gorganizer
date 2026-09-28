@@ -1,6 +1,7 @@
 #include "ExecutablesDialog.h"
 #include "Dialogs.h"
 #include "ErrorPresenter.h"
+#include "WindowFit.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -16,6 +17,7 @@
 #include <QFileInfo>
 #include <QComboBox>
 #include <QSpinBox>
+#include <QScrollArea>
 
 namespace gorganizer {
 
@@ -25,9 +27,10 @@ ExecutablesDialog::ExecutablesDialog(GrpcClient* grpc, const QString& gameId,
     : QDialog(parent), m_grpc(grpc), m_gameId(gameId), m_profileName(profileName)
 {
     setWindowTitle("External Tools");
-    resize(920, 700);
 
-    auto* root = new QHBoxLayout(this);
+    auto* root = new QVBoxLayout(this);
+    auto* body = new QHBoxLayout;
+    root->addLayout(body, 1);
 
     auto* leftCol = new QVBoxLayout;
     m_list = new QListWidget;
@@ -49,7 +52,7 @@ ExecutablesDialog::ExecutablesDialog(GrpcClient* grpc, const QString& gameId,
     leftCol->addLayout(listBtns);
     leftCol->addWidget(installLootBtn);
     leftCol->addWidget(rollbackLootBtn);
-    root->addLayout(leftCol, 1);
+    body->addLayout(leftCol, 1);
 
     auto* formBox = new QGroupBox("Tool");
     auto* form = new QFormLayout(formBox);
@@ -113,7 +116,11 @@ ExecutablesDialog::ExecutablesDialog(GrpcClient* grpc, const QString& gameId,
     form->addRow(m_formHint);
 
     auto* rightCol = new QVBoxLayout;
-    rightCol->addWidget(formBox, 1);
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setWidget(formBox);
+    rightCol->addWidget(scroll, 1);
 
     auto* formBtns = new QHBoxLayout;
     m_saveBtn = new QPushButton("Save");
@@ -142,9 +149,11 @@ ExecutablesDialog::ExecutablesDialog(GrpcClient* grpc, const QString& gameId,
     auto* closeBtn = new QPushButton("Close");
     connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
     closeRow->addWidget(closeBtn);
-    rightCol->addLayout(closeRow);
+    root->addLayout(closeRow);
 
-    root->addLayout(rightCol, 2);
+    body->addLayout(rightCol, 2);
+    closeBtn->setDefault(true);
+    fitToScreen(this, QSize(920, 700));
 
     reload();
     clearForm();

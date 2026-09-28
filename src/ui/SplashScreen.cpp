@@ -20,7 +20,6 @@ SplashScreen::SplashScreen(GrpcClient* grpc, QWidget* parent)
     , m_grpc(grpc)
 {
     setAttribute(Qt::WA_DeleteOnClose, false);
-    setFixedSize(480, 240);
 
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(40, 40, 40, 40);
@@ -55,8 +54,9 @@ SplashScreen::SplashScreen(GrpcClient* grpc, QWidget* parent)
     layout->addWidget(hint);
 
     if (auto* screen = QApplication::primaryScreen()) {
-        QRect g = screen->geometry();
-        move(g.center().x() - width() / 2, g.center().y() - height() / 2);
+        const QRect available = screen->availableGeometry();
+        setFixedSize(QSize(480, 240).boundedTo(available.size()));
+        move(available.center() - QPoint(width() / 2, height() / 2));
     }
 
     m_timer = new QTimer(this);

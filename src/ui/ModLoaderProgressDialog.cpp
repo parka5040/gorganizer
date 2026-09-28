@@ -1,5 +1,6 @@
 #include "ModLoaderProgressDialog.h"
 #include "ErrorPresenter.h"
+#include "WindowFit.h"
 
 #include <QDialogButtonBox>
 #include <QLabel>
@@ -23,7 +24,6 @@ ModLoaderProgressDialog::ModLoaderProgressDialog(QWidget* parent)
     : QDialog(parent)
 {
     setModal(false);
-    resize(520, 320);
 
     auto* root = new QVBoxLayout(this);
 
@@ -60,8 +60,10 @@ ModLoaderProgressDialog::ModLoaderProgressDialog(QWidget* parent)
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close);
     buttons->button(QDialogButtonBox::Close)->setText("Hide");
+    buttons->button(QDialogButtonBox::Close)->setDefault(true);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::hide);
     root->addWidget(buttons);
+    fitToScreen(this, QSize(520, 320));
 }
 
 void ModLoaderProgressDialog::begin(const QString& title, const QString& headline)

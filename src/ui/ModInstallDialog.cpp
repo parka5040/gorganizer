@@ -6,6 +6,7 @@
 #include "InstallCollisionDialog.h"
 #include "InstallErrorText.h"
 #include "ThemeManager.h"
+#include "WindowFit.h"
 
 #include <QBrush>
 #include <QCloseEvent>
@@ -40,8 +41,6 @@ ModInstallDialog::ModInstallDialog(const QString& gameId, const QString& modName
 {
     setWindowTitle(m_target.mode != GrpcInstallAsNewMod
         ? "Update Mod: " + m_target.targetMod : "Install Mod: " + modName);
-    setMinimumSize(500, 400);
-    resize(600, 500);
 
     auto* layout = new QVBoxLayout(this);
 
@@ -100,6 +99,8 @@ ModInstallDialog::ModInstallDialog(const QString& gameId, const QString& modName
             m_statusLabel->setText("Checking whether this mod was installed…");
         }
     });
+    m_installBtn->setDefault(true);
+    fitToScreen(this, QSize(600, 500), QSize(500, 400));
     m_previewRequestId = m_grpc->previewInstallAsync(m_gameId, m_source.archiveRelPath,
                                                        m_source.externalArchivePath);
 }

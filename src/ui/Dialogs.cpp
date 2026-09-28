@@ -96,7 +96,9 @@ bool confirmDestructive(QWidget* parent, const QString& title, const QString& te
     box.setTextFormat(Qt::PlainText);
     box.setText(text);
     auto* acceptBtn = box.addButton(acceptLabel, QMessageBox::DestructiveRole);
-    box.addButton(rejectLabel, QMessageBox::RejectRole);
+    auto* cancelBtn = box.addButton(rejectLabel, QMessageBox::RejectRole);
+    box.setDefaultButton(static_cast<QPushButton*>(cancelBtn));
+    box.setEscapeButton(cancelBtn);
     box.exec();
     return box.clickedButton() == acceptBtn;
 }
@@ -123,7 +125,9 @@ bool plainConfirmDestructive(QWidget* parent, const QString& title, const QStrin
     box.setTextFormat(Qt::PlainText);
     box.setText(text);
     auto* acceptBtn = box.addButton(acceptLabel, QMessageBox::DestructiveRole);
-    box.addButton(rejectLabel, QMessageBox::RejectRole);
+    auto* cancelBtn = box.addButton(rejectLabel, QMessageBox::RejectRole);
+    box.setDefaultButton(static_cast<QPushButton*>(cancelBtn));
+    box.setEscapeButton(cancelBtn);
     box.exec();
     return box.clickedButton() == acceptBtn;
 }

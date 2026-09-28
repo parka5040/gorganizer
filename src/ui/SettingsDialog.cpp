@@ -3,10 +3,12 @@
 #include "GrpcClient.h"
 #include "ErrorPresenter.h"
 #include "ThemeManager.h"
+#include "WindowFit.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFormLayout>
+#include <QScrollArea>
 #include <QLineEdit>
 #include <QDialogButtonBox>
 #include <QLabel>
@@ -36,11 +38,13 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
     , m_config(config)
 {
     setWindowTitle("Settings");
-    setMinimumWidth(450);
 
     auto* layout = new QVBoxLayout(this);
-
-    auto* form = new QFormLayout;
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    auto* content = new QWidget;
+    auto* form = new QFormLayout(content);
 
     m_themeCombo = new QComboBox;
     populateThemeCombo();
@@ -71,7 +75,7 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
     form->addRow("", m_statusLabel);
 
     m_protonCombo = new QComboBox;
-    m_protonCombo->setMinimumWidth(240);
+    m_protonCombo->setMinimumWidth(140);
     auto* protonRow = new QHBoxLayout;
     protonRow->addWidget(m_protonCombo);
     auto* protonSaveBtn = new QPushButton("Save");
@@ -88,6 +92,7 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
         ? QString::fromUtf8(xdg) + "/gorganizer/gorganizer.sock"
         : QDir::tempPath() + "/gorganizer-" + QString::number(getuid()) + "/gorganizer.sock";
     socketLabel->setText(socketPath);
+    socketLabel->setWordWrap(true);
     socketLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     form->addRow("Daemon Socket:", socketLabel);
 
@@ -106,7 +111,8 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
     m_nxmStatus->setWordWrap(true);
     form->addRow("", m_nxmStatus);
 
-    layout->addLayout(form);
+    scroll->setWidget(content);
+    layout->addWidget(scroll, 1);
 
     populateProtonCombo();
 
@@ -116,6 +122,8 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
     connect(m_saveBtn, &QPushButton::clicked, this, &SettingsDialog::onSaveKey);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     layout->addWidget(buttons);
+    buttons->button(QDialogButtonBox::Close)->setDefault(true);
+    fitToScreen(this, QSize(560, 520));
 
     connect(m_grpc, &GrpcClient::nexusAPIKeySet, this, &SettingsDialog::onKeyValidated);
     connect(m_grpc, &GrpcClient::rpcError, this, [this](const QString& method, const QString& error) {

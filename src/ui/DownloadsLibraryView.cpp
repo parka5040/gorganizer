@@ -28,6 +28,7 @@
 #include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QMimeData>
+#include <QShowEvent>
 
 namespace gorganizer {
 
@@ -115,27 +116,16 @@ DownloadsLibraryView::DownloadsLibraryView(GrpcClient* grpc, InstallController* 
             });
 
     QHeaderView* hdr = m_view->header();
-    hdr->setSectionResizeMode(DownloadsModel::ColName,        QHeaderView::Interactive);
-    hdr->setSectionResizeMode(DownloadsModel::ColVersion,     QHeaderView::Interactive);
-    hdr->setSectionResizeMode(DownloadsModel::ColCategory,    QHeaderView::Interactive);
-    hdr->setSectionResizeMode(DownloadsModel::ColStatus,      QHeaderView::Interactive);
-    hdr->setSectionResizeMode(DownloadsModel::ColSize,        QHeaderView::Interactive);
-    hdr->setSectionResizeMode(DownloadsModel::ColDownloaded,  QHeaderView::Interactive);
+    hdr->setSectionResizeMode(QHeaderView::Interactive);
     hdr->setStretchLastSection(false);
-
-    hdr->resizeSection(DownloadsModel::ColName,       540);
-    hdr->resizeSection(DownloadsModel::ColVersion,    100);
-    hdr->resizeSection(DownloadsModel::ColCategory,   140);
-    hdr->resizeSection(DownloadsModel::ColStatus,     240);
-    hdr->resizeSection(DownloadsModel::ColSize,       100);
-    hdr->resizeSection(DownloadsModel::ColDownloaded, 160);
 
     {
         QSettings s;
         QByteArray saved = s.value("downloads/columns/headerState").toByteArray();
-        if (!saved.isEmpty())
-            hdr->restoreState(saved);
+        if (!saved.isEmpty() && hdr->restoreState(saved))
+            m_fitColumnsOnFirstShow = false;
     }
+    hdr->setSectionResizeMode(DownloadsModel::ColName, QHeaderView::Stretch);
     connect(hdr, &QHeaderView::sectionResized, this,
             [hdr](int, int, int) {
         QSettings s;
@@ -187,6 +177,20 @@ DownloadsLibraryView::DownloadsLibraryView(GrpcClient* grpc, InstallController* 
             it->progress->setLabelText("Checking whether this archive was installed…");
         }
     });
+}
+
+void DownloadsLibraryView::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    if (!m_fitColumnsOnFirstShow)
+        return;
+    m_fitColumnsOnFirstShow = false;
+    QHeaderView* hdr = m_view->header();
+    for (int col = DownloadsModel::ColVersion; col <= DownloadsModel::ColDownloaded; ++col) {
+        m_view->resizeColumnToContents(col);
+        const int limit = col == DownloadsModel::ColStatus ? 150 : 120;
+        hdr->resizeSection(col, qMin(hdr->sectionSize(col), limit));
+    }
 }
 
 void DownloadsLibraryView::dragEnterEvent(QDragEnterEvent* event)

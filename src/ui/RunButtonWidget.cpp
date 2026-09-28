@@ -49,7 +49,7 @@ RunButtonWidget::RunButtonWidget(QWidget* parent)
     layout->setSpacing(0);
 
     m_combo = new QComboBox;
-    m_combo->setMinimumWidth(160);
+    m_combo->setMinimumWidth(120);
     m_combo->setToolTip(
         "Choose what the Run button launches — the game directly, or a "
         "script extender (xNVSE/SKSE64/F4SE/…).");
@@ -57,7 +57,7 @@ RunButtonWidget::RunButtonWidget(QWidget* parent)
 
     m_runBtn = new QToolButton;
     m_runBtn->setText("Run");
-    m_runBtn->setMinimumWidth(140);
+    setFocusProxy(m_runBtn);
     layout->addWidget(m_runBtn);
 
     connect(m_runBtn, &QToolButton::clicked, this, [this]() { emit runRequested(); });

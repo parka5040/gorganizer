@@ -1,5 +1,6 @@
 add_library(gorganizer_ui STATIC
     MainWindow.cpp
+    WindowFit.cpp
     ArchiveDrop.cpp
     InstallController.cpp
     SessionController.cpp

@@ -4,6 +4,7 @@
 #include "Dialogs.h"
 #include "GrpcClient.h"
 #include "ErrorPresenter.h"
+#include "WindowFit.h"
 
 #include <QLabel>
 #include <QListWidget>
@@ -14,10 +15,29 @@
 #include <QLineEdit>
 #include <QFormLayout>
 #include <QMenu>
+#include <QScrollArea>
 #include <QDir>
 #include <algorithm>
 
 namespace gorganizer {
+
+namespace {
+
+QVBoxLayout* scrollablePageLayout(QWizardPage* page)
+{
+    auto* scroll = new QScrollArea(page);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    auto* content = new QWidget;
+    auto* layout = new QVBoxLayout(content);
+    scroll->setWidget(content);
+    auto* pageLayout = new QVBoxLayout(page);
+    pageLayout->setContentsMargins(0, 0, 0, 0);
+    pageLayout->addWidget(scroll);
+    return layout;
+}
+
+}
 
 SetupWizard::SetupWizard(AppConfig& config, GrpcClient* grpc, QWidget* parent)
     : QWizard(parent)
@@ -25,7 +45,6 @@ SetupWizard::SetupWizard(AppConfig& config, GrpcClient* grpc, QWidget* parent)
     , m_grpc(grpc)
 {
     setWindowTitle("Gorganizer Setup");
-    setMinimumSize(640, 480);
 
     addPage(createWelcomePage());
     addPage(createSteamDetectionPage());
@@ -33,6 +52,12 @@ SetupWizard::SetupWizard(AppConfig& config, GrpcClient* grpc, QWidget* parent)
     addPage(createApiKeyPage());
     addPage(createDirectorySetupPage());
     addPage(createFinishPage());
+    fitToScreen(this, QSize(640, 480), QSize(560, 420));
+    connect(this, &QWizard::currentIdChanged, this, [this](int id) {
+        static_cast<QPushButton*>(button(QWizard::NextButton))->setDefault(id != 5);
+        static_cast<QPushButton*>(button(QWizard::FinishButton))->setDefault(id == 5);
+    });
+    static_cast<QPushButton*>(button(QWizard::NextButton))->setDefault(true);
 
     connect(m_grpc, &GrpcClient::nexusKeySaveFinished, this,
         [this](quint64 requestId, bool saved, const QString& error) {
@@ -161,7 +186,7 @@ QWizardPage* SetupWizard::createWelcomePage()
     page->setTitle("Welcome to Gorganizer");
     page->setSubTitle("A native Linux mod organizer for Bethesda games");
 
-    auto* layout = new QVBoxLayout(page);
+    auto* layout = scrollablePageLayout(page);
     auto* label = new QLabel(
         "Gorganizer manages mods for Bethesda games running through Steam and Proton.\n\n"
         "It creates a virtual file system overlay so you can enable, disable, and "
@@ -182,7 +207,7 @@ QWizardPage* SetupWizard::createSteamDetectionPage()
     page->setTitle("Steam Detection");
     page->setSubTitle("Locating your Steam installation and installed games");
 
-    auto* layout = new QVBoxLayout(page);
+    auto* layout = scrollablePageLayout(page);
 
     m_steamPathLabel = new QLabel("Searching...");
     layout->addWidget(m_steamPathLabel);
@@ -280,7 +305,7 @@ QWizardPage* SetupWizard::createGameSelectionPage()
     page->setTitle("Game Selection");
     page->setSubTitle("Select which games you want to manage. Right-click for quick actions.");
 
-    auto* layout = new QVBoxLayout(page);
+    auto* layout = scrollablePageLayout(page);
 
     m_selectionList = new QListWidget;
     m_selectionList->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -349,7 +374,7 @@ QWizardPage* SetupWizard::createApiKeyPage()
     page->setTitle("Nexus Mods API Key");
     page->setSubTitle("Optional — required for downloads and script extender install");
 
-    auto* layout = new QVBoxLayout(page);
+    auto* layout = scrollablePageLayout(page);
 
     auto* help = new QLabel(
         "Paste your Nexus Mods personal API key below. Save it to use Nexus Mods downloads.\n\n"
@@ -417,7 +442,7 @@ QWizardPage* SetupWizard::createDirectorySetupPage()
     page->setTitle("Directory Setup");
     page->setSubTitle("Creating mod management directories");
 
-    auto* layout = new QVBoxLayout(page);
+    auto* layout = scrollablePageLayout(page);
     m_dirStatusLabel = new QLabel;
     m_dirStatusLabel->setWordWrap(true);
     layout->addWidget(m_dirStatusLabel);
@@ -490,7 +515,7 @@ QWizardPage* SetupWizard::createFinishPage()
     page->setTitle("Finish setup");
     page->setSubTitle("Save your choices to the background service");
 
-    auto* layout = new QVBoxLayout(page);
+    auto* layout = scrollablePageLayout(page);
     m_summaryLabel = new QLabel;
     m_summaryLabel->setWordWrap(true);
     layout->addWidget(m_summaryLabel);

@@ -121,6 +121,7 @@ PluginListWidget::PluginListWidget(QWidget* parent)
             this, &PluginListWidget::persistLoadoutToDaemon);
 
     m_view = new LoadOrderTreeView(this);
+    setFocusProxy(m_view);
     m_view->setModel(m_model);
     m_view->setItemDelegate(new PluginRowDelegate(m_view));
     m_view->setRootIsDecorated(false);

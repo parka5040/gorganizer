@@ -4,6 +4,7 @@
 #include "ErrorPresenter.h"
 #include "InstallErrorText.h"
 #include "ThemeManager.h"
+#include "WindowFit.h"
 
 #include <QApplication>
 #include <QCloseEvent>
@@ -19,6 +20,7 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QStackedWidget>
+#include <QScrollArea>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
@@ -64,7 +66,6 @@ ImportDialog::ImportDialog(GrpcClient* grpc, const QString& gameId, QWidget* par
     , m_gameId(gameId)
 {
     setWindowTitle(QString("Import Mods — %1").arg(m_gameId));
-    resize(680, 600);
     setModal(true);
 
     auto* root = new QVBoxLayout(this);
@@ -79,6 +80,7 @@ ImportDialog::ImportDialog(GrpcClient* grpc, const QString& gameId, QWidget* par
     connect(m_grpc, &GrpcClient::transferFailed, this, &ImportDialog::onTransferFailed);
 
     m_stack->setCurrentIndex(PAGE_ARCHIVE);
+    fitToScreen(this, QSize(680, 600));
 }
 
 QWidget* ImportDialog::buildArchivePage()
@@ -135,16 +137,21 @@ QWidget* ImportDialog::buildSelectionPage()
 {
     auto* page = new QWidget;
     auto* lay = new QVBoxLayout(page);
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    auto* content = new QWidget;
+    auto* contentLay = new QVBoxLayout(content);
 
     m_manifestLabel = new QLabel;
     m_manifestLabel->setTextFormat(Qt::RichText);
     m_manifestLabel->setWordWrap(true);
-    lay->addWidget(m_manifestLabel);
+    contentLay->addWidget(m_manifestLabel);
 
     m_tree = new QTreeWidget;
     m_tree->setHeaderHidden(true);
     m_tree->setSelectionMode(QAbstractItemView::NoSelection);
-    lay->addWidget(m_tree, 1);
+    m_tree->setMinimumHeight(130);
+    contentLay->addWidget(m_tree, 1);
 
     auto* policyBox = new QGroupBox("When a mod or profile already exists");
     auto* policyLay = new QVBoxLayout(policyBox);
@@ -158,14 +165,16 @@ QWidget* ImportDialog::buildSelectionPage()
     auto* policyHint = new QLabel("Rename and Skip never replace anything you already have.", policyBox);
     policyHint->setWordWrap(true);
     policyLay->addWidget(policyHint);
-    lay->addWidget(policyBox);
+    contentLay->addWidget(policyBox);
 
     m_selectionErrorLabel = new QLabel;
     m_selectionErrorLabel->setTextFormat(Qt::PlainText);
     m_selectionErrorLabel->setWordWrap(true);
     m_selectionErrorLabel->setStyleSheet(QString("color: %1;").arg(errHex()));
     m_selectionErrorLabel->setVisible(false);
-    lay->addWidget(m_selectionErrorLabel);
+    contentLay->addWidget(m_selectionErrorLabel);
+    scroll->setWidget(content);
+    lay->addWidget(scroll, 1);
 
     auto* btnRow = new QHBoxLayout;
     auto* backBtn = new QPushButton("Back");
@@ -467,6 +476,7 @@ void ImportDialog::onStartImport()
     m_closeBtn->setVisible(false);
     m_cancelBtn->setVisible(true);
     m_cancelBtn->setEnabled(true);
+    m_cancelBtn->setDefault(true);
     m_stack->setCurrentIndex(PAGE_PROGRESS);
 
     m_grpc->startImport(m_gameId, archivePath, policy, QMap<QString, int>(), mods, profiles,
@@ -561,6 +571,7 @@ void ImportDialog::onTransferFailed(const QString& error)
     m_cancelBtn->setVisible(false);
     m_backBtn->setVisible(true);
     m_closeBtn->setVisible(true);
+    m_closeBtn->setDefault(true);
 }
 
 bool ImportDialog::confirmAbortWhileRunning()
