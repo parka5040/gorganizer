@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -62,7 +63,7 @@ func prepareMergeStage(modDir, stageDir string) error {
 }
 
 // publishPreparedMerge preserves current metadata fields and swaps a completed merge into place under the game's profile lock.
-func (is *InstallService) publishPreparedMerge(gameID, modName, token string, snapshot *download.ModMetadata) error {
+func (is *InstallService) publishPreparedMerge(ctx context.Context, gameID, modName, token string, snapshot *download.ModMetadata, published *bool) error {
 	defer is.s.lockProfiles(gameID)()
 	modsDir := config.ModsDir(gameID)
 	modDir := filepath.Join(modsDir, modName)
@@ -83,11 +84,11 @@ func (is *InstallService) publishPreparedMerge(gameID, modName, token string, sn
 		_ = os.RemoveAll(stageDir)
 		return fmt.Errorf("writing merged metadata: %w", err)
 	}
-	return is.s.svc.mods.publishReinstallStage(gameID, modName, modsDir, token, dto.GameRunningOperationMerge, true)
+	return is.s.svc.mods.publishReinstallStage(ctx, gameID, modName, modsDir, token, dto.GameRunningOperationMerge, true, published)
 }
 
 // publishPreparedReplace retains the original mod's settings and swaps a completed replacement under the game's profile lock.
-func (is *InstallService) publishPreparedReplace(gameID, modName, token string) error {
+func (is *InstallService) publishPreparedReplace(ctx context.Context, gameID, modName, token string, published *bool) error {
 	defer is.s.lockProfiles(gameID)()
 	modsDir := config.ModsDir(gameID)
 	stageDir := filepath.Join(modsDir, reinstallStagePrefix+token)
@@ -107,7 +108,7 @@ func (is *InstallService) publishPreparedReplace(gameID, modName, token string) 
 		_ = os.RemoveAll(stageDir)
 		return fmt.Errorf("writing replacement metadata: %w", err)
 	}
-	return is.s.svc.mods.publishReinstallStage(gameID, modName, modsDir, token, dto.GameRunningOperationReinstall, true)
+	return is.s.svc.mods.publishReinstallStage(ctx, gameID, modName, modsDir, token, dto.GameRunningOperationReinstall, true, published)
 }
 
 // replaceStageMetadata keeps the original settings and adopts the replacement's files, archive and supplied version or page.

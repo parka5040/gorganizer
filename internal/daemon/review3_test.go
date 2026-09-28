@@ -41,6 +41,60 @@ func TestFinishVerificationRefusedWhileDeployed(t *testing.T) {
 	}
 }
 
+// TestSharedInstallFinishRefusesOtherFarm checks verification cannot finish over a sibling's active Data farm.
+func TestSharedInstallFinishRefusesOtherFarm(t *testing.T) {
+	for _, mounted := range []string{"falloutnv", "ttw"} {
+		t.Run(mounted, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			install, manifest := steamFixture(t, 22380, "Fallout New Vegas")
+			d := newIsolatedDaemon(t, map[string]config.GameConfig{
+				"falloutnv": {InstallPath: install, DataSubpath: "Data", SteamAppID: 22380},
+				"ttw":       {InstallPath: filepath.Join(t.TempDir(), "synthetic"), DataSubpath: "Data", LinkedFromGameID: "falloutnv"},
+			})
+			d.readSteamAppState = steam.ReadAppState
+			if _, err := d.MountVFS(mounted, "Default"); err != nil {
+				t.Fatal(err)
+			}
+			changeSteamFixture(t, manifest, "buildid", "123", "124")
+			other := "ttw"
+			if mounted == "ttw" {
+				other = "falloutnv"
+			}
+			_, err := d.SetSteamMaintenance(other, false, true)
+			var busy *dto.OperationBusyError
+			if !errors.As(err, &busy) || busy.GameID != other || busy.Holder != mounted || busy.Operation != dto.BusyOperationMounted {
+				t.Fatalf("finish for %s while %s deployed = %v", other, mounted, err)
+			}
+			if _, err := os.Stat(filepath.Join(install, "Data", vfs.SentinelFilename)); err != nil {
+				t.Fatalf("mounted farm changed: %v", err)
+			}
+			owner, err := d.GetVFSStatus(mounted)
+			if err != nil || !owner.Mounted || owner.SteamMaintenance != dto.SteamMaintenanceVerify {
+				t.Fatalf("owner status = %+v, %v", owner, err)
+			}
+		})
+	}
+}
+
+// TestSiblingSteamStatusDoesNotReportPausedFarm checks a sibling never reports Verify plus unmounted while Data is deployed.
+func TestSiblingSteamStatusDoesNotReportPausedFarm(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	install, manifest := steamFixture(t, 22380, "Fallout New Vegas")
+	d := newIsolatedDaemon(t, map[string]config.GameConfig{
+		"falloutnv": {InstallPath: install, DataSubpath: "Data", SteamAppID: 22380},
+		"ttw":       {InstallPath: filepath.Join(t.TempDir(), "synthetic"), DataSubpath: "Data", LinkedFromGameID: "falloutnv"},
+	})
+	d.readSteamAppState = steam.ReadAppState
+	if _, err := d.MountVFS("falloutnv", "Default"); err != nil {
+		t.Fatal(err)
+	}
+	changeSteamFixture(t, manifest, "buildid", "123", "124")
+	status, err := d.GetVFSStatus("ttw")
+	if err != nil || status.Mounted || status.SteamMaintenance != dto.SteamMaintenanceNone {
+		t.Fatalf("TTW status over FNV farm = %+v, %v", status, err)
+	}
+}
+
 // TestPauseFromChangedWhileDeployedPreservesAndMarks ensures pausing captures Steam changes before a verify marker is recorded.
 func TestPauseFromChangedWhileDeployedPreservesAndMarks(t *testing.T) {
 	d, data, manifest := newSteamMaintenanceDaemon(t)
@@ -253,6 +307,61 @@ func TestImportBindsArchiveToPreview(t *testing.T) {
 				t.Fatalf("unchanged archive was not imported: %q, %v", body, readErr)
 			}
 		})
+	}
+}
+
+// TestImportRefusesArchiveChangedDuringExtraction checks that the final descriptor identity gates all publication.
+func TestImportRefusesArchiveChangedDuringExtraction(t *testing.T) {
+	d, _, _ := newSteamMaintenanceDaemon(t)
+	modFile := filepath.Join(config.ModsDir("skyrimse"), "A", "a.esp")
+	writeFixture(t, modFile)
+	archive := filepath.Join(t.TempDir(), "backup.tar.zst")
+	if _, err := d.ExportInstance(context.Background(), dto.ExportRequest{GameID: "skyrimse", OutputPath: archive, ModFolders: []string{"A"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := d.PreviewImport(context.Background(), "skyrimse", archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(modFile, []byte("keep original"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	changed := false
+	_, err = d.ImportInstance(context.Background(), dto.ImportRequest{GameID: "skyrimse", ArchivePath: archive, ExpectedArchiveIdentity: preview.ArchiveIdentity, Policy: dto.PolicyOverwrite}, func(p dto.TransferProgress) {
+		if p.Step != "extract" || changed {
+			return
+		}
+		changed = true
+		f, openErr := os.OpenFile(archive, os.O_RDWR, 0)
+		if openErr != nil {
+			t.Error(openErr)
+			return
+		}
+		if _, writeErr := f.WriteAt([]byte{0}, 0); writeErr != nil {
+			t.Error(writeErr)
+		}
+		if closeErr := f.Close(); closeErr != nil {
+			t.Error(closeErr)
+		}
+		info, statErr := os.Stat(archive)
+		if statErr != nil {
+			t.Error(statErr)
+			return
+		}
+		if timeErr := os.Chtimes(archive, info.ModTime().Add(2*time.Second), info.ModTime().Add(2*time.Second)); timeErr != nil {
+			t.Error(timeErr)
+		}
+	})
+	var rejected *transfer.BundleRejectedError
+	if !changed || !errors.As(err, &rejected) || rejected.Reason != transfer.BundleRejectedChanged {
+		t.Fatalf("import after rewrite = %v, extraction observed %t", err, changed)
+	}
+	if body, readErr := os.ReadFile(modFile); readErr != nil || string(body) != "keep original" {
+		t.Fatalf("original mod changed: %q, %v", body, readErr)
+	}
+	stages, globErr := filepath.Glob(filepath.Join(config.ModsDir("skyrimse"), ".gorganizer-import-*"))
+	if globErr != nil || len(stages) != 0 {
+		t.Fatalf("import staging left behind: %v, %v", stages, globErr)
 	}
 }
 

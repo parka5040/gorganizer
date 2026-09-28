@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 )
 
 // TestConfirmedRestoreCrashResumesAtEveryStep checks every interrupted cleanup reaches plain Data without losing captured output.
@@ -71,6 +74,94 @@ func TestConfirmedRestoreCrashResumesAtEveryStep(t *testing.T) {
 				t.Errorf("farm sentinel remains: %v", err)
 			}
 		})
+	}
+}
+
+// TestConfirmedRestoreRetryCapturesLateOutput saves writes made after a restore record was committed.
+func TestConfirmedRestoreRetryCapturesLateOutput(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	data := filepath.Join(root, "Data")
+	overwrite := filepath.Join(root, "Overwrite")
+	mustFile(t, filepath.Join(data, "original.esp"), "original")
+	mm := NewMountManager(data, overwrite, "testgame")
+	if err := mm.Activate([]Layer{{Name: "__base__", RootPath: data, Enabled: true}}, "Default"); err != nil {
+		t.Fatal(err)
+	}
+	crash := errors.New("simulated crash")
+	original := restoreStep
+	restoreStep = func(step int) error {
+		if step == 1 {
+			return crash
+		}
+		return nil
+	}
+	t.Cleanup(func() { restoreStep = original })
+	if err := RestoreFromBackup(data); !errors.Is(err, crash) {
+		t.Fatalf("first restore = %v", err)
+	}
+	restoreStep = original
+	mustFile(t, filepath.Join(data, "late.esp"), "late output")
+	if err := RestoreFromBackup(data); err != nil {
+		t.Fatalf("retry = %v", err)
+	}
+	if got := mustRead(t, filepath.Join(overwrite, "late.esp")); got != "late output" {
+		t.Fatalf("late output = %q", got)
+	}
+	if got := mustRead(t, filepath.Join(data, "original.esp")); got != "original" {
+		t.Fatalf("restored Data = %q", got)
+	}
+	for _, suffix := range FarmSiblingSuffixes() {
+		if _, err := os.Lstat(data + suffix); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("leftover %s: %v", suffix, err)
+		}
+	}
+}
+
+// TestConfirmedRestoreRetryUsesJournalPreservation saves late output into the recorded Steam batch.
+func TestConfirmedRestoreRetryUsesJournalPreservation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	data := filepath.Join(root, "Data")
+	mustFile(t, filepath.Join(data, "original.esp"), "original")
+	mm := NewMountManager(data, filepath.Join(root, "Overwrite"), "testgame")
+	if err := mm.Activate([]Layer{{Name: "__base__", RootPath: data, Enabled: true}}, "Default"); err != nil {
+		t.Fatal(err)
+	}
+	farm, _, err := directoryAt(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, _, err := directoryAt(data + farmBackupSuffix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := CaptureOptions{PreserveInto: PreservedDir(data), BatchID: uuid.NewString(), Baseline: &StorefrontSnapshot{Store: "steam"}, Current: &StorefrontSnapshot{Store: "steam"}}
+	if err := writeDeactivationJournal(data, &deactivationJournal{Magic: deactivationMagic, GameID: "testgame", Farm: farm, Backup: backup, CreatedAt: time.Now().UTC(), Capture: decision}); err != nil {
+		t.Fatal(err)
+	}
+	crash := errors.New("simulated crash")
+	original := restoreStep
+	restoreStep = func(step int) error {
+		if step == 1 {
+			return crash
+		}
+		return nil
+	}
+	t.Cleanup(func() { restoreStep = original })
+	if err := RestoreFromBackup(data); !errors.Is(err, crash) {
+		t.Fatalf("first restore = %v", err)
+	}
+	restoreStep = original
+	mustFile(t, filepath.Join(data, "late.esp"), "preserved output")
+	if err := RestoreFromBackup(data); err != nil {
+		t.Fatalf("retry = %v", err)
+	}
+	if got := mustRead(t, filepath.Join(PreservedDir(data), decision.BatchID, "files", "late.esp")); got != "preserved output" {
+		t.Fatalf("preserved output = %q", got)
+	}
+	if got := mustRead(t, filepath.Join(data, "original.esp")); got != "original" {
+		t.Fatalf("restored Data = %q", got)
 	}
 }
 

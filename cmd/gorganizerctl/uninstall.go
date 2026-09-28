@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -62,8 +63,9 @@ func runUninstallWith(args []string, deps uninstallDeps) int {
 	purge := fs.Bool("purge", false, "also remove settings, profiles, mods and downloads")
 	yes := fs.Bool("yes", false, "confirm the first removal prompt")
 	check := fs.Bool("check", false, "check that every game is already restored without changing anything")
+	holdLocks := fs.Bool("hold-locks", false, "hold both offline locks while a command runs after a successful check")
 	forgetMissing := fs.Bool("forget-missing-games", false, "permit purge when a configured game is no longer installed")
-	if fs.Parse(args) != nil || fs.NArg() != 0 || *keep && *purge || *check && (*keep || *purge || *yes || *forgetMissing) || *forgetMissing && !*purge {
+	if fs.Parse(args) != nil || (!*holdLocks && fs.NArg() != 0) || (*holdLocks && (!*check || fs.NArg() == 0)) || *keep && *purge || *check && (*keep || *purge || *yes || *forgetMissing) || *forgetMissing && !*purge {
 		fmt.Fprintln(deps.errOut, "Choose either --keep-data or --purge, not both. --forget-missing-games requires --purge. --check cannot be combined with removal options.")
 		return 2
 	}
@@ -168,6 +170,20 @@ func runUninstallWith(args []string, deps uninstallDeps) int {
 	}
 	if *check {
 		fmt.Fprintln(deps.out, "All configured games are restored. Nothing has been deleted.")
+		if *holdLocks {
+			command := exec.Command(fs.Arg(0), fs.Args()[1:]...)
+			command.Stdin = deps.in
+			command.Stdout = deps.out
+			command.Stderr = deps.errOut
+			if err := command.Run(); err != nil {
+				var exit *exec.ExitError
+				if errors.As(err, &exit) {
+					return exit.ExitCode()
+				}
+				fmt.Fprintf(deps.errOut, "Could not run cleanup: %v. Nothing else was removed.\n", err)
+				return 1
+			}
+		}
 		return 0
 	}
 

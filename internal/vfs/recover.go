@@ -565,6 +565,27 @@ func RestoreFromBackup(dataPath string, capture ...CaptureOptions) error {
 		if !backupExists || backup != record.Backup || dataExists && (record.Farm.Dev == 0 || data != record.Farm) {
 			return fmt.Errorf("confirmed restore needs review: Data and Data.orig do not match the restore record")
 		}
+		if dataExists {
+			if _, err := os.Lstat(journal); err == nil {
+				teardown, err = readDeactivationJournal(journal)
+				if err != nil {
+					return err
+				}
+				if teardown.Capture.PreserveInto != "" {
+					opts = teardown.Capture
+				}
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("checking deactivation journal: %w", err)
+			}
+			if teardown != nil && teardown.DataCaptured && data == teardown.Farm {
+				err = captureRecordedFarm(resolved, resolved, opts, true)
+			} else {
+				err = captureRetiringFarm(resolved, resolved, opts)
+			}
+			if err != nil {
+				return err
+			}
+		}
 		return restoreRecordedBackup(resolved, backupPath, record)
 	}
 	if _, err := os.Lstat(journal); err == nil {

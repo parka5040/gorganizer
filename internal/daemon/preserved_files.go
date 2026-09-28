@@ -56,7 +56,7 @@ func (vs *VFSService) SetSteamMaintenance(gameID string, enabled, verificationCo
 		subpath = "Data"
 	}
 	dataPath := filepath.Join(vs.s.mountInstallPath(gc), subpath)
-	if enabled {
+	{
 		checkedRoots := make(map[*vfs.RootDeploymentManager]bool)
 		for otherID := range vs.s.config.Games {
 			if otherID == gameID {
@@ -70,7 +70,7 @@ func (vs *VFSService) SetSteamMaintenance(gameID string, enabled, verificationCo
 			if otherSubpath == "" {
 				otherSubpath = "Data"
 			}
-			if filepath.Clean(filepath.Join(other.InstallPath, otherSubpath)) != filepath.Clean(dataPath) {
+			if filepath.Clean(filepath.Join(vs.s.mountInstallPath(other), otherSubpath)) != filepath.Clean(dataPath) {
 				continue
 			}
 			if mm := vs.s.mountMgrs[otherID]; mm != nil && mm.IsMounted() {
@@ -94,17 +94,20 @@ func (vs *VFSService) SetSteamMaintenance(gameID string, enabled, verificationCo
 				}
 			}
 		}
-	} else if state, _ := vs.s.steamStatusLocked(gameID, dataPath); state == dto.SteamMaintenanceVerify {
-		if mm := vs.s.mountMgrs[gameID]; mm != nil && mm.IsMounted() {
-			return nil, &dto.SteamMaintenanceError{GameID: gameID, Reason: "verify"}
-		}
-		if root := vs.s.rootDeployMgrs[gameID]; root != nil {
-			manifest, err := root.ActiveManifest()
-			if err != nil {
-				return nil, err
-			}
-			if manifest != nil {
+	}
+	if !enabled {
+		if state, _ := vs.s.steamStatusLocked(gameID, dataPath); state == dto.SteamMaintenanceVerify {
+			if mm := vs.s.mountMgrs[gameID]; mm != nil && mm.IsMounted() {
 				return nil, &dto.SteamMaintenanceError{GameID: gameID, Reason: "verify"}
+			}
+			if root := vs.s.rootDeployMgrs[gameID]; root != nil {
+				manifest, err := root.ActiveManifest()
+				if err != nil {
+					return nil, err
+				}
+				if manifest != nil {
+					return nil, &dto.SteamMaintenanceError{GameID: gameID, Reason: "verify"}
+				}
 			}
 		}
 	}

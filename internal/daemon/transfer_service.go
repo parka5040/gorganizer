@@ -76,6 +76,7 @@ func (ts *TransferService) ImportInstance(ctx context.Context, req dto.ImportReq
 		GameID:             req.GameID,
 		ArchivePath:        req.ArchivePath,
 		ArchiveFile:        archive,
+		ArchiveIdentity:    req.ExpectedArchiveIdentity,
 		Policy:             req.Policy,
 		ModPolicyOverrides: req.ModPolicyOverrides,
 		ModFolders:         req.ModFolders,

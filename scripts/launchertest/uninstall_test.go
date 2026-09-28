@@ -1,6 +1,7 @@
 package launchertest
 
 import (
+	"bufio"
 	"context"
 	"os"
 	"os/exec"
@@ -14,6 +15,15 @@ import (
 const fakeUninstallCtl = `#!/bin/bash
 printf '%s\n' "$*" >> "$SHIM_LOG"
 case "$*" in
+    'uninstall --check --hold-locks -- '*)
+        [ "${FAKE_CHECK_FAIL:-}" != yes ] || exit 1
+        mkdir -p "$XDG_RUNTIME_DIR/gorganizer"
+        exec 9>"$XDG_RUNTIME_DIR/gorganizer/gorganizerd.lock"
+        exec 8>"$XDG_RUNTIME_DIR/gorganizer/session.lock"
+        flock -n 9 || exit 1
+        flock -n 8 || exit 1
+        shift 4
+        "$@" ;;
     'uninstall --check') [ "${FAKE_CHECK_FAIL:-}" != yes ] ;;
     'desktop status'*) [ "${FAKE_DESKTOP_STATUS:-}" = yes ] ;;
     'desktop unregister'*)
@@ -190,7 +200,7 @@ func TestCleanerChecksGamesBeforeDeleting(t *testing.T) {
 	if err == nil {
 		t.Fatalf("cleaner ignored failed check: %q", output)
 	}
-	if calls := string(readFixtureFile(t, log)); calls != "uninstall --check\n" {
+	if calls := string(readFixtureFile(t, log)); calls != "uninstall --check --hold-locks -- env GORGANIZER_CLEANER_HELD=1 bash "+filepath.Join(f.root, "cleaner.sh")+" --cleaner-locked-run --yes\n" {
 		t.Fatalf("maintenance calls = %q", calls)
 	}
 	if _, err := os.Stat(filepath.Join(f.root, "Old_Mods", "save")); err != nil {
@@ -198,6 +208,100 @@ func TestCleanerChecksGamesBeforeDeleting(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(f.root, "gorganizerd")); err != nil {
 		t.Errorf("build deleted after failed check: %v", err)
+	}
+}
+
+// TestCleanerHoldsOfflineLocksAtPrompt keeps both admission locks until confirmation and deletion finish.
+func TestCleanerHoldsOfflineLocksAtPrompt(t *testing.T) {
+	if _, err := exec.LookPath("script"); err != nil {
+		t.Skip("a pseudoterminal is required to test the confirmation prompt")
+	}
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("flock is required to test daemon admission")
+	}
+	f := newFixture(t)
+	log := f.installUninstallCtl(t)
+	if err := os.MkdirAll(filepath.Join(f.root, "tmp"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(f.root, "build", "delete-me")
+	writeFixtureFile(t, victim, []byte("artifact"), 0600)
+	inputR, inputW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inputR.Close()
+	defer inputW.Close()
+	outputR, outputW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outputR.Close()
+	defer outputW.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "script", "-q", "-e", "-c", "bash "+strconv.Quote(filepath.Join(f.root, "cleaner.sh")), "/dev/null")
+	cmd.Dir = f.root
+	cmd.Env = append(os.Environ(), "HOME="+f.root, "XDG_CONFIG_HOME="+filepath.Join(f.root, "config"), "XDG_DATA_HOME="+filepath.Join(f.root, "share"), "XDG_RUNTIME_DIR="+filepath.Join(f.root, "runtime"), "TMPDIR="+filepath.Join(f.root, "tmp"), "PATH="+f.shims+string(os.PathListSeparator)+os.Getenv("PATH"), "SHIM_LOG="+log)
+	cmd.Stdin = inputR
+	cmd.Stdout = outputW
+	cmd.Stderr = outputW
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	prompt := make(chan string, 1)
+	go func() {
+		var output strings.Builder
+		reader := bufio.NewReader(outputR)
+		for {
+			b, err := reader.ReadByte()
+			if err != nil {
+				prompt <- output.String()
+				return
+			}
+			output.WriteByte(b)
+			if strings.Contains(output.String(), "Type 'yes' to proceed:") {
+				prompt <- output.String()
+				return
+			}
+		}
+	}()
+	select {
+	case output := <-prompt:
+		if !strings.Contains(output, "Type 'yes' to proceed:") {
+			t.Fatalf("cleaner did not reach the prompt: %q", output)
+		}
+	case <-ctx.Done():
+		_ = cmd.Wait()
+		_ = outputW.Close()
+		t.Fatalf("cleaner did not reach the confirmation prompt: %q", <-prompt)
+	}
+	lockDir := filepath.Join(f.root, "runtime", "gorganizer")
+	for _, name := range []string{"gorganizerd.lock", "session.lock"} {
+		if _, err := os.Stat(filepath.Join(lockDir, name)); err != nil {
+			t.Fatalf("admission lock %s was never acquired: %v", name, err)
+		}
+		probe := exec.Command("flock", "-n", filepath.Join(lockDir, name), "-c", "true")
+		if err := probe.Run(); err == nil {
+			t.Fatalf("daemon/session start acquired %s while cleaner waited", name)
+		}
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("cleanup ran before confirmation: %v", err)
+	}
+	if _, err := inputW.Write([]byte("yes\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("cleaner did not complete: %v", err)
+	}
+	if _, err := os.Stat(victim); !os.IsNotExist(err) {
+		t.Fatalf("cleaner did not remove build files: %v", err)
+	}
+	for _, name := range []string{"gorganizerd.lock", "session.lock"} {
+		if err := exec.Command("flock", "-n", filepath.Join(lockDir, name), "-c", "true").Run(); err != nil {
+			t.Fatalf("cleanup kept %s locked: %v", name, err)
+		}
 	}
 }
 
@@ -235,7 +339,7 @@ func TestCleanerDeletesOnlyValidatedOldFolders(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(unlistedExtract, "keep")); err != nil {
 		t.Errorf("unlisted extraction changed: %v", err)
 	}
-	if calls := string(readFixtureFile(t, log)); !strings.HasPrefix(calls, "uninstall --check\nmigrate-data --from "+f.root+" --dry-run --list\n") {
+	if calls := string(readFixtureFile(t, log)); !strings.HasPrefix(calls, "uninstall --check --hold-locks -- env GORGANIZER_CLEANER_HELD=1 bash "+filepath.Join(f.root, "cleaner.sh")+" --cleaner-locked-run --yes\nmigrate-data --from "+f.root+" --dry-run --list\n") {
 		t.Errorf("maintenance calls = %q", calls)
 	}
 }

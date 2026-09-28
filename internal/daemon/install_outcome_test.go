@@ -158,6 +158,183 @@ func TestMergeCancelledBeforePublishKeepsTarget(t *testing.T) {
 	assertInstallOutcome(t, d, "merge-cancel", dto.InstallOutcomeCancelled)
 }
 
+// TestMergeAndReplaceCancelWhileWaitingForProfileLock keeps the original mod when cancellation arrives after staging.
+func TestMergeAndReplaceCancelWhileWaitingForProfileLock(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode dto.InstallMode
+	}{
+		{name: "merge", mode: dto.InstallMergeIntoMod},
+		{name: "replace", mode: dto.InstallReplaceMod},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, folder, archive := mergeFixture(t)
+			modsDir := config.ModsDir("skyrimse")
+			modDir := filepath.Join(modsDir, folder)
+			before := snapshotTree(t, modDir)
+			unlock := d.lockProfiles("skyrimse")
+			locked := true
+			defer func() {
+				if locked {
+					unlock()
+				}
+			}()
+			staged := make(chan struct{}, 1)
+			d.installBeforePublish = func() { staged <- struct{}{} }
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			result := make(chan error, 1)
+			go func() {
+				_, _, err := d.StartInstall(ctx, dto.StartInstallRequest{
+					GameID: "skyrimse", ClientRequestID: "wait-" + tc.name, ExternalArchivePath: archive,
+					Mode: tc.mode, TargetMod: folder,
+				})
+				result <- err
+			}()
+			select {
+			case <-staged:
+			case err := <-result:
+				t.Fatalf("install ended before staging: %v", err)
+			case <-time.After(10 * time.Second):
+				t.Fatal("install did not finish staging")
+			}
+			time.Sleep(50 * time.Millisecond)
+			select {
+			case err := <-result:
+				t.Fatalf("install passed held profile lock: %v", err)
+			default:
+			}
+			cancel()
+			unlock()
+			locked = false
+			select {
+			case err := <-result:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("install = %v, want cancellation", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("cancelled install did not finish")
+			}
+			if got := snapshotTree(t, modDir); !reflect.DeepEqual(got, before) {
+				t.Fatalf("original mod changed: %v, want %v", got, before)
+			}
+			assertNoReinstallState(t, modsDir)
+			assertInstallOutcome(t, d, "wait-"+tc.name, dto.InstallOutcomeCancelled)
+		})
+	}
+}
+
+// TestReinstallCancelWhileWaitingForProfileLock keeps the original mod after a staged replay is cancelled.
+func TestReinstallCancelWhileWaitingForProfileLock(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	d := newStardewDaemon(t)
+	folder, _ := installForReinstall(t, d, "skyrimse", "Original", map[string]string{"base.esp": "original"}, false)
+	modsDir := config.ModsDir("skyrimse")
+	modDir := filepath.Join(modsDir, folder)
+	before := snapshotTree(t, modDir)
+	unlock := d.lockProfiles("skyrimse")
+	locked := true
+	defer func() {
+		if locked {
+			unlock()
+		}
+	}()
+	staged := make(chan struct{}, 1)
+	d.reinstallFault = func(step string) error {
+		if step == "replayed" {
+			staged <- struct{}{}
+		}
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, _, _, err := d.ReinstallMod(ctx, "skyrimse", folder, "wait-reinstall")
+		result <- err
+	}()
+	select {
+	case <-staged:
+	case err := <-result:
+		t.Fatalf("reinstall ended before staging: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("reinstall did not finish staging")
+	}
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case err := <-result:
+		t.Fatalf("reinstall passed held profile lock: %v", err)
+	default:
+	}
+	cancel()
+	unlock()
+	locked = false
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("reinstall = %v, want cancellation", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelled reinstall did not finish")
+	}
+	if got := snapshotTree(t, modDir); !reflect.DeepEqual(got, before) {
+		t.Fatalf("original mod changed: %v, want %v", got, before)
+	}
+	assertNoReinstallState(t, modsDir)
+	assertInstallOutcome(t, d, "wait-reinstall", dto.InstallOutcomeCancelled)
+}
+
+// TestReinstallCancelWhileWaitingForStateLock refuses cancellation after staging and before the visible rename.
+func TestReinstallCancelWhileWaitingForStateLock(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	d := newStardewDaemon(t)
+	folder, _ := installForReinstall(t, d, "skyrimse", "Original", map[string]string{"base.esp": "original"}, false)
+	modsDir := config.ModsDir("skyrimse")
+	modDir := filepath.Join(modsDir, folder)
+	before := snapshotTree(t, modDir)
+	reached := make(chan struct{}, 1)
+	continuePublish := make(chan struct{})
+	d.reinstallFault = func(step string) error {
+		if step == "sync-stage-dir" {
+			reached <- struct{}{}
+			<-continuePublish
+		}
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, _, _, err := d.ReinstallMod(ctx, "skyrimse", folder, "wait-for-state")
+		result <- err
+	}()
+	select {
+	case <-reached:
+	case err := <-result:
+		t.Fatalf("reinstall finished before state lock: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("reinstall did not reach the swap")
+	}
+	d.mu.Lock()
+	close(continuePublish)
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	d.mu.Unlock()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("reinstall = %v, want cancellation", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelled reinstall did not finish")
+	}
+	if got := snapshotTree(t, modDir); !reflect.DeepEqual(got, before) {
+		t.Fatalf("original mod changed: %v, want %v", got, before)
+	}
+	assertNoReinstallState(t, modsDir)
+	assertInstallOutcome(t, d, "wait-for-state", dto.InstallOutcomeCancelled)
+}
+
 // TestInstallOutcomeRegistryLifecycle verifies running results, final errors, duplicate ids, bounded eviction, and expiry.
 func TestInstallOutcomeRegistryLifecycle(t *testing.T) {
 	base := time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC)

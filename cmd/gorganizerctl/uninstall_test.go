@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -54,6 +57,95 @@ func newUninstallFixture(t *testing.T) *uninstallFixture {
 		return os.RemoveAll(path)
 	}}
 	return f
+}
+
+// TestUninstallCheckHoldsLocksThroughChild keeps both admission locks across a prompt and its cleanup.
+func TestUninstallCheckHoldsLocksThroughChild(t *testing.T) {
+	f := newUninstallFixture(t)
+	victim := filepath.Join(f.root, "build-artifact")
+	if err := os.WriteFile(victim, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inR.Close()
+	defer inW.Close()
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outR.Close()
+	defer outW.Close()
+	f.deps.in = inR
+	f.deps.out = outW
+	result := make(chan int, 1)
+	done := make(chan struct{})
+	go func() {
+		result <- runUninstallWith([]string{"--check", "--hold-locks", "--", "sh", "-c", `printf 'prompt ready\n'; read answer; [ "$answer" = yes ] && rm -- "$1"`, "sh", victim}, f.deps)
+		close(done)
+	}()
+	defer func() {
+		_, _ = inW.Write([]byte("yes\n"))
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+		}
+	}()
+	ready := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(outR)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil || strings.Contains(line, "prompt ready") {
+				ready <- err
+				return
+			}
+		}
+	}()
+	select {
+	case err := <-ready:
+		if err != nil {
+			t.Fatalf("child did not reach prompt: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cleanup child did not reach prompt")
+	}
+	if release, err := instancelock.Acquire(); !errors.Is(err, instancelock.ErrHeld) {
+		if release != nil {
+			release()
+		}
+		t.Fatalf("daemon start acquired instance lock while cleaner waited: %v", err)
+	}
+	if release, err := acquireSessionLock(); !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+		if release != nil {
+			release()
+		}
+		t.Fatalf("session started while cleaner waited: %v", err)
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("file removed before confirmation: %v", err)
+	}
+	if _, err := inW.Write([]byte("yes\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case code := <-result:
+		if code != 0 {
+			t.Fatalf("cleanup exit = %d, error = %q", code, f.errOut.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cleanup did not finish")
+	}
+	if _, err := os.Stat(victim); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleanup did not remove file: %v", err)
+	}
+	if release, err := instancelock.Acquire(); err != nil {
+		t.Fatalf("instance lock not released: %v", err)
+	} else {
+		release()
+	}
 }
 
 // TestUninstallRefusesWhileDaemonRuns checks that the instance lock prevents any deletion.

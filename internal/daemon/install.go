@@ -663,12 +663,11 @@ func (is *InstallService) startInstallFrom(ctx context.Context, req dto.StartIns
 			_ = os.RemoveAll(stageDir)
 			return "", 0, err
 		}
-		*published = true
 		var publishErr error
 		if req.Mode == dto.InstallReplaceMod {
-			publishErr = is.publishPreparedReplace(req.GameID, target, stageToken)
+			publishErr = is.publishPreparedReplace(ctx, req.GameID, target, stageToken, published)
 		} else {
-			publishErr = is.publishPreparedMerge(req.GameID, target, stageToken, mergeSnapshot)
+			publishErr = is.publishPreparedMerge(ctx, req.GameID, target, stageToken, mergeSnapshot, published)
 		}
 		if publishErr != nil {
 			sink(download.InstallProgress{InstallID: result.InstallID, Step: download.StageFailed, Error: publishErr.Error()})

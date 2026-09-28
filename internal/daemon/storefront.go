@@ -183,6 +183,31 @@ func (s *session) steamStatusLocked(gameID, dataPath string) (dto.SteamMaintenan
 			FileCount: len(batch.Files), Reason: batch.Reason, Path: batch.Path,
 		})
 	}
+	for otherID := range s.config.Games {
+		if otherID == gameID {
+			continue
+		}
+		other, err := s.config.EffectiveGameConfig(otherID)
+		if err != nil {
+			continue
+		}
+		subpath := other.DataSubpath
+		if subpath == "" {
+			subpath = "Data"
+		}
+		if filepath.Clean(filepath.Join(s.mountInstallPath(other), subpath)) != filepath.Clean(dataPath) {
+			continue
+		}
+		if mm := s.mountMgrs[otherID]; mm != nil && mm.IsMounted() {
+			return dto.SteamMaintenanceNone, results
+		}
+		if root := s.rootDeployMgrs[otherID]; root != nil {
+			manifest, err := root.ActiveManifest()
+			if err == nil && manifest != nil && manifest.GameID == otherID {
+				return dto.SteamMaintenanceNone, results
+			}
+		}
+	}
 	return state, results
 }
 

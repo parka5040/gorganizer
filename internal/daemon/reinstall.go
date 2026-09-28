@@ -279,8 +279,7 @@ func (md *ModService) commitReinstall(ctx context.Context, gameID, modName, mods
 		_ = os.RemoveAll(stageDir)
 		return 0, err
 	}
-	*published = true
-	if err := md.publishReinstallStage(gameID, modName, modsDir, token, dto.GameRunningOperationReinstall, false); err != nil {
+	if err := md.publishReinstallStage(ctx, gameID, modName, modsDir, token, dto.GameRunningOperationReinstall, false, published); err != nil {
 		return 0, err
 	}
 	if md.s.installAfterPublish != nil {
@@ -290,7 +289,7 @@ func (md *ModService) commitReinstall(ctx context.Context, gameID, modName, mods
 }
 
 // publishReinstallStage records and swaps an already completed stage; the caller holds the game's profile lock.
-func (md *ModService) publishReinstallStage(gameID, modName, modsDir, token, operation string, discardOnIntentFailure bool) error {
+func (md *ModService) publishReinstallStage(ctx context.Context, gameID, modName, modsDir, token, operation string, discardOnIntentFailure bool, published *bool) error {
 	stageDir := filepath.Join(modsDir, reinstallStagePrefix+token)
 	modDir := filepath.Join(modsDir, modName)
 	intent := reinstallIntent{
@@ -331,7 +330,7 @@ func (md *ModService) publishReinstallStage(gameID, modName, modsDir, token, ope
 	if err := atomicfile.SyncDir(modsDir); err != nil {
 		return fmt.Errorf("syncing mods directory before swap: %w", err)
 	}
-	return md.swapReinstalledMod(gameID, modName, modDir, stageDir, filepath.Join(modsDir, intent.Old), intentPath, operation)
+	return md.swapReinstalledMod(ctx, gameID, modName, modDir, stageDir, filepath.Join(modsDir, intent.Old), intentPath, operation, published)
 }
 
 // mergedReinstallMetadata combines the current non-file keys of the original metadata with the replayed source and file lists.
@@ -359,8 +358,8 @@ func mergedReinstallMetadata(modDir, stageDir, modName string, snapshot *downloa
 }
 
 // swapReinstalledMod publishes a staged mod and removes the previous folder after rebuilding any deployed farm.
-func (md *ModService) swapReinstalledMod(gameID, modName, modDir, stageDir, oldDir, intentPath, operation string) error {
-	if err := md.swapInReinstalledMod(gameID, modName, modDir, stageDir, oldDir, intentPath, operation); err != nil {
+func (md *ModService) swapReinstalledMod(ctx context.Context, gameID, modName, modDir, stageDir, oldDir, intentPath, operation string, published *bool) error {
+	if err := md.swapInReinstalledMod(ctx, gameID, modName, modDir, stageDir, oldDir, intentPath, operation, published); err != nil {
 		return err
 	}
 	if err := md.s.reinstallStep("sync-swap-dir"); err != nil {
@@ -387,8 +386,8 @@ func (md *ModService) swapReinstalledMod(gameID, modName, modDir, stageDir, oldD
 }
 
 // swapInReinstalledMod swaps a completed stage and discards its intent after a refusal or successful rollback.
-func (md *ModService) swapInReinstalledMod(gameID, modName, modDir, stageDir, oldDir, intentPath, operation string) error {
-	discard, err := md.swapInReinstalledModLocked(gameID, modName, modDir, stageDir, oldDir, operation)
+func (md *ModService) swapInReinstalledMod(ctx context.Context, gameID, modName, modDir, stageDir, oldDir, intentPath, operation string, published *bool) error {
+	discard, err := md.swapInReinstalledModLocked(ctx, gameID, modName, modDir, stageDir, oldDir, operation, published)
 	if discard {
 		_ = os.RemoveAll(stageDir)
 		removeReinstallIntent(intentPath)
@@ -397,7 +396,7 @@ func (md *ModService) swapInReinstalledMod(gameID, modName, modDir, stageDir, ol
 }
 
 // swapInReinstalledModLocked swaps a mod and rebuilds its mounted farm under s.mu, reporting whether the stage and intent can be discarded.
-func (md *ModService) swapInReinstalledModLocked(gameID, modName, modDir, stageDir, oldDir, operation string) (bool, error) {
+func (md *ModService) swapInReinstalledModLocked(ctx context.Context, gameID, modName, modDir, stageDir, oldDir, operation string, published *bool) (bool, error) {
 	md.s.mu.Lock()
 	defer md.s.mu.Unlock()
 	used, err := md.mountedModUsedLocked(gameID, modName)
@@ -457,7 +456,14 @@ func (md *ModService) swapInReinstalledModLocked(gameID, modName, modDir, stageD
 			return false, nil
 		}
 	}
-	if err := md.reinstallRename("move-aside", modDir, oldDir); err != nil {
+	if err := md.s.reinstallStep("move-aside"); err != nil {
+		return true, fmt.Errorf("moving original mod aside: %w", err)
+	}
+	if err := installCtxErr(ctx); err != nil {
+		return true, err
+	}
+	*published = true
+	if err := os.Rename(modDir, oldDir); err != nil {
 		return true, fmt.Errorf("moving original mod aside: %w", err)
 	}
 	if err := md.s.reinstallStep("moved-aside"); err != nil {

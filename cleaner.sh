@@ -6,8 +6,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CTL_BIN="$SCRIPT_DIR/gorganizerctl"
 KEEP_MODS=false
 ASSUME_YES=false
+LOCKED_RUN=false
 for arg in "$@"; do
     case "$arg" in
+        --cleaner-locked-run) LOCKED_RUN=true ;;
         --keep-mods) KEEP_MODS=true ;;
         --yes|-y) ASSUME_YES=true ;;
         --help|-h)
@@ -21,7 +23,9 @@ if [ ! -x "$CTL_BIN" ]; then
     printf '%s\n' "Gorganizer's maintenance tool is missing, so nothing was removed. Rebuild with ./gorganizer.sh, then run cleaner again." >&2
     exit 1
 fi
-"$CTL_BIN" uninstall --check || exit 1
+if ! $LOCKED_RUN || [ "${GORGANIZER_CLEANER_HELD:-}" != 1 ]; then
+    exec "$CTL_BIN" uninstall --check --hold-locks -- env GORGANIZER_CLEANER_HELD=1 bash "$SCRIPT_DIR/cleaner.sh" --cleaner-locked-run "$@"
+fi
 
 cleaner_validate_path() {
     local path="$1" kind="$2" required="${3:-false}" part

@@ -49,6 +49,7 @@ type ImportOptions struct {
 	GameID             string
 	ArchivePath        string
 	ArchiveFile        *os.File
+	ArchiveIdentity    string
 	Policy             dto.CollisionPolicy
 	ModPolicyOverrides map[string]dto.CollisionPolicy
 	ModFolders         []string
@@ -486,6 +487,15 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 		}
 	}
 
+	if opts.ArchiveIdentity != "" {
+		if opts.ArchiveFile == nil {
+			return summary, &BundleRejectedError{Reason: BundleRejectedChanged, Item: filepath.Base(opts.ArchivePath)}
+		}
+		identity, err := ArchiveIdentity(opts.ArchiveFile)
+		if err != nil || identity != opts.ArchiveIdentity {
+			return summary, &BundleRejectedError{Reason: BundleRejectedChanged, Item: filepath.Base(opts.ArchivePath)}
+		}
+	}
 	for _, me := range manifest.Mods {
 		if !selMods[me.Folder] || skipMods[me.Folder] {
 			continue

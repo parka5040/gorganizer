@@ -225,7 +225,11 @@ func inventory(root string) ([]entry, int64, int, []string, []string, error) {
 			}
 			inside := within(filepath.Clean(target), root) || within(filepath.Clean(target), realRoot)
 			if resolved, err := filepath.EvalSymlinks(target); err == nil {
-				inside = within(resolved, realRoot)
+				if filepath.IsAbs(e.Target) {
+					inside = within(resolved, realRoot)
+				} else {
+					inside = inside && within(resolved, realRoot)
+				}
 			}
 			if !filepath.IsAbs(e.Target) && !inside {
 				blockers = append(blockers, fmt.Sprintf("%s is a shortcut that points outside the folder being moved. Remove or replace it, then try again.", path))

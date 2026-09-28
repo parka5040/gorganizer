@@ -246,6 +246,22 @@ func TestRelativeExternalShortcutBlocksMigration(t *testing.T) {
 			}
 		})
 	}
+	t.Run("external alias re-enters source", func(t *testing.T) {
+		from, mods, _ := fixture(t)
+		put(t, filepath.Join(mods, "B", "file.esp"), "saved")
+		if err := os.Symlink(mods, filepath.Join(from, "alias")); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(mods, "B", "shortcut")
+		if err := os.Symlink("../../alias/B/file.esp", link); err != nil {
+			t.Fatal(err)
+		}
+		p := planned(t, from)
+		want := link + " is a shortcut that points outside the folder being moved. Remove or replace it, then try again."
+		if !slices.Contains(p.Items[0].Blockers, want) {
+			t.Fatalf("blockers = %v, want %q", p.Items[0].Blockers, want)
+		}
+	})
 	t.Run("external through internal shortcut", func(t *testing.T) {
 		from, mods, _ := fixture(t)
 		external := filepath.Join(t.TempDir(), "shared")
