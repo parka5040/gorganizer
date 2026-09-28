@@ -541,7 +541,7 @@ needs_register() {
 
 # Build only the maintenance tool when registration precedes installation.
 ensure_register_ctl() {
-    [ -x "$CTL_BIN" ] && return 0
+    [ -x "$CTL_BIN" ] && ! needs_build && return 0
     local stage="$SCRIPT_DIR/.build-staging" version tmp
     version="$(sed -n '1{s/[[:space:]]*$//;p;}' "$SCRIPT_DIR/VERSION")" || return 1
     mkdir -p "$stage/bin" || return 1

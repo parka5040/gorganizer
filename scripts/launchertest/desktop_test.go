@@ -29,7 +29,7 @@ func TestRegisterUsesCtlAndNeverClearsDefault(t *testing.T) {
 		writeFixtureFile(t, filepath.Join(f.shims, name), []byte("#!/bin/sh\nprintf '%s %s\\n' '"+name+"' \"$*\" >> \"$SHIM_LOG\"\n"), 0o755)
 	}
 	settings := []string{"HOME=" + os.Getenv("HOME"), "XDG_DATA_HOME=" + data, "XDG_CONFIG_HOME=" + config, "SHIM_LOG=" + logPath}
-	if output, err := f.run(t, "cmd_register; cmd_unregister", settings...); err != nil {
+	if output, err := f.run(t, `build_fingerprint > "$SCRIPT_DIR/.build-fingerprint" && cmd_register; cmd_unregister`, settings...); err != nil {
 		t.Fatalf("register/unregister: %v, %s", err, output)
 	}
 	calls := string(readFixtureFile(t, logPath))
@@ -63,5 +63,30 @@ func TestRegisterBuildsOnlyMissingCtl(t *testing.T) {
 	calls := string(readFixtureFile(t, f.log))
 	if !strings.Contains(calls, " ctl\n") || strings.Contains(calls, " all gui") {
 		t.Errorf("build calls = %q", calls)
+	}
+}
+
+// TestRegisterRebuildsStaleCtl checks registration replaces a maintenance tool built from older sources.
+func TestRegisterRebuildsStaleCtl(t *testing.T) {
+	f := newFixture(t)
+	output, err := f.run(t, "ensure_register_ctl")
+	if err != nil {
+		t.Fatalf("build maintenance tool: %v, %s", err, output)
+	}
+	calls := string(readFixtureFile(t, f.log))
+	if !strings.Contains(calls, " ctl\n") || strings.Contains(calls, " all gui") {
+		t.Errorf("build calls = %q", calls)
+	}
+}
+
+// TestRegisterKeepsCurrentCtl checks registration does not rebuild a maintenance tool that matches the sources.
+func TestRegisterKeepsCurrentCtl(t *testing.T) {
+	f := newFixture(t)
+	output, err := f.run(t, `build_fingerprint > "$SCRIPT_DIR/.build-fingerprint" && ensure_register_ctl`)
+	if err != nil {
+		t.Fatalf("check maintenance tool: %v, %s", err, output)
+	}
+	if calls, err := os.ReadFile(f.log); err == nil && strings.Contains(string(calls), " ctl\n") {
+		t.Errorf("current maintenance tool was rebuilt: %q", calls)
 	}
 }
