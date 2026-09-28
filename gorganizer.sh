@@ -36,8 +36,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
-# shellcheck source=scripts/deploy-check.sh
-. "$SCRIPT_DIR/scripts/deploy-check.sh"
 
 # --- version ---------------------------------------------------------------
 # The VERSION file at the repo root is the single source of truth. The
