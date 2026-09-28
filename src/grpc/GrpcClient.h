@@ -41,30 +41,30 @@ public:
 
     void listMods(const QString& gameId);
     // Synchronous ListMods for modal flows (export mod checklist).
-    bool listModsSync(const QString& gameId, std::vector<GrpcModInfo>& out, QString& errorOut);
+    bool listModsSync(const QString& gameId, std::vector<GrpcModInfo>& out, GrpcError& errorOut);
     void getMod(const QString& gameId, const QString& modName);
     void rescanMod(const QString& gameId, const QString& modName);
     bool uninstallMod(const QString& gameId, const QString& modName, bool force,
-                      std::vector<QString>& archivesFlaggedOut, QString& errorOut);
+                      std::vector<QString>& archivesFlaggedOut, GrpcError& errorOut);
     quint64 reinstallModAsync(const QString& gameId, const QString& modName,
                               const QString& clientRequestId);
     quint64 uninstallModAsync(const QString& gameId, const QString& modName, bool force);
     quint64 renameModAsync(const QString& gameId, const QString& oldName, const QString& newName);
     // Registers a mod folder created outside StartInstall.
     bool registerManualInstall(const QString& gameId, const QString& modName,
-                               const QString& archiveRelPath, QString& errorOut);
+                               const QString& archiveRelPath, GrpcError& errorOut);
 
     bool listOverwriteFiles(const QString& gameId,
                             std::vector<GrpcOverwriteEntry>& filesOut,
-                            QString& overwriteDirOut, QString& errorOut);
+                            QString& overwriteDirOut, GrpcError& errorOut);
     // Empty files extracts everything; collisions reported as ALREADY_EXISTS.
     bool extractOverwriteToMod(const QString& gameId, const QString& modName,
                                const QStringList& files, bool keepInOverwrite,
-                               int& fileCountOut, QString& errorOut);
+                               int& fileCountOut, GrpcError& errorOut);
 
     void listProfiles(const QString& gameId);
     // Synchronous ListProfiles for modal flows (export profile checklist).
-    bool listProfilesSync(const QString& gameId, std::vector<GrpcProfile>& out, QString& errorOut);
+    bool listProfilesSync(const QString& gameId, std::vector<GrpcProfile>& out, GrpcError& errorOut);
     void createProfile(const QString& gameId, const QString& name);
     void copyProfile(const QString& gameId, const QString& source, const QString& name);
     void deleteProfile(const QString& gameId, const QString& name);
@@ -73,10 +73,10 @@ public:
                     const std::vector<GrpcModListEntry>& entries);
     bool listSeparators(const QString& gameId, const QString& profileName,
                         std::vector<GrpcSeparator>& out, bool& viewEnabledOut,
-                        QString& errorOut);
+                        GrpcError& errorOut);
     bool setSeparators(const QString& gameId, const QString& profileName,
                        const std::vector<GrpcSeparator>& seps, bool viewEnabled,
-                       QString& errorOut);
+                       GrpcError& errorOut);
 
     void mountVfs(const QString& gameId, const QString& profileName);
     // Auto-swap unmounts the conflicting game in the same mutex group (FNV/TTW).
@@ -121,9 +121,9 @@ public:
     bool apply4GBPatch(const QString& gameId, const QString& patcherExePath,
                        QString& outputOut, QString& errorOut);
     bool is4GBPatched(const QString& gameId);
-    bool detectProtonVersions(std::vector<GrpcProtonVersion>& out, QString& errorOut);
-    bool getPreferredProton(QString& pathOut, QString& errorOut);
-    bool setPreferredProton(const QString& path, QString& errorOut);
+    bool detectProtonVersions(std::vector<GrpcProtonVersion>& out, GrpcError& errorOut);
+    bool getPreferredProton(QString& pathOut, GrpcError& errorOut);
+    bool setPreferredProton(const QString& path, GrpcError& errorOut);
     // Tells daemon which game the UI is showing for NXM download routing. Fire-and-forget.
     void setActiveGame(const QString& gameId);
 
@@ -146,22 +146,22 @@ public:
     bool translateWinePath(const QString& gameId, const QString& unixPath,
                            QString& winePathOut, QString& errorOut);
 
-    bool listArchives(const QString& gameId, std::vector<GrpcArchiveRow>& rowsOut, QString& errorOut);
-    bool setArchiveHidden(const QString& gameId, const QString& archiveRelPath, bool hidden, QString& errorOut);
-    bool setArchivesHiddenBulk(const QString& gameId, bool hidden, GrpcBulkHideScope scope, int& affectedOut, QString& errorOut);
-    bool removeArchive(const QString& gameId, const QString& archiveRelPath, const QString& downloadId, QString& errorOut);
+    bool listArchives(const QString& gameId, std::vector<GrpcArchiveRow>& rowsOut, GrpcError& errorOut);
+    bool setArchiveHidden(const QString& gameId, const QString& archiveRelPath, bool hidden, GrpcError& errorOut);
+    bool setArchivesHiddenBulk(const QString& gameId, bool hidden, GrpcBulkHideScope scope, int& affectedOut, GrpcError& errorOut);
+    bool removeArchive(const QString& gameId, const QString& archiveRelPath, const QString& downloadId, GrpcError& errorOut);
     bool refreshArchiveMetadata(const QString& gameId, const QString& archiveRelPath,
-                                GrpcArchiveRow& rowOut, QString& errorOut);
+                                GrpcArchiveRow& rowOut, GrpcError& errorOut);
     void startDownload(const QString& nxmUri);
     void cancelDownload(const QString& downloadId);
     void retryDownload(const QString& downloadId);
 
     bool previewInstall(const QString& gameId, const QString& archiveRelPath,
-                        GrpcPreviewInstallResult& out, QString& errorOut,
+                        GrpcPreviewInstallResult& out, GrpcError& errorOut,
                         const QString& externalArchivePath = QString());
     quint64 previewInstallAsync(const QString& gameId, const QString& archiveRelPath,
                                 const QString& externalArchivePath);
-    bool discardPreview(const QString& previewId, QString& errorOut);
+    bool discardPreview(const QString& previewId, GrpcError& errorOut);
     void discardPreviewAsync(const QString& previewId);
     // Queues an install on the install RPC worker and returns the id its installRequest* signals carry.
     quint64 startInstall(const QString& gameId, const QString& archiveRelPath,
@@ -182,7 +182,7 @@ public:
 
     // Reads an export archive's manifest and per-item collision flags without writing anything.
     bool previewImport(const QString& gameId, const QString& archivePath,
-                       GrpcImportPreview& out, QString& errorOut);
+                       GrpcImportPreview& out, GrpcError& errorOut);
     // Starts a streaming instance export on the transfer worker; progress arrives via transfer* signals.
     void startExport(const QString& gameId, const QString& outputPath,
                      const QStringList& modFolders, const QStringList& profileNames,
@@ -220,8 +220,8 @@ public:
     // Queues a pending-enable acknowledgement on the unary worker and returns the id its dependencyEnableAck* signals carry.
     quint64 ackDependencyEnable(const QString& gameId, const QString& batchId, const QStringList& uniqueIds);
 
-    bool getGameSettings(const QString& gameId, GrpcGameSettings& settingsOut, QString& errorOut);
-    bool setGameSettings(const QString& gameId, bool autoInstall, GrpcGameSettings& settingsOut, QString& errorOut);
+    bool getGameSettings(const QString& gameId, GrpcGameSettings& settingsOut, GrpcError& errorOut);
+    bool setGameSettings(const QString& gameId, bool autoInstall, GrpcGameSettings& settingsOut, GrpcError& errorOut);
 
     bool listProfileIniFiles(const QString& gameId, const QString& profileName,
                              std::vector<GrpcProfileIniFile>& filesOut,
@@ -249,11 +249,11 @@ public:
 
     // Persist a user-set plugin load order; synchronous, false on RPC failure with errorOut set.
     bool setPluginOrder(const QString& gameId, const QString& profileName,
-                        const QStringList& filenames, QString& errorOut);
+                        const QStringList& filenames, GrpcError& errorOut);
     // Persist the complete ordered activation state for the profile.
     bool setPluginLoadout(const QString& gameId, const QString& profileName,
                           const std::vector<GrpcPluginLoadoutEntry>& plugins,
-                          QString& errorOut);
+                          GrpcError& errorOut);
 
     void setNexusAPIKey(const QString& apiKey);
     quint64 saveNexusAPIKey(const QString& apiKey);
@@ -292,28 +292,28 @@ signals:
 
     void vfsMounted(const GrpcVFSStatus& status);
     void vfsRetargeted(quint64 requestId, const GrpcVFSStatus& status);
-    void vfsRetargetFailed(quint64 requestId, const QString& gameId, const QString& profileName, const QString& error);
+    void vfsRetargetFailed(quint64 requestId, const QString& gameId, const QString& profileName, const QString& error, int grpcCode);
     void vfsUnmounted();
     void vfsStatusReceived(const GrpcVFSStatus& status);
     void vfsRecoveryRetried(const QString& gameId);
     void vfsStatusQueried(quint64 requestId, const GrpcVFSStatus& status);
-    void vfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void vfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     void steamMaintenanceSet(quint64 requestId, const GrpcVFSStatus& status);
-    void steamMaintenanceSetFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void steamMaintenanceSetFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     void preservedFilesImported(quint64 requestId, const QString& gameId, const QString& modName, int fileCount);
-    void preservedFilesImportFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void preservedFilesImportFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     void preservedBatchDeleted(quint64 requestId, const GrpcVFSStatus& status);
-    void preservedBatchDeleteFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void preservedBatchDeleteFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     void maintenanceUnmountFinished(quint64 requestId, const QString& gameId, bool ok, int grpcCode, const QString& error);
     void vfsRebuilt();
 
     void conflictsReceived(const std::vector<GrpcFileConflict>& conflicts);
 
     void gameLaunched(int pid);
-    void gameLaunchFailed(const QString& error);
+    void gameLaunchFailed(const QString& error, int grpcCode);
 
     void previewInstallCompleted(quint64 requestId, const GrpcPreviewInstallResult& result);
-    void previewInstallFailed(quint64 requestId, const QString& error);
+    void previewInstallFailed(quint64 requestId, const QString& error, int grpcCode);
     void installRequestCompleted(quint64 requestId, const QString& modFolder, int fileCount);
     void installRequestFailed(quint64 requestId, int grpcCode, const QString& error, bool sent);
     void reinstallRequestFailed(quint64 requestId, int grpcCode, const QString& error, bool sent);
@@ -341,10 +341,10 @@ signals:
 
     void transferProgress(const GrpcTransferProgress& progress);
     void transferCompleted(const GrpcTransferSummary& summary);
-    void transferFailed(const QString& error);
+    void transferFailed(const QString& error, int grpcCode);
 
     void modLoaderStatusReceived(quint64 requestId, const QString& gameId, const GrpcModLoaderStatus& status);
-    void modLoaderStatusFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void modLoaderStatusFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     void modLoaderOperationFinished(quint64 requestId, const QString& gameId, const QString& operation,
                                     bool ok, int grpcCode, const GrpcModLoaderStatus& status, const QString& error);
 
@@ -361,7 +361,7 @@ signals:
                         const QStringList& flaggedArchives);
     void modRenamed(quint64 requestId, const QString& gameId, const QString& oldName, const QString& newName);
     void modActionFailed(quint64 requestId, const QString& gameId, const QString& modName,
-                         const QString& method, const QString& error);
+                         const QString& method, const QString& error, int grpcCode);
     void modDependencyReportReceived(quint64 requestId, const GrpcModDependencyReport& report);
     void modDependencyReportFailed(quint64 requestId, const QString& gameId, const QString& profileName,
                                    const QString& error);
@@ -374,13 +374,13 @@ signals:
     void dependencyEnableAckFailed(quint64 requestId, const QString& gameId, const QString& batchId,
                                    const QString& error);
     void profileIniSaved(quint64 requestId, const GrpcIniSaveResult& result);
-    void profileIniSaveFailed(quint64 requestId, const QString& error);
+    void profileIniSaveFailed(quint64 requestId, const QString& error, int grpcCode);
     void profileIniFilesApplied(quint64 requestId, int appliedFileCount);
-    void profileIniFilesApplyFailed(quint64 requestId, const QString& error);
+    void profileIniFilesApplyFailed(quint64 requestId, const QString& error, int grpcCode);
     // Reports that a mod finished installing for the subscribed game, as a refresh hint.
     void installCompletedHintReceived(const GrpcInstallCompleted& event);
 
-    void rpcError(const QString& method, const QString& error);
+    void rpcError(const QString& method, const QString& error, int grpcCode);
 
 private slots:
     void onCheckConnection();

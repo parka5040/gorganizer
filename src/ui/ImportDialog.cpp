@@ -271,7 +271,7 @@ void ImportDialog::onPreview()
     m_previewBtn->setEnabled(false);
     QApplication::setOverrideCursor(Qt::WaitCursor);
     GrpcImportPreview preview;
-    QString err;
+    GrpcError err;
     const QString path = m_previewPath;
     const bool ok = m_grpc->previewImport(m_gameId, path, preview, err);
     QApplication::restoreOverrideCursor();
@@ -280,9 +280,9 @@ void ImportDialog::onPreview()
     if (m_previewPath != path) return;
     if (!ok) {
         clearPreview();
-        m_archiveErrorLabel->setText(errorSummary("read this backup", err));
+        m_archiveErrorLabel->setText(errorSummary("read this backup", err, false));
         m_archiveErrorLabel->setVisible(true);
-        presentError(this, "Backup Could Not Be Read", "read this backup", err);
+        presentError(this, "Backup Could Not Be Read", "read this backup", err, false);
         return;
     }
     if (!previewFileUnchanged()) {
@@ -545,7 +545,7 @@ void ImportDialog::onTransferCompleted(const GrpcTransferSummary& summary)
     emit importCompleted();
 }
 
-void ImportDialog::onTransferFailed(const QString& error)
+void ImportDialog::onTransferFailed(const QString& error, int grpcCode)
 {
     if (!m_running) return;
     m_running = false;
@@ -564,8 +564,8 @@ void ImportDialog::onTransferFailed(const QString& error)
     } else {
         m_stepLabel->setText("Import failed.");
         m_resultLabel->setStyleSheet(QString("color: %1;").arg(errHex()));
-        m_resultLabel->setText(errorSummary("import this backup", error, true));
-        presentError(this, "Import Failed", "import this backup", error, true);
+        m_resultLabel->setText(errorSummary("import this backup", GrpcError{grpcCode, QStringLiteral("ImportInstance"), error}, true));
+        presentError(this, "Import Failed", "import this backup", GrpcError{grpcCode, QStringLiteral("ImportInstance"), error}, true);
     }
     m_resultLabel->setVisible(true);
     m_cancelBtn->setVisible(false);

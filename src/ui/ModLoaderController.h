@@ -54,14 +54,14 @@ private slots:
     // Applies the newest status answer for a game, completes a reconciling operation, and reports an interactive update check.
     void onStatusReceived(quint64 requestId, const QString& gameId, const GrpcModLoaderStatus& status);
     // Retries a reconciling poll or reports a failed interactive update check; other status failures only reach the status bar.
-    void onStatusFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void onStatusFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     // Completes the matching operation, or starts reconciling it when its outcome is unknown.
     void onOperationFinished(quint64 requestId, const QString& gameId, const QString& operation,
                              bool ok, int grpcCode, const GrpcModLoaderStatus& status, const QString& error);
     // Advances the pre-state capture or the unmount check from the answer to one of this controller's VFS queries.
     void onVfsStatusQueried(quint64 requestId, const GrpcVFSStatus& status);
     // Aborts a failed pre-state capture or retries a failed unmount check.
-    void onVfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void onVfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     // Runs the operation after the maintenance unmount, or checks the mount state when the unmount RPC failed.
     void onMaintenanceUnmountFinished(quint64 requestId, const QString& gameId, bool ok, int grpcCode,
                                       const QString& error);

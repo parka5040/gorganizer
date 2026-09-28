@@ -118,12 +118,12 @@ SteamMaintenanceController::SteamMaintenanceController(GrpcClient* grpc, Session
         }
     });
     connect(m_grpc, &GrpcClient::vfsStatusQueryFailed, this,
-            [this](quint64 requestId, const QString& gameId, const QString& error) {
+            [this](quint64 requestId, const QString& gameId, const QString& error, int grpcCode) {
         if (requestId != m_refreshRequestId)
             return;
         m_refreshRequestId = 0;
         if (gameId == m_gameId)
-            m_statusBar->showMessage(errorSummary("check saved files", error), 5000);
+            m_statusBar->showMessage(errorSummary("check saved files", GrpcError{grpcCode, QStringLiteral("GetVFSStatus"), error}, false), 5000);
         updateActions();
     });
     connect(m_grpc, &GrpcClient::disconnected, this, [this] {
@@ -276,13 +276,13 @@ void SteamMaintenanceController::onMaintenanceSet(quint64 requestId, const GrpcV
     requestRefresh(status.gameId);
 }
 
-void SteamMaintenanceController::onMaintenanceSetFailed(quint64 requestId, const QString& gameId, const QString& error)
+void SteamMaintenanceController::onMaintenanceSetFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode)
 {
     if (requestId != m_maintenanceRequestId || gameId != m_operationGameId)
         return;
     m_maintenanceRequestId = 0;
     m_operationGameId.clear();
-    presentError(m_parentWindow, "Steam Update Help", m_finishing ? "finish the Steam update" : "pause mods", error, true);
+    presentError(m_parentWindow, "Steam Update Help", m_finishing ? "finish the Steam update" : "pause mods", GrpcError{grpcCode, QStringLiteral("SetSteamMaintenance"), error}, true);
     requestRefresh(gameId);
 }
 
@@ -446,13 +446,13 @@ void SteamMaintenanceController::onFilesImported(quint64 requestId, const QStrin
     requestRefresh(gameId);
 }
 
-void SteamMaintenanceController::onFilesImportFailed(quint64 requestId, const QString& gameId, const QString& error)
+void SteamMaintenanceController::onFilesImportFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode)
 {
     if (requestId != m_importRequestId || gameId != m_operationGameId)
         return;
     m_importRequestId = 0;
     m_operationGameId.clear();
-    presentError(m_savedDialog, "Recover Saved Files", "recover saved files", error, true);
+    presentError(m_savedDialog, "Recover Saved Files", "recover saved files", GrpcError{grpcCode, QStringLiteral("ImportPreservedFiles"), error}, true);
     requestRefresh(gameId);
 }
 
@@ -487,13 +487,13 @@ void SteamMaintenanceController::onBatchDeleted(quint64 requestId, const GrpcVFS
     requestRefresh(status.gameId);
 }
 
-void SteamMaintenanceController::onBatchDeleteFailed(quint64 requestId, const QString& gameId, const QString& error)
+void SteamMaintenanceController::onBatchDeleteFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode)
 {
     if (requestId != m_deleteRequestId || gameId != m_operationGameId)
         return;
     m_deleteRequestId = 0;
     m_operationGameId.clear();
-    presentError(m_savedDialog, "Delete Saved Files", "delete saved files", error, true);
+    presentError(m_savedDialog, "Delete Saved Files", "delete saved files", GrpcError{grpcCode, QStringLiteral("DeletePreservedBatch"), error}, true);
     requestRefresh(gameId);
 }
 

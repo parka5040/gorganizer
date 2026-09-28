@@ -60,12 +60,21 @@ QString errorSummary(const QString& operation, const QString& rawError)
 
 QString errorSummary(const QString& operation, const QString& rawError, bool mutating)
 {
-    const QString token = parseInstallError(rawError).token;
-    if (!token.isEmpty() && token != QLatin1String("timeout"))
-        return redacted(daemonErrorMessage(rawError));
-    if (isTimeout(rawError) && mutating)
+    return errorSummary(operation, GrpcError{0, QString(), rawError}, mutating);
+}
+
+QString errorSummary(const QString& operation, const GrpcError& error, bool changesSomething)
+{
+    if (changesSomething && error.outcomeUnknown())
         return QStringLiteral("The result is unknown. Reconnect to check before trying again.");
-    if (isTransportFailure(rawError))
+    if (!changesSomething && error.unavailable())
+        return QStringLiteral("Gorganizer's background service is not responding. Try again in a moment.");
+    const QString token = parseInstallError(error.message).token;
+    if (!token.isEmpty() && token != QLatin1String("timeout"))
+        return redacted(daemonErrorMessage(error.message));
+    if (error.ok() && isTimeout(error.message) && changesSomething)
+        return QStringLiteral("The result is unknown. Reconnect to check before trying again.");
+    if (isTransportFailure(error.message))
         return QStringLiteral("Gorganizer's background service is not responding. Check that Gorganizer is still "
                               "running, then try again.");
     return QStringLiteral("Couldn't %1.").arg(redacted(operation));
@@ -85,14 +94,26 @@ void presentError(QWidget* parent, const QString& title, const QString& operatio
 void presentError(QWidget* parent, const QString& title, const QString& operation, const QString& rawError,
                   bool mutating, const QString& extraDetails)
 {
+    presentError(parent, title, operation, GrpcError{0, QString(), rawError}, mutating, extraDetails);
+}
+
+void presentError(QWidget* parent, const QString& title, const QString& operation, const GrpcError& error,
+                  bool changesSomething)
+{
+    presentError(parent, title, operation, error, changesSomething, QString());
+}
+
+void presentError(QWidget* parent, const QString& title, const QString& operation, const GrpcError& error,
+                  bool changesSomething, const QString& extraDetails)
+{
     QMessageBox box(parent);
     box.setIcon(QMessageBox::Warning);
     box.setWindowTitle(redacted(title));
     box.setTextFormat(Qt::PlainText);
-    box.setText(errorSummary(operation, rawError, mutating));
+    box.setText(errorSummary(operation, error, changesSomething));
     box.setStandardButtons(QMessageBox::Ok);
     attachErrorDetails(&box, title, operation, extraDetails.isEmpty()
-                           ? rawError : rawError + QStringLiteral("\n\n") + extraDetails);
+                           ? error.message : error.message + QStringLiteral("\n\n") + extraDetails);
     box.exec();
 }
 

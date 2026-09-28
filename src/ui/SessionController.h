@@ -94,7 +94,7 @@ private:
     // Tracks the mount state and pending changes of the active game from a polled VFS status, ignoring other games.
     void onVfsStatusReceived(const GrpcVFSStatus& status);
     // Reverts a failed SetModList loudly (U-4), warns when Apply is refused because the game runs, and shows other RPC errors as readable status text.
-    void onRpcError(const QString& method, const QString& error);
+    void onRpcError(const QString& method, const QString& error, int grpcCode);
     // Shows or disables Apply according to pending changes and recovery state.
     void setVfsDirty(bool dirty);
     // Updates the active game's recovery controls from a daemon status.
@@ -118,9 +118,9 @@ private:
     void startProfileSwitch();
     void onVfsRetargeted(quint64 requestId, const GrpcVFSStatus& status);
     void onVfsRetargetFailed(quint64 requestId, const QString& gameId, const QString& profileName,
-                             const QString& error);
+                             const QString& error, int grpcCode);
     void onRetargetStatusQueried(quint64 requestId, const GrpcVFSStatus& status);
-    void onRetargetStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void onRetargetStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error, int);
 
     AppConfig& m_config;
     GrpcClient* m_grpc;

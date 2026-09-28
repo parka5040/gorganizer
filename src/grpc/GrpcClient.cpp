@@ -1,6 +1,7 @@
 #include "GrpcClient.h"
 #include "GrpcDeadline.h"
 #include "GrpcInstallPreview.h"
+#include "GrpcStatus.h"
 #include "GrpcWorker.h"
 #include "gorganizer.grpc.pb.h"
 
@@ -59,6 +60,12 @@ bool mapError(const grpc::Status& status, QString& errorOut)
     if (status.ok()) return true;
     errorOut = QString::fromStdString(status.error_message());
     return false;
+}
+
+bool mapError(const grpc::Status& status, const QString& method, GrpcError& errorOut)
+{
+    errorOut = grpcErrorFromStatus(status, method);
+    return status.ok();
 }
 
 GrpcArchiveRow archiveRowFromProto(const gorganizer::v1::ArchiveRow& r)
@@ -308,10 +315,10 @@ void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
         m_transferActive = false;
         emit transferCompleted(summary);
     });
-    connect(worker, &GrpcWorker::transferFailed, this, [this, generation](const QString& error) {
+    connect(worker, &GrpcWorker::transferFailed, this, [this, generation](const QString& error, int grpcCode) {
         if (generation != m_connectionGeneration) return;
         m_transferActive = false;
-        emit transferFailed(error);
+        emit transferFailed(error, grpcCode);
     });
     connect(worker, &GrpcWorker::modLoaderStatusReceived, this, &GrpcClient::modLoaderStatusReceived);
     connect(worker, &GrpcWorker::modLoaderStatusFailed, this, &GrpcClient::modLoaderStatusFailed);
@@ -455,12 +462,12 @@ quint64 GrpcClient::configureGameTracked(const QString& gameId, const QString& n
 
 void GrpcClient::listMods(const QString& gameId) { post(&GrpcWorker::doListMods, gameId); }
 
-bool GrpcClient::listModsSync(const QString& gameId, std::vector<GrpcModInfo>& out, QString& errorOut)
+bool GrpcClient::listModsSync(const QString& gameId, std::vector<GrpcModInfo>& out, GrpcError& errorOut)
 {
     gorganizer::v1::ListModsRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::ListModsResponse resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::ListMods, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::ListMods, req, resp), "ListMods", errorOut)) return false;
     out.clear();
     out.reserve(resp.mods_size());
     for (const auto& m : resp.mods()) {
@@ -488,12 +495,12 @@ void GrpcClient::rescanMod(const QString& gameId, const QString& modName)
 
 void GrpcClient::listProfiles(const QString& gameId) { post(&GrpcWorker::doListProfiles, gameId); }
 
-bool GrpcClient::listProfilesSync(const QString& gameId, std::vector<GrpcProfile>& out, QString& errorOut)
+bool GrpcClient::listProfilesSync(const QString& gameId, std::vector<GrpcProfile>& out, GrpcError& errorOut)
 {
     gorganizer::v1::ListProfilesRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::ListProfilesResponse resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::ListProfiles, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::ListProfiles, req, resp), "ListProfiles", errorOut)) return false;
     out.clear();
     out.reserve(resp.profiles_size());
     for (const auto& p : resp.profiles()) {
@@ -547,7 +554,7 @@ quint64 GrpcClient::retargetVfs(const QString& gameId, const QString& profileNam
     const quint64 requestId = ++m_nextVfsRequestId;
     if (!installRpcWorker() || !isConnected()) {
         QMetaObject::invokeMethod(this, [this, requestId, gameId, profileName] {
-            emit vfsRetargetFailed(requestId, gameId, profileName, QStringLiteral("not connected"));
+            emit vfsRetargetFailed(requestId, gameId, profileName, QStringLiteral("not connected"), GrpcStatusUnavailable);
         }, Qt::QueuedConnection);
         return requestId;
     }
@@ -574,7 +581,7 @@ quint64 GrpcClient::queryVfsStatus(const QString& gameId)
     const quint64 requestId = ++m_nextVfsRequestId;
     if (!unaryWorker()) {
         QMetaObject::invokeMethod(this, [this, requestId, gameId] {
-            emit vfsStatusQueryFailed(requestId, gameId, QStringLiteral("not connected"));
+            emit vfsStatusQueryFailed(requestId, gameId, QStringLiteral("not connected"), GrpcStatusUnavailable);
         }, Qt::QueuedConnection);
         return requestId;
     }
@@ -587,7 +594,7 @@ quint64 GrpcClient::setSteamMaintenance(const QString& gameId, bool enabled, boo
     const quint64 requestId = ++m_nextSteamRequestId;
     if (!installRpcWorker() || !isConnected()) {
         QMetaObject::invokeMethod(this, [this, requestId, gameId] {
-            emit steamMaintenanceSetFailed(requestId, gameId, QStringLiteral("not connected"));
+            emit steamMaintenanceSetFailed(requestId, gameId, QStringLiteral("not connected"), GrpcStatusUnavailable);
         }, Qt::QueuedConnection);
         return requestId;
     }
@@ -601,7 +608,7 @@ quint64 GrpcClient::importPreservedFiles(const QString& gameId, const QString& b
     const quint64 requestId = ++m_nextSteamRequestId;
     if (!unaryWorker() || !isConnected()) {
         QMetaObject::invokeMethod(this, [this, requestId, gameId] {
-            emit preservedFilesImportFailed(requestId, gameId, QStringLiteral("not connected"));
+            emit preservedFilesImportFailed(requestId, gameId, QStringLiteral("not connected"), GrpcStatusUnavailable);
         }, Qt::QueuedConnection);
         return requestId;
     }
@@ -614,7 +621,7 @@ quint64 GrpcClient::deletePreservedBatch(const QString& gameId, const QString& b
     const quint64 requestId = ++m_nextSteamRequestId;
     if (!unaryWorker() || !isConnected()) {
         QMetaObject::invokeMethod(this, [this, requestId, gameId] {
-            emit preservedBatchDeleteFailed(requestId, gameId, QStringLiteral("not connected"));
+            emit preservedBatchDeleteFailed(requestId, gameId, QStringLiteral("not connected"), GrpcStatusUnavailable);
         }, Qt::QueuedConnection);
         return requestId;
     }
@@ -627,7 +634,7 @@ quint64 GrpcClient::unmountVfsForMaintenance(const QString& gameId)
     const quint64 requestId = ++m_nextVfsRequestId;
     if (!unaryWorker()) {
         QMetaObject::invokeMethod(this, [this, requestId, gameId] {
-            emit maintenanceUnmountFinished(requestId, gameId, false, GrpcStatusFailedPrecondition,
+            emit maintenanceUnmountFinished(requestId, gameId, false, GrpcStatusUnavailable,
                                             QStringLiteral("not connected"));
         }, Qt::QueuedConnection);
         return requestId;
@@ -741,7 +748,7 @@ quint64 GrpcClient::postModLoaderStatus(GrpcWorker* worker, const QString& gameI
     const quint64 requestId = ++m_nextModLoaderRequestId;
     if (!worker) {
         QMetaObject::invokeMethod(this, [this, requestId, gameId] {
-            emit modLoaderStatusFailed(requestId, gameId, QStringLiteral("not connected"));
+            emit modLoaderStatusFailed(requestId, gameId, QStringLiteral("not connected"), GrpcStatusUnavailable);
         }, Qt::QueuedConnection);
         return requestId;
     }
@@ -989,70 +996,70 @@ bool GrpcClient::shutdownDaemonSync(int rpcTimeoutMs, int pollTimeoutMs, QString
     return false;
 }
 
-bool GrpcClient::listArchives(const QString& gameId, std::vector<GrpcArchiveRow>& rowsOut, QString& errorOut)
+bool GrpcClient::listArchives(const QString& gameId, std::vector<GrpcArchiveRow>& rowsOut, GrpcError& errorOut)
 {
     gorganizer::v1::ListArchivesRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::ListArchivesResponse resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::ListArchives, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::ListArchives, req, resp), "ListArchives", errorOut)) return false;
     rowsOut.clear();
     for (const auto& r : resp.rows()) rowsOut.push_back(archiveRowFromProto(r));
     return true;
 }
 
-bool GrpcClient::setArchiveHidden(const QString& gameId, const QString& archiveRelPath, bool hidden, QString& errorOut)
+bool GrpcClient::setArchiveHidden(const QString& gameId, const QString& archiveRelPath, bool hidden, GrpcError& errorOut)
 {
     gorganizer::v1::SetArchiveHiddenRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_archive_rel_path(archiveRelPath.toStdString());
     req.set_hidden(hidden);
     gorganizer::v1::SetArchiveHiddenResponse resp;
-    return mapError(invokeUnary(m_syncStub.get(), &Stub::SetArchiveHidden, req, resp), errorOut);
+    return mapError(invokeUnary(m_syncStub.get(), &Stub::SetArchiveHidden, req, resp), "SetArchiveHidden", errorOut);
 }
 
 bool GrpcClient::setArchivesHiddenBulk(const QString& gameId, bool hidden, GrpcBulkHideScope scope,
-                                        int& affectedOut, QString& errorOut)
+                                        int& affectedOut, GrpcError& errorOut)
 {
     gorganizer::v1::SetArchivesHiddenBulkRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_hidden(hidden);
     req.set_scope(static_cast<gorganizer::v1::SetArchivesHiddenBulkRequest_Scope>(scope));
     gorganizer::v1::SetArchivesHiddenBulkResponse resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::SetArchivesHiddenBulk, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::SetArchivesHiddenBulk, req, resp), "SetArchivesHiddenBulk", errorOut)) return false;
     affectedOut = resp.affected();
     return true;
 }
 
-bool GrpcClient::removeArchive(const QString& gameId, const QString& archiveRelPath, const QString& downloadId, QString& errorOut)
+bool GrpcClient::removeArchive(const QString& gameId, const QString& archiveRelPath, const QString& downloadId, GrpcError& errorOut)
 {
     gorganizer::v1::RemoveArchiveRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_archive_rel_path(archiveRelPath.toStdString());
     req.set_download_id(downloadId.toStdString());
     gorganizer::v1::RemoveArchiveResponse resp;
-    return mapError(invokeUnary(m_syncStub.get(), &Stub::RemoveArchive, req, resp), errorOut);
+    return mapError(invokeUnary(m_syncStub.get(), &Stub::RemoveArchive, req, resp), "RemoveArchive", errorOut);
 }
 
 bool GrpcClient::refreshArchiveMetadata(const QString& gameId, const QString& archiveRelPath,
-                                         GrpcArchiveRow& rowOut, QString& errorOut)
+                                         GrpcArchiveRow& rowOut, GrpcError& errorOut)
 {
     gorganizer::v1::RefreshArchiveMetadataRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_archive_rel_path(archiveRelPath.toStdString());
     gorganizer::v1::RefreshArchiveMetadataResponse resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::RefreshArchiveMetadata, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::RefreshArchiveMetadata, req, resp), "RefreshArchiveMetadata", errorOut)) return false;
     rowOut = archiveRowFromProto(resp.row());
     return true;
 }
 
 bool GrpcClient::previewInstall(const QString& gameId, const QString& archiveRelPath,
-                                 GrpcPreviewInstallResult& out, QString& errorOut,
+                                 GrpcPreviewInstallResult& out, GrpcError& errorOut,
                                  const QString& externalArchivePath)
 {
     auto req = previewInstallRequest(gameId, archiveRelPath, externalArchivePath);
     gorganizer::v1::PreviewInstallResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::PreviewInstall, req, resp,
-                              std::chrono::minutes(10)), errorOut)) return false;
+                              std::chrono::minutes(10)), "PreviewInstall", errorOut)) return false;
     out = previewInstallResultFromProto(resp);
     return true;
 }
@@ -1063,7 +1070,7 @@ quint64 GrpcClient::previewInstallAsync(const QString& gameId, const QString& ar
     const quint64 requestId = ++m_nextPreviewRequestId;
     if (!installRpcWorker()) {
         QMetaObject::invokeMethod(this, [this, requestId] {
-            emit previewInstallFailed(requestId, QStringLiteral("not connected"));
+            emit previewInstallFailed(requestId, QStringLiteral("not connected"), GrpcStatusUnavailable);
         }, Qt::QueuedConnection);
         return requestId;
     }
@@ -1072,12 +1079,12 @@ quint64 GrpcClient::previewInstallAsync(const QString& gameId, const QString& ar
     return requestId;
 }
 
-bool GrpcClient::discardPreview(const QString& previewId, QString& errorOut)
+bool GrpcClient::discardPreview(const QString& previewId, GrpcError& errorOut)
 {
     gorganizer::v1::DiscardPreviewRequest req;
     req.set_preview_id(previewId.toStdString());
     gorganizer::v1::DiscardPreviewResponse resp;
-    return mapError(invokeUnary(m_syncStub.get(), &Stub::DiscardPreview, req, resp), errorOut);
+    return mapError(invokeUnary(m_syncStub.get(), &Stub::DiscardPreview, req, resp), "DiscardPreview", errorOut);
 }
 
 void GrpcClient::discardPreviewAsync(const QString& previewId)
@@ -1095,7 +1102,7 @@ quint64 GrpcClient::renameModAsync(const QString& gameId, const QString& oldName
     if (!installRpcWorker() || !isConnected()) {
         QMetaObject::invokeMethod(this, [this, requestId, gameId, oldName] {
             emit modActionFailed(requestId, gameId, oldName, QStringLiteral("RenameMod"),
-                                 QStringLiteral("not connected"));
+                                 QStringLiteral("not connected"), GrpcStatusUnavailable);
         }, Qt::QueuedConnection);
         return requestId;
     }
@@ -1104,7 +1111,7 @@ quint64 GrpcClient::renameModAsync(const QString& gameId, const QString& oldName
 }
 
 bool GrpcClient::uninstallMod(const QString& gameId, const QString& modName, bool force,
-                               std::vector<QString>& archivesFlaggedOut, QString& errorOut)
+                               std::vector<QString>& archivesFlaggedOut, GrpcError& errorOut)
 {
     gorganizer::v1::UninstallModRequest req;
     req.set_game_id(gameId.toStdString());
@@ -1112,7 +1119,7 @@ bool GrpcClient::uninstallMod(const QString& gameId, const QString& modName, boo
     req.set_force(force);
     gorganizer::v1::UninstallModResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::UninstallMod, req, resp,
-                              std::chrono::minutes(5)), errorOut)) return false;
+                              std::chrono::minutes(5)), "UninstallMod", errorOut)) return false;
     archivesFlaggedOut.clear();
     for (const auto& p : resp.archives_flagged_uninstalled())
         archivesFlaggedOut.push_back(QString::fromStdString(p));
@@ -1139,7 +1146,7 @@ quint64 GrpcClient::uninstallModAsync(const QString& gameId, const QString& modN
     if (!installRpcWorker() || !isConnected()) {
         QMetaObject::invokeMethod(this, [this, requestId, gameId, modName] {
             emit modActionFailed(requestId, gameId, modName, QStringLiteral("UninstallMod"),
-                                 QStringLiteral("not connected"));
+                                 QStringLiteral("not connected"), GrpcStatusUnavailable);
         }, Qt::QueuedConnection);
         return requestId;
     }
@@ -1148,24 +1155,24 @@ quint64 GrpcClient::uninstallModAsync(const QString& gameId, const QString& modN
 }
 
 bool GrpcClient::registerManualInstall(const QString& gameId, const QString& modName,
-                                        const QString& archiveRelPath, QString& errorOut)
+                                        const QString& archiveRelPath, GrpcError& errorOut)
 {
     gorganizer::v1::RegisterManualInstallRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_mod_name(modName.toStdString());
     req.set_archive_rel_path(archiveRelPath.toStdString());
     gorganizer::v1::RegisterManualInstallResponse resp;
-    return mapError(invokeUnary(m_syncStub.get(), &Stub::RegisterManualInstall, req, resp), errorOut);
+    return mapError(invokeUnary(m_syncStub.get(), &Stub::RegisterManualInstall, req, resp), "RegisterManualInstall", errorOut);
 }
 
 bool GrpcClient::listOverwriteFiles(const QString& gameId,
                                      std::vector<GrpcOverwriteEntry>& filesOut,
-                                     QString& overwriteDirOut, QString& errorOut)
+                                     QString& overwriteDirOut, GrpcError& errorOut)
 {
     gorganizer::v1::ListOverwriteFilesRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::ListOverwriteFilesResponse resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::ListOverwriteFiles, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::ListOverwriteFiles, req, resp), "ListOverwriteFiles", errorOut)) return false;
     filesOut.clear();
     filesOut.reserve(resp.files_size());
     for (const auto& f : resp.files()) {
@@ -1182,7 +1189,7 @@ bool GrpcClient::listOverwriteFiles(const QString& gameId,
 
 bool GrpcClient::extractOverwriteToMod(const QString& gameId, const QString& modName,
                                         const QStringList& files, bool keepInOverwrite,
-                                        int& fileCountOut, QString& errorOut)
+                                        int& fileCountOut, GrpcError& errorOut)
 {
     gorganizer::v1::ExtractOverwriteToModRequest req;
     req.set_game_id(gameId.toStdString());
@@ -1192,20 +1199,20 @@ bool GrpcClient::extractOverwriteToMod(const QString& gameId, const QString& mod
         req.add_files(f.toStdString());
     gorganizer::v1::ExtractOverwriteToModResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::ExtractOverwriteToMod, req, resp,
-                              std::chrono::minutes(2)), errorOut)) return false;
+                              std::chrono::minutes(2)), "ExtractOverwriteToMod", errorOut)) return false;
     fileCountOut = resp.file_count();
     return true;
 }
 
 bool GrpcClient::listSeparators(const QString& gameId, const QString& profileName,
                                  std::vector<GrpcSeparator>& out, bool& viewEnabledOut,
-                                 QString& errorOut)
+                                 GrpcError& errorOut)
 {
     gorganizer::v1::ListSeparatorsRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
     gorganizer::v1::ListSeparatorsResponse resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::ListSeparators, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::ListSeparators, req, resp), "ListSeparators", errorOut)) return false;
     out.clear();
     out.reserve(resp.separators_size());
     for (const auto& sp : resp.separators()) {
@@ -1221,7 +1228,7 @@ bool GrpcClient::listSeparators(const QString& gameId, const QString& profileNam
 
 bool GrpcClient::setSeparators(const QString& gameId, const QString& profileName,
                                 const std::vector<GrpcSeparator>& seps, bool viewEnabled,
-                                QString& errorOut)
+                                GrpcError& errorOut)
 {
     gorganizer::v1::SetSeparatorsRequest req;
     req.set_game_id(gameId.toStdString());
@@ -1234,11 +1241,11 @@ bool GrpcClient::setSeparators(const QString& gameId, const QString& profileName
     }
     req.set_view_enabled(viewEnabled);
     gorganizer::v1::SetSeparatorsResponse resp;
-    return mapError(invokeUnary(m_syncStub.get(), &Stub::SetSeparators, req, resp), errorOut);
+    return mapError(invokeUnary(m_syncStub.get(), &Stub::SetSeparators, req, resp), "SetSeparators", errorOut);
 }
 
 bool GrpcClient::setPluginOrder(const QString& gameId, const QString& profileName,
-                                 const QStringList& filenames, QString& errorOut)
+                                 const QStringList& filenames, GrpcError& errorOut)
 {
     gorganizer::v1::SetPluginOrderRequest req;
     req.set_game_id(gameId.toStdString());
@@ -1246,12 +1253,12 @@ bool GrpcClient::setPluginOrder(const QString& gameId, const QString& profileNam
     for (const auto& f : filenames)
         req.add_filenames(f.toStdString());
     gorganizer::v1::SetPluginOrderResponse resp;
-    return mapError(invokeUnary(m_syncStub.get(), &Stub::SetPluginOrder, req, resp), errorOut);
+    return mapError(invokeUnary(m_syncStub.get(), &Stub::SetPluginOrder, req, resp), "SetPluginOrder", errorOut);
 }
 
 bool GrpcClient::setPluginLoadout(const QString& gameId, const QString& profileName,
                                   const std::vector<GrpcPluginLoadoutEntry>& plugins,
-                                  QString& errorOut)
+                                  GrpcError& errorOut)
 {
     gorganizer::v1::SetPluginLoadoutRequest req;
     req.set_game_id(gameId.toStdString());
@@ -1262,14 +1269,14 @@ bool GrpcClient::setPluginLoadout(const QString& gameId, const QString& profileN
         entry->set_enabled(plugin.enabled);
     }
     gorganizer::v1::SetPluginLoadoutResponse resp;
-    return mapError(invokeUnary(m_syncStub.get(), &Stub::SetPluginLoadout, req, resp), errorOut);
+    return mapError(invokeUnary(m_syncStub.get(), &Stub::SetPluginLoadout, req, resp), "SetPluginLoadout", errorOut);
 }
 
-bool GrpcClient::detectProtonVersions(std::vector<GrpcProtonVersion>& out, QString& errorOut)
+bool GrpcClient::detectProtonVersions(std::vector<GrpcProtonVersion>& out, GrpcError& errorOut)
 {
     gorganizer::v1::DetectProtonRequest req;
     gorganizer::v1::DetectProtonResponse resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::DetectProton, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::DetectProton, req, resp), "DetectProton", errorOut)) return false;
     out.clear();
     out.reserve(resp.versions_size());
     for (const auto& v : resp.versions()) {
@@ -1281,21 +1288,21 @@ bool GrpcClient::detectProtonVersions(std::vector<GrpcProtonVersion>& out, QStri
     return true;
 }
 
-bool GrpcClient::getPreferredProton(QString& pathOut, QString& errorOut)
+bool GrpcClient::getPreferredProton(QString& pathOut, GrpcError& errorOut)
 {
     gorganizer::v1::GetPreferredProtonRequest req;
     gorganizer::v1::GetPreferredProtonResponse resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::GetPreferredProton, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::GetPreferredProton, req, resp), "GetPreferredProton", errorOut)) return false;
     pathOut = QString::fromStdString(resp.path());
     return true;
 }
 
-bool GrpcClient::setPreferredProton(const QString& path, QString& errorOut)
+bool GrpcClient::setPreferredProton(const QString& path, GrpcError& errorOut)
 {
     gorganizer::v1::SetPreferredProtonRequest req;
     req.set_path(path.toStdString());
     gorganizer::v1::SetPreferredProtonResponse resp;
-    return mapError(invokeUnary(m_syncStub.get(), &Stub::SetPreferredProton, req, resp), errorOut);
+    return mapError(invokeUnary(m_syncStub.get(), &Stub::SetPreferredProton, req, resp), "SetPreferredProton", errorOut);
 }
 
 void GrpcClient::setActiveGame(const QString& gameId)
@@ -1684,14 +1691,14 @@ bool GrpcClient::translateWinePath(const QString& gameId, const QString& unixPat
 }
 
 bool GrpcClient::previewImport(const QString& gameId, const QString& archivePath,
-                               GrpcImportPreview& out, QString& errorOut)
+                               GrpcImportPreview& out, GrpcError& errorOut)
 {
     gorganizer::v1::PreviewImportRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_archive_path(archivePath.toStdString());
     gorganizer::v1::PreviewImportResponse resp;
     if (!mapError(invokeUnary(m_syncStub.get(), &Stub::PreviewImport, req, resp,
-                              std::chrono::seconds(60)), errorOut)) return false;
+                              std::chrono::seconds(60)), "PreviewImport", errorOut)) return false;
     out = importPreviewFromProto(resp);
     return true;
 }
@@ -1701,11 +1708,11 @@ void GrpcClient::startExport(const QString& gameId, const QString& outputPath,
                              bool includeOverwrite, bool includeGameSettings)
 {
     if (!transferWorker()) {
-        emit transferFailed(QStringLiteral("not connected"));
+        emit transferFailed(QStringLiteral("not connected"), GrpcStatusUnavailable);
         return;
     }
     if (m_transferActive) {
-        emit transferFailed(QStringLiteral("transfer already running"));
+        emit transferFailed(QStringLiteral("transfer already running"), GrpcStatusFailedPrecondition);
         return;
     }
     m_transferActive = true;
@@ -1719,11 +1726,11 @@ void GrpcClient::startImport(const QString& gameId, const QString& archivePath,
                              const QString& expectedArchiveIdentity)
 {
     if (!transferWorker()) {
-        emit transferFailed(QStringLiteral("not connected"));
+        emit transferFailed(QStringLiteral("not connected"), GrpcStatusUnavailable);
         return;
     }
     if (m_transferActive) {
-        emit transferFailed(QStringLiteral("transfer already running"));
+        emit transferFailed(QStringLiteral("transfer already running"), GrpcStatusFailedPrecondition);
         return;
     }
     m_transferActive = true;
@@ -1737,24 +1744,24 @@ void GrpcClient::cancelTransfer()
     if (transferWorker()) transferWorker()->cancelActiveStream();
 }
 
-bool GrpcClient::getGameSettings(const QString& gameId, GrpcGameSettings& settingsOut, QString& errorOut)
+bool GrpcClient::getGameSettings(const QString& gameId, GrpcGameSettings& settingsOut, GrpcError& errorOut)
 {
     gorganizer::v1::GetGameSettingsRequest req;
     req.set_game_id(gameId.toStdString());
     gorganizer::v1::GameSettings resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::GetGameSettings, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::GetGameSettings, req, resp), "GetGameSettings", errorOut)) return false;
     settingsOut.gameId = QString::fromStdString(resp.game_id());
     settingsOut.autoInstall = resp.auto_install();
     return true;
 }
 
-bool GrpcClient::setGameSettings(const QString& gameId, bool autoInstall, GrpcGameSettings& settingsOut, QString& errorOut)
+bool GrpcClient::setGameSettings(const QString& gameId, bool autoInstall, GrpcGameSettings& settingsOut, GrpcError& errorOut)
 {
     gorganizer::v1::SetGameSettingsRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_auto_install(autoInstall);
     gorganizer::v1::GameSettings resp;
-    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::SetGameSettings, req, resp), errorOut)) return false;
+    if (!mapError(invokeUnary(m_syncStub.get(), &Stub::SetGameSettings, req, resp), "SetGameSettings", errorOut)) return false;
     settingsOut.gameId = QString::fromStdString(resp.game_id());
     settingsOut.autoInstall = resp.auto_install();
     return true;
@@ -1791,7 +1798,7 @@ quint64 GrpcClient::saveProfileIniFile(const QString& gameId, const QString& pro
     const quint64 requestId = ++m_nextIniRequestId;
     if (!unaryWorker()) {
         QMetaObject::invokeMethod(this, [this, requestId] {
-            emit profileIniSaveFailed(requestId, QStringLiteral("not connected"));
+            emit profileIniSaveFailed(requestId, QStringLiteral("not connected"), GrpcStatusUnavailable);
         }, Qt::QueuedConnection);
         return requestId;
     }
@@ -1804,7 +1811,7 @@ quint64 GrpcClient::applyProfileIniFiles(const QString& gameId, const QString& p
     const quint64 requestId = ++m_nextIniRequestId;
     if (!unaryWorker()) {
         QMetaObject::invokeMethod(this, [this, requestId] {
-            emit profileIniFilesApplyFailed(requestId, QStringLiteral("not connected"));
+            emit profileIniFilesApplyFailed(requestId, QStringLiteral("not connected"), GrpcStatusUnavailable);
         }, Qt::QueuedConnection);
         return requestId;
     }

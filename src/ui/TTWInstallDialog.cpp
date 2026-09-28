@@ -521,7 +521,7 @@ void TTWInstallDialog::onConfigure()
             if (!dialogs::confirm(this, "Replace existing TTW mod?",
                 QString("A mod folder named %1 already exists. Replace it?").arg(m_modName),
                 QMessageBox::No)) return;
-            QString uerr;
+            GrpcError uerr;
             std::vector<QString> flagged;
             if (!m_grpc->uninstallMod("ttw", m_modName, true, flagged, uerr)) {
                 presentError(this, "Remove Failed", "uninstall this mod", uerr, true);

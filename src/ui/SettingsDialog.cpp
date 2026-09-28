@@ -126,11 +126,12 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
     fitToScreen(this, QSize(560, 520));
 
     connect(m_grpc, &GrpcClient::nexusAPIKeySet, this, &SettingsDialog::onKeyValidated);
-    connect(m_grpc, &GrpcClient::rpcError, this, [this](const QString& method, const QString& error) {
+    connect(m_grpc, &GrpcClient::rpcError, this, [this](const QString& method, const QString& error, int grpcCode) {
         if (method == "SetNexusAPIKey") {
+            const GrpcError failure{grpcCode, method, error};
             m_statusLabel->setText(QString("<b style='color:%1;'>%2</b>")
-                                       .arg(errHex(), errorSummary("save the Nexus API key", error, true).toHtmlEscaped()));
-            presentError(this, "API Key Not Saved", "save the Nexus API key", error, true);
+                                       .arg(errHex(), errorSummary("save the Nexus API key", failure, true).toHtmlEscaped()));
+            presentError(this, "API Key Not Saved", "save the Nexus API key", failure, true);
             m_saveBtn->setEnabled(true);
         }
     });
@@ -175,11 +176,11 @@ void SettingsDialog::populateProtonCombo()
         return;
 
     std::vector<GrpcProtonVersion> versions;
-    QString err;
+    GrpcError err;
     if (!m_grpc->detectProtonVersions(versions, err)) {
         m_protonStatus->setText(
             QString("<span style='color:%1;'>%2</span>")
-                .arg(errHex(), errorSummary("detect Proton versions", err).toHtmlEscaped()));
+                .arg(errHex(), errorSummary("detect Proton versions", err, false).toHtmlEscaped()));
         return;
     }
     for (const auto& v : versions)
@@ -393,7 +394,7 @@ void SettingsDialog::onSaveProton()
         return;
     }
     QString path = m_protonCombo->currentData().toString();
-    QString err;
+    GrpcError err;
     if (!m_grpc->setPreferredProton(path, err)) {
         m_protonStatus->setText(
             QString("<b style='color:%1;'>%2</b>")

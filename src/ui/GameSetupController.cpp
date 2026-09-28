@@ -225,7 +225,7 @@ void GameSetupController::onVfsStatusQueried(quint64 requestId, const GrpcVFSSta
     queueRecovery(recovery);
 }
 
-void GameSetupController::onVfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString&)
+void GameSetupController::onVfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString&, int)
 {
     if (m_pendingReviewQueries.value(gameId) != requestId)
         return;
@@ -309,7 +309,7 @@ void GameSetupController::queueRecovery(const GrpcRecoveryPending& recovery)
     m_showingRecovery = false;
 }
 
-void GameSetupController::onRpcError(const QString& method, const QString& error)
+void GameSetupController::onRpcError(const QString& method, const QString& error, int grpcCode)
 {
     if (method != QLatin1String("RestoreFromBackup"))
         return;
@@ -322,7 +322,7 @@ void GameSetupController::onRpcError(const QString& method, const QString& error
     for (const QString& id : m_seenRecoveryIds.value(gameId))
         m_shownRecoveryIds.remove(id);
     m_seenRecoveryIds.remove(gameId);
-    presentError(m_parentWindow, "Recovery changed", "restore the game files", error, true);
+    presentError(m_parentWindow, "Recovery changed", "restore the game files", GrpcError{grpcCode, method, error}, true);
     if (reannounced && m_latestRecoveries.contains(gameId)
         && !m_seenRecoveryIds.value(gameId).contains(m_latestRecoveries.value(gameId).recoveryId))
         reviewRecovery(gameId);

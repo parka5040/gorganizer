@@ -391,13 +391,13 @@ void IniEditorDialog::onIniSaved(quint64 requestId, const GrpcIniSaveResult& res
     saveNextFile();
 }
 
-void IniEditorDialog::onIniSaveFailed(quint64 requestId, const QString& error)
+void IniEditorDialog::onIniSaveFailed(quint64 requestId, const QString& error, int grpcCode)
 {
     if (!m_operationRunning || requestId != m_requestId || m_savingIndex < 0)
         return;
     finishOperation();
     m_statusLabel->setText(QString("<span style='color:%1;'>Couldn't save settings to the profile.</span>").arg(errHex()));
-    presentError(this, "Save Failed", "save this INI file", error, true);
+    presentError(this, "Save Failed", "save this INI file", GrpcError{grpcCode, QStringLiteral("SaveProfileIniFile"), error}, true);
 }
 
 void IniEditorDialog::onIniApplied(quint64 requestId, int)
@@ -408,7 +408,7 @@ void IniEditorDialog::onIniApplied(quint64 requestId, int)
     m_statusLabel->setText(QString("<span style='color:%1;'>Settings applied to the game.</span>").arg(okHex()));
 }
 
-void IniEditorDialog::onIniApplyFailed(quint64 requestId, const QString& error)
+void IniEditorDialog::onIniApplyFailed(quint64 requestId, const QString& error, int grpcCode)
 {
     if (!m_operationRunning || requestId != m_requestId || !m_applyAfterSave)
         return;
@@ -417,7 +417,7 @@ void IniEditorDialog::onIniApplyFailed(quint64 requestId, const QString& error)
         m_savingIndex >= 0
             ? "Settings were saved to this profile, but could not be applied to the game."
             : "Settings could not be applied to the game."));
-    presentError(this, "Settings Not Applied", "apply settings to the game", error, true);
+    presentError(this, "Settings Not Applied", "apply settings to the game", GrpcError{grpcCode, QStringLiteral("ApplyProfileIniFiles"), error}, true);
 }
 
 void IniEditorDialog::onToggleEnabled(bool checked)

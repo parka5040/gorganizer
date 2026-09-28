@@ -133,7 +133,7 @@ void LaunchController::onGameLaunched(int pid)
     m_statusBar->showMessage(QString("Game launched (PID %1)").arg(pid), 5000);
 }
 
-void LaunchController::onGameLaunchFailed(const QString& error)
+void LaunchController::onGameLaunchFailed(const QString& error, int grpcCode)
 {
     m_launchPending = false;
     updateRunEnabled();
@@ -143,19 +143,19 @@ void LaunchController::onGameLaunchFailed(const QString& error)
         const QString reason = parsed.fields.value(QStringLiteral("reason"));
         m_modLoader->refreshStatus(gameId);
         if (reason == QLatin1String("unsupported_build"))
-            presentError(m_parentWindow, "Launch Blocked", "launch this game", error, true);
+            presentError(m_parentWindow, "Launch Blocked", "launch this game", GrpcError{grpcCode, QStringLiteral("LaunchGame"), error}, true);
         else
             offerModLoaderFix(gameId, reason);
         m_session->refreshStatusInfo();
         return;
     }
     if (parsed.token == QLatin1String("modloader_busy")) {
-        presentError(m_parentWindow, "Launch Blocked", "launch this game", error, true);
+        presentError(m_parentWindow, "Launch Blocked", "launch this game", GrpcError{grpcCode, QStringLiteral("LaunchGame"), error}, true);
         m_session->refreshStatusInfo();
         return;
     }
     if (parsed.token == QLatin1String("game_running") || parsed.token == QLatin1String("daemon_shutting_down")) {
-        presentError(m_parentWindow, "Launch Blocked", "launch this game", error, true);
+        presentError(m_parentWindow, "Launch Blocked", "launch this game", GrpcError{grpcCode, QStringLiteral("LaunchGame"), error}, true);
         const QString gameId = parsed.fields.value(QStringLiteral("game"));
         if (!gameId.isEmpty() && m_grpc->isConnected())
             m_grpc->getVfsStatus(gameId);
@@ -163,24 +163,24 @@ void LaunchController::onGameLaunchFailed(const QString& error)
         return;
     }
     if (parsed.token == QLatin1String("loader_missing")) {
-        presentError(m_parentWindow, "Script Extender Launch Blocked", "launch this game", error, true);
+        presentError(m_parentWindow, "Script Extender Launch Blocked", "launch this game", GrpcError{grpcCode, QStringLiteral("LaunchGame"), error}, true);
         m_session->refreshStatusInfo();
         return;
     }
 
     if (parsed.token == QLatin1String("fnv4gb_not_applied_for_ttw")) {
-        presentError(m_parentWindow, "Patch FalloutNV.exe to 4GB", "launch this game", error, true);
+        presentError(m_parentWindow, "Patch FalloutNV.exe to 4GB", "launch this game", GrpcError{grpcCode, QStringLiteral("LaunchGame"), error}, true);
         m_session->refreshStatusInfo();
         return;
     }
 
     if (parsed.token == QLatin1String("xnvse_missing_for_ttw")) {
-        presentError(m_parentWindow, "xNVSE Required", "launch this game", error, true);
+        presentError(m_parentWindow, "xNVSE Required", "launch this game", GrpcError{grpcCode, QStringLiteral("LaunchGame"), error}, true);
         m_session->refreshStatusInfo();
         return;
     }
 
-    presentError(m_parentWindow, "Launch Failed", "launch this game", error, true);
+    presentError(m_parentWindow, "Launch Failed", "launch this game", GrpcError{grpcCode, QStringLiteral("LaunchGame"), error}, true);
     m_session->refreshStatusInfo();
 }
 

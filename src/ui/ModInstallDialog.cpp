@@ -196,7 +196,7 @@ void ModInstallDialog::onPreviewCompleted(quint64 requestId, const GrpcPreviewIn
     showRoots(result.selectableRoots);
 }
 
-void ModInstallDialog::onPreviewFailed(quint64 requestId, const QString& error)
+void ModInstallDialog::onPreviewFailed(quint64 requestId, const QString& error, int grpcCode)
 {
     if (requestId != m_previewRequestId)
         return;
@@ -205,8 +205,8 @@ void ModInstallDialog::onPreviewFailed(quint64 requestId, const QString& error)
         return;
     }
     if (m_phase == Previewing) {
-        showFailure(errorSummary("read this archive", error));
-        presentError(this, "Archive Could Not Be Read", "read this archive", error);
+        showFailure(errorSummary("read this archive", GrpcError{grpcCode, QStringLiteral("PreviewInstall"), error}, false));
+        presentError(this, "Archive Could Not Be Read", "read this archive", GrpcError{grpcCode, QStringLiteral("PreviewInstall"), error}, false);
     }
 }
 

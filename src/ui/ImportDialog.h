@@ -38,7 +38,7 @@ private slots:
     void onBackToSelection();
     void onTransferProgress(const GrpcTransferProgress& progress);
     void onTransferCompleted(const GrpcTransferSummary& summary);
-    void onTransferFailed(const QString& error);
+    void onTransferFailed(const QString& error, int grpcCode);
 
 private:
     QWidget* buildArchivePage();

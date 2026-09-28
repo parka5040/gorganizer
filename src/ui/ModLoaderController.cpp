@@ -236,7 +236,7 @@ void ModLoaderController::onStatusReceived(quint64 requestId, const QString& gam
     updateMenu();
 }
 
-void ModLoaderController::onStatusFailed(quint64 requestId, const QString& gameId, const QString& error)
+void ModLoaderController::onStatusFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode)
 {
     if (m_pendingStatus.value(gameId) == requestId)
         m_pendingStatus.remove(gameId);
@@ -250,11 +250,11 @@ void ModLoaderController::onStatusFailed(quint64 requestId, const QString& gameI
     if (requestId == m_interactiveCheckId) {
         m_interactiveCheckId = 0;
         updateMenu();
-        presentError(m_parentWindow, "Check for SMAPI Updates", "check for SMAPI updates", error);
+        presentError(m_parentWindow, "Check for SMAPI Updates", "check for SMAPI updates", GrpcError{grpcCode, QStringLiteral("GetModLoaderStatus"), error}, false);
         return;
     }
     if (gameId == m_game.shortName)
-        m_statusBar->showMessage(errorSummary("check SMAPI's status", error), 5000);
+        m_statusBar->showMessage(errorSummary("check SMAPI's status", GrpcError{grpcCode, QStringLiteral("GetModLoaderStatus"), error}, false), 5000);
     updateMenu();
 }
 
@@ -438,14 +438,14 @@ void ModLoaderController::onVfsStatusQueried(quint64 requestId, const GrpcVFSSta
     abortOperation(message, QString(), false);
 }
 
-void ModLoaderController::onVfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error)
+void ModLoaderController::onVfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode)
 {
     Q_UNUSED(gameId);
     if (!m_op)
         return;
     if (m_op->phase == Phase::Capturing && requestId == m_op->captureRequestId) {
         const QString message = QStringLiteral("gorganizer could not check whether the mods of %1 are mounted, so "
-                                               "SMAPI was not changed.\n\n%2").arg(m_op->gameName, errorSummary("check mounted mods", error));
+                                               "SMAPI was not changed.\n\n%2").arg(m_op->gameName, errorSummary("check mounted mods", GrpcError{grpcCode, QStringLiteral("GetVFSStatus"), error}, false));
         abortOperation(message, QString(), true);
         return;
     }

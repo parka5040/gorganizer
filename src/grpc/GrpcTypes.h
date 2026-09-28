@@ -472,6 +472,15 @@ enum GrpcStatusCode {
     GrpcStatusUnavailable = 14,
 };
 
+struct GrpcError {
+    int code = 0;
+    QString method;
+    QString message;
+    bool ok() const;
+    bool outcomeUnknown() const;
+    bool unavailable() const;
+};
+
 struct GrpcReinstallResult {
     int archivesReplayed = 0;
     int archivesSkipped = 0;

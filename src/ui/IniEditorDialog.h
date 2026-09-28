@@ -58,9 +58,9 @@ private:
     void saveNextFile();
     void finishOperation();
     void onIniSaved(quint64 requestId, const GrpcIniSaveResult& result);
-    void onIniSaveFailed(quint64 requestId, const QString& error);
+    void onIniSaveFailed(quint64 requestId, const QString& error, int grpcCode);
     void onIniApplied(quint64 requestId, int appliedFileCount);
-    void onIniApplyFailed(quint64 requestId, const QString& error);
+    void onIniApplyFailed(quint64 requestId, const QString& error, int grpcCode);
 
     GrpcClient* m_grpc;
     QString m_gameId;

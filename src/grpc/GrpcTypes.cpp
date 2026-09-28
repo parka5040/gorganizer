@@ -127,4 +127,19 @@ bool grpcOutcomeUnknown(int code)
         || code == GrpcStatusUnavailable;
 }
 
+bool GrpcError::ok() const
+{
+    return code == GrpcStatusOk;
+}
+
+bool GrpcError::outcomeUnknown() const
+{
+    return grpcOutcomeUnknown(code);
+}
+
+bool GrpcError::unavailable() const
+{
+    return code == GrpcStatusUnavailable;
+}
+
 }

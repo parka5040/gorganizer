@@ -138,29 +138,29 @@ signals:
     void modListUpdated();
     void vfsMounted(const GrpcVFSStatus& status);
     void vfsRetargeted(quint64 requestId, const GrpcVFSStatus& status);
-    void vfsRetargetFailed(quint64 requestId, const QString& gameId, const QString& profileName, const QString& error);
+    void vfsRetargetFailed(quint64 requestId, const QString& gameId, const QString& profileName, const QString& error, int grpcCode);
     void vfsUnmounted();
     void vfsStatusReceived(const GrpcVFSStatus& status);
     void vfsRecoveryRetried(const QString& gameId);
     void vfsStatusQueried(quint64 requestId, const GrpcVFSStatus& status);
-    void vfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void vfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     void steamMaintenanceSet(quint64 requestId, const GrpcVFSStatus& status);
-    void steamMaintenanceSetFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void steamMaintenanceSetFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     void preservedFilesImported(quint64 requestId, const QString& gameId, const QString& modName, int fileCount);
-    void preservedFilesImportFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void preservedFilesImportFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     void preservedBatchDeleted(quint64 requestId, const GrpcVFSStatus& status);
-    void preservedBatchDeleteFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void preservedBatchDeleteFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     void maintenanceUnmountFinished(quint64 requestId, const QString& gameId, bool ok, int grpcCode, const QString& error);
     void vfsRebuilt();
     void conflictsReceived(const std::vector<GrpcFileConflict>& conflicts);
     void gameLaunched(int pid);
-    void gameLaunchFailed(const QString& error);
+    void gameLaunchFailed(const QString& error, int grpcCode);
 
     void downloadStarted(const QString& downloadId, int queuedAhead);
     void downloadCancelled(const QString& downloadId);
     void downloadRetried(const QString& downloadId, int queuedAhead);
     void previewInstallCompleted(quint64 requestId, const GrpcPreviewInstallResult& result);
-    void previewInstallFailed(quint64 requestId, const QString& error);
+    void previewInstallFailed(quint64 requestId, const QString& error, int grpcCode);
     void installRequestCompleted(quint64 requestId, const QString& modFolder, int fileCount);
     void installRequestFailed(quint64 requestId, int grpcCode, const QString& error, bool sent);
     void reinstallRequestFailed(quint64 requestId, int grpcCode, const QString& error, bool sent);
@@ -186,10 +186,10 @@ signals:
 
     void transferProgress(const GrpcTransferProgress& progress);
     void transferCompleted(const GrpcTransferSummary& summary);
-    void transferFailed(const QString& error);
+    void transferFailed(const QString& error, int grpcCode);
 
     void modLoaderStatusReceived(quint64 requestId, const QString& gameId, const GrpcModLoaderStatus& status);
-    void modLoaderStatusFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void modLoaderStatusFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     void modLoaderOperationFinished(quint64 requestId, const QString& gameId, const QString& operation,
                                     bool ok, int grpcCode, const GrpcModLoaderStatus& status, const QString& error);
 
@@ -206,7 +206,7 @@ signals:
                         const QStringList& flaggedArchives);
     void modRenamed(quint64 requestId, const QString& gameId, const QString& oldName, const QString& newName);
     void modActionFailed(quint64 requestId, const QString& gameId, const QString& modName,
-                         const QString& method, const QString& error);
+                         const QString& method, const QString& error, int grpcCode);
     void modDependencyReportReceived(quint64 requestId, const GrpcModDependencyReport& report);
     void modDependencyReportFailed(quint64 requestId, const QString& gameId, const QString& profileName,
                                    const QString& error);
@@ -219,12 +219,12 @@ signals:
     void dependencyEnableAckFailed(quint64 requestId, const QString& gameId, const QString& batchId,
                                    const QString& error);
     void profileIniSaved(quint64 requestId, const GrpcIniSaveResult& result);
-    void profileIniSaveFailed(quint64 requestId, const QString& error);
+    void profileIniSaveFailed(quint64 requestId, const QString& error, int grpcCode);
     void profileIniFilesApplied(quint64 requestId, int appliedFileCount);
-    void profileIniFilesApplyFailed(quint64 requestId, const QString& error);
+    void profileIniFilesApplyFailed(quint64 requestId, const QString& error, int grpcCode);
     void installCompletedHintReceived(quint64 generation, const GrpcInstallCompleted& event);
 
-    void rpcError(const QString& method, const QString& error);
+    void rpcError(const QString& method, const QString& error, int grpcCode);
 
 private:
     using Stub = gorganizer::v1::Gorganizer::Stub;

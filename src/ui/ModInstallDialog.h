@@ -54,7 +54,7 @@ signals:
 
 private slots:
     void onPreviewCompleted(quint64 requestId, const GrpcPreviewInstallResult& result);
-    void onPreviewFailed(quint64 requestId, const QString& error);
+    void onPreviewFailed(quint64 requestId, const QString& error, int grpcCode);
     void onInstallCompleted(quint64 requestId, const QString& modFolder, int fileCount);
     void onInstallFailed(quint64 requestId, const QString& error);
     void onInstallCancelled(quint64 requestId);

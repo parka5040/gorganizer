@@ -26,7 +26,7 @@ private slots:
     void onProfileCreated(const GrpcProfile& profile);
     void onProfileCopied(const QString& gameId, const GrpcProfile& profile);
     void onProfileDeleted();
-    void onRpcError(const QString& method, const QString& error);
+    void onRpcError(const QString& method, const QString& error, int grpcCode);
     void onComboChanged(int index);
     void onCreateClicked();
     void onDeleteClicked();

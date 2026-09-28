@@ -305,7 +305,7 @@ void PluginListWidget::persistLoadoutToDaemon()
     if (!m_supported || !m_grpc || !m_game.detected || m_activeProfile.isEmpty())
         return;
     const auto loadout = m_model->orderedLoadout();
-    QString err;
+    GrpcError err;
     if (!m_grpc->setPluginLoadout(m_game.shortName, m_activeProfile, loadout, err)) {
         qWarning().noquote() << errorSummary("save plugin choices", err, true);
         presentError(this, "Plugin state not saved", "save plugin choices", err, true);

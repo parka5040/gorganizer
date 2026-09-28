@@ -44,11 +44,11 @@ private:
     void deleteBatch();
     void finishSteam();
     void onMaintenanceSet(quint64 requestId, const GrpcVFSStatus& status);
-    void onMaintenanceSetFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void onMaintenanceSetFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     void onFilesImported(quint64 requestId, const QString& gameId, const QString& modName, int fileCount);
-    void onFilesImportFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void onFilesImportFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     void onBatchDeleted(quint64 requestId, const GrpcVFSStatus& status);
-    void onBatchDeleteFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void onBatchDeleteFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     const GrpcPreservedBatch* selectedBatch() const;
     void requestRefresh(const QString& gameId);
 

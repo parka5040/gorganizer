@@ -131,7 +131,7 @@ void ProfileSelectorWidget::onProfileCopied(const QString& gameId, const GrpcPro
     }
 }
 
-void ProfileSelectorWidget::onRpcError(const QString& method, const QString& error)
+void ProfileSelectorWidget::onRpcError(const QString& method, const QString& error, int grpcCode)
 {
     if (method != "CopyProfile" || !m_copyPending)
         return;
@@ -142,7 +142,7 @@ void ProfileSelectorWidget::onRpcError(const QString& method, const QString& err
     m_copyBtn->setEnabled(true);
     if (auto* main = qobject_cast<QMainWindow*>(window()))
         main->statusBar()->clearMessage();
-    presentError(this, "Copy Profile", "copy this profile", error);
+    presentError(this, "Copy Profile", "copy this profile", GrpcError{grpcCode, method, error}, true);
 }
 
 void ProfileSelectorWidget::onProfileDeleted()

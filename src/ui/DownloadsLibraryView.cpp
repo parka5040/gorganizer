@@ -81,7 +81,7 @@ DownloadsLibraryView::DownloadsLibraryView(GrpcClient* grpc, InstallController* 
         if (m_suppressToggleSignal || m_game.shortName.isEmpty())
             return;
         GrpcGameSettings s;
-        QString err;
+        GrpcError err;
         if (!m_grpc->setGameSettings(m_game.shortName, checked, s, err))
             presentError(this, "Settings Error", "save settings", err, true);
     });
@@ -243,7 +243,7 @@ void DownloadsLibraryView::setGame(const GameInfo& game)
 
     if (!game.shortName.isEmpty()) {
         GrpcGameSettings s;
-        QString err;
+        GrpcError err;
         m_suppressToggleSignal = true;
         if (m_grpc->getGameSettings(game.shortName, s, err))
             m_autoInstallToggle->setChecked(s.autoInstall);
@@ -267,7 +267,7 @@ void DownloadsLibraryView::reloadFromDaemon()
         return;
     }
     std::vector<GrpcArchiveRow> rows;
-    QString err;
+    GrpcError err;
     if (!m_grpc->listArchives(m_game.shortName, rows, err)) {
         m_model->replaceFromDaemon({});
         return;
@@ -329,7 +329,7 @@ void DownloadsLibraryView::onContextMenu(const QPoint& pos)
                 if (!dialogs::confirm(this, "Remove Download",
                     "Remove this download from the list? Any partly downloaded file is deleted."))
                     return;
-                QString err;
+                GrpcError err;
                 if (!m_grpc->removeArchive(m_game.shortName, row.archiveRelPath, row.downloadId, err)) {
                     presentError(this, "Remove Failed", "remove this download", err, true);
                     return;
@@ -362,10 +362,10 @@ void DownloadsLibraryView::onContextMenu(const QPoint& pos)
                        [this, row] { actionHide(row.archiveRelPath, !row.hidden); });
         if (!inFlight) {
             menu.addAction("Refresh Nexus Metadata", this, [this, row] {
-                QString err;
+                GrpcError err;
                 GrpcArchiveRow fresh;
                 if (!m_grpc->refreshArchiveMetadata(m_game.shortName, row.archiveRelPath, fresh, err)) {
-                    presentError(this, "Refresh Failed", "refresh this archive's information", err);
+                    presentError(this, "Refresh Failed", "refresh this archive's information", err, true);
                     return;
                 }
                 reloadFromDaemon();
@@ -604,7 +604,12 @@ void DownloadsLibraryView::actionMergeInto(const GrpcArchiveRow& row)
 
 void DownloadsLibraryView::actionHide(const QString& archivePath, bool hidden)
 {
-    QString err;
+    if (!m_grpc->isConnected()) {
+        presentError(this, "Hide Failed", "hide this archive",
+                     GrpcError{GrpcStatusUnavailable, QStringLiteral("SetArchiveHidden"), QStringLiteral("not connected")}, false);
+        return;
+    }
+    GrpcError err;
     if (!m_grpc->setArchiveHidden(m_game.shortName, archivePath, hidden, err)) {
         presentError(this, "Hide Failed", "hide this archive", err, true);
         return;
@@ -615,7 +620,7 @@ void DownloadsLibraryView::actionHide(const QString& archivePath, bool hidden)
 
 void DownloadsLibraryView::actionBulkHide(GrpcBulkHideScope scope, bool hidden)
 {
-    QString err;
+    GrpcError err;
     int affected = 0;
     if (!m_grpc->setArchivesHiddenBulk(m_game.shortName, hidden, scope, affected, err)) {
         presentError(this, "Bulk Hide Failed", "hide these archives", err, true);
@@ -629,7 +634,7 @@ void DownloadsLibraryView::actionDelete(const GrpcArchiveRow& row)
     if (!dialogs::confirm(this, "Delete Archive",
         QString("Delete %1 from disk? This cannot be undone.").arg(row.fileArchiveName)))
         return;
-    QString err;
+    GrpcError err;
     if (!m_grpc->removeArchive(m_game.shortName, row.archiveRelPath, row.downloadId, err)) {
         presentError(this, "Delete Failed", "delete this archive", err, true);
         return;

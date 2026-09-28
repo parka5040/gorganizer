@@ -106,7 +106,7 @@ SessionController::SessionController(AppConfig& config, GrpcClient* grpc,
         autoMountActiveProfile();
     });
     connect(m_grpc, &GrpcClient::vfsStatusQueryFailed, this,
-            [this](quint64 requestId, const QString& gameId, const QString&) {
+            [this](quint64 requestId, const QString& gameId, const QString&, int) {
         if (requestId != m_autoMountQueryId || gameId != m_activeGame.shortName)
             return;
         m_autoMountQueryId = 0;
@@ -410,12 +410,12 @@ void SessionController::onVfsRetargeted(quint64 requestId, const GrpcVFSStatus& 
 }
 
 void SessionController::onVfsRetargetFailed(quint64 requestId, const QString& gameId,
-                                            const QString& profileName, const QString& error)
+                                            const QString& profileName, const QString& error, int grpcCode)
 {
     if (requestId != m_retargetRequestId || gameId != m_retargetGameId
         || gameId != m_activeGame.shortName)
         return;
-    presentError(m_parentWindow, "Switch Profile", "switch profiles", error, true);
+    presentError(m_parentWindow, "Switch Profile", "switch profiles", GrpcError{grpcCode, QStringLiteral("MountVFS"), error}, true);
     if (requestId != m_retargetRequestId || gameId != m_activeGame.shortName)
         return;
     m_retargetRequestId = 0;
@@ -454,7 +454,7 @@ void SessionController::onRetargetStatusQueried(quint64 requestId, const GrpcVFS
     startProfileSwitch();
 }
 
-void SessionController::onRetargetStatusQueryFailed(quint64 requestId, const QString& gameId, const QString&)
+void SessionController::onRetargetStatusQueryFailed(quint64 requestId, const QString& gameId, const QString&, int)
 {
     if (requestId != m_retargetStatusQueryId || gameId != m_activeGame.shortName)
         return;
@@ -704,7 +704,7 @@ void SessionController::autoMountActiveProfile()
     m_grpc->mountVfsWithSwap(m_activeGame.shortName, m_currentProfile);
 }
 
-void SessionController::onRpcError(const QString& method, const QString& error)
+void SessionController::onRpcError(const QString& method, const QString& error, int grpcCode)
 {
     if (method == QLatin1String("RetryVFSRecovery")) {
         const QString gameId = m_retryGameId;
@@ -734,11 +734,11 @@ void SessionController::onRpcError(const QString& method, const QString& error)
     if (method == "SetModList") {
         if (m_activeGame.detected)
             m_modList->reloadAfterFailedSave(m_activeGame, m_currentProfile);
-        presentError(m_parentWindow, "Change not saved", "save mod choices", error, true);
+        presentError(m_parentWindow, "Change not saved", "save mod choices", GrpcError{grpcCode, method, error}, true);
         return;
     }
     if (method == QLatin1String("RebuildVFS") && parseInstallError(error).token == QLatin1String("game_running")) {
-        presentError(m_parentWindow, "Apply Changes", "apply mod changes", error, true);
+        presentError(m_parentWindow, "Apply Changes", "apply mod changes", GrpcError{grpcCode, method, error}, true);
         return;
     }
     const QString operation = method == QLatin1String("MountVFS") ? QStringLiteral("activate mods")
@@ -747,7 +747,7 @@ void SessionController::onRpcError(const QString& method, const QString& error)
         : method == QLatin1String("RetryVFSRecovery") ? QStringLiteral("check recovery")
         : method == QLatin1String("RestoreFromBackup") ? QStringLiteral("restore the game files")
         : QStringLiteral("complete this request");
-    m_statusBar->showMessage(errorSummary(operation, error, true), 5000);
+    m_statusBar->showMessage(errorSummary(operation, GrpcError{grpcCode, method, error}, true), 5000);
 }
 
 void SessionController::onRecoveryAction()

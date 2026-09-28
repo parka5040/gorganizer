@@ -35,7 +35,7 @@ private slots:
     // U-3 re-enable point: launch resolved successfully.
     void onGameLaunched(int pid);
     // U-3 re-enable point on failure; translates machine error strings into actionable dialogs.
-    void onGameLaunchFailed(const QString& error);
+    void onGameLaunchFailed(const QString& error, int grpcCode);
     // Re-evaluates Run when a SMAPI operation starts or ends.
     void onModLoaderActivityChanged(const QString& gameId, bool active);
     // Re-evaluates Run for the newly active game.

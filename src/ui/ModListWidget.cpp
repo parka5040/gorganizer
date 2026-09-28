@@ -558,7 +558,7 @@ void ModListWidget::finishFolderScan(std::vector<ModMetadata> scanned, const Sca
     if (!m_gameId.isEmpty() && !m_profileName.isEmpty()) {
         std::vector<GrpcSeparator> seps;
         bool viewEnabled = false;
-        QString err;
+        GrpcError err;
         const bool loaded = m_grpc->listSeparators(context.gameId, context.profileName, seps, viewEnabled, err);
         if (!matchesContext(context) || tag.generation != m_scanGeneration)
             return;
@@ -846,7 +846,7 @@ int ModListWidget::availableSeparatorIndex(const ActionContext& context, const Q
     if (index >= 0) {
         std::vector<GrpcSeparator> separators;
         bool viewEnabled = false;
-        QString error;
+        GrpcError error;
         const bool loaded = m_grpc->listSeparators(context.gameId, context.profileName,
                                                     separators, viewEnabled, error);
         if (loaded && matchesContext(context) && std::any_of(separators.begin(), separators.end(),
@@ -1738,7 +1738,7 @@ void ModListWidget::onModRenamed(quint64 requestId, const QString& gameId, const
 }
 
 void ModListWidget::onModActionFailed(quint64 requestId, const QString& gameId, const QString& modName,
-                                      const QString& method, const QString& error)
+                                      const QString& method, const QString& error, int grpcCode)
 {
     if (!m_modAction || requestId != m_modAction->requestId || gameId != m_modAction->context.gameId
         || modName != m_modAction->folder)
@@ -1769,10 +1769,11 @@ void ModListWidget::onModActionFailed(quint64 requestId, const QString& gameId, 
         return;
     }
     const QString displayError = modActionError(error, action.submittedWhileConnected);
+    const GrpcError failure{grpcCode, method, grpcCode == GrpcStatusOk ? displayError : error};
     if (m_bulkReinstall) {
         ++m_bulkReinstall->failed;
         m_bulkReinstall->errors.append(QStringLiteral("• %1: %2\n%3")
-            .arg(action.name, errorSummary(QStringLiteral("reinstall this mod"), displayError, true), error));
+            .arg(action.name, errorSummary(QStringLiteral("reinstall this mod"), failure, true), error));
         finishModAction(false);
         return;
     }
@@ -1785,7 +1786,7 @@ void ModListWidget::onModActionFailed(quint64 requestId, const QString& gameId, 
     const QString operation = action.kind == ModActionKind::Reinstall ? QStringLiteral("reinstall this mod")
         : action.kind == ModActionKind::Uninstall ? QStringLiteral("uninstall this mod")
         : QStringLiteral("rename this mod");
-    presentError(this, title, operation, displayError, true, error);
+    presentError(this, title, operation, failure, true, error);
 }
 
 void ModListWidget::onReinstallFailed(quint64 requestId, const QString& error)
@@ -1793,7 +1794,7 @@ void ModListWidget::onReinstallFailed(quint64 requestId, const QString& error)
     if (!m_modAction || m_modAction->kind != ModActionKind::Reinstall ||
         m_modAction->requestId != requestId) return;
     onModActionFailed(requestId, m_modAction->context.gameId, m_modAction->folder,
-                      QStringLiteral("ReinstallMod"), error);
+                      QStringLiteral("ReinstallMod"), error, GrpcStatusOk);
 }
 
 void ModListWidget::onReinstallCancelled(quint64 requestId)
@@ -1844,7 +1845,8 @@ void ModListWidget::onModActionWorkersStopped()
         : QStringLiteral("RenameMod");
     onModActionFailed(action.requestId, action.context.gameId, action.folder, method,
                       action.submittedWhileConnected ? QStringLiteral("deadline exceeded")
-                          : QStringLiteral("not connected"));
+                          : QStringLiteral("not connected"),
+                      action.submittedWhileConnected ? GrpcStatusDeadlineExceeded : GrpcStatusUnavailable);
 }
 
 void ModListWidget::showContextMenu(const QPoint& pos)
@@ -2437,7 +2439,7 @@ void ModListWidget::persistSeparators()
         g.collapsed = s.collapsed;
         out.push_back(std::move(g));
     }
-    QString err;
+    GrpcError err;
     m_grpc->setSeparators(m_gameId, m_profileName, out, m_visualMode, err);
 }
 
@@ -2605,7 +2607,8 @@ void ModListWidget::onOverwriteContextMenu(const ActionContext& context, const Q
     QMenu menu;
 
     std::vector<GrpcOverwriteEntry> files;
-    QString owDir, err;
+    QString owDir;
+    GrpcError err;
     bool ok = m_grpc->listOverwriteFiles(context.gameId, files, owDir, err);
     if (!matchesContext(context))
         return;
@@ -2632,7 +2635,7 @@ void ModListWidget::onOverwriteContextMenu(const ActionContext& context, const Q
     if (ok && !hasFiles)
         extractAll->setToolTip("Overwrite is empty.");
     if (!ok)
-        extractAll->setToolTip(plainToolTip(errorSummary("list Overwrite files", err)));
+        extractAll->setToolTip(plainToolTip(errorSummary("list Overwrite files", err, false)));
     connect(extractAll, &QAction::triggered, this, [this, context] { extractOverwriteAll(context); });
 
     auto* extractSel = menu.addAction("Extract Selected Files to New Mod...");
@@ -2653,7 +2656,7 @@ void ModListWidget::extractOverwriteAll(const ActionContext& context)
     if (!ok || name.trimmed().isEmpty() || !matchesContext(context) || refuseModAction())
         return;
     int count = 0;
-    QString err;
+    GrpcError err;
     const bool extracted = m_grpc->extractOverwriteToMod(context.gameId, name.trimmed(), {}, false, count, err);
     if (!matchesContext(context))
         return;
@@ -2672,12 +2675,13 @@ void ModListWidget::extractOverwriteSelected(const ActionContext& context)
     if (refuseModAction() || !matchesContext(context))
         return;
     std::vector<GrpcOverwriteEntry> files;
-    QString owDir, err;
+    QString owDir;
+    GrpcError err;
     const bool listed = m_grpc->listOverwriteFiles(context.gameId, files, owDir, err);
     if (!matchesContext(context))
         return;
     if (!listed) {
-        presentError(this, "Extract Failed", "list Overwrite files", err);
+        presentError(this, "Extract Failed", "list Overwrite files", err, false);
         return;
     }
 
@@ -2755,7 +2759,7 @@ void ModListWidget::extractOverwriteSelected(const ActionContext& context)
     }
 
     int count = 0;
-    QString rpcErr;
+    GrpcError rpcErr;
     const bool extracted = m_grpc->extractOverwriteToMod(context.gameId, name, chosen, keepCb->isChecked(),
                                                           count, rpcErr);
     if (!matchesContext(context))

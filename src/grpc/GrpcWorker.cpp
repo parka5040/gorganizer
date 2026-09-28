@@ -430,7 +430,7 @@ bool GrpcWorker::call(const char* rpcName, Method method, const Req& req, Resp& 
 {
     auto status = invoke(method, req, resp, deadline);
     if (!status.ok()) {
-        emit rpcError(rpcName, QString::fromStdString(status.error_message()));
+        emit rpcError(rpcName, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
         return false;
     }
     return true;
@@ -493,11 +493,11 @@ void GrpcWorker::runTransferStream(std::unique_ptr<grpc::ClientReader<gorganizer
         }
     });
     if (!status.ok()) {
-        emit transferFailed(QString::fromStdString(status.error_message()));
+        emit transferFailed(QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
         return;
     }
     if (!haveSummary) {
-        emit transferFailed(QStringLiteral("transfer stream ended without a summary"));
+        emit transferFailed(QStringLiteral("transfer stream ended without a summary"), GrpcStatusUnknown);
         return;
     }
     emit transferCompleted(summary);
@@ -869,7 +869,7 @@ void GrpcWorker::doRetargetVfs(quint64 requestId, const QString& gameId, const Q
     gorganizer::v1::MountVFSResponse resp;
     auto status = invoke(&Stub::MountVFS, req, resp, std::chrono::minutes(10));
     if (!status.ok()) {
-        emit vfsRetargetFailed(requestId, gameId, profileName, QString::fromStdString(status.error_message()));
+        emit vfsRetargetFailed(requestId, gameId, profileName, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
         return;
     }
     emit vfsRetargeted(requestId, vfsStatusFromProto(resp.status()));
@@ -937,7 +937,7 @@ void GrpcWorker::doQueryVfsStatus(quint64 requestId, const QString& gameId)
     gorganizer::v1::VFSStatus resp;
     auto status = invoke(&Stub::GetVFSStatus, req, resp);
     if (!status.ok()) {
-        emit vfsStatusQueryFailed(requestId, gameId, QString::fromStdString(status.error_message()));
+        emit vfsStatusQueryFailed(requestId, gameId, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
         return;
     }
     GrpcVFSStatus out = vfsStatusFromProto(resp);
@@ -957,7 +957,7 @@ void GrpcWorker::doSetSteamMaintenance(quint64 requestId, const QString& gameId,
     gorganizer::v1::VFSStatus resp;
     auto status = invoke(&Stub::SetSteamMaintenance, req, resp, std::chrono::minutes(10));
     if (!status.ok()) {
-        emit steamMaintenanceSetFailed(requestId, gameId, QString::fromStdString(status.error_message()));
+        emit steamMaintenanceSetFailed(requestId, gameId, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
         return;
     }
     auto result = vfsStatusFromProto(resp);
@@ -979,7 +979,7 @@ void GrpcWorker::doImportPreservedFiles(quint64 requestId, const QString& gameId
     gorganizer::v1::ImportPreservedFilesResponse resp;
     auto status = invoke(&Stub::ImportPreservedFiles, req, resp, std::chrono::minutes(10));
     if (!status.ok()) {
-        emit preservedFilesImportFailed(requestId, gameId, QString::fromStdString(status.error_message()));
+        emit preservedFilesImportFailed(requestId, gameId, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
         return;
     }
     emit preservedFilesImported(requestId, gameId, QString::fromStdString(resp.mod_name()), resp.file_count());
@@ -993,7 +993,7 @@ void GrpcWorker::doDeletePreservedBatch(quint64 requestId, const QString& gameId
     gorganizer::v1::VFSStatus resp;
     auto status = invoke(&Stub::DeletePreservedBatch, req, resp);
     if (!status.ok()) {
-        emit preservedBatchDeleteFailed(requestId, gameId, QString::fromStdString(status.error_message()));
+        emit preservedBatchDeleteFailed(requestId, gameId, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
         return;
     }
     auto result = vfsStatusFromProto(resp);
@@ -1032,7 +1032,7 @@ void GrpcWorker::doLaunchGame(const QString& gameId, bool useTool, const QString
     req.set_profile_name(profileName.toStdString());
     gorganizer::v1::LaunchGameResponse resp;
     auto status = invoke(&Stub::LaunchGame, req, resp);
-    if (!status.ok()) { emit gameLaunchFailed(QString::fromStdString(status.error_message())); return; }
+    if (!status.ok()) { emit gameLaunchFailed(QString::fromStdString(status.error_message()), static_cast<int>(status.error_code())); return; }
     emit gameLaunched(resp.pid());
 }
 
@@ -1070,7 +1070,7 @@ void GrpcWorker::doPreviewInstall(quint64 requestId, const QString& gameId,
     gorganizer::v1::PreviewInstallResponse resp;
     auto status = invoke(&Stub::PreviewInstall, req, resp, std::chrono::minutes(10));
     if (!status.ok()) {
-        emit previewInstallFailed(requestId, QString::fromStdString(status.error_message()));
+        emit previewInstallFailed(requestId, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
         return;
     }
     emit previewInstallCompleted(requestId, previewInstallResultFromProto(resp));
@@ -1353,7 +1353,7 @@ void GrpcWorker::doGetModLoaderStatus(quint64 requestId, const QString& gameId, 
     const std::chrono::milliseconds deadline = checkLatest ? std::chrono::seconds(60) : std::chrono::seconds(30);
     auto status = invoke(&Stub::GetModLoaderStatus, req, resp, deadline);
     if (!status.ok()) {
-        emit modLoaderStatusFailed(requestId, gameId, QString::fromStdString(status.error_message()));
+        emit modLoaderStatusFailed(requestId, gameId, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
         return;
     }
     emit modLoaderStatusReceived(requestId, gameId, modLoaderStatusFromProto(resp));
@@ -1457,7 +1457,7 @@ void GrpcWorker::doUninstallMod(quint64 requestId, const QString& gameId, const 
     const auto status = invoke(&Stub::UninstallMod, req, resp, std::chrono::minutes(10));
     if (!status.ok()) {
         emit modActionFailed(requestId, gameId, modName, QStringLiteral("UninstallMod"),
-                             QString::fromStdString(status.error_message()));
+                             QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
         return;
     }
     QStringList flaggedArchives;
@@ -1476,7 +1476,7 @@ void GrpcWorker::doRenameMod(quint64 requestId, const QString& gameId, const QSt
     const auto status = invoke(&Stub::RenameMod, req, resp, std::chrono::minutes(10));
     if (!status.ok()) {
         emit modActionFailed(requestId, gameId, oldName, QStringLiteral("RenameMod"),
-                             QString::fromStdString(status.error_message()));
+                             QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
         return;
     }
     emit modRenamed(requestId, gameId, oldName, newName);
@@ -1556,7 +1556,7 @@ void GrpcWorker::doSaveProfileIniFile(quint64 requestId, const QString& gameId, 
     gorganizer::v1::SaveProfileIniFileResponse resp;
     auto status = invoke(&Stub::SaveProfileIniFile, req, resp);
     if (!status.ok()) {
-        emit profileIniSaveFailed(requestId, QString::fromStdString(status.error_message()));
+        emit profileIniSaveFailed(requestId, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
         return;
     }
     GrpcIniSaveResult result;
@@ -1571,7 +1571,7 @@ void GrpcWorker::doSaveProfileIniFile(quint64 requestId, const QString& gameId, 
         result.outcome = GrpcIniSaveOutcome::SavedApplyFailed;
         break;
     default:
-        emit profileIniSaveFailed(requestId, QStringLiteral("Unknown INI save result"));
+        emit profileIniSaveFailed(requestId, QStringLiteral("Unknown INI save result"), GrpcStatusUnknown);
         return;
     }
     result.applyError = QString::fromStdString(resp.apply_error());
@@ -1587,7 +1587,7 @@ void GrpcWorker::doApplyProfileIniFiles(quint64 requestId, const QString& gameId
     gorganizer::v1::ApplyProfileIniFilesResponse resp;
     auto status = invoke(&Stub::ApplyProfileIniFiles, req, resp);
     if (!status.ok()) {
-        emit profileIniFilesApplyFailed(requestId, QString::fromStdString(status.error_message()));
+        emit profileIniFilesApplyFailed(requestId, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
         return;
     }
     emit profileIniFilesApplied(requestId, resp.applied_file_count());

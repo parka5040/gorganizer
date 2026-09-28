@@ -41,9 +41,9 @@ private slots:
     void onRecoveryPending(const GrpcRecoveryPending& recovery);
     void onVfsStatusReceived(const GrpcVFSStatus& status);
     void onVfsStatusQueried(quint64 requestId, const GrpcVFSStatus& status);
-    void onVfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error);
+    void onVfsStatusQueryFailed(quint64 requestId, const QString& gameId, const QString& error, int);
     // Explains that a recovery confirmation went stale without changing the game.
-    void onRpcError(const QString& method, const QString& error);
+    void onRpcError(const QString& method, const QString& error, int grpcCode);
 
 private:
     // Queues a recovery prompt without repeating the currently open dialog.

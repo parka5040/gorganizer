@@ -128,7 +128,7 @@ private slots:
                           const QStringList& flaggedArchives);
     void onModRenamed(quint64 requestId, const QString& gameId, const QString& oldName, const QString& newName);
     void onModActionFailed(quint64 requestId, const QString& gameId, const QString& modName,
-                           const QString& method, const QString& error);
+                           const QString& method, const QString& error, int grpcCode);
     void onModActionWorkersStopped();
     void onReinstallFailed(quint64 requestId, const QString& error);
     void onReinstallCancelled(quint64 requestId);
