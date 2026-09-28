@@ -565,6 +565,8 @@ void DownloadsLibraryView::showFomodInstallDialog(const GrpcArchiveRow& row,
             this, &DownloadsLibraryView::fomodWizardOpened);
     connect(&dlg, &ModInstallDialog::fomodWizardClosed,
             this, &DownloadsLibraryView::fomodWizardClosed);
+    connect(&dlg, &ModInstallDialog::installDetached,
+            this, &DownloadsLibraryView::installDialogDetached);
     if (dlg.exec() == QDialog::Accepted)
         emit modInstalledFromDownload(m_game.shortName);
     else if (dlg.installUnconfirmed())

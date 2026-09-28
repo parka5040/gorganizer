@@ -49,6 +49,7 @@ signals:
     void archivesRejected(const QStringList& rejected);
     void fomodWizardOpened(const QString& archivePath, const QString& modName);
     void fomodWizardClosed(const QString& archivePath);
+    void installDialogDetached(quint64 requestId, const QString& gameId, const QString& modName);
 
 protected:
     void dragEnterEvent(QDragEnterEvent* event) override;

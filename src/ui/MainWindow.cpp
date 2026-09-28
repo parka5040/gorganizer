@@ -364,11 +364,18 @@ void MainWindow::wireConnections()
         statusBar()->showMessage("Gorganizer's background service connected", 3000);
         m_grpc->detectGames();
         m_grpc->startWatching();
+        const auto games = m_pendingInstallRefresh;
+        m_pendingInstallRefresh.clear();
+        for (const QString& gameId : games) refreshDetachedInstall(gameId);
     });
     connect(m_grpc, &GrpcClient::disconnected, this, [this] {
         statusBar()->showMessage("Gorganizer's background service disconnected. Run is unavailable until it reconnects.");
     });
 
+    connect(m_downloadsLibrary, &DownloadsLibraryView::installDialogDetached, this,
+            [this](quint64 id, const QString& gameId, const QString& modName) {
+                onInstallDialogDetached(id, gameId, modName);
+            });
     connect(m_installs, &InstallController::installSucceeded, this, &MainWindow::onInstallRequestCompleted);
     connect(m_installs, &InstallController::installFailed, this, &MainWindow::onInstallRequestFailed);
     connect(m_installs, &InstallController::cancelled, this, &MainWindow::onInstallCancelled);
@@ -552,7 +559,7 @@ bool MainWindow::canInstallArchive(const GameInfo& game)
         dialogs::info(this, "Install Mod", "Waiting for Gorganizer's background service — try again in a moment.");
         return false;
     }
-    if (m_pendingExternalInstall) {
+    if (m_pendingExternalInstall || (m_dropQueue && m_dropQueue->waitingRequestId)) {
         dialogs::info(this, "Install Mod", "Another mod install is still running. Try again when it finishes.");
         return false;
     }
@@ -574,6 +581,12 @@ MainWindow::ArchiveInstallResult MainWindow::installArchiveFromPath(const QStrin
     const QString modName = QFileInfo(path).completeBaseName();
     ModInstallDialog dlg(game.shortName, modName, m_grpc, m_installs,
                          ModInstallDialog::ArchiveSource::fromExternal(path), this);
+    bool detached = false;
+    connect(&dlg, &ModInstallDialog::installDetached, this,
+            [this, &detached](quint64 id, const QString& gameId, const QString& name) {
+                detached = true;
+                onInstallDialogDetached(id, gameId, name, m_dropQueue.has_value());
+            });
     if (dlg.exec() == QDialog::Accepted) {
         statusBar()->showMessage(
             QString("Installed \"%1\" (%2 files)")
@@ -591,7 +604,7 @@ MainWindow::ArchiveInstallResult MainWindow::installArchiveFromPath(const QStrin
         }
         return ArchiveInstallResult::Unknown;
     }
-    return ArchiveInstallResult::Failed;
+    return detached ? ArchiveInstallResult::Started : ArchiveInstallResult::Failed;
 }
 
 bool MainWindow::installThroughDaemonLayout(const QString& gameId, const QString& path)
@@ -629,7 +642,7 @@ void MainWindow::handleArchiveDrop(const ArchiveDrop& drop)
 
 void MainWindow::startNextDroppedArchive()
 {
-    if (!m_dropQueue)
+    if (!m_dropQueue || m_dropQueue->waitingRequestId)
         return;
     if (m_dropQueue->remaining.isEmpty()) {
         m_dropQueue.reset();
@@ -704,8 +717,38 @@ void MainWindow::startExternalInstall(const PendingExternalInstall& request)
     statusBar()->showMessage(QString("Installing \"%1\"…").arg(request.name));
 }
 
+void MainWindow::onInstallDialogDetached(quint64 requestId, const QString& gameId,
+                                         const QString& modName, bool fromDropQueue)
+{
+    m_detachedInstalls.insert(requestId, DetachedInstall{gameId, modName, fromDropQueue});
+    if (fromDropQueue && m_dropQueue) m_dropQueue->waitingRequestId = requestId;
+    statusBar()->showMessage(QStringLiteral("Checking installation result for \"%1\"…").arg(modName));
+}
+
+void MainWindow::refreshDetachedInstall(const QString& gameId)
+{
+    if (!m_grpc->isConnected()) {
+        m_pendingInstallRefresh.insert(gameId);
+        return;
+    }
+    if (m_session->activeGame().shortName != gameId) return;
+    m_modList->reloadMods();
+    m_downloadsLibrary->refresh();
+}
+
 void MainWindow::onInstallRequestCompleted(quint64 requestId, const QString& modFolder, int fileCount)
 {
+    if (m_detachedInstalls.contains(requestId)) {
+        const DetachedInstall detached = m_detachedInstalls.take(requestId);
+        statusBar()->showMessage(QStringLiteral("Installed \"%1\" (%2 files)")
+                                     .arg(modFolder).arg(fileCount), 10000);
+        refreshDetachedInstall(detached.gameId);
+        if (detached.fromDropQueue && m_dropQueue && m_dropQueue->waitingRequestId == requestId) {
+            m_dropQueue->waitingRequestId = 0;
+            finishDroppedArchive(true);
+        }
+        return;
+    }
     if (!m_pendingExternalInstall || m_pendingExternalInstall->requestId != requestId) return;
     const QString gameId = m_pendingExternalInstall->gameId;
     m_pendingExternalInstall.reset();
@@ -719,6 +762,15 @@ void MainWindow::onInstallRequestCompleted(quint64 requestId, const QString& mod
 
 void MainWindow::onInstallRequestFailed(quint64 requestId, const QString& error)
 {
+    if (m_detachedInstalls.contains(requestId)) {
+        const DetachedInstall detached = m_detachedInstalls.take(requestId);
+        statusBar()->showMessage(errorSummary("install this mod", error, true), 10000);
+        if (detached.fromDropQueue && m_dropQueue && m_dropQueue->waitingRequestId == requestId) {
+            m_dropQueue->waitingRequestId = 0;
+            finishDroppedArchive(false);
+        }
+        return;
+    }
     if (m_pendingExternalInstall && m_pendingExternalInstall->requestId == requestId) {
         const PendingExternalInstall request = *m_pendingExternalInstall;
         m_pendingExternalInstall.reset();
@@ -732,6 +784,15 @@ void MainWindow::onInstallRequestFailed(quint64 requestId, const QString& error)
 
 void MainWindow::onInstallCancelled(quint64 requestId)
 {
+    if (m_detachedInstalls.contains(requestId)) {
+        const DetachedInstall detached = m_detachedInstalls.take(requestId);
+        statusBar()->showMessage("Install cancelled. Nothing was installed.", 10000);
+        if (detached.fromDropQueue && m_dropQueue && m_dropQueue->waitingRequestId == requestId) {
+            m_dropQueue->waitingRequestId = 0;
+            finishDroppedArchive(false);
+        }
+        return;
+    }
     if (!m_pendingExternalInstall || m_pendingExternalInstall->requestId != requestId) return;
     m_pendingExternalInstall.reset();
     m_cancelInstallButton->hide();
@@ -741,6 +802,15 @@ void MainWindow::onInstallCancelled(quint64 requestId)
 
 void MainWindow::onInstallUnknown(quint64 requestId)
 {
+    if (m_detachedInstalls.contains(requestId)) {
+        const DetachedInstall detached = m_detachedInstalls.take(requestId);
+        statusBar()->showMessage(errorSummary("install this mod",
+            GrpcError{GrpcStatusUnknown, QStringLiteral("GetInstallOutcome"), QString()}, true), 15000);
+        refreshDetachedInstall(detached.gameId);
+        if (detached.fromDropQueue && m_dropQueue && m_dropQueue->waitingRequestId == requestId)
+            m_dropQueue.reset();
+        return;
+    }
     if (!m_pendingExternalInstall || m_pendingExternalInstall->requestId != requestId) return;
     const QString gameId = m_pendingExternalInstall->gameId;
     m_pendingExternalInstall.reset();

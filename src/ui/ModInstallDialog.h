@@ -51,6 +51,7 @@ protected:
 signals:
     void fomodWizardOpened(const QString& archivePath, const QString& modName);
     void fomodWizardClosed(const QString& archivePath);
+    void installDetached(quint64 requestId, const QString& gameId, const QString& modName);
 
 private slots:
     void onPreviewCompleted(quint64 requestId, const GrpcPreviewInstallResult& result);

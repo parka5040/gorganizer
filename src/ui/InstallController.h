@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QHash>
+#include <QElapsedTimer>
 #include <QString>
 #include <QTimer>
 #include <vector>
@@ -50,7 +51,9 @@ private:
         bool reinstall = false;
         bool reconciling = false;
         bool sawRunning = false;
-        int polls = 0;
+        int unknownAnswers = 0;
+        QElapsedTimer reconciliationTime;
+        QElapsedTimer disconnectedTime;
         quint64 queryId = 0;
     };
     void onFailed(quint64 requestId, int grpcCode, const QString& error, bool sent);

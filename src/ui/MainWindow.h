@@ -3,6 +3,8 @@
 #include <QMainWindow>
 #include <QTabWidget>
 #include <QLabel>
+#include <QHash>
+#include <QSet>
 #include <QActionGroup>
 #include <optional>
 #include "AppConfig.h"
@@ -71,6 +73,7 @@ private:
     struct DropQueue {
         GameInfo game;
         QStringList remaining;
+        quint64 waitingRequestId = 0;
     };
 
     struct PendingExternalInstall {
@@ -81,6 +84,15 @@ private:
         GrpcInstallMode mode = GrpcInstallAsNewMod;
     };
 
+    struct DetachedInstall {
+        QString gameId;
+        QString modName;
+        bool fromDropQueue = false;
+    };
+
+    void onInstallDialogDetached(quint64 requestId, const QString& gameId, const QString& modName,
+                                 bool fromDropQueue = false);
+    void refreshDetachedInstall(const QString& gameId);
     void setupUi();
     void createControllers();
     void wireConnections();
@@ -143,6 +155,8 @@ private:
     QMenu* m_smapiMenu = nullptr;
 
     std::optional<PendingExternalInstall> m_pendingExternalInstall;
+    QHash<quint64, DetachedInstall> m_detachedInstalls;
+    QSet<QString> m_pendingInstallRefresh;
     std::optional<DropQueue> m_dropQueue;
     bool m_restorePluginsTab = false;
     bool m_daemonOwned = false;

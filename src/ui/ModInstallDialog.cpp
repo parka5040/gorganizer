@@ -95,8 +95,10 @@ ModInstallDialog::ModInstallDialog(const QString& gameId, const QString& modName
     connect(m_installs, &InstallController::reconciling, this, [this](quint64 id) {
         if (m_phase == Installing && id == m_installRequestId) {
             m_reconciling = true;
-            m_cancelBtn->setEnabled(false);
-            m_statusLabel->setText("Checking whether this mod was installed…");
+            m_cancelBtn->setText("Close");
+            m_cancelBtn->setEnabled(true);
+            m_statusLabel->setText("Checking installation result…\n"
+                                   "You can close this window; Gorganizer will tell you the result.");
         }
     });
     m_installBtn->setDefault(true);
@@ -340,6 +342,11 @@ void ModInstallDialog::onInstallUnknown(quint64 requestId)
 
 void ModInstallDialog::closeEvent(QCloseEvent* event)
 {
+    if (m_phase == Installing && m_reconciling) {
+        reject();
+        event->accept();
+        return;
+    }
     if (m_phase == Previewing || m_phase == CancellingPreview || m_phase == Installing) {
         reject();
         event->ignore();
@@ -361,7 +368,14 @@ void ModInstallDialog::reject()
     if (m_phase == CancellingPreview)
         return;
     if (m_phase == Installing) {
-        if (m_reconciling) return;
+        if (m_reconciling) {
+            const quint64 requestId = m_installRequestId;
+            m_phase = Done;
+            m_installRequestId = 0;
+            emit installDetached(requestId, m_gameId, m_modName);
+            QDialog::reject();
+            return;
+        }
         if (!m_cancelRequested) {
             m_cancelRequested = true;
             m_cancelBtn->setEnabled(false);

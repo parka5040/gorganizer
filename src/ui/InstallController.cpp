@@ -35,6 +35,7 @@ InstallController::InstallController(GrpcClient* grpc, QObject* parent)
         const quint64 id = m_queries.take(queryId);
         if (!m_pending.contains(id) || m_pending.value(id).queryId != queryId) return;
         m_pending[id].queryId = 0;
+        m_pending[id].disconnectedTime.invalidate();
         switch (outcome.state) {
         case GrpcInstallOutcomeState::Succeeded:
             finishSucceeded(id, outcome.modFolder, outcome.fileCount);
@@ -47,11 +48,11 @@ InstallController::InstallController(GrpcClient* grpc, QObject* parent)
             break;
         case GrpcInstallOutcomeState::Running:
             m_pending[id].sawRunning = true;
-            m_pending[id].polls = 0;
+            m_pending[id].reconciliationTime.restart();
             QTimer::singleShot(1500, this, [this, id] { query(id); });
             break;
         case GrpcInstallOutcomeState::Unknown:
-            if (m_pending[id].sawRunning) finishUnknown(id);
+            if (m_pending[id].sawRunning || ++m_pending[id].unknownAnswers >= 5) finishUnknown(id);
             else pollAgain(id);
             break;
         }
@@ -61,17 +62,35 @@ InstallController::InstallController(GrpcClient* grpc, QObject* parent)
         const quint64 id = m_queries.take(queryId);
         if (!m_pending.contains(id) || m_pending.value(id).queryId != queryId) return;
         m_pending[id].queryId = 0;
+        if (!m_pending[id].disconnectedTime.isValid())
+            m_pending[id].disconnectedTime.start();
         pollAgain(id);
+    });
+    connect(m_grpc, &GrpcClient::disconnected, this, [this] {
+        for (auto it = m_pending.begin(); it != m_pending.end(); ++it)
+            if (it->reconciling && !it->disconnectedTime.isValid())
+                it->disconnectedTime.start();
     });
     connect(m_grpc, &GrpcClient::workersStopped, this, [this] {
         const auto ids = m_pending.keys();
-        for (quint64 id : ids) beginReconciliation(id);
+        for (quint64 id : ids) {
+            if (!m_pending.contains(id)) continue;
+            if (m_pending.value(id).reconciling) {
+                m_queries.remove(m_pending[id].queryId);
+                m_pending[id].queryId = 0;
+                query(id);
+            } else {
+                beginReconciliation(id);
+            }
+        }
     });
     connect(m_grpc, &GrpcClient::connected, this, [this] {
         const auto ids = m_pending.keys();
-        for (quint64 id : ids)
-            if (m_pending.value(id).reconciling && m_pending.value(id).queryId == 0)
-                query(id);
+        for (quint64 id : ids) {
+            if (!m_pending.value(id).reconciling) continue;
+            m_pending[id].disconnectedTime.invalidate();
+            if (m_pending.value(id).queryId == 0) query(id);
+        }
     });
     connect(m_grpc, &GrpcClient::installCompletedHintReceived, this,
             [this](const GrpcInstallCompleted& hint) {
@@ -141,6 +160,8 @@ void InstallController::beginReconciliation(quint64 requestId)
     auto it = m_pending.find(requestId);
     if (it == m_pending.end() || it->reconciling) return;
     it->reconciling = true;
+    it->reconciliationTime.start();
+    if (!m_grpc->isConnected()) it->disconnectedTime.start();
     emit reconciling(requestId);
     query(requestId);
 }
@@ -149,6 +170,13 @@ void InstallController::query(quint64 requestId)
 {
     auto it = m_pending.find(requestId);
     if (it == m_pending.end() || !it->reconciling || it->queryId) return;
+    if (!m_grpc->isConnected() && !it->disconnectedTime.isValid())
+        it->disconnectedTime.start();
+    if (it->reconciliationTime.elapsed() >= 30 * 60 * 1000 ||
+        (it->disconnectedTime.isValid() && it->disconnectedTime.elapsed() >= 2 * 60 * 1000)) {
+        finishUnknown(requestId);
+        return;
+    }
     if (!m_grpc->isConnected()) {
         QTimer::singleShot(1500, this, [this, requestId] { query(requestId); });
         return;
@@ -160,12 +188,7 @@ void InstallController::query(quint64 requestId)
 
 void InstallController::pollAgain(quint64 requestId)
 {
-    auto it = m_pending.find(requestId);
-    if (it == m_pending.end()) return;
-    if (++it->polls >= 80) {
-        finishUnknown(requestId);
-        return;
-    }
+    if (!m_pending.contains(requestId)) return;
     QTimer::singleShot(1500, this, [this, requestId] { query(requestId); });
 }
 
