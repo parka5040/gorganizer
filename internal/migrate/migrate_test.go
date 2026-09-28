@@ -112,8 +112,20 @@ func TestPlanFindsLegacyFoldersAndBlockers(t *testing.T) {
 		{"unfinished landing", func(t *testing.T, mods, install string) {
 			put(t, filepath.Join(mods, "Downloads", ".gorganizer-landing", "op.json"), "{}")
 		}, "Unmount the mods", 0},
-		{"preserved batches", func(t *testing.T, mods, install string) {
+		{"retained dependency requests", func(t *testing.T, mods, install string) {
 			put(t, filepath.Join(mods, ".gorganizer-dependency-requests.json"), `{"schema_version":1,"batches":[{}]}`)
+		}, "Unmount the mods", 0},
+		{"preserved batches", func(t *testing.T, mods, install string) {
+			put(t, filepath.Join(install, "Data.gorganizer-preserved", "batch", "files", "game.txt"), "keep")
+		}, "Unmount the mods", 0},
+		{"Steam maintenance marker", func(t *testing.T, mods, install string) {
+			put(t, filepath.Join(install, "Data.gorganizer-maintenance"), "keep")
+		}, "Unmount the mods", 0},
+		{"launch ticket", func(t *testing.T, mods, install string) {
+			put(t, filepath.Join(install, "Data.gorganizer-session"), "keep")
+		}, "Unmount the mods", 0},
+		{"interrupted restore", func(t *testing.T, mods, install string) {
+			put(t, filepath.Join(install, "Data.gorganizer-restoring"), "keep")
 		}, "Unmount the mods", 0},
 		{"other Data sibling", func(t *testing.T, mods, install string) {
 			put(t, filepath.Join(install, "Data.gorganizer-unknown"), "keep")
