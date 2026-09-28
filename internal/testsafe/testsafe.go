@@ -11,7 +11,9 @@ import (
 
 var launcherNames = []string{"xdg-open", "steam", "gio", "kde-open", "gnome-open", "flatpak", "protontricks"}
 
-// InstallLauncherShims writes failing launcher scripts into dir and returns their log path.
+var quietNames = []string{"notify-send"}
+
+// InstallLauncherShims writes failing launcher scripts and silent desktop-notification scripts into dir and returns the launcher log path.
 func InstallLauncherShims(dir string) (string, error) {
 	logPath := filepath.Join(dir, "launcher-calls.log")
 	quotedLogPath := "'" + strings.ReplaceAll(logPath, "'", "'\\''") + "'"
@@ -21,10 +23,17 @@ func InstallLauncherShims(dir string) (string, error) {
 			return "", fmt.Errorf("writing the %s shim: %w", name, err)
 		}
 	}
+	quotedNotificationPath := "'" + strings.ReplaceAll(filepath.Join(dir, "notification-calls.log"), "'", "'\\''") + "'"
+	for _, name := range quietNames {
+		script := fmt.Sprintf("#!/bin/sh\nprintf '%%s %%s\\n' '%s' \"$*\" >> %s\nexit 0\n", name, quotedNotificationPath)
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
+			return "", fmt.Errorf("writing the %s shim: %w", name, err)
+		}
+	}
 	return logPath, nil
 }
 
-// RunWithSafeEnvironment runs tests with isolated directories and failing launcher shims.
+// RunWithSafeEnvironment runs tests with isolated directories, failing launcher shims and silent notification shims.
 func RunWithSafeEnvironment(m *testing.M) int {
 	root, err := os.MkdirTemp("", "gzt")
 	if err != nil {

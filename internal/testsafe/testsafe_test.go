@@ -50,3 +50,25 @@ func TestLauncherShimsRecordInvocations(t *testing.T) {
 		}
 	}
 }
+
+// TestNotificationShimsStaySilent verifies desktop notifications succeed without reaching the desktop or the launcher log.
+func TestNotificationShimsStaySilent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	logPath, err := InstallLauncherShims(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range quietNames {
+		if err := exec.Command(filepath.Join(dir, name), "Gorganizer", "a message").Run(); err != nil {
+			t.Fatalf("%s = %v, want success", name, err)
+		}
+	}
+	if _, err := os.Stat(logPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("notification reached the launcher log: %v", err)
+	}
+	calls, err := os.ReadFile(filepath.Join(dir, "notification-calls.log"))
+	if err != nil || !strings.Contains(string(calls), "notify-send Gorganizer a message") {
+		t.Fatalf("notification calls = %q, %v", calls, err)
+	}
+}
