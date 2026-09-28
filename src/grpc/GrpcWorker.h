@@ -98,7 +98,8 @@ public slots:
                           bool includeOverwrite, bool includeGameSettings);
     void doImportInstance(const QString& gameId, const QString& archivePath,
                           int policy, const QMap<QString, int>& modPolicyOverrides,
-                          const QStringList& modFolders, const QStringList& profileNames);
+                          const QStringList& modFolders, const QStringList& profileNames,
+                          const QString& expectedArchiveIdentity);
 
     void doGetModLoaderStatus(quint64 requestId, const QString& gameId, bool checkLatest);
     void doInstallModLoader(quint64 requestId, const QString& gameId, bool repairOnly);

@@ -304,8 +304,10 @@ QString knownTokenMessage(const InstallError& parsed)
         if (field("reason") == QLatin1String("user"))
             return QStringLiteral("Mods for %1 are paused while you update or verify the game in Steam. "
                                   "Choose \"Steam Finished\" when Steam is done.").arg(game);
-        return QStringLiteral("Steam changed files of %1 while mods were active. Your changed files were saved. "
-                              "In Steam, verify the game's files, then choose \"Verification Finished\".")
+        return QStringLiteral("Steam changed game files of %1 while mods were active. If mods are still active, "
+                              "open Steam Update Help and choose Pause Mods to save Steam's changes and put the "
+                              "original game files back. Then verify the game in Steam and choose "
+                              "Verification Finished.")
             .arg(game);
     }
     if (token == QLatin1String("install_record_failed"))

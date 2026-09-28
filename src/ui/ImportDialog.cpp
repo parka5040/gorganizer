@@ -2,6 +2,7 @@
 #include "Dialogs.h"
 #include "GrpcClient.h"
 #include "ErrorPresenter.h"
+#include "InstallErrorText.h"
 #include "ThemeManager.h"
 
 #include <QApplication>
@@ -154,6 +155,9 @@ QWidget* ImportDialog::buildSelectionPage()
     policyLay->addWidget(m_renameRadio);
     policyLay->addWidget(m_skipRadio);
     policyLay->addWidget(m_overwriteRadio);
+    auto* policyHint = new QLabel("Rename and Skip never replace anything you already have.", policyBox);
+    policyHint->setWordWrap(true);
+    policyLay->addWidget(policyHint);
     lay->addWidget(policyBox);
 
     m_selectionErrorLabel = new QLabel;
@@ -404,6 +408,7 @@ void ImportDialog::onStartImport()
     }
 
     const QString archivePath = m_previewPath;
+    const QString archiveIdentity = m_preview.archiveIdentity;
     const GrpcTransferPolicy policy = selectedPolicy();
     const QStringList mods = checkedChildren(m_modsRoot);
     const QStringList profiles = checkedChildren(m_profilesRoot);
@@ -420,36 +425,33 @@ void ImportDialog::onStartImport()
                 replacedProfiles << profile.name;
         }
 
-        if (!replacedMods.isEmpty() || !replacedProfiles.isEmpty()
-            || m_preview.includesOverwrite || m_preview.includesGameSettings) {
-            QStringList details;
-            if (!replacedMods.isEmpty())
-                details << QString("Mods:\n%1").arg(replacementList(replacedMods));
-            if (!replacedProfiles.isEmpty())
-                details << QString("Profiles:\n%1").arg(replacementList(replacedProfiles));
-            if (m_preview.includesOverwrite)
-                details << "Files in the Overwrite folder with the same names will also be replaced.";
-            if (m_preview.includesGameSettings)
-                details << "Matching game settings will also be replaced.";
-            details << "Anything else that already exists when the import runs is also replaced.";
+        QStringList details;
+        if (!replacedMods.isEmpty())
+            details << QString("Mods:\n%1").arg(replacementList(replacedMods));
+        if (!replacedProfiles.isEmpty())
+            details << QString("Profiles:\n%1").arg(replacementList(replacedProfiles));
+        if (m_preview.includesOverwrite)
+            details << "Files in the Overwrite folder with the same names will also be replaced.";
+        if (m_preview.includesGameSettings)
+            details << "Matching game settings will also be replaced.";
 
-            QMessageBox box(this);
-            box.setIcon(QMessageBox::Warning);
-            box.setWindowTitle("Replace existing items?");
-            box.setTextFormat(Qt::PlainText);
-            box.setText("Importing will replace matching mods and profiles. This cannot be undone.");
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Warning);
+        box.setWindowTitle("Replace existing items?");
+        box.setTextFormat(Qt::PlainText);
+        box.setText("Importing will replace any mods and profiles with the same names. This cannot be undone.");
+        if (!details.isEmpty())
             box.setInformativeText(details.join("\n\n"));
-            auto* replaceBtn = box.addButton("Replace and import", QMessageBox::DestructiveRole);
-            auto* cancelBtn = box.addButton("Cancel", QMessageBox::RejectRole);
-            box.setDefaultButton(cancelBtn);
-            box.setEscapeButton(cancelBtn);
-            box.exec();
-            if (box.clickedButton() != replaceBtn) return;
-            if (m_previewPath != archivePath) return;
-            if (!previewFileUnchanged()) {
-                showChangedBackup();
-                return;
-            }
+        auto* replaceBtn = box.addButton("Replace and import", QMessageBox::DestructiveRole);
+        auto* cancelBtn = box.addButton("Cancel", QMessageBox::RejectRole);
+        box.setDefaultButton(cancelBtn);
+        box.setEscapeButton(cancelBtn);
+        box.exec();
+        if (box.clickedButton() != replaceBtn) return;
+        if (m_previewPath != archivePath) return;
+        if (!previewFileUnchanged()) {
+            showChangedBackup();
+            return;
         }
     }
 
@@ -467,7 +469,8 @@ void ImportDialog::onStartImport()
     m_cancelBtn->setEnabled(true);
     m_stack->setCurrentIndex(PAGE_PROGRESS);
 
-    m_grpc->startImport(m_gameId, archivePath, policy, QMap<QString, int>(), mods, profiles);
+    m_grpc->startImport(m_gameId, archivePath, policy, QMap<QString, int>(), mods, profiles,
+                        archiveIdentity);
 }
 
 void ImportDialog::onCancelTransfer()
@@ -536,6 +539,12 @@ void ImportDialog::onTransferFailed(const QString& error)
 {
     if (!m_running) return;
     m_running = false;
+    const InstallError parsed = parseInstallError(error);
+    if (parsed.token == QLatin1String("bundle_rejected")
+        && parsed.fields.value("reason") == QLatin1String("changed")) {
+        showChangedBackup();
+        return;
+    }
     m_progressBar->setRange(0, 100);
     m_progressBar->setValue(0);
     if (m_cancelRequested) {

@@ -817,6 +817,9 @@ void SessionController::refreshStatusInfo()
     } else if (state == GrpcVFSLifecycleState::RecoveryDeferred) {
         text = QStringLiteral("Waiting for the game to close");
         tip = QStringLiteral("Mods were left active because the game may still be running.");
+    } else if (m_steamMaintenance == GrpcSteamMaintenanceState::VerifyRequired && m_vfsMounted) {
+        text = QStringLiteral("Steam changed the game");
+        tip = QStringLiteral("Steam changed game files while mods were active. Open the Steam help to pause mods safely.");
     } else if (m_steamMaintenance == GrpcSteamMaintenanceState::VerifyRequired
                || m_steamMaintenance == GrpcSteamMaintenanceState::UserRequested) {
         text = QStringLiteral("Paused for Steam");
@@ -838,7 +841,8 @@ void SessionController::refreshStatusInfo()
             || m_steamMaintenance == GrpcSteamMaintenanceState::UserRequested
             || m_steamMaintenance == GrpcSteamMaintenanceState::SteamBusy
             || m_hasSavedSteamFiles);
-    m_modStatusLabel->setToolTip(steamHelp ? tip + (m_hasSavedSteamFiles
+    const bool verifyMounted = m_steamMaintenance == GrpcSteamMaintenanceState::VerifyRequired && m_vfsMounted;
+    m_modStatusLabel->setToolTip(steamHelp && !verifyMounted ? tip + (m_hasSavedSteamFiles
         ? "\nClick for Steam update help and saved files." : "\nClick for Steam update help.") : tip);
     m_modStatusLabel->setCursor(steamHelp ? Qt::PointingHandCursor : Qt::ArrowCursor);
 }

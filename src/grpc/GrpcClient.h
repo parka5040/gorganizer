@@ -190,7 +190,8 @@ public:
     // Starts a streaming instance import on the transfer worker; progress arrives via transfer* signals.
     void startImport(const QString& gameId, const QString& archivePath,
                      GrpcTransferPolicy policy, const QMap<QString, int>& modPolicyOverrides,
-                     const QStringList& modFolders, const QStringList& profileNames);
+                     const QStringList& modFolders, const QStringList& profileNames,
+                     const QString& expectedArchiveIdentity);
     // Cancels the in-flight export/import stream; the transfer then reports transferFailed.
     void cancelTransfer();
     bool transferActive() const { return m_transferActive; }

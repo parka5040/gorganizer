@@ -47,14 +47,17 @@ SteamMaintenanceController::SteamMaintenanceController(GrpcClient* grpc, Session
     m_explanation->setMinimumWidth(440);
     panelLayout->addWidget(m_explanation);
     auto* panelButtons = new QHBoxLayout;
+    m_pauseButton = new QPushButton("Pause Mods", m_panel);
     m_finishButton = new QPushButton(m_panel);
     m_showFilesButton = new QPushButton("Show Saved Files…", m_panel);
     auto* closePanel = new QPushButton("Close", m_panel);
+    panelButtons->addWidget(m_pauseButton);
     panelButtons->addWidget(m_finishButton);
     panelButtons->addWidget(m_showFilesButton);
     panelButtons->addStretch();
     panelButtons->addWidget(closePanel);
     panelLayout->addLayout(panelButtons);
+    connect(m_pauseButton, &QPushButton::clicked, this, &SteamMaintenanceController::pauseMods);
     connect(m_finishButton, &QPushButton::clicked, this, &SteamMaintenanceController::finishSteam);
     connect(m_showFilesButton, &QPushButton::clicked, this, &SteamMaintenanceController::showSavedFiles);
     connect(closePanel, &QPushButton::clicked, m_panel, &QDialog::hide);
@@ -171,8 +174,14 @@ void SteamMaintenanceController::updateActions()
     const bool ready = m_grpc->isConnected() && !m_gameId.isEmpty() && m_haveStatus;
     const bool busy = m_maintenanceRequestId || m_importRequestId || m_deleteRequestId || m_refreshRequestId;
     m_helpAction->setEnabled(ready);
-    m_pauseAction->setEnabled(ready && !busy && m_status.steamMaintenance == GrpcSteamMaintenanceState::None);
-    m_finishButton->setVisible(m_status.steamMaintenance == GrpcSteamMaintenanceState::VerifyRequired
+    const bool verifyMounted = m_status.steamMaintenance == GrpcSteamMaintenanceState::VerifyRequired
+        && m_status.mounted;
+    m_pauseAction->setEnabled(ready && !busy && (m_status.steamMaintenance == GrpcSteamMaintenanceState::None
+                                                 || verifyMounted));
+    m_pauseButton->setVisible(verifyMounted);
+    m_pauseButton->setEnabled(ready && !busy);
+    m_finishButton->setVisible((m_status.steamMaintenance == GrpcSteamMaintenanceState::VerifyRequired
+                                && !m_status.mounted)
                                || m_status.steamMaintenance == GrpcSteamMaintenanceState::UserRequested);
     m_finishButton->setText(m_status.steamMaintenance == GrpcSteamMaintenanceState::VerifyRequired
                                 ? "Verification Finished" : "Steam Finished");
@@ -188,7 +197,9 @@ void SteamMaintenanceController::updateActions()
     m_deleteButton->setEnabled(canChangeSavedFiles);
     switch (m_status.steamMaintenance) {
     case GrpcSteamMaintenanceState::VerifyRequired:
-        m_explanation->setText("Steam changed game files while mods were active. Your changed files were saved, and your mods are paused. In Steam, right-click the game, choose Properties → Installed Files → Verify integrity of game files. When Steam has finished, choose Verification Finished.");
+        m_explanation->setText(verifyMounted
+            ? "Steam changed game files while your mods were active. Choose Pause Mods to save Steam's changes and put the original game files back. Then verify the game in Steam."
+            : "Steam changed game files while mods were active. Your changed files were saved, and your mods are paused. In Steam, right-click the game, choose Properties → Installed Files → Verify integrity of game files. When Steam has finished, choose Verification Finished.");
         break;
     case GrpcSteamMaintenanceState::UserRequested:
         m_explanation->setText("Mods are paused so Steam can update or check the game. Choose Steam Finished when Steam is done.");
@@ -219,8 +230,12 @@ void SteamMaintenanceController::pauseMods()
     if (!m_pauseAction->isEnabled())
         return;
     const QString gameId = m_gameId;
+    const bool verifyMounted = m_status.steamMaintenance == GrpcSteamMaintenanceState::VerifyRequired
+        && m_status.mounted;
     if (!dialogs::plainConfirm(m_parentWindow, "Pause Mods for Steam",
-            "Deactivate mods so Steam can update or verify the game safely? You can activate them again afterwards with Steam Finished."))
+            verifyMounted
+                ? "Save Steam's changes and put the original game files back? Verify the game in Steam afterwards."
+                : "Deactivate mods so Steam can update or verify the game safely? You can activate them again afterwards with Steam Finished."))
         return;
     if (m_gameId != gameId || !m_pauseAction->isEnabled())
         return;
@@ -389,6 +404,10 @@ void SteamMaintenanceController::recoverFiles()
     QStringList paths;
     for (const auto* item : m_files->selectedItems())
         paths.append(item->data(Qt::UserRole).toString());
+    if (paths.isEmpty()) {
+        for (int i = 0; i < m_files->count(); ++i)
+            paths.append(m_files->item(i)->data(Qt::UserRole).toString());
+    }
     const QDate created = QDate::fromString(batch->createdAt.left(10), Qt::ISODate);
     const QString date = created.isValid() ? created.toString(Qt::ISODate) : batch->createdAt.left(10);
     QInputDialog input(m_savedDialog);

@@ -604,6 +604,7 @@ struct GrpcImportPreview {
     std::vector<GrpcTransferProfileEntry> profiles;
     bool includesOverwrite = false;
     bool includesGameSettings = false;
+    QString archiveIdentity;
 };
 
 struct GrpcTransferProgress {

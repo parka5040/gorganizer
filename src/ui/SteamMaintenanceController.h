@@ -60,6 +60,7 @@ private:
     QWidget* m_parentWindow;
     QDialog* m_panel = nullptr;
     QLabel* m_explanation = nullptr;
+    QPushButton* m_pauseButton = nullptr;
     QPushButton* m_finishButton = nullptr;
     QPushButton* m_showFilesButton = nullptr;
     QDialog* m_savedDialog = nullptr;

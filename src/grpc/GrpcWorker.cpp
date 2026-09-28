@@ -1296,11 +1296,13 @@ void GrpcWorker::doExportInstance(const QString& gameId, const QString& outputPa
 
 void GrpcWorker::doImportInstance(const QString& gameId, const QString& archivePath,
                                   int policy, const QMap<QString, int>& modPolicyOverrides,
-                                  const QStringList& modFolders, const QStringList& profileNames)
+                                  const QStringList& modFolders, const QStringList& profileNames,
+                                  const QString& expectedArchiveIdentity)
 {
     gorganizer::v1::ImportInstanceRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_archive_path(archivePath.toStdString());
+    req.set_expected_archive_identity(expectedArchiveIdentity.toStdString());
     req.set_policy(static_cast<gorganizer::v1::TransferCollisionPolicy>(policy));
     for (auto it = modPolicyOverrides.constBegin(); it != modPolicyOverrides.constEnd(); ++it)
         (*req.mutable_mod_policy_overrides())[it.key().toStdString()] =

@@ -180,6 +180,7 @@ GrpcImportPreview importPreviewFromProto(const gorganizer::v1::PreviewImportResp
     }
     out.includesOverwrite = r.includes_overwrite();
     out.includesGameSettings = r.includes_game_settings();
+    out.archiveIdentity = QString::fromStdString(r.archive_identity());
     return out;
 }
 
@@ -1714,7 +1715,8 @@ void GrpcClient::startExport(const QString& gameId, const QString& outputPath,
 
 void GrpcClient::startImport(const QString& gameId, const QString& archivePath,
                              GrpcTransferPolicy policy, const QMap<QString, int>& modPolicyOverrides,
-                             const QStringList& modFolders, const QStringList& profileNames)
+                             const QStringList& modFolders, const QStringList& profileNames,
+                             const QString& expectedArchiveIdentity)
 {
     if (!transferWorker()) {
         emit transferFailed(QStringLiteral("not connected"));
@@ -1726,7 +1728,8 @@ void GrpcClient::startImport(const QString& gameId, const QString& archivePath,
     }
     m_transferActive = true;
     postTo(transferWorker(), &GrpcWorker::doImportInstance, gameId, archivePath,
-           static_cast<int>(policy), modPolicyOverrides, modFolders, profileNames);
+           static_cast<int>(policy), modPolicyOverrides, modFolders, profileNames,
+           expectedArchiveIdentity);
 }
 
 void GrpcClient::cancelTransfer()
