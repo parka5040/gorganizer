@@ -3,19 +3,19 @@
 #include "Dialogs.h"
 #include "GrpcClient.h"
 #include "InstallErrorText.h"
+#include "ErrorPresenter.h"
 #include "ModCatalog.h"
 #include "ModDependencyText.h"
 #include "ModListWidget.h"
 #include "SessionController.h"
 #include "SmapiModsWidget.h"
+#include "SafeLinks.h"
 
-#include <QDesktopServices>
 #include <QMap>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QStatusBar>
 #include <QTimer>
-#include <QUrl>
 #include <algorithm>
 
 namespace gorganizer {
@@ -99,6 +99,11 @@ ModDependencyController::ModDependencyController(GrpcClient* grpc, SessionContro
     connect(m_grpc, &GrpcClient::workersStopped, this, &ModDependencyController::onWorkersStopped);
 
     connect(m_modList, &ModListWidget::interactionFinished, this, &ModDependencyController::onListInteractionFinished);
+    connect(m_modList, &ModListWidget::modListReadyForEnable, this,
+            &ModDependencyController::onModListReadyForEnable);
+    connect(m_modList, &ModListWidget::modListAdopted, this, &ModDependencyController::onModListAdopted);
+    connect(m_modList, &ModListWidget::modListAdoptionDeferred, this,
+            &ModDependencyController::onModListAdoptionDeferred);
     connect(m_modList, &ModListWidget::modsEdited, this, &ModDependencyController::onModListPersisted);
     connect(m_modList, &ModListWidget::dependencyFetchRequested, this,
             &ModDependencyController::onModFetchRequested, Qt::QueuedConnection);
@@ -261,7 +266,7 @@ void ModDependencyController::onReportReceived(quint64 requestId, const GrpcModD
             else
                 m_remoteAttemptAt.remove(request.gameId);
         } else if (!report.remoteError.isEmpty()) {
-            m_remoteError.insert(request.gameId, report.remoteError);
+            m_remoteError.insert(request.gameId, errorSummary("check SMAPI mod requirements", report.remoteError));
         }
         publishRemoteState();
     }
@@ -280,7 +285,7 @@ void ModDependencyController::onReportFailed(quint64 requestId, const QString&, 
         return;
     const ReportRequest request = it.value();
     m_reportRequests.erase(it);
-    const QString message = modDependencyErrorMessage(error);
+    const QString message = errorSummary("check SMAPI mod requirements", error);
     if (request.remote) {
         m_remoteInFlight.remove(request.gameId);
         m_remoteError.insert(request.gameId, message);
@@ -411,6 +416,10 @@ void ModDependencyController::requestJobModList()
 {
     if (!m_job)
         return;
+    if (!m_modList->readyForDependencyEnable()) {
+        m_job->stage = EnableJob::Stage::WaitingForSaves;
+        return;
+    }
     m_job->stage = EnableJob::Stage::Loading;
     m_job->listEditSerial = m_modList->editSerial();
     m_job->listRequestId = m_grpc->getModListTracked(m_job->gameId, m_job->profileName);
@@ -437,7 +446,7 @@ void ModDependencyController::onModListReceived(quint64 requestId, const QString
         m_job->stage = EnableJob::Stage::WaitingForList;
         return;
     }
-    if (m_modList->editSerial() != m_job->listEditSerial) {
+    if (m_modList->editSerial() != m_job->listEditSerial || !m_modList->readyForDependencyEnable()) {
         requestJobModList();
         return;
     }
@@ -449,27 +458,74 @@ void ModDependencyController::onModListRequestFailed(quint64 requestId, const QS
 {
     if (!m_job || m_job->stage != EnableJob::Stage::Loading || requestId != m_job->listRequestId)
         return;
-    finishJob(QStringLiteral("Could not read the mod list to enable dependencies: %1").arg(error));
+    finishJob(errorSummary("read the mod list to enable required mods", error));
 }
 
 void ModDependencyController::onListInteractionFinished()
 {
-    if (m_job && m_job->stage == EnableJob::Stage::WaitingForList)
+    if (m_job && (m_job->stage == EnableJob::Stage::WaitingForList
+                  || m_job->stage == EnableJob::Stage::WaitingForSaves))
         requestJobModList();
 }
 
+void ModDependencyController::onModListReadyForEnable()
+{
+    if (m_job && m_job->stage == EnableJob::Stage::WaitingForSaves) {
+        syncContext();
+        if (jobCurrent())
+            requestJobModList();
+        else
+            finishJob();
+    }
+}
+
 void ModDependencyController::applyJob(const std::vector<GrpcModListEntry>& entries)
+{
+    m_job->stage = EnableJob::Stage::WaitingForAdoption;
+    m_job->adoptionEntries = entries;
+    m_job->adoptionId = m_modList->adoptModList(entries);
+    if (m_job->adoptionId == 0)
+        finishJob(QStringLiteral("The mod list is not loaded, so no dependency was enabled."));
+}
+
+void ModDependencyController::onModListAdopted(quint64 adoptionId)
+{
+    if (!m_job || m_job->stage != EnableJob::Stage::WaitingForAdoption)
+        return;
+    if (m_job->adoptionId != adoptionId) {
+        requestJobModList();
+        return;
+    }
+    syncContext();
+    if (!jobCurrent()) {
+        finishJob();
+        return;
+    }
+    if (m_modList->editSerial() != m_job->listEditSerial || !m_modList->readyForDependencyEnable()) {
+        requestJobModList();
+        return;
+    }
+    finishApplyingJob(m_job->adoptionEntries);
+}
+
+void ModDependencyController::onModListAdoptionDeferred(quint64 adoptionId)
+{
+    if (!m_job || m_job->stage != EnableJob::Stage::WaitingForAdoption || m_job->adoptionId != adoptionId)
+        return;
+    syncContext();
+    if (jobCurrent())
+        requestJobModList();
+    else
+        finishJob();
+}
+
+void ModDependencyController::finishApplyingJob(const std::vector<GrpcModListEntry>& entries)
 {
     QHash<QString, bool> authoritative;
     for (const auto& entry : entries) {
         if (!authoritative.contains(entry.modName))
             authoritative.insert(entry.modName, entry.enabled);
     }
-    if (!m_modList->adoptModList(entries)) {
-        finishJob(QStringLiteral("The mod list is not loaded, so no dependency was enabled."));
-        return;
-    }
-
     QStringList toEnable;
     for (const auto& name : m_job->modNames) {
         if (m_modList->containsMod(name) && !toEnable.contains(name))
@@ -499,6 +555,11 @@ void ModDependencyController::onModListSaved(quint64 requestId, const QString&, 
 {
     if (!m_job || m_job->stage != EnableJob::Stage::Saving || requestId != m_job->saveRequestId)
         return;
+    syncContext();
+    if (!jobCurrent()) {
+        finishJob();
+        return;
+    }
     m_job->saved = true;
     acknowledgeJob();
 }
@@ -508,16 +569,19 @@ void ModDependencyController::onModListSaveFailed(quint64 requestId, const QStri
 {
     if (!m_job || m_job->stage != EnableJob::Stage::Saving || requestId != m_job->saveRequestId)
         return;
-    if (!m_job->interactive) {
-        finishJob(QStringLiteral("Downloaded dependencies could not be enabled (%1); gorganizer tries again shortly.")
-                      .arg(error),
-                  true);
+    syncContext();
+    if (!jobCurrent()) {
+        finishJob();
         return;
     }
-    finishJob(QStringLiteral("The required mods could not be enabled: %1").arg(error));
-    dialogs::plainWarn(m_parentWindow, QStringLiteral("Enable Required Dependencies"),
-                       QStringLiteral("The required mods could not be enabled, so the mod list shows the profile's "
-                                      "saved state again.\n\n%1").arg(error));
+    if (!m_job->interactive) {
+        finishJob(errorSummary("enable downloaded dependencies", error, true)
+                      + QStringLiteral(" Gorganizer will try again shortly."), true);
+        return;
+    }
+    finishJob(errorSummary("enable required mods", error, true));
+    presentError(m_parentWindow, QStringLiteral("Enable Required Dependencies"),
+                 QStringLiteral("enable required mods"), error, true);
 }
 
 void ModDependencyController::acknowledgeJob()
@@ -565,7 +629,7 @@ void ModDependencyController::onEnableAckFailed(quint64 requestId, const QString
 {
     if (!m_job || m_job->stage != EnableJob::Stage::Acknowledging || !m_job->ackRequests.remove(requestId))
         return;
-    m_statusBar->showMessage(QStringLiteral("Could not record enabled dependencies: %1").arg(error), 6000);
+    m_statusBar->showMessage(errorSummary("record enabled dependencies", error, true), 6000);
     if (m_job->ackRequests.isEmpty())
         finishJob();
 }
@@ -822,7 +886,7 @@ void ModDependencyController::onFetchFinished(quint64 requestId, const QString&,
             text += QStringLiteral("\n\nWhy not automatically: %1").arg(openReasons.join(QLatin1Char(' ')));
         if (askPlain(m_parentWindow, QStringLiteral("Open Nexus Mods Pages"), text, QStringLiteral("Open Pages"))) {
             for (const auto& url : urls)
-                QDesktopServices::openUrl(QUrl(url));
+                openWebLink(m_parentWindow, url);
         }
     }
 
@@ -858,7 +922,8 @@ void ModDependencyController::onFetchFailed(quint64 requestId, const QString&, c
     m_fetch.reset();
     updateActionsBusy();
     m_statusBar->clearMessage();
-    dialogs::plainWarn(m_parentWindow, QStringLiteral("Fetch Missing Dependencies"), modDependencyErrorMessage(error));
+    presentError(m_parentWindow, QStringLiteral("Fetch Missing Dependencies"),
+                 QStringLiteral("fetch missing dependencies"), error, true);
 }
 
 void ModDependencyController::onEnableRequiredRequested()

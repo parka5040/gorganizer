@@ -7,10 +7,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	pb "github.com/parka/gorganizer/api/proto"
 	"github.com/parka/gorganizer/internal/dto"
+	"github.com/parka/gorganizer/internal/fsutil"
 	"google.golang.org/grpc"
 )
 
@@ -50,7 +52,7 @@ type ModLoaderController interface {
 
 type TransferController interface {
 	ExportInstance(ctx context.Context, req dto.ExportRequest, emit func(dto.TransferProgress)) (dto.TransferSummary, error)
-	PreviewImport(gameID, archivePath string) (dto.ImportPreview, error)
+	PreviewImport(ctx context.Context, gameID, archivePath string) (dto.ImportPreview, error)
 	ImportInstance(ctx context.Context, req dto.ImportRequest, emit func(dto.TransferProgress)) (dto.TransferSummary, error)
 }
 
@@ -96,7 +98,7 @@ type ModController interface {
 	RescanMod(gameID, modName string) (*dto.ModInfoResult, error)
 	RenameMod(gameID, oldName, newName string) error
 	UninstallMod(gameID, modName string, force bool) ([]string, error)
-	ReinstallMod(gameID, modName string) (replayed, skipped, fileCount int, err error)
+	ReinstallMod(ctx context.Context, gameID, modName, clientRequestID string) (replayed, skipped, fileCount int, err error)
 	RegisterManualInstall(gameID, modName, archiveRelPath string) (profilesUpdated int, err error)
 	ListOverwriteFiles(gameID string) (entries []dto.OverwriteEntryResult, dir string, err error)
 	ExtractOverwriteToMod(gameID, modName string, files []string, keep bool) (fileCount int, err error)
@@ -105,6 +107,7 @@ type ModController interface {
 type ProfileController interface {
 	ListProfiles(gameID string) ([]dto.ProfileResult, error)
 	CreateProfile(gameID, name string) (*dto.ProfileResult, error)
+	CopyProfile(gameID, sourceName, newName string) (*dto.ProfileResult, error)
 	DeleteProfile(gameID, name string) error
 	GetModList(gameID, profileName string) ([]dto.ModListEntryResult, error)
 	SetModList(gameID, profileName string, entries []dto.ModListEntryResult) error
@@ -113,11 +116,16 @@ type ProfileController interface {
 }
 
 type VFSController interface {
+	MountVFSWithOptions(gameID, profileName string, autoSwap, retarget bool) (*dto.VFSStatusResult, error)
 	MountVFS(gameID, profileName string) (*dto.VFSStatusResult, error)
 	UnmountVFS(gameID string) error
+	SetSteamMaintenance(gameID string, enabled, verificationConfirmed bool) (*dto.VFSStatusResult, error)
+	ImportPreservedFiles(gameID, batchID, modName string, relativePaths []string) (string, int, error)
+	DeletePreservedBatch(gameID, batchID string) (*dto.VFSStatusResult, error)
 	GetVFSStatus(gameID string) (*dto.VFSStatusResult, error)
 	RebuildVFS(gameID string) error
-	RestoreFromBackup(gameID string) error
+	RestoreFromBackup(gameID string, expectedKind dto.RecoveryKind, recoveryID string) error
+	RetryDeferredRecovery(gameID string) error
 }
 
 type ConflictController interface {
@@ -135,7 +143,7 @@ type ArchiveController interface {
 	CancelDownload(id string) error
 	RetryDownload(id string) (queuedAhead int, err error)
 	ListArchives(gameID string) ([]dto.ArchiveRowResult, error)
-	RemoveArchive(gameID, archiveRelPath string) error
+	RemoveArchive(gameID, archiveRelPath, downloadID string) error
 	SetArchiveHidden(gameID, archiveRelPath string, hidden bool) error
 	SetArchivesHiddenBulk(gameID string, hidden bool, scope dto.BulkHideScope) (int, error)
 	RefreshArchiveMetadata(gameID, archiveRelPath string) (*dto.ArchiveRowResult, error)
@@ -143,8 +151,9 @@ type ArchiveController interface {
 }
 
 type InstallController interface {
-	PreviewInstall(gameID, archiveRelPath string) (*dto.PreviewResult, error)
-	StartInstall(req dto.StartInstallRequest) (modFolder string, fileCount int, err error)
+	PreviewInstall(req dto.PreviewInstallRequest) (*dto.PreviewResult, error)
+	StartInstall(ctx context.Context, req dto.StartInstallRequest) (modFolder string, fileCount int, err error)
+	GetInstallOutcome(gameID, clientRequestID string) (dto.InstallOutcome, error)
 	DiscardPreview(previewID string) error
 	StreamInstallEvents(ctx context.Context, gameID string) (<-chan dto.InstallEventResult, error)
 }
@@ -172,7 +181,8 @@ type SettingsController interface {
 
 type IniController interface {
 	ListProfileIniFiles(gameID, profileName string) (*dto.ProfileIniListResult, error)
-	SaveProfileIniFile(gameID, profileName, filename, content string) error
+	SaveProfileIniFile(gameID, profileName, filename, content string) (*dto.ProfileIniSaveResult, error)
+	ApplyProfileIniFiles(gameID, profileName string) (int, error)
 	SetProfileIniEnabled(gameID, profileName string, enabled bool) (*dto.ProfileIniStatusResult, error)
 	GetProfileIniStatus(gameID, profileName string) (*dto.ProfileIniStatusResult, error)
 	ListIniTweaks(gameID, profileName string) ([]dto.IniTweakStateResult, error)
@@ -183,6 +193,7 @@ type LifecycleController interface {
 	Shutdown()
 	WatchStatus() <-chan dto.StatusEventResult
 	Health() dto.ReadinessResult
+	GetShutdownPlan() []dto.ShutdownPlanItem
 }
 
 var (
@@ -204,18 +215,33 @@ func NewServer(socketPath string, ctrl DaemonController) *Server {
 	}
 }
 
-// Start creates the socket directory, listens, and serves gRPC.
+// Start checks the socket directory and path, listens privately, and serves gRPC.
 func (s *Server) Start() error {
 	dir := filepath.Dir(s.socketPath)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("creating socket directory %s: %w", dir, err)
+	if err := fsutil.EnsurePrivateDir(dir); err != nil {
+		return fmt.Errorf("checking socket directory %s: %w", dir, err)
 	}
 
-	os.Remove(s.socketPath)
+	info, err := os.Lstat(s.socketPath)
+	if err == nil {
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if info.Mode()&os.ModeSocket == 0 || !ok || int(st.Uid) != os.Getuid() {
+			return fmt.Errorf("socket path %s is not a socket owned by this user", s.socketPath)
+		}
+		if err := os.Remove(s.socketPath); err != nil {
+			return fmt.Errorf("removing stale socket %s: %w", s.socketPath, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("checking socket %s: %w", s.socketPath, err)
+	}
 
 	lis, err := net.Listen("unix", s.socketPath)
 	if err != nil {
 		return fmt.Errorf("listening on %s: %w", s.socketPath, err)
+	}
+	if err := os.Chmod(s.socketPath, 0o600); err != nil {
+		_ = lis.Close()
+		return fmt.Errorf("setting socket permissions %s: %w", s.socketPath, err)
 	}
 
 	s.grpcServer = grpc.NewServer()

@@ -13,21 +13,22 @@
 #                         Does NOT launch the GUI — start it from your app
 #                         menu, or run `./gorganizer.sh launch`.
 #   launch                Start the daemon + GUI. Used by the desktop entry.
+#   stop                  Ask the running daemon to shut down safely.
 #   setup                 Detect distro, install build deps via system PM.
 #   doctor                Check build and runtime dependencies without changes.
 #   build [--rebuild]     Build only. --rebuild forces a clean rebuild.
-#   update [--restart]    Pull latest from origin/main, rebuild, re-register.
-#                         Refuses to run if the working tree is dirty or not
-#                         a git checkout. User config and *_Mods/ are
-#                         preserved. --restart bounces a running daemon.
+#   update [--restart]    Update this branch from its own source, rebuild, and
+#                         re-register. --restart only reminds you to reopen a
+#                         running session; it never stops Gorganizer.
 #   register              (Re-)install desktop file + icon + nxm:// handler.
 #   unregister            Reverse `register`.
-#   nxm <URI>             One-shot: forward an nxm:// URL to the running daemon.
-#   import [--from PATH]  Migrate legacy *_Mods/ folders into this clone.
-#   uninstall [--purge]   Remove the application: stop daemon, unregister,
-#                         delete build artifacts. User data is preserved.
-#                         --purge additionally removes config, profiles,
-#                         caches, and the daemon log.
+#   nxm <URI>             Open Gorganizer if needed and add a Nexus Mods download.
+#   import --from PATH    Move old *_Mods/ folders to the personal data folder.
+#   uninstall [--keep-data|--purge [--forget-missing-games]] [--yes]
+#                         Restore every game before removing Gorganizer.
+#                         Mods, downloads, settings and profiles stay by default.
+#                         --purge requires a second confirmation to delete them.
+#   uninstall --check     Check games without restoring or deleting anything.
 #   --rebuild             Compatibility alias for `build --rebuild`.
 #   --version, -v         Print version and exit.
 #   --help, -h            Show this message.
@@ -43,7 +44,9 @@ cd "$SCRIPT_DIR"
 # `./gorganizer.sh --version` works even before anything is built.
 gorganizer_version() {
     local v
-    if [ -f "$SCRIPT_DIR/VERSION" ]; then
+    if [ -f "$SCRIPT_DIR/release.json" ]; then
+        v="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SCRIPT_DIR/release.json")"
+    elif [ -f "$SCRIPT_DIR/VERSION" ]; then
         v="$(sed -n '1{s/[[:space:]]*$//;p;}' "$SCRIPT_DIR/VERSION" 2>/dev/null)"
     fi
     [ -z "${v:-}" ] && v="dev"
@@ -62,14 +65,15 @@ gorganizer_version() {
 DAEMON_BIN="$SCRIPT_DIR/gorganizerd"
 CTL_BIN="$SCRIPT_DIR/gorganizerctl"
 GUI_BIN="$SCRIPT_DIR/build/src/gorganizer"
+RELEASE_MODE=false
+if [ -f "$SCRIPT_DIR/release.json" ]; then
+    RELEASE_MODE=true
+    SCRIPT_DIR="$(cd "$SCRIPT_DIR" && pwd -P)"
+    DAEMON_BIN="$SCRIPT_DIR/bin/gorganizerd"
+    CTL_BIN="$SCRIPT_DIR/bin/gorganizerctl"
+    GUI_BIN="$SCRIPT_DIR/bin/gorganizer-gui"
+fi
 ICON_SRC="$SCRIPT_DIR/resources/icons/tmp_logo.png"
-
-# Runtime — must match internal/config/paths.go and singleton.go.
-RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}/gorganizer"
-SOCKET_PATH="$RUNTIME_DIR/gorganizer.sock"
-LOCK_PATH="$RUNTIME_DIR/gorganizerd.lock"
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/gorganizer"
-DAEMON_LOG="$STATE_DIR/gorganizerd.log"
 
 # User-facing install locations (XDG).
 APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
@@ -80,24 +84,11 @@ NXM_DESKTOP_FILE="$APPS_DIR/gorganizer-nxm.desktop"
 MIMEAPPS="${XDG_CONFIG_HOME:-$HOME/.config}/mimeapps.list"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gorganizer"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/gorganizer"
-BOOTSTRAP_SENTINEL="$CONFIG_DIR/.bootstrapped"
-
-# Legacy *_Mods directory names. Keep in sync with `ModsDirName` in
-# internal/gamedef/registry.go — the daemon and this script must agree on the
-# folder layout. Format: "<gameID>:<DirName>".
-GAME_MODS_DIRS=(
-    "morrowind:Morrowind_Mods"
-    "oblivion:Oblivion_Mods"
-    "skyrim:Skyrim_Mods"
-    "skyrimse:SkyrimSE_Mods"
-    "fallout3:Fallout3_Mods"
-    "falloutnv:FalloutNV_Mods"
-    "fallout4:Fallout4_Mods"
-    "starfield:Starfield_Mods"
-    "oblivionremastered:OblivionRemastered_Mods"
-    "ttw:TTW_Mods"
-    "stardewvalley:StardewValley_Mods"
-)
+RELEASE_CHECKOUT="$SCRIPT_DIR"
+if $RELEASE_MODE && [ -d "$DATA_DIR/releases" ] && [ ! -L "$DATA_DIR/releases" ] &&
+   [ "${SCRIPT_DIR%/*}" = "$(cd "$DATA_DIR/releases" && pwd -P)" ]; then
+    RELEASE_CHECKOUT="$DATA_DIR/releases/current"
+fi
 
 # --- output helpers --------------------------------------------------------
 
@@ -130,21 +121,23 @@ Subcommands:
                         Does NOT launch the GUI — start it from your app
                         menu, or run \`./gorganizer.sh launch\`.
   launch                Start the daemon + GUI (used by the desktop entry).
+  stop                  Ask the running daemon to shut down safely.
   setup                 Detect distro, install build deps via system PM.
   doctor                Check build and runtime dependencies without changes.
   build [--rebuild]     Build only. --rebuild forces a clean rebuild.
-  update [--restart]    Pull latest from origin/main, rebuild, re-register.
-                        Refuses to run if the working tree is dirty or not
-                        a git checkout. User config and *_Mods/ are
-                        preserved. --restart bounces a running daemon.
+  update [--restart]    Update this branch from its own source and rebuild.
+                        Refuses to run if you have uncommitted changes.
+                        Your mods and settings are preserved. --restart only
+                        reminds you to reopen; it never stops Gorganizer.
   register              (Re-)install desktop file + icon + nxm:// handler.
   unregister            Reverse \`register\`.
-  nxm <URI>             One-shot: forward an nxm:// URL to the running daemon.
-  import [--from PATH]  Migrate legacy *_Mods/ folders into this clone.
-  uninstall [--purge]   Remove the application: stop daemon, unregister,
-                        delete build artifacts. User data is preserved.
-                        --purge additionally removes config, profiles,
-                        caches, and the daemon log.
+  nxm <URI>             Open Gorganizer if needed and add a Nexus Mods download.
+  import --from PATH    Move old *_Mods/ folders to your personal data folder.
+  uninstall [--keep-data|--purge [--forget-missing-games]] [--yes]
+                        Restore every game before removing Gorganizer.
+                        Mods, downloads, settings and profiles stay by default.
+                        --purge requires a second confirmation to delete them.
+  uninstall --check     Check games without restoring or deleting anything.
   --rebuild             Compatibility alias for \`build --rebuild\`.
   --version, -v         Print version and exit.
   --help, -h            Show this message.
@@ -166,11 +159,29 @@ prompt_yn() {
 
 # --- distro detection ------------------------------------------------------
 
+detect_immutable_host() {
+    [ -e "${GORGANIZER_OSTREE_MARKER:-/run/ostree-booted}" ] && return 0
+    [ -r "${GORGANIZER_OS_RELEASE:-/etc/os-release}" ] || return 1
+    local ID="" ID_LIKE="" VARIANT_ID=""
+    . "${GORGANIZER_OS_RELEASE:-/etc/os-release}"
+    case "${ID,,}" in
+        steamos|nixos|bazzite|bluefin|aurora|endless) return 0 ;;
+    esac
+    case "${VARIANT_ID,,}" in
+        *silverblue*|*kinoite*|*sericea*|*onyx*|*atomic*|*coreos*) return 0 ;;
+    esac
+    case " ${ID_LIKE,,} " in
+        *" steamos "*) return 0 ;;
+    esac
+    return 1
+}
+
 detect_distro_family() {
+    detect_immutable_host && { echo immutable; return; }
     local family="unknown"
-    if [ -r /etc/os-release ]; then
-        # shellcheck disable=SC1091
-        . /etc/os-release
+    if [ -r "${GORGANIZER_OS_RELEASE:-/etc/os-release}" ]; then
+        local ID="" ID_LIKE=""
+        . "${GORGANIZER_OS_RELEASE:-/etc/os-release}"
         local ids=" ${ID:-} ${ID_LIKE:-} "
         case "$ids" in
             *" arch "*|*" artix "*|*" manjaro "*|*" endeavouros "*|*" cachyos "*) family="arch" ;;
@@ -189,6 +200,8 @@ deps_for_family() {
     case "$1" in
         arch) cat <<'EOF'
 base-devel|base-devel
+make|make
+pkg-config|pkgconf
 cmake|cmake
 ninja|ninja
 go|go
@@ -202,6 +215,9 @@ EOF
             ;;
         debian) cat <<'EOF'
 build-essential|build-essential
+make|make
+pkg-config|pkg-config pkgconf
+libprotobuf-dev|libprotobuf-dev
 cmake|cmake
 ninja-build|ninja-build
 golang-go|golang-go
@@ -216,6 +232,9 @@ EOF
             ;;
         fedora) cat <<'EOF'
 gcc-c++|gcc-c++
+make|make
+pkg-config|pkgconf-pkg-config pkgconf
+protobuf-devel|protobuf-devel
 cmake|cmake
 ninja-build|ninja-build
 golang|golang
@@ -230,6 +249,8 @@ EOF
             ;;
         suse) cat <<'EOF'
 gcc-c++|gcc-c++
+make|make
+pkg-config|pkg-config pkgconf
 cmake|cmake
 ninja|ninja
 go|go
@@ -325,46 +346,78 @@ missing_deps() {
     return 0
 }
 
+IMMUTABLE_NOTICE_SHOWN=false
+show_immutable_notice() {
+    $IMMUTABLE_NOTICE_SHOWN && return 0
+    warn "This system keeps its system files read-only, so Gorganizer will not install developer tools on it. To build Gorganizer here, open a Distrobox or Toolbox container, run ./gorganizer.sh inside it, and start Gorganizer from that container."
+    IMMUTABLE_NOTICE_SHOWN=true
+}
+
+check_build_tools() {
+    local tool pkg_tool="" missing=()
+    for tool in make cmake go protoc grpc_cpp_plugin; do
+        command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+    done
+    if ! command -v c++ >/dev/null 2>&1 && ! command -v g++ >/dev/null 2>&1 && ! command -v clang++ >/dev/null 2>&1; then
+        missing+=("C++ compiler")
+    fi
+    if command -v pkg-config >/dev/null 2>&1; then
+        pkg_tool=pkg-config
+    elif command -v pkgconf >/dev/null 2>&1; then
+        pkg_tool=pkgconf
+    else
+        missing+=("pkg-config or pkgconf")
+    fi
+    if [ -n "$pkg_tool" ]; then
+        "$pkg_tool" --exists protobuf || missing+=("protobuf development headers")
+        "$pkg_tool" --exists grpc++ || missing+=("gRPC development headers")
+    fi
+    if [ ${#missing[@]} -ne 0 ]; then
+        err "Missing build tools: ${missing[*]}."
+        return 1
+    fi
+}
+
 # Prompt-and-install build deps. Used by `setup` and the first-run flow.
-# Returns 0 on success, non-zero if the user declined or the install failed.
 install_deps_interactive() {
     local family="$1" missing install_cmd deps_rc=0
     local -a install_cmd_parts=()
-    install_cmd="$(pm_install_cmd "$family")"
-    if [ -z "$install_cmd" ]; then
-        warn "Unknown distro family ($family). Install build deps manually:"
-        warn "    Need: cmake, ninja, go (1.26+), protoc, protoc-gen-grpc,"
-        warn "          qt6-base dev, grpc dev, 7zip, unzip."
-        return 1
+    if [ "$family" = immutable ]; then
+        show_immutable_notice
+    else
+        install_cmd="$(pm_install_cmd "$family")"
+        if [ -z "$install_cmd" ]; then
+            warn "Build packages cannot be installed automatically on this system."
+        else
+            missing_deps "$family" >/dev/null || deps_rc=$?
+            case "$deps_rc" in
+                2) ok "All build deps already installed." ;;
+                1) warn "Build packages cannot be checked automatically on this system." ;;
+                0)
+                    missing="${MISSING_BUILD_PACKAGES[*]}"
+                    if [ -n "$missing" ]; then
+                        log "Missing build dependencies (${BOLD}$family${RESET}):"
+                        printf '    %s\n' "$missing" >&2
+                        log "Install command:"
+                        printf '    %s %s\n' "$install_cmd" "$missing" >&2
+                        if [ ! -t 0 ] || ! prompt_yn "Install now via sudo?" Y; then
+                            err "Gorganizer cannot build because the needed tools were not installed. Install them and run ./gorganizer.sh again."
+                            return 1
+                        fi
+                        sudo -v || { err "sudo authentication failed. Build stopped."; return 1; }
+                        read -r -a install_cmd_parts <<< "$install_cmd"
+                        if ! "${install_cmd_parts[@]}" "${MISSING_BUILD_PACKAGES[@]}"; then
+                            err "Package install failed. Build stopped."
+                            return 1
+                        fi
+                        ok "Build deps installed."
+                    fi
+                    ;;
+            esac
+        fi
     fi
-    missing_deps "$family" >/dev/null || deps_rc=$?
-    case "$deps_rc" in
-        2) ok "All build deps already installed."; return 0 ;;
-        1) warn "Distro family unknown; can't auto-install."; return 1 ;;
-    esac
-    missing="${MISSING_BUILD_PACKAGES[*]}"
-    if [ -z "$missing" ]; then
-        warn "Build dependency packages could not be resolved; continuing without an install."
-        return 0
-    fi
-
-    log "Missing build dependencies (${BOLD}$family${RESET}):"
-    echo "    $missing" >&2
-    log "Install command:"
-    echo "    $install_cmd $missing" >&2
-    if ! prompt_yn "Install now via sudo?" Y; then
-        warn "Skipped. Run \`$install_cmd $missing\` yourself, then rerun."
-        return 1
-    fi
-    sudo -v || { err "sudo authentication failed."; return 1; }
-    read -r -a install_cmd_parts <<< "$install_cmd"
-    if ! "${install_cmd_parts[@]}" "${MISSING_BUILD_PACKAGES[@]}"; then
-        err "Package install failed."
-        return 1
-    fi
-    ok "Build deps installed."
+    check_build_tools || return 1
     check_go_version_warning
-    return 0
 }
 
 # Required runtime binaries, their per-family package candidates, and the
@@ -412,6 +465,8 @@ runtime_tools_check() {
         if [ -n "$resolved" ] && [ -n "$install_cmd" ]; then
             printf '         fix: %s %s\n' "$install_cmd" "$resolved"
             add_runtime_package "$resolved"
+        elif [ "$family" = immutable ]; then
+            printf '         available inside a Distrobox or Toolbox container\n'
         else
             printf '         fix: install %s manually for this distro\n' "$binary"
         fi
@@ -424,6 +479,10 @@ runtime_tools_check() {
 install_runtime_tools_interactive() {
     local family="$1" install_cmd
     local -a install_cmd_parts=()
+    if [ "$family" = immutable ]; then
+        runtime_tools_check "$family"
+        return 0
+    fi
     runtime_tools_check "$family"
     [ ${#RUNTIME_MISSING_PACKAGES[@]} -eq 0 ] && return 0
     if [ ! -t 0 ]; then
@@ -449,45 +508,113 @@ install_runtime_tools_interactive() {
 }
 
 check_go_version_warning() {
-    local gov
-    gov="$(go version 2>/dev/null | awk '{print $3}' | sed 's/^go//')"
-    [ -z "$gov" ] && return 0
-    local major minor
-    major="${gov%%.*}"
-    minor="${gov#*.}"; minor="${minor%%.*}"
-    if [ "${major:-0}" -lt 1 ] || { [ "${major:-0}" -eq 1 ] && [ "${minor:-0}" -lt 26 ]; }; then
-        warn "Detected go${gov}; this project requires 1.26+."
-        warn "If \`make\` fails with module-version errors, install a newer Go from"
-        warn "    https://go.dev/dl/"
+    export GOTOOLCHAIN=local
+    local required found output req_major req_minor req_patch got_major got_minor got_patch
+    required="$(sed -n 's/^go[[:space:]]\+\([0-9][0-9.]*\).*/\1/p' "$SCRIPT_DIR/go.mod" | sed -n '1p')"
+    if [ -z "$required" ]; then
+        err "Could not read the required Go version from go.mod."
+        return 1
+    fi
+    if ! output="$(go version 2>/dev/null)" || [[ ! "$output" =~ ^go\ version\ (devel\ )?go([0-9]+\.[0-9]+(\.[0-9]+)?) ]]; then
+        err "Could not check the installed Go version."
+        return 1
+    fi
+    found="${BASH_REMATCH[2]}"
+    IFS=. read -r req_major req_minor req_patch <<< "$required"
+    IFS=. read -r got_major got_minor got_patch <<< "$found"
+    req_patch="${req_patch:-0}"
+    got_patch="${got_patch:-0}"
+    if (( 10#$got_major < 10#$req_major ||
+          (10#$got_major == 10#$req_major && 10#$got_minor < 10#$req_minor) ||
+          (10#$got_major == 10#$req_major && 10#$got_minor == 10#$req_minor && 10#$got_patch < 10#$req_patch) )); then
+        err "Gorganizer needs Go $required or newer, but this system has Go $found. Install a newer Go from https://go.dev/dl/ and run ./gorganizer.sh again."
+        return 1
     fi
 }
 
 # --- build -----------------------------------------------------------------
 
+build_fingerprint() (
+    cd "$SCRIPT_DIR" || return 1
+    find . \( -type d \( -name build -o -name .build-staging -o -name .tools \
+        -o -name .git -o -name .gocache -o -name .tmp \) -prune \) -o \
+        \( -type f \( -name '*.go' -o -name '*.cpp' -o -name '*.h' \
+            -o -name '*.proto' -o -name CMakeLists.txt -o -name go.mod \
+            -o -name go.sum -o -name Makefile -o -name VERSION \
+            -o -path './resources/*' -o -path './assets/*' \) \
+            ! -name '*.pb.go' -print0 \) | \
+        LC_ALL=C sort -z | xargs -0 -r sha256sum | sha256sum
+)
+
 needs_build() {
+    $RELEASE_MODE && return 1
     [ "${1:-}" = "force" ] && return 0
     [ ! -x "$DAEMON_BIN" ] && return 0
+    [ ! -x "$CTL_BIN" ]    && return 0
     [ ! -x "$GUI_BIN" ]    && return 0
-    local changed
-    changed=$(find "$SCRIPT_DIR" \
-        \( -name '*.go' -o -name '*.cpp' -o -name '*.h' \
-           -o -name '*.proto' -o -name 'CMakeLists.txt' \) \
-        -not -path '*/build/*' \
-        -newer "$GUI_BIN" -print -quit 2>/dev/null)
-    [ -n "$changed" ]
+    [ ! -f "$SCRIPT_DIR/.build-fingerprint" ] && return 0
+    command -v sha256sum >/dev/null 2>&1 || return 0
+    local fingerprint
+    fingerprint="$(build_fingerprint)" || return 0
+    [ "$fingerprint" != "$(< "$SCRIPT_DIR/.build-fingerprint")" ]
 }
 
-do_build() {
-    local force="${1:-}"
-    if [ "$force" = "force" ]; then
+validate_build_binary() {
+    local output
+    [ -x "$1" ] || return 1
+    output="$("$1" --version)" || return 1
+    [[ "$output" == *"$2"* ]]
+}
+
+build_and_publish() (
+    local stage="$SCRIPT_DIR/.build-staging" version fingerprint
+    local daemon_tmp="" ctl_tmp="" gui_tmp="" fingerprint_tmp=""
+    trap 'rm -f "$daemon_tmp" "$ctl_tmp" "$gui_tmp" "$fingerprint_tmp"' EXIT
+    trap 'exit 1' INT TERM
+
+    if [ "${1:-}" = "force" ]; then
         log "Cleaning previous build..."
-        make clean >/dev/null
+        rm -rf "$stage" || return 1
     fi
+    mkdir -p "$stage/bin" || return 1
+    command -v sha256sum >/dev/null 2>&1 || return 1
+    version="$(sed -n '1{s/[[:space:]]*$//;p;}' "$SCRIPT_DIR/VERSION")" || return 1
+    [ -n "$version" ] || return 1
+    fingerprint="$(build_fingerprint)" || return 1
+
     log "Building (delegated to make)..."
-    if ! make all gui; then
-        err "Build failed."
-        local family
-        family="$(detect_distro_family)"
+    make OUT_DIR="$stage/bin" GUI_BUILD_DIR="$stage/gui" all gui || return 1
+    validate_build_binary "$stage/bin/gorganizerd" "$version" || return 1
+    validate_build_binary "$stage/bin/gorganizerctl" "$version" || return 1
+    validate_build_binary "$stage/gui/src/gorganizer" "$version" || return 1
+    [ "$(build_fingerprint)" = "$fingerprint" ] || return 1
+
+    mkdir -p "$SCRIPT_DIR/build/src" || return 1
+    daemon_tmp="$(mktemp "$DAEMON_BIN.tmp.XXXXXX")" || return 1
+    ctl_tmp="$(mktemp "$CTL_BIN.tmp.XXXXXX")" || return 1
+    gui_tmp="$(mktemp "$GUI_BIN.tmp.XXXXXX")" || return 1
+    fingerprint_tmp="$(mktemp "$stage/fingerprint.XXXXXX")" || return 1
+    install -m 755 "$stage/bin/gorganizerd" "$daemon_tmp" || return 1
+    install -m 755 "$stage/bin/gorganizerctl" "$ctl_tmp" || return 1
+    install -m 755 "$stage/gui/src/gorganizer" "$gui_tmp" || return 1
+    printf '%s\n' "$fingerprint" > "$fingerprint_tmp" || return 1
+
+    mv -f "$daemon_tmp" "$DAEMON_BIN" || return 1
+    mv -f "$ctl_tmp" "$CTL_BIN" || return 1
+    mv -f "$gui_tmp" "$GUI_BIN" || return 1
+    mv -f "$fingerprint_tmp" "$SCRIPT_DIR/.build-fingerprint" || return 1
+)
+
+do_build() {
+    local family
+    family="$(detect_distro_family)"
+    if [ "$family" = immutable ]; then
+        show_immutable_notice
+    fi
+    check_build_tools || return 1
+    check_go_version_warning || return 1
+    if ! build_and_publish "${1:-}"; then
+        err "The new build failed. Your installed version is unchanged."
         local install_cmd; install_cmd="$(pm_install_cmd "$family")"
         if [ -n "$install_cmd" ]; then
             warn "If this looks like a missing tool/header, run:"
@@ -500,141 +627,33 @@ do_build() {
 
 # --- desktop / mime registration -------------------------------------------
 
-# Icon=<absolute path>  is more reliable than the theme-name lookup
-# (Icon=gorganizer): the latter requires the icon cache to be current,
-# which trips up launchers that read .desktop files synchronously
-# (Niri's fuzzel/wofi, some KDE configurations).
-write_desktop_file() {
-    # Exec uses the `launch` subcommand because the no-arg form is the
-    # install/update flow — running it from a launcher would silently
-    # rebuild instead of opening the GUI. `launch` is the user-facing
-    # run path and the only thing the desktop entry should ever invoke.
-    cat > "$DESKTOP_FILE" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Gorganizer
-Comment=Native Linux mod organizer for Bethesda games
-Exec=$SCRIPT_DIR/gorganizer.sh launch
-Icon=$ICON_DEST
-Terminal=false
-Categories=Game;Utility;
-Keywords=mod;organizer;skyrim;fallout;bethesda;stardew;smapi;
-Version=$(gorganizer_version)
-EOF
-}
-
-write_nxm_desktop_file() {
-    cat > "$NXM_DESKTOP_FILE" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Gorganizer NXM Handler
-Comment=Nexus Mods download handler for Gorganizer
-Exec=$SCRIPT_DIR/gorganizer.sh nxm %u
-Icon=$ICON_DEST
-Terminal=false
-Categories=Game;
-NoDisplay=true
-MimeType=x-scheme-handler/nxm;
-EOF
-}
-
-# Idempotently write `key=value` under [section] in mimeapps.list. Drops any
-# prior line for the same key first so handlers don't stack on re-runs. Uses
-# python3 because the awk version was fiddly across awks.
-mimeapps_ensure() {
-    local section="$1" entry="$2"
-    mkdir -p "$(dirname "$MIMEAPPS")"
-    [ -f "$MIMEAPPS" ] || : > "$MIMEAPPS"
-    python3 - "$MIMEAPPS" "$section" "$entry" <<'PYEOF'
-import os, sys, tempfile
-path, section, entry = sys.argv[1:4]
-key = entry.split("=", 1)[0] + "="
-hdr = f"[{section}]"
-try:
-    with open(path, "r", encoding="utf-8") as f:
-        text = f.read()
-except FileNotFoundError:
-    text = ""
-out, in_target, inserted, seen = [], False, False, False
-for line in text.splitlines():
-    s = line.strip()
-    if s.startswith("[") and s.endswith("]"):
-        in_target = (s == hdr)
-        if in_target:
-            seen = True
-        out.append(line)
-        if in_target and not inserted:
-            out.append(entry); inserted = True
-        continue
-    if in_target and s.startswith(key):
-        continue
-    out.append(line)
-if not seen:
-    if out and out[-1].strip() != "":
-        out.append("")
-    out.append(hdr); out.append(entry)
-new = "\n".join(out)
-if not new.endswith("\n"):
-    new += "\n"
-# Atomic replace: write to a sibling tempfile, fsync, then os.replace.
-# Without this, a crash mid-write (or two gorganizer instances racing)
-# could leave mimeapps.list truncated and break every nxm:// link.
-d = os.path.dirname(path) or "."
-fd, tmp = tempfile.mkstemp(prefix=".mimeapps.", dir=d)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(new)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-except Exception:
-    try: os.unlink(tmp)
-    except OSError: pass
-    raise
-PYEOF
-}
-
-# Drop a `key=value` line from mimeapps.list (any section).
-mimeapps_drop() {
-    local entry="$1"
-    [ -f "$MIMEAPPS" ] || return 0
-    python3 - "$MIMEAPPS" "$entry" <<'PYEOF'
-import os, sys, tempfile
-path, entry = sys.argv[1:3]
-with open(path, "r", encoding="utf-8") as f:
-    text = f.read()
-out = [line for line in text.splitlines() if line.strip() != entry]
-new = "\n".join(out)
-if not new.endswith("\n"):
-    new += "\n"
-d = os.path.dirname(path) or "."
-fd, tmp = tempfile.mkstemp(prefix=".mimeapps.", dir=d)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(new)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-except Exception:
-    try: os.unlink(tmp)
-    except OSError: pass
-    raise
-PYEOF
-}
-
-# Returns 0 if the desktop entries / icon / NXM mime are missing or stale
-# (Exec= paths point somewhere other than this clone, or still point to the
-# pre-`launch`-subcommand entry that would re-run the installer instead of
-# opening the GUI). Returns 1 if all good.
+# Returns 0 when the desktop shortcut or icon needs updating.
 needs_register() {
-    [ -f "$DESKTOP_FILE" ]     || return 0
-    [ -f "$NXM_DESKTOP_FILE" ] || return 0
-    [ -f "$ICON_DEST" ]        || return 0
-    grep -qF "Exec=$SCRIPT_DIR/gorganizer.sh launch" "$DESKTOP_FILE"     2>/dev/null || return 0
-    grep -qF "Exec=$SCRIPT_DIR/gorganizer.sh nxm"    "$NXM_DESKTOP_FILE" 2>/dev/null || return 0
-    grep -qF "Icon=$ICON_DEST" "$DESKTOP_FILE"     2>/dev/null || return 0
-    grep -qF "Icon=$ICON_DEST" "$NXM_DESKTOP_FILE" 2>/dev/null || return 0
+    [ -f "$ICON_DEST" ] || return 0
+    [ -x "$CTL_BIN" ] || return 0
+    "$CTL_BIN" desktop status --checkout "$RELEASE_CHECKOUT" --icon "$ICON_DEST" >/dev/null 2>&1 || return 0
     return 1
+}
+
+# Build only the maintenance tool when registration precedes installation.
+ensure_register_ctl() {
+    if $RELEASE_MODE; then
+        [ -x "$CTL_BIN" ] || { err "Gorganizer's maintenance tool is missing from this download."; return 1; }
+        return 0
+    fi
+    [ -x "$CTL_BIN" ] && ! needs_build && return 0
+    check_build_tools || return 1
+    check_go_version_warning || return 1
+    local stage="$SCRIPT_DIR/.build-staging" version tmp
+    version="$(sed -n '1{s/[[:space:]]*$//;p;}' "$SCRIPT_DIR/VERSION")" || return 1
+    mkdir -p "$stage/bin" || return 1
+    make OUT_DIR="$stage/bin" GUI_BUILD_DIR="$stage/gui" ctl || return 1
+    validate_build_binary "$stage/bin/gorganizerctl" "$version" || return 1
+    tmp="$(mktemp "$CTL_BIN.tmp.XXXXXX")" || return 1
+    if ! install -m 755 "$stage/bin/gorganizerctl" "$tmp" || ! mv -f "$tmp" "$CTL_BIN"; then
+        rm -f "$tmp"
+        return 1
+    fi
 }
 
 cmd_register() {
@@ -642,220 +661,43 @@ cmd_register() {
         err "Icon missing at $ICON_SRC"
         return 1
     fi
-    install -d "$APPS_DIR" "$ICON_DIR"
+    ensure_register_ctl || { err "Could not build Gorganizer's maintenance tool."; return 1; }
     install -Dm644 "$ICON_SRC" "$ICON_DEST"
-    write_desktop_file
-    write_nxm_desktop_file
-
-    local entry="x-scheme-handler/nxm=gorganizer-nxm.desktop"
-    mimeapps_ensure "Default Applications" "$entry"
-    mimeapps_ensure "Added Associations"   "$entry"
-
+    "$CTL_BIN" desktop register --checkout "$RELEASE_CHECKOUT" --icon "$ICON_DEST" || return 1
     xdg-mime default gorganizer-nxm.desktop x-scheme-handler/nxm 2>/dev/null || true
     update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
     gtk-update-icon-cache "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor" >/dev/null 2>&1 || true
-
-    log "Desktop file: $DESKTOP_FILE"
-    log "NXM handler:  $NXM_DESKTOP_FILE"
-    log "Icon:         $ICON_DEST"
-    log "Mimeapps:     $MIMEAPPS"
-
-    local current
-    current="$(xdg-mime query default x-scheme-handler/nxm 2>/dev/null || true)"
-    if [ "$current" = "gorganizer-nxm.desktop" ]; then
-        ok "nxm:// handler is now Gorganizer."
-    else
-        warn "xdg-mime says nxm:// default is '$current' (expected gorganizer-nxm.desktop)."
-        warn "Browsers may still find us via mimeapps.list. Try logging out + back in if not."
-    fi
-    ok "Registered. Re-run after moving the clone directory."
+    ok "Registered. If you move Gorganizer, run this again from its new folder."
 }
 
 cmd_unregister() {
-    local entry="x-scheme-handler/nxm=gorganizer-nxm.desktop"
-    [ -f "$DESKTOP_FILE" ]     && rm -f "$DESKTOP_FILE"     && log "Removed $DESKTOP_FILE"
-    [ -f "$NXM_DESKTOP_FILE" ] && rm -f "$NXM_DESKTOP_FILE" && log "Removed $NXM_DESKTOP_FILE"
-    [ -f "$ICON_DEST" ]        && rm -f "$ICON_DEST"        && log "Removed $ICON_DEST"
-    mimeapps_drop "$entry"
-    xdg-mime default '' x-scheme-handler/nxm 2>/dev/null || true
+    if [ ! -x "$CTL_BIN" ]; then
+        err "Gorganizer's maintenance tool is missing. Nothing was removed. Run ./gorganizer.sh register first."
+        return 1
+    fi
+    "$CTL_BIN" desktop unregister --checkout "$RELEASE_CHECKOUT" || return 1
+    if [ ! -e "$DESKTOP_FILE" ] && [ ! -L "$DESKTOP_FILE" ] &&
+       [ ! -e "$NXM_DESKTOP_FILE" ] && [ ! -L "$NXM_DESKTOP_FILE" ]; then
+        [ ! -f "$ICON_DEST" ] || rm -f "$ICON_DEST"
+    fi
     update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
     ok "Unregistered."
 }
 
 # --- migration -------------------------------------------------------------
 
-# Detect mods left behind by the old install.sh layout
-# (~/.local/share/gorganizer/<gameID>/mods/) and offer to move them into
-# this clone as <DirName>/. Returns 0 if any were found+moved (or nothing
-# to do); 1 only on hard failure.
-migrate_legacy_install() {
-    # Parallel arrays — paths theoretically could contain `|`, and bash
-    # has no clean way to escape a delimiter inside an array element. A
-    # second parallel array per field is uglier but unambiguous.
-    local srcs=() dsts=() games=() mapping
-    for mapping in "${GAME_MODS_DIRS[@]}"; do
-        local game="${mapping%%:*}" name="${mapping##*:}"
-        local src="$DATA_DIR/$game/mods"
-        local dst="$SCRIPT_DIR/$name"
-        if [ -d "$src" ] && [ ! -e "$dst" ]; then
-            srcs+=("$src")
-            dsts+=("$dst")
-            games+=("$game")
-        fi
-    done
-    [ ${#srcs[@]} -eq 0 ] && return 0
-
-    log "Found legacy mod folders from a previous install:"
-    local i
-    for ((i = 0; i < ${#srcs[@]}; i++)); do
-        echo "    ${srcs[$i]}" >&2
-        echo "        →  ${dsts[$i]}" >&2
-    done
-    if ! prompt_yn "Move them into this clone now?" N; then
-        warn "Skipped. Run \`./gorganizer.sh import\` to revisit later."
-        return 0
-    fi
-
-    for ((i = 0; i < ${#srcs[@]}; i++)); do
-        if mv "${srcs[$i]}" "${dsts[$i]}"; then
-            ok "Moved ${srcs[$i]} → ${dsts[$i]}"
-            # Remove now-empty parent if it has no other contents.
-            rmdir "$DATA_DIR/${games[$i]}" 2>/dev/null || true
-        else
-            err "Failed to move ${srcs[$i]}"
-        fi
-    done
-}
-
-# Migrate from another clone of gorganizer (the old in-tree dev pattern).
-migrate_from_path() {
-    local from="$1"
-    [ -d "$from" ] || { err "No such directory: $from"; return 1; }
-    from="$(cd "$from" && pwd)"
-    if [ "$from" = "$SCRIPT_DIR" ]; then
-        err "Source equals current clone. Nothing to do."
-        return 1
-    fi
-
-    local srcs=() dsts=() mapping
-    for mapping in "${GAME_MODS_DIRS[@]}"; do
-        local name="${mapping##*:}"
-        local src="$from/$name"
-        local dst="$SCRIPT_DIR/$name"
-        if [ -d "$src" ]; then
-            if [ -e "$dst" ]; then
-                warn "Skipping $name: target exists at $dst"
-                continue
-            fi
-            srcs+=("$src")
-            dsts+=("$dst")
-        fi
-    done
-    [ ${#srcs[@]} -eq 0 ] && { log "No *_Mods/ folders found in $from"; return 0; }
-
-    log "Will move from $from:"
-    local i
-    for ((i = 0; i < ${#srcs[@]}; i++)); do
-        echo "    ${srcs[$i]}  →  ${dsts[$i]}" >&2
-    done
-    if ! prompt_yn "Proceed?" N; then
-        warn "Cancelled."
-        return 0
-    fi
-    for ((i = 0; i < ${#srcs[@]}; i++)); do
-        if mv "${srcs[$i]}" "${dsts[$i]}"; then
-            ok "Moved ${srcs[$i]} → ${dsts[$i]}"
-        else
-            err "Failed to move ${srcs[$i]}"
-        fi
-    done
-}
-
 cmd_import() {
-    local from=""
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --from) shift; from="${1:-}"; shift ;;
-            *) err "Unknown option: $1"; return 2 ;;
-        esac
-    done
-    if [ -n "$from" ]; then
-        migrate_from_path "$from"
-    else
-        migrate_legacy_install
+    if [ "$#" -ne 2 ] || [ "$1" != --from ] || [ -z "$2" ]; then
+        err "Usage: $0 import --from <path>"
+        return 2
     fi
+    "$CTL_BIN" migrate-data --from "$2"
 }
 
 # --- daemon lifecycle ------------------------------------------------------
-# This is the orphan-daemon fix from the old launcher. internal/ipc/server.go
-# unconditionally os.Remove()s the socket on bind, so without explicit kill
-# of the prior daemon, every restart leaves an orphan. Don't simplify.
 
-kill_stale_daemons() {
-    if ! pgrep -x gorganizerd >/dev/null; then
-        return 0
-    fi
-    log "Terminating stale gorganizerd process(es)..."
-    pkill -TERM -x gorganizerd 2>/dev/null || true
-    local i
-    for i in $(seq 1 30); do
-        pgrep -x gorganizerd >/dev/null || break
-        sleep 0.1
-    done
-    if pgrep -x gorganizerd >/dev/null; then
-        warn "Stubborn daemons, SIGKILL"
-        pkill -KILL -x gorganizerd 2>/dev/null || true
-        sleep 0.3
-    fi
-    rm -f "$SOCKET_PATH" "$LOCK_PATH"
-}
-
-DAEMON_PID=""
-start_daemon() {
-    mkdir -p "$RUNTIME_DIR" "$STATE_DIR"
-    : > "$DAEMON_LOG"
-
-    # GORGANIZER_ROOT pins per-game mod folders to the project dir
-    # (e.g. ./FalloutNV_Mods/) instead of ~/.local/share/gorganizer/...
-    GORGANIZER_ROOT="$SCRIPT_DIR" \
-        "$DAEMON_BIN" --log-level info >"$DAEMON_LOG" 2>&1 &
-    DAEMON_PID=$!
-
-    local i
-    for i in $(seq 1 50); do
-        if [ -S "$SOCKET_PATH" ]; then
-            ok "Daemon up (pid $DAEMON_PID, log: $DAEMON_LOG)"
-            return 0
-        fi
-        if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
-            err "Daemon exited during startup. Last 20 log lines:"
-            tail -20 "$DAEMON_LOG" | sed 's/^/    /' >&2 || true
-            exit 1
-        fi
-        sleep 0.1
-    done
-    err "Daemon started but socket never appeared at $SOCKET_PATH"
-    tail -20 "$DAEMON_LOG" | sed 's/^/    /' >&2 || true
-    kill -TERM "$DAEMON_PID" 2>/dev/null || true
-    exit 1
-}
-
-stop_daemon_trap() {
-    local rc=$?
-    if [ -n "${DAEMON_PID:-}" ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
-        log "Shutting down daemon (pid $DAEMON_PID)..."
-        kill -TERM "$DAEMON_PID" 2>/dev/null || true
-        local i
-        for i in $(seq 1 50); do
-            kill -0 "$DAEMON_PID" 2>/dev/null || break
-            sleep 0.1
-        done
-        if kill -0 "$DAEMON_PID" 2>/dev/null; then
-            kill -KILL "$DAEMON_PID" 2>/dev/null || true
-        fi
-    fi
-    rm -f "$SOCKET_PATH" "$LOCK_PATH"
-    exit "$rc"
+cmd_stop() {
+    "$CTL_BIN" stop "$@"
 }
 
 # --- install (default) -----------------------------------------------------
@@ -867,8 +709,7 @@ stop_daemon_trap() {
 already_installed() {
     [ -x "$DAEMON_BIN" ] || return 1
     [ -x "$GUI_BIN" ]    || return 1
-    [ -f "$DESKTOP_FILE" ] || return 1
-    grep -qF "Exec=$SCRIPT_DIR/gorganizer.sh launch" "$DESKTOP_FILE" 2>/dev/null || return 1
+    needs_register && return 1
     return 0
 }
 
@@ -884,7 +725,7 @@ cmd_install() {
     if [ ! -x "$DAEMON_BIN" ] || [ ! -x "$GUI_BIN" ]; then
         local family
         family="$(detect_distro_family)"
-        install_deps_interactive "$family" || true
+        install_deps_interactive "$family" || return 1
     fi
 
     # Build (incremental): no-op when sources are unchanged AND both
@@ -899,14 +740,6 @@ cmd_install() {
     local runtime_family
     runtime_family="$(detect_distro_family)"
     install_runtime_tools_interactive "$runtime_family"
-
-    # First-install migration only — gated by the sentinel so updates
-    # never re-prompt for legacy *_Mods/ moves.
-    if [ ! -f "$BOOTSTRAP_SENTINEL" ]; then
-        migrate_legacy_install || true
-        mkdir -p "$CONFIG_DIR"
-        touch "$BOOTSTRAP_SENTINEL"
-    fi
 
     # Refresh the desktop entry on every run so a moved clone or a
     # version bump shows up in the launcher immediately.
@@ -927,7 +760,7 @@ cmd_install() {
     fi
     log "  Daemon:    $DAEMON_BIN"
     log "  Frontend:  $GUI_BIN"
-    log "  Mod root:  $SCRIPT_DIR/<Game>_Mods/"
+    log "  Mods:      $DATA_DIR/<game>/mods/"
     log "  Desktop:   $DESKTOP_FILE"
     echo ""
     log "Launch via your application menu, or run:"
@@ -936,86 +769,104 @@ cmd_install() {
 
 # --- launch ----------------------------------------------------------------
 
+notify_user() {
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send "Gorganizer" "$1" || true
+    fi
+}
+
+preflight_data_migration() {
+    if [ "${GORGANIZER_ROOT+x}" != x ]; then
+        local status plan count result first_blocker
+        if ! status="$("$CTL_BIN" migrate-data --status)"; then
+            err "Could not check whether your mods need moving. Please try again."
+            notify_user "Could not check whether your mods need moving. Please try again."
+            exit 1
+        fi
+        case "$status" in
+            pending)
+                if ! result="$("$CTL_BIN" migrate-data --resume 2>&1)"; then
+                    err "$result"
+                    notify_user "Could not finish moving your mods: $result"
+                    exit 1
+                fi
+                [ -z "$result" ] || log "$result"
+                ;;
+            none) ;;
+            *)
+                err "Could not check whether your mods need moving: $status"
+                notify_user "Could not check whether your mods need moving. Please try again."
+                exit 1
+                ;;
+        esac
+        plan="$("$CTL_BIN" migrate-data --from "$SCRIPT_DIR" --dry-run --count 2>&1)" || true
+        if [[ "$plan" =~ ^[0-9]+$ ]]; then
+            count="$plan"
+            if [ "$count" -gt 0 ]; then
+                notify_user "Moving your mods to your personal data folder. This happens once."
+                log "Moving your mods to your personal data folder. This happens once."
+                if result="$("$CTL_BIN" migrate-data --from "$SCRIPT_DIR" --yes 2>&1)"; then
+                    [ -z "$result" ] || log "$result"
+                    notify_user "Your mods are now in ~/.local/share/gorganizer."
+                    ok "Your mods are now in ~/.local/share/gorganizer."
+                else
+                    first_blocker="$(printf '%s\n' "$result" | sed -n 's/^[[:space:]]*Cannot move yet: //p' | sed -n '1p')"
+                    [ -n "$first_blocker" ] || first_blocker="${result##*$'\n'}"
+                    first_blocker="${first_blocker#Could not move your mods: }"
+                    first_blocker="${first_blocker%.}"
+                    warn "Gorganizer couldn't move your mods yet: $first_blocker. It will try again next time."
+                    notify_user "Gorganizer couldn't move your mods yet: $first_blocker. It will try again next time."
+                    export GORGANIZER_ROOT="$SCRIPT_DIR"
+                fi
+            fi
+        else
+            warn "Gorganizer couldn't check your old mods yet: $plan. It will try again next time."
+            notify_user "Gorganizer couldn't check your old mods yet. It will try again next time."
+            export GORGANIZER_ROOT="$SCRIPT_DIR"
+        fi
+    fi
+}
+
 cmd_launch() {
-    # Argv carryover from the desktop entry: an nxm:// URI may be passed
-    # along when the user clicks a Nexus "Mod manager download" button
-    # while the GUI is already up. The GUI itself forwards URIs through
-    # to the daemon (see src/main.cpp); we just pass them through argv.
-    if [ ! -x "$DAEMON_BIN" ] || [ ! -x "$GUI_BIN" ]; then
+    if [ ! -x "$DAEMON_BIN" ] || [ ! -x "$GUI_BIN" ] || [ ! -x "$CTL_BIN" ]; then
         err "Gorganizer is not built yet."
         err "Run \`./gorganizer.sh\` from this clone to build and install."
         exit 1
     fi
 
-    # Silence Qt6 D-Bus / system tray noise on systems without a
-    # cooperative notification server. Doesn't mute Qt's actual errors.
     export QT_LOGGING_RULES="${QT_LOGGING_RULES:+$QT_LOGGING_RULES;}qt.dbus.*=false;qt.qpa.systemtray.*=false;qt.qpa.theme.dbus.*=false;qt.qpa.theme.debug=false"
-    export GORGANIZER_ROOT="$SCRIPT_DIR"
-
-    echo ""
-    echo -e "  ${BOLD}Gorganizer${RESET} ${CYAN}$(gorganizer_version)${RESET}"
-    echo -e "  ${CYAN}-----------${RESET}"
-    log "  Daemon:    $DAEMON_BIN"
-    log "  Frontend:  $GUI_BIN"
-    log "  Mod root:  $SCRIPT_DIR/<Game>_Mods/"
-    log "  Socket:    $SOCKET_PATH"
-    log "  Log:       $DAEMON_LOG"
-    echo ""
-
-    kill_stale_daemons
-    start_daemon
-
-    # GUI as a backgrounded child + `wait`. Three reasons:
-    #   * `exec "$GUI_BIN"` would replace this shell, so EXIT/INT/TERM
-    #     traps cannot fire — a GUI crash (segfault, OOM, uncaught Qt
-    #     exception) would orphan the daemon.
-    #   * Running the GUI as a *foreground* child (no `&`) makes bash
-    #     wait synchronously, queueing pending signals until the GUI
-    #     exits on its own. A `kill -TERM` to the script alone wouldn't
-    #     reach the GUI.
-    #   * Backgrounding + `wait` lets bash respond to signals
-    #     immediately. The INT/TERM trap forwards to the GUI so it
-    #     shuts down cleanly; the EXIT trap then reaps the daemon.
-    "$GUI_BIN" "$@" &
-    GUI_PID=$!
-    trap 'kill -TERM "$GUI_PID" 2>/dev/null || true' INT TERM
-    trap stop_daemon_trap EXIT
-
-    # `wait` is interruptible: a fired trap unblocks it with exit code
-    # 128+signum. Loop until the GUI is actually gone so we propagate
-    # the GUI's real exit code, not the signal-interrupted placeholder.
-    GUI_RC=0
-    while kill -0 "$GUI_PID" 2>/dev/null; do
-        wait "$GUI_PID"
-        GUI_RC=$?
-    done
-    exit "$GUI_RC"
+    if $RELEASE_MODE; then
+        exec "$CTL_BIN" session --daemon "$DAEMON_BIN" --gui "$GUI_BIN" -- "$@"
+    fi
+    preflight_data_migration
+    exec "$CTL_BIN" session --daemon "$DAEMON_BIN" --gui "$GUI_BIN" -- "$@"
 }
 
 # --- nxm forwarding --------------------------------------------------------
 
 cmd_nxm() {
-    local uri="${1:-}"
-    if [ -z "$uri" ]; then
-        err "Usage: $0 nxm <URI>"
-        exit 2
-    fi
-    if [ ! -x "$DAEMON_BIN" ]; then
-        err "Daemon not built yet. Run ./gorganizer.sh first."
+    if [ ! -x "$DAEMON_BIN" ] || [ ! -x "$CTL_BIN" ]; then
+        err "Gorganizer is not built yet. Run ./gorganizer.sh first."
         exit 1
     fi
-    exec "$DAEMON_BIN" --handle-nxm "$uri"
+    if ! $RELEASE_MODE && ! "$CTL_BIN" ping >/dev/null 2>&1; then
+        preflight_data_migration
+    fi
+    exec "$CTL_BIN" nxm "$@"
 }
 
 # --- update ----------------------------------------------------------------
 
+update_migration_reminder() {
+    local status
+    if [ -x "$CTL_BIN" ] && status="$("$CTL_BIN" migrate-data --status 2>/dev/null)" \
+       && [ "$status" = pending ]; then
+        log "Open Gorganizer to finish moving your mods."
+    fi
+}
+
 cmd_update() {
-    # In-place update of an existing checkout. Pulls origin/main, forces a
-    # clean rebuild, refreshes the desktop entry (Exec= path may have moved
-    # under the user) and bounces a running daemon. User config under
-    # $CONFIG_DIR and mod data under each <Game>_Mods/ tree are never
-    # touched here — git pull only changes tracked files.
-    local restart=false
+    local restart=false branch upstream remote old_sha old_short new_sha
     while [ $# -gt 0 ]; do
         case "$1" in
             --restart) restart=true; shift ;;
@@ -1023,69 +874,93 @@ cmd_update() {
         esac
     done
 
+    if $RELEASE_MODE; then
+        "$CTL_BIN" release update || return $?
+        if $restart; then
+            log "Close Gorganizer and open it again to use the new version now."
+        fi
+        return 0
+    fi
+
     if ! command -v git >/dev/null 2>&1; then
         err "git not found in PATH; can't update."
-        exit 1
+        return 1
     fi
     if [ ! -d "$SCRIPT_DIR/.git" ]; then
         err "$SCRIPT_DIR is not a git checkout."
         err "Re-clone the repo to update:"
         err "    git clone https://github.com/parka5040/gorganizer ~/gorganizer"
-        exit 1
+        return 1
     fi
 
-    # Refuse to clobber local edits — they're the user's, not ours to merge.
     if ! git -C "$SCRIPT_DIR" diff --quiet HEAD -- 2>/dev/null \
        || [ -n "$(git -C "$SCRIPT_DIR" status --porcelain)" ]; then
         err "Working tree has uncommitted changes:"
         git -C "$SCRIPT_DIR" status -s >&2
         err "Stash or commit them, then re-run \`./gorganizer.sh update\`."
-        exit 1
+        return 1
     fi
 
-    local old_sha new_sha
-    old_sha=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD)
-
-    log "Fetching origin..."
-    if ! git -C "$SCRIPT_DIR" fetch --quiet origin; then
-        err "git fetch failed."
-        exit 1
+    if ! branch="$(git -C "$SCRIPT_DIR" symbolic-ref --quiet --short HEAD)"; then
+        err "This copy of Gorganizer is not on a branch, so it cannot be updated automatically."
+        return 1
+    fi
+    if ! upstream="$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref '@{u}' 2>/dev/null)" \
+       || ! remote="$(git -C "$SCRIPT_DIR" config --get "branch.$branch.remote")"; then
+        err "This branch has no update source. Ask whoever set it up, or re-download Gorganizer."
+        return 1
     fi
 
-    log "Pulling --ff-only..."
-    if ! git -C "$SCRIPT_DIR" pull --ff-only --quiet origin main; then
-        err "Non-fast-forward (or other) pull failure. Resolve manually:"
-        err "    cd $SCRIPT_DIR && git pull"
-        exit 1
+    old_sha="$(git -C "$SCRIPT_DIR" rev-parse HEAD)"
+    old_short="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD)"
+    if ! git -C "$SCRIPT_DIR" fetch --quiet "$remote"; then
+        err "Could not check for updates. Nothing was changed."
+        return 1
     fi
-
-    new_sha=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD)
-    if [ "$old_sha" = "$new_sha" ]; then
-        ok "Already on the latest commit ($new_sha)."
-    else
-        ok "Updated $old_sha -> $new_sha:"
-        git -C "$SCRIPT_DIR" log --oneline "${old_sha}..${new_sha}" || true
+    if ! git -C "$SCRIPT_DIR" merge-base --is-ancestor HEAD "$upstream"; then
+        err "Your copy has changes that are not in the update source. Nothing was changed."
+        return 1
     fi
-
-    log "Rebuilding from clean..."
-    do_build force || exit 1
-
-    log "Refreshing desktop entry..."
-    cmd_register || warn "Desktop registration reported issues."
-
-    if pgrep -x gorganizerd >/dev/null 2>&1; then
-        if [ "$restart" = true ]; then
-            log "Restarting daemon..."
-            kill_stale_daemons
-            start_daemon
-            ok "Daemon restarted."
-        else
-            warn "A daemon is running on the old build."
-            warn "Re-run with --restart, or quit the GUI and rerun \`./gorganizer.sh launch\`."
+    if [ "$old_sha" = "$(git -C "$SCRIPT_DIR" rev-parse "$upstream")" ]; then
+        if ! needs_build; then
+            ok "Gorganizer is already up to date ($old_short)."
+            update_migration_reminder
+            return 0
         fi
+    else
+        if ! git -C "$SCRIPT_DIR" merge --ff-only --quiet "$upstream"; then
+            err "Could not install the update. Your previous version is still available."
+            return 1
+        fi
+        new_sha="$(git -C "$SCRIPT_DIR" rev-parse HEAD)"
+        ok "New in this update:"
+        git -C "$SCRIPT_DIR" log --format='  %s' "${old_sha}..${new_sha}"
     fi
 
-    ok "Update complete."
+    if ! do_build force; then
+        if [ -n "${new_sha:-}" ]; then
+            if ! git -C "$SCRIPT_DIR" reset --keep "$old_sha"; then
+                err "The update could not be built or rolled back. Your installed Gorganizer has not changed; ask whoever set it up for help."
+                return 1
+            fi
+        fi
+        err "The update was downloaded but could not be built, so Gorganizer stayed on the previous version ($old_short). Your mods and settings were not touched."
+        return 1
+    fi
+
+    if ! cmd_register; then
+        warn "Could not refresh the application menu entry. Gorganizer was updated."
+    fi
+
+    if [ -x "$CTL_BIN" ] && "$CTL_BIN" ping >/dev/null 2>&1; then
+        ok "Update installed. It will be used next time you open Gorganizer."
+        if $restart; then
+            log "Close Gorganizer and open it again to use the new version now."
+        fi
+    else
+        ok "Update installed."
+    fi
+    update_migration_reminder
 }
 
 # --- setup -----------------------------------------------------------------
@@ -1100,10 +975,25 @@ cmd_setup() {
 # --- doctor -----------------------------------------------------------------
 
 cmd_doctor() {
+    if $RELEASE_MODE; then
+        "$CTL_BIN" doctor "$@"
+        return $?
+    fi
     local family logical candidates resolved install_cmd build_rc=0
     family="$(detect_distro_family)"
     install_cmd="$(pm_install_cmd "$family")"
     log "Distro family: ${BOLD}$family${RESET}"
+    if [ "$family" = immutable ]; then
+        show_immutable_notice
+        log "Build dependencies:"
+        check_build_tools || build_rc=1
+        if command -v go >/dev/null 2>&1; then
+            check_go_version_warning || build_rc=1
+        fi
+        log "Runtime tools (optional):"
+        runtime_tools_check "$family"
+        return "$build_rc"
+    fi
     if [ -n "$install_cmd" ]; then
         log "Package manager: $install_cmd"
     else
@@ -1138,65 +1028,143 @@ cmd_doctor() {
 
 # --- uninstall -------------------------------------------------------------
 
-cmd_uninstall() {
-    local purge=false
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --purge) purge=true; shift ;;
-            *) err "Unknown option: $1"; return 2 ;;
-        esac
-    done
-
-    # Stop daemon first.
-    if pgrep -x gorganizerd >/dev/null 2>&1; then
-        log "Stopping running gorganizerd..."
-        pkill -TERM -x gorganizerd 2>/dev/null || true
-        local i
-        for i in $(seq 1 30); do
-            pgrep -x gorganizerd >/dev/null 2>&1 || break
-            sleep 0.1
-        done
-        pkill -KILL -x gorganizerd 2>/dev/null || true
-        rm -f "$SOCKET_PATH" "$LOCK_PATH"
-    fi
-
-    # Remove desktop entry, NXM handler, icon, mime registration.
-    cmd_unregister
-
-    # Always-on: blow away build artifacts. The whole point of `uninstall`
-    # is to leave nothing executable behind that the launcher could still
-    # find via PATH or a stale .desktop somewhere else.
-    if [ -e "$DAEMON_BIN" ] || [ -e "$CTL_BIN" ] || [ -d "$SCRIPT_DIR/build" ]; then
-        make clean >/dev/null 2>&1 || true
-        rm -rf "$SCRIPT_DIR/build"
-        rm -f "$DAEMON_BIN" "$CTL_BIN"
-        ok "Build artifacts removed."
-    fi
-
-    # User data is preserved by default — config, profiles, downloads,
-    # and the daemon log are exactly what the user wants to keep across
-    # a reinstall. --purge is the explicit nuke option.
-    local user_dirs=("$CONFIG_DIR" "$DATA_DIR" "${XDG_STATE_HOME:-$HOME/.local/state}/gorganizer")
-    if $purge; then
-        for d in "${user_dirs[@]}"; do
-            [ -e "$d" ] && rm -rf "$d" && log "Purged $d"
-        done
+uninstall_validate_build_paths() {
+    local path ancestor kind uid
+    local -a paths
+    uid="$(id -u)"
+    if [ "${1:-}" = release ]; then
+        paths=("$DAEMON_BIN" "$CTL_BIN" "$SCRIPT_DIR/gorganizer.sh" "$SCRIPT_DIR/release.json")
     else
-        local kept=()
-        for d in "${user_dirs[@]}"; do [ -e "$d" ] && kept+=("$d"); done
-        if [ ${#kept[@]} -gt 0 ]; then
-            log "User data preserved (run with --purge to remove):"
-            for d in "${kept[@]}"; do echo "    $d" >&2; done
+        paths=("$SCRIPT_DIR/build" "$SCRIPT_DIR/.build-staging" "$SCRIPT_DIR/CMakeFiles" "$SCRIPT_DIR/.tools" \
+            "$DAEMON_BIN" "$CTL_BIN" "$SCRIPT_DIR/.build-fingerprint" \
+            "$SCRIPT_DIR/api/proto/gorganizer.pb.go" "$SCRIPT_DIR/api/proto/gorganizer_grpc.pb.go")
+    fi
+    for path in "${paths[@]}"; do
+        ancestor="${path%/*}"
+        while [ "$ancestor" != / ]; do
+            if [ -L "$ancestor" ] || [ ! -d "$ancestor" ]; then
+                err "Cannot safely remove build files: $ancestor is not a real folder. Nothing was removed."
+                return 1
+            fi
+            ancestor="${ancestor%/*}"
+            [ -n "$ancestor" ] || ancestor=/
+        done
+        [ -e "$path" ] || [ -L "$path" ] || continue
+        kind=-f
+        case "$path" in
+            "$SCRIPT_DIR/build"|"$SCRIPT_DIR/.build-staging"|"$SCRIPT_DIR/CMakeFiles"|"$SCRIPT_DIR/.tools") kind=-d ;;
+        esac
+        if [ -L "$path" ] || [ "$(stat -c %u -- "$path")" != "$uid" ] || [ ! "$kind" "$path" ]; then
+            err "Cannot safely remove build files: $path is not an owned build artifact. Nothing was removed."
+            return 1
+        fi
+    done
+}
+
+uninstall_validate_releases_paths() {
+    local path="$DATA_DIR/releases" ancestor entry uid
+    uid="$(id -u)"
+    ancestor="${path%/*}"
+    while [ "$ancestor" != / ]; do
+        if [ -L "$ancestor" ] || [ ! -d "$ancestor" ]; then
+            err "Cannot safely remove releases: $ancestor is not a real folder. Nothing was removed."
+            return 1
+        fi
+        ancestor="${ancestor%/*}"
+        [ -n "$ancestor" ] || ancestor=/
+    done
+    if [ -L "$path" ] || [ ! -d "$path" ] || [ "$(stat -c %u -- "$path")" != "$uid" ]; then
+        err "Cannot safely remove releases: $path is not an owned folder. Nothing was removed."
+        return 1
+    fi
+    for entry in "$path"/* "$path"/.[!.]*; do
+        [ -e "$entry" ] || [ -L "$entry" ] || continue
+        if [ "$(stat -c %u -- "$entry")" != "$uid" ]; then
+            err "Cannot safely remove releases: $entry is not owned by you. Nothing was removed."
+            return 1
+        fi
+    done
+}
+
+cmd_uninstall() {
+    if $RELEASE_MODE; then
+        local option purge=false check=false
+        for option in "$@"; do
+            [ "$option" != --purge ] || purge=true
+            [ "$option" != --check ] || check=true
+        done
+        if $purge && ! $check; then
+            uninstall_validate_build_paths release || return 1
+            uninstall_validate_releases_paths || return 1
+        fi
+        if $purge && ! $check; then
+            "$CTL_BIN" uninstall --preserve-releases "$@" || return $?
+        else
+            "$CTL_BIN" uninstall "$@" || return $?
+        fi
+        if ! $check; then
+            cmd_unregister || return 1
+            if $purge; then
+                uninstall_validate_releases_paths || return 1
+                ok "Uninstalled. Removing downloaded versions."
+                exec /bin/sh -c 'rm -rf -- "$1"' sh "$DATA_DIR/releases"
+            fi
+            ok "Uninstalled. You can now delete this download folder."
+        fi
+        return 0
+    fi
+    local mods_json="" mods_list="" mods_checked=false
+    if [ ! -x "$CTL_BIN" ]; then
+        err "Gorganizer's maintenance tool is missing, so nothing was removed. Rebuild with ./gorganizer.sh, then run uninstall again."
+        return 1
+    fi
+    for option in "$@"; do
+        if [ "$option" = --check ]; then
+            "$CTL_BIN" uninstall "$@"
+            return $?
+        fi
+    done
+    uninstall_validate_build_paths || return 1
+    if mods_json="$("$CTL_BIN" migrate-data --from "$SCRIPT_DIR" --dry-run --json)"; then
+        if command -v jq >/dev/null 2>&1; then
+            if mods_list="$(printf '%s\n' "$mods_json" | jq -r 'if (.sources | type) == "array" and all(.sources[]; type == "string" and (index("\n") | not) and (index("\r") | not) and (index("\u0000") | not)) then .sources[] else error("invalid sources") end')"; then
+                mods_checked=true
+            fi
+        elif mods_list="$("$CTL_BIN" migrate-data --from "$SCRIPT_DIR" --dry-run --list)"; then
+            mods_checked=true
         fi
     fi
-
-    echo ""
-    log "${BOLD}*_Mods/${RESET} folders in $SCRIPT_DIR are user data — left untouched."
-    log "To finish removal: ${BOLD}rm -rf $SCRIPT_DIR${RESET}"
+    "$CTL_BIN" uninstall "$@" || return $?
+    uninstall_validate_build_paths || return 1
+    if $mods_checked; then
+        if [ -n "$mods_list" ]; then
+            warn "Your mods are still inside this folder: ${mods_list//$'\n'/, }. Move them with ./gorganizer.sh import --from \"$SCRIPT_DIR\" before you delete it, or they will be lost."
+        fi
+    else
+        warn "Your mods may still be inside this folder. Move them with ./gorganizer.sh import --from \"$SCRIPT_DIR\" before you delete it, or they will be lost."
+    fi
+    rm -rf -- "$SCRIPT_DIR/build" "$SCRIPT_DIR/.build-staging" "$SCRIPT_DIR/CMakeFiles" "$SCRIPT_DIR/.tools"
+    rm -f -- "$DAEMON_BIN" "$CTL_BIN" "$SCRIPT_DIR/.build-fingerprint" \
+        "$SCRIPT_DIR/api/proto/gorganizer.pb.go" "$SCRIPT_DIR/api/proto/gorganizer_grpc.pb.go"
+    ok "Build artifacts removed."
     ok "Uninstalled."
 }
 
 # --- dispatch --------------------------------------------------------------
+
+[ "${GORGANIZER_SH_SOURCE_ONLY:-}" = 1 ] && return 0
+
+if $RELEASE_MODE; then
+    case "${1:-}" in
+        "") cmd_register; exit $? ;;
+        setup|build|--rebuild)
+            err "This is a prebuilt copy of Gorganizer. You do not need to build it."
+            exit 1 ;;
+        import)
+            err "Import from an old source folder is not available in this prebuilt copy."
+            exit 1 ;;
+    esac
+fi
 
 # Compatibility alias: --rebuild → build --rebuild (top-level, no subcommand).
 if [ "${1:-}" = "--rebuild" ]; then
@@ -1209,6 +1177,9 @@ case "${1:-}" in
         ;;
     launch)
         shift; cmd_launch "$@"
+        ;;
+    stop)
+        shift; cmd_stop "$@"
         ;;
     setup)
         shift; cmd_setup "$@"
@@ -1234,14 +1205,14 @@ case "${1:-}" in
     update)
         shift; cmd_update "$@"
         ;;
-    register)
+    register|--register-nxm)
         shift; cmd_register "$@"
         ;;
     unregister)
         shift; cmd_unregister "$@"
         ;;
     nxm|--nxm)
-        shift; cmd_nxm "${1:-}"
+        shift; cmd_nxm "$@"
         ;;
     import)
         shift; cmd_import "$@"

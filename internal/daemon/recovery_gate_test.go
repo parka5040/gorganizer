@@ -99,6 +99,48 @@ func TestRecoverAllSweepsOrphanStagingBeforeRecoveryIsReady(t *testing.T) {
 	}
 }
 
+// TestTrashSweptAtStartup verifies recovery removes uninstall trash for every configured game without following symlinks or touching other entries.
+func TestTrashSweptAtStartup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	games := newSkyrimGames(t)
+	otherInstall := filepath.Join(t.TempDir(), "Fallout4")
+	writeFixture(t, filepath.Join(otherInstall, "Data", "Fallout4.esm"))
+	games["fallout4"] = config.GameConfig{Name: "Fallout 4", InstallPath: otherInstall, DataSubpath: "Data", SteamAppID: 377160}
+	var trashDirs []string
+	var preserved []string
+	d := newUnrecoveredDaemon(t, games, func(*Daemon) {
+		outside := filepath.Join(t.TempDir(), "outside")
+		writeFixture(t, filepath.Join(outside, "keep.txt"))
+		for _, gameID := range []string{"skyrimse", "fallout4"} {
+			modsDir := config.ModsDir(gameID)
+			trash := filepath.Join(modsDir, ".gorganizer-trash-crashed")
+			writeFixture(t, filepath.Join(trash, "mod.esp"))
+			trashDirs = append(trashDirs, trash)
+			link := filepath.Join(modsDir, ".gorganizer-trash-link")
+			if err := os.Symlink(outside, link); err != nil {
+				t.Fatal(err)
+			}
+			regular := filepath.Join(modsDir, ".gorganizer-trash-file")
+			writeFixture(t, regular)
+			nested := filepath.Join(modsDir, "Ordinary", ".gorganizer-trash-nested", "keep.txt")
+			writeFixture(t, nested)
+			preserved = append(preserved, link, regular, nested)
+		}
+		preserved = append(preserved, filepath.Join(outside, "keep.txt"))
+	})
+	d.RecoverAll()
+	for _, dir := range trashDirs {
+		if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("startup left trash %s: %v", dir, err)
+		}
+	}
+	for _, path := range preserved {
+		if _, err := os.Lstat(path); err != nil {
+			t.Errorf("startup removed non-trash path %s: %v", path, err)
+		}
+	}
+}
+
 // TestInstallsWaitForStartupRecovery locks that an install requested before startup recovery finished starts only afterwards.
 func TestInstallsWaitForStartupRecovery(t *testing.T) {
 	d := newUnrecoveredDaemon(t, newSkyrimGames(t), nil)
@@ -106,7 +148,7 @@ func TestInstallsWaitForStartupRecovery(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := d.StartInstall(dto.StartInstallRequest{GameID: "skyrimse", ArchiveRelPath: "Early.zip", Mode: dto.InstallAsNewMod, TargetMod: "Early"})
+		_, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{GameID: "skyrimse", ArchiveRelPath: "Early.zip", Mode: dto.InstallAsNewMod, TargetMod: "Early"})
 		done <- err
 	}()
 	select {

@@ -26,7 +26,7 @@ func GameSlug(gameID string) string {
 func ParseNXM(uri string) (*NXMLink, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidNXMURI, err)
+		return nil, fmt.Errorf("%w: malformed link", ErrInvalidNXMURI)
 	}
 	if u.Scheme != "nxm" {
 		return nil, fmt.Errorf("%w: scheme is %q, expected \"nxm\"", ErrInvalidNXMURI, u.Scheme)
@@ -36,16 +36,16 @@ func ParseNXM(uri string) (*NXMLink, error) {
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 
 	if len(parts) < 4 || parts[0] != "mods" || parts[2] != "files" {
-		return nil, fmt.Errorf("%w: unexpected path format: %s", ErrInvalidNXMURI, u.Path)
+		return nil, fmt.Errorf("%w: unexpected path format: %s", ErrInvalidNXMURI, redactURL(uri))
 	}
 
 	modID, err := strconv.Atoi(parts[1])
 	if err != nil {
-		return nil, fmt.Errorf("%w: invalid mod ID: %s", ErrInvalidNXMURI, parts[1])
+		return nil, fmt.Errorf("%w: invalid mod ID", ErrInvalidNXMURI)
 	}
 	fileID, err := strconv.Atoi(parts[3])
 	if err != nil {
-		return nil, fmt.Errorf("%w: invalid file ID: %s", ErrInvalidNXMURI, parts[3])
+		return nil, fmt.Errorf("%w: invalid file ID", ErrInvalidNXMURI)
 	}
 
 	link := &NXMLink{

@@ -285,6 +285,10 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 		return 0, "", err
 	}
 	es.s.mu.RLock()
+	if err := es.s.deferredForLocked(gameID, dto.BusyOperationTool); err != nil {
+		es.s.mu.RUnlock()
+		return 0, "", err
+	}
 	pending := es.s.recoveryPendingFor(gameID)
 	conflict := es.s.findMutexConflict(gameID)
 	es.s.mu.RUnlock()
@@ -297,11 +301,14 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 	if es.s.applyBusy(gameID) {
 		return 0, "", fmt.Errorf("cannot launch a tool while %s or another managed tool is running", gameID)
 	}
-	releaseFence, fenceErr := es.s.acquireShared(gameID, dto.BusyOperationTool)
+	reservation, fenceErr := es.s.acquireSharedOwned(gameID, dto.BusyOperationTool)
 	if fenceErr != nil {
 		return 0, "", fenceErr
 	}
-	defer releaseFence()
+	defer reservation.Release()
+	if err := es.s.steamAdmission(gameID); err != nil {
+		return 0, "", err
+	}
 
 	gc, ok := es.s.gameConfigSnapshot(gameID)
 	if !ok {
@@ -317,6 +324,16 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 	}
 	if exe == nil {
 		return 0, "", fmt.Errorf("executable %q not found for %s", execID, gameID)
+	}
+	var profileDir string
+	var profileDirErr error
+	if profileName == "" {
+		profileDir, profileDirErr = es.s.profileMgr.CheckedProfilesDir(gameID)
+	} else {
+		profileDir, profileDirErr = es.s.profileMgr.CheckedProfileDir(gameID, profileName)
+	}
+	if profileDirErr != nil {
+		return 0, "", profileDirErr
 	}
 	catalogEntry, trustedCatalogEntry := tools.ValidateCatalogMatch(exe.ToolID, gameID, exe.ExePath)
 	trustedToolID := ""
@@ -355,6 +372,27 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 	if err := es.ensureExecutableRuntime(gameID, eff, *exe); err != nil {
 		return 0, "", err
 	}
+	es.s.mu.Lock()
+	mm := es.s.ensureMountManager(gameID, eff)
+	es.s.mu.Unlock()
+	if outputPolicy == tools.OutputExclusiveSourceEdit && mm.IsMounted() {
+		return 0, "", errors.New("exclusive source-edit tools require the game VFS to be unmounted")
+	}
+	if exe.NeedsVFSMounted {
+		if profileName != "" {
+			if _, err := es.s.svc.vfs.mountVFSOwned(gameID, profileName, false, true, reservation.id); err != nil {
+				return 0, "", fmt.Errorf("preparing VFS for tool: %w", err)
+			}
+		}
+		if mm.IsMounted() && mm.IsDirty() && !es.s.applyBusy(gameID) {
+			if err := es.s.svc.vfs.rebuildVFSOwned(gameID, reservation.id); err != nil {
+				return 0, "", fmt.Errorf("applying pending mod changes before tool launch: %w", err)
+			}
+		}
+		if err := es.s.applyMountedRootDeployment(gameID, eff, profileName, mm); err != nil {
+			return 0, "", fmt.Errorf("applying game-root deployment before tool launch: %w", err)
+		}
+	}
 	profileSyncCompatData := ""
 	if outputPolicy == tools.OutputProfileSync && trustedToolID != "loot" && profileName != "" {
 		profileSyncCompatData, _ = tools.ResolveCompatDataPath(&eff, exe.PrefixAppID)
@@ -363,28 +401,9 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 		}
 	}
 
-	es.s.mu.Lock()
-	mm := es.s.ensureMountManager(gameID, eff)
-	es.s.mu.Unlock()
-	if outputPolicy == tools.OutputExclusiveSourceEdit && mm.IsMounted() {
-		return 0, "", errors.New("exclusive source-edit tools require the game VFS to be unmounted")
+	if err := es.s.steamAdmission(gameID); err != nil {
+		return 0, "", err
 	}
-	if exe.NeedsVFSMounted {
-		if !mm.IsMounted() && profileName != "" {
-			if _, err := es.s.svc.vfs.MountVFS(gameID, profileName); err != nil {
-				return 0, "", fmt.Errorf("mounting VFS for tool: %w", err)
-			}
-		}
-		if mm.IsMounted() && mm.IsDirty() && !es.s.applyBusy(gameID) {
-			if err := es.s.svc.vfs.RebuildVFS(gameID); err != nil {
-				return 0, "", fmt.Errorf("applying pending mod changes before tool launch: %w", err)
-			}
-		}
-		if err := es.s.applyMountedRootDeployment(gameID, eff, profileName, mm); err != nil {
-			return 0, "", fmt.Errorf("applying game-root deployment before tool launch: %w", err)
-		}
-	}
-
 	dataPath := mm.DataPath()
 	resolvedExePath := es.resolveDetectedExecutablePath(gameID, eff, mm, exe.ExePath)
 	modsDir := config.ModsDir(gameID)
@@ -422,7 +441,7 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 		}
 		if gameID != "morrowind" {
 			if err := es.s.svc.launch.writePluginsTxt(gameID, eff, profileName); err != nil {
-				return 0, "", fmt.Errorf("preparing plugin state for LOOT: %w", err)
+				return 0, "", &dto.PluginStateError{GameID: gameID, Cause: err}
 			}
 		}
 		library, err := tools.ResolveSteamLibrary(&eff)
@@ -439,12 +458,11 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 		if gameID == "morrowind" {
 			if err := es.s.svc.launch.writePluginsTxt(gameID, eff, profileName, lootWorkspace.GameRoot); err != nil {
 				_ = lootWorkspace.Remove()
-				return 0, "", fmt.Errorf("preparing Morrowind plugin state for LOOT: %w", err)
+				return 0, "", &dto.PluginStateError{GameID: gameID, Cause: err}
 			}
 		}
 	}
 
-	profileDir := es.s.profileMgr.ProfileDir(gameID, profileName)
 	scratchRoot := filepath.Join(config.CacheDir(), "tool-scratch", gameID, runID)
 	scratchOutputRoot := filepath.Join(scratchRoot, "output")
 	scratchTempRoot := filepath.Join(scratchRoot, "temp")
@@ -645,7 +663,10 @@ func (es *ExecutableService) LaunchExecutable(gameID, execID, profileName string
 			}
 		}
 		if code == 0 && outputPolicy == tools.OutputProfileSync && trustedToolID != "loot" && profileName != "" {
-			if importErr := es.s.iniMgr.PullFromDocumentsAt(gameID, profileName, eff.SteamAppID, profileSyncCompatData); importErr != nil {
+			unlockProfiles := es.s.lockProfiles(gameID)
+			importErr := es.s.iniMgr.PullFromDocumentsAt(gameID, profileName, eff.SteamAppID, profileSyncCompatData)
+			unlockProfiles()
+			if importErr != nil {
 				slog.Warn("importing tool-edited profile INIs failed", "run", runID, "err", importErr)
 				es.s.emitInfo(fmt.Sprintf("[%s:ini-import] failed: %v", runID, importErr))
 				code = -1

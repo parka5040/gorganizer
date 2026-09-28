@@ -6,6 +6,7 @@ require (
 	github.com/bodgit/sevenzip v1.6.1
 	github.com/google/uuid v1.6.0
 	github.com/klauspost/compress v1.17.11
+	github.com/nwaples/rardecode/v2 v2.4.1
 	golang.org/x/sys v0.40.0
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11

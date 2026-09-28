@@ -102,8 +102,10 @@ func TestInstallModeValues(t *testing.T) {
 	}{
 		{"dto.InstallAsNewMod", int(dto.InstallAsNewMod), 0},
 		{"dto.InstallMergeIntoMod", int(dto.InstallMergeIntoMod), 1},
+		{"dto.InstallReplaceMod", int(dto.InstallReplaceMod), 2},
 		{"pb.INSTALL_MODE_NEW_MOD", int(pb.InstallMode_INSTALL_MODE_NEW_MOD), 0},
 		{"pb.INSTALL_MODE_MERGE_INTO", int(pb.InstallMode_INSTALL_MODE_MERGE_INTO), 1},
+		{"pb.INSTALL_MODE_REPLACE", int(pb.InstallMode_INSTALL_MODE_REPLACE), 2},
 	})
 }
 

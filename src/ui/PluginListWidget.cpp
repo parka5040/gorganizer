@@ -3,11 +3,15 @@
 #include "GrpcClient.h"
 #include "ThemeManager.h"
 #include "Dialogs.h"
+#include "ErrorPresenter.h"
 
 #include <QVBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
 #include <QDropEvent>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QMimeData>
 #include <QDebug>
 
 namespace gorganizer {
@@ -32,9 +36,31 @@ int LoadOrderTreeView::dropTargetRow(QDropEvent* event) const
     return aboveHalf ? idx.row() : idx.row() + 1;
 }
 
+void LoadOrderTreeView::dragEnterEvent(QDragEnterEvent* event)
+{
+    if (event->mimeData()->hasUrls()) {
+        event->ignore();
+        return;
+    }
+    QTreeView::dragEnterEvent(event);
+}
+
+void LoadOrderTreeView::dragMoveEvent(QDragMoveEvent* event)
+{
+    if (event->mimeData()->hasUrls()) {
+        event->ignore();
+        return;
+    }
+    QTreeView::dragMoveEvent(event);
+}
+
 // Applies a legal load-order move, explaining any rejection instead of silently ignoring it.
 void LoadOrderTreeView::dropEvent(QDropEvent* event)
 {
+    if (event->mimeData()->hasUrls()) {
+        event->ignore();
+        return;
+    }
     if (!model())
         return;
 
@@ -95,6 +121,7 @@ PluginListWidget::PluginListWidget(QWidget* parent)
             this, &PluginListWidget::persistLoadoutToDaemon);
 
     m_view = new LoadOrderTreeView(this);
+    setFocusProxy(m_view);
     m_view->setModel(m_model);
     m_view->setItemDelegate(new PluginRowDelegate(m_view));
     m_view->setRootIsDecorated(false);
@@ -278,11 +305,10 @@ void PluginListWidget::persistLoadoutToDaemon()
     if (!m_supported || !m_grpc || !m_game.detected || m_activeProfile.isEmpty())
         return;
     const auto loadout = m_model->orderedLoadout();
-    QString err;
+    GrpcError err;
     if (!m_grpc->setPluginLoadout(m_game.shortName, m_activeProfile, loadout, err)) {
-        qWarning().noquote() << "setPluginLoadout failed:" << err;
-        dialogs::warn(this, "Plugin state not saved",
-            QString("The plugin order and activation state could not be saved:\n\n%1").arg(err));
+        qWarning().noquote() << errorSummary("save plugin choices", err, true);
+        presentError(this, "Plugin state not saved", "save plugin choices", err, true);
         resubscribeStream();
         return;
     }

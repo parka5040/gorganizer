@@ -1,40 +1,48 @@
 #pragma once
 
 #include <QDialog>
-#include <QTreeWidget>
-#include <QLabel>
-#include <QPointer>
-#include <QProgressBar>
-#include <QPushButton>
-#include <QDialogButtonBox>
 #include <QString>
-#include <QList>
-#include <QThread>
-#include "FomodPlan.h"
-
-#include <QProcess>
+#include <QStringList>
+#include <QtGlobal>
+#include <vector>
+#include "GrpcTypes.h"
 
 class QCloseEvent;
+class QDialogButtonBox;
+class QLabel;
+class QProgressBar;
+class QPushButton;
+class QTreeWidget;
 
 namespace gorganizer {
 
 class GrpcClient;
-class InstallWorker;
+class InstallController;
 
 class ModInstallDialog : public QDialog {
     Q_OBJECT
 public:
-    explicit ModInstallDialog(const QString& archivePath,
-                              const QString& modsDir,
-                              const QString& defaultModName,
-                              QWidget* parent = nullptr);
-    ~ModInstallDialog() override;
+    struct ArchiveSource {
+        QString archiveRelPath;
+        QString externalArchivePath;
 
-    // When set, a successful install fires RegisterManualInstall so the daemon updates modlists.
-    void setDaemonContext(GrpcClient* grpc, const QString& gameId);
+        static ArchiveSource fromLibrary(const QString& path) { return {path, {}}; }
+        static ArchiveSource fromExternal(const QString& path) { return {{}, path}; }
+    };
+
+    struct InstallTarget {
+        GrpcInstallMode mode;
+        QString targetMod;
+    };
+
+    explicit ModInstallDialog(const QString& gameId, const QString& modName,
+                              GrpcClient* grpc, InstallController* installs, ArchiveSource source,
+                              QWidget* parent = nullptr,
+                              InstallTarget target = {GrpcInstallAsNewMod, {}});
 
     QString installedModName() const { return m_modName; }
     int installedFileCount() const { return m_fileCount; }
+    bool installUnconfirmed() const { return m_installUnconfirmed; }
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -43,33 +51,44 @@ protected:
 signals:
     void fomodWizardOpened(const QString& archivePath, const QString& modName);
     void fomodWizardClosed(const QString& archivePath);
+    void installDetached(quint64 requestId, const QString& gameId, const QString& modName);
 
 private slots:
-    void onExtractFinished(int exitCode, QProcess::ExitStatus status);
+    void onPreviewCompleted(quint64 requestId, const GrpcPreviewInstallResult& result);
+    void onPreviewFailed(quint64 requestId, const QString& error, int grpcCode);
+    void onInstallCompleted(quint64 requestId, const QString& modFolder, int fileCount);
+    void onInstallFailed(quint64 requestId, const QString& error);
+    void onInstallCancelled(quint64 requestId);
+    void onInstallUnknown(quint64 requestId);
     void onInstallClicked();
-    void onCancelClicked();
-    void onWorkerFinished(bool ok, bool cancelled, int fileCount, const QString& err);
 
 private:
-    void startExtraction();
-    void scanExtractedTree();
-    void populateTree(const QString& dir, QTreeWidgetItem* parent);
-    void installFrom(const QString& sourceDir);
-    void writeMetadata(const QString& modDir);
+    void showRoots(const QStringList& selectableRoots);
+    void beginInstall(bool fomodConfirmed, const std::vector<GrpcFomodFile>& files = {},
+                      const QString& selectedRoot = QString());
+    void showFailure(const QString& message);
+    void discardPreview();
+    QString archivePath() const;
 
-    QString m_archivePath;
-    QString m_modsDir;
-    QString m_modName;
-    QString m_extractDir;
-    QString m_detectedDataRoot;
-    int m_fileCount = 0;
-
-    GrpcClient* m_grpc = nullptr;
     QString m_gameId;
-
-    QList<FomodFile> m_fomodSelections;
-    QString m_fomodModulePath;
-    bool m_legacyFomodFlatCopy = false;
+    QString m_modName;
+    GrpcClient* m_grpc;
+    InstallController* m_installs;
+    ArchiveSource m_source;
+    InstallTarget m_target;
+    QString m_previewId;
+    QString m_selectedRoot;
+    QString m_installRoot;
+    std::vector<GrpcFomodFile> m_selectedFiles;
+    bool m_fomodConfirmed = false;
+    bool m_cancelRequested = false;
+    bool m_reconciling = false;
+    bool m_installUnconfirmed = false;
+    QStringList m_selectableRoots;
+    quint64 m_previewRequestId = 0;
+    quint64 m_installRequestId = 0;
+    int m_fileCount = 0;
+    bool m_rootChosen = false;
 
     QLabel* m_statusLabel;
     QProgressBar* m_progressBar;
@@ -77,19 +96,10 @@ private:
     QTreeWidget* m_treeWidget;
     QDialogButtonBox* m_buttons;
     QPushButton* m_installBtn;
-    QPushButton* m_cancelBtn = nullptr;
+    QPushButton* m_cancelBtn;
 
-    QThread* m_workerThread = nullptr;
-    InstallWorker* m_worker = nullptr;
-    QString m_installDestDir;
-    QString m_installStageDir;
-
-    QPointer<QProcess> m_extractProc;
-    QString m_extractToolUsed;
-    QStringList m_extractArgsUsed;
-
-    enum Phase { Extracting, Choosing, Installing, Cancelling, Done };
-    Phase m_phase = Extracting;
+    enum Phase { Previewing, CancellingPreview, Choosing, Installing, Done };
+    Phase m_phase = Previewing;
 };
 
 }

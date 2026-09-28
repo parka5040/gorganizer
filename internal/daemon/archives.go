@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -44,20 +45,58 @@ func (ar *ArchiveService) managerHooks() download.ManagerHooks {
 	}
 }
 
-// handleLandedArchive waits for startup recovery, then installs a landed archive for the dependency requests it satisfies, otherwise auto-installs it when the game's setting is on.
+// handleLandedArchive handles a new archive for dependency requests and optional automatic installation.
 func (ar *ArchiveService) handleLandedArchive(snap download.DownloadSnapshot, archivePath string, sidecar download.ArchiveSidecar) {
+	ar.handleLandedArchiveMode(snap, archivePath, sidecar, true)
+}
+
+// handleLandedArchiveMode waits for recovery before consuming dependencies or installing a new download.
+func (ar *ArchiveService) handleLandedArchiveMode(snap download.DownloadSnapshot, archivePath string, sidecar download.ArchiveSidecar, autoInstall bool) {
 	if err := ar.s.awaitRecovery(); err != nil {
 		slog.Warn("handling a landed archive skipped; the next start consumes it for waiting dependency requests but never auto-installs it", "game", snap.GameID, "archive", archivePath, "err", err)
+		return
+	}
+	landing := heldLanding{snap: snap, path: archivePath, sidecar: sidecar, autoInstall: autoInstall}
+	if ar.s.holdDeferredLanding(landing) {
+		return
+	}
+	var release func()
+	for {
+		var err error
+		release, err = ar.s.acquireShared(snap.GameID, dto.BusyOperationInstall)
+		if err == nil {
+			break
+		}
+		var busy *dto.OperationBusyError
+		if !errors.As(err, &busy) || busy.Operation != dto.BusyOperationRecovery {
+			return
+		}
+		select {
+		case <-ar.s.shutdownCh:
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	defer release()
+	if ar.s.holdDeferredLanding(landing) {
+		return
+	}
+	ar.s.mu.RLock()
+	pending := ar.s.recoveryPendingFor(snap.GameID)
+	ar.s.mu.RUnlock()
+	if pending != nil {
 		return
 	}
 	if deps := ar.s.svc.modDeps; deps != nil && deps.consumeLandedArchive(snap.GameID, snap.ID, archivePath, sidecar) {
 		return
 	}
-	settings, _ := config.LoadGameSettings(snap.GameID)
-	if !settings.AutoInstall {
+	if !autoInstall {
 		return
 	}
-	ar.autoInstallAfterDownload(snap.GameID, archivePath, sidecar)
+	settings, _ := config.LoadGameSettings(snap.GameID)
+	if settings.AutoInstall {
+		ar.autoInstallAfterDownload(snap.GameID, archivePath, sidecar)
+	}
 }
 
 // relFromDownloads converts an absolute archive path under DownloadsDir into the index-relative form.
@@ -77,7 +116,7 @@ func (ar *ArchiveService) autoInstallAfterDownload(gameID, archivePath string, s
 		base := filepath.Base(archivePath)
 		modName = strings.TrimSuffix(base, filepath.Ext(base))
 	}
-	if _, _, err := ar.s.svc.install.StartInstall(dto.StartInstallRequest{
+	if _, _, err := ar.s.svc.install.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: gameID, ArchiveRelPath: rel,
 		Mode: dto.InstallAsNewMod, TargetMod: modName,
 	}); err != nil {
@@ -144,6 +183,36 @@ func (ar *ArchiveService) CancelDownload(id string) error {
 
 func (ar *ArchiveService) RetryDownload(id string) (int, error) {
 	state := ar.s.downloadStateSnapshot()
+	for _, gameID := range state.gameIDs {
+		present, err := download.HasLanding(gameID, id)
+		if err != nil {
+			return 0, err
+		}
+		if !present {
+			continue
+		}
+		finished, stillPresent, err := download.FinishLandingWithManager(gameID, id, state.manager)
+		if err != nil {
+			var informationErr *download.ArchiveInformationSaveError
+			if errors.As(err, &informationErr) || errors.Is(err, download.ErrArchiveDownloadBusy) {
+				return 0, err
+			}
+			return 0, &download.LandingRecoveryError{Err: err}
+		}
+		if !stillPresent {
+			continue
+		}
+		ar.s.invalidateInstalledArchiveCache(gameID)
+		if row, err := ar.buildArchiveRow(gameID, relFromDownloads(gameID, finished.ArchivePath)); err == nil {
+			row.DownloadID = finished.Snapshot.ID
+			ar.s.archiveBus.Publish(gameID, dto.ArchiveEventResult{GameID: gameID, RowChanged: row})
+		}
+		ar.managerHooks().OnDownloadProgress(finished.Snapshot)
+		ar.s.goBackground("finish archive landing", func() {
+			ar.handleLandedArchiveMode(finished.Snapshot, finished.ArchivePath, finished.Sidecar, false)
+		})
+		return 0, nil
+	}
 	if state.manager == nil {
 		return 0, fmt.Errorf("download manager not initialized")
 	}
@@ -216,19 +285,21 @@ func (ar *ArchiveService) ListArchives(gameID string) ([]dto.ArchiveRowResult, e
 		rows = append(rows, row)
 	}
 
-	indexed := make(map[string]struct{}, len(idx.Archives))
-	for _, e := range idx.Archives {
-		indexed[e.Path] = struct{}{}
+	indexed := make(map[string]int, len(idx.Archives))
+	for i, e := range idx.Archives {
+		indexed[e.Path] = i
 	}
 	if entries, err := download.LoadLedger(gameID); err == nil {
-		var toEvict []string
 		for _, le := range entries {
-			if le.Terminal() || le.Status == "" {
-				toEvict = append(toEvict, le.ID)
-				continue
-			}
-			if _, dup := indexed[le.ArchiveRelPath]; dup {
-				toEvict = append(toEvict, le.ID)
+			if i, dup := indexed[le.ArchiveRelPath]; dup {
+				if !le.Terminal() || le.Status == download.LedgerFailed || le.Status == download.LedgerCancelled {
+					rows[i].DownloadID = le.ID
+					rows[i].Status = ledgerToDownloadStatus(le.Status)
+					rows[i].BytesDownloaded = le.BytesDone
+					if rows[i].GameDomain == "" {
+						rows[i].GameDomain = le.GameSlug
+					}
+				}
 				continue
 			}
 			rows = append(rows, dto.ArchiveRowResult{
@@ -241,9 +312,6 @@ func (ar *ArchiveService) ListArchives(gameID string) ([]dto.ArchiveRowResult, e
 				SizeBytes:       le.BytesTotal,
 				Status:          ledgerToDownloadStatus(le.Status),
 			})
-		}
-		for _, id := range toEvict {
-			_ = download.RemoveLedgerEntry(gameID, id)
 		}
 	}
 	return rows, nil
@@ -265,21 +333,85 @@ func ledgerToDownloadStatus(ls download.LedgerStatus) dto.DownloadStatus {
 	return dto.DownloadStatusUnknown
 }
 
-// RemoveArchive deletes an archive, its sidecar, and the index entry.
-func (ar *ArchiveService) RemoveArchive(gameID, archiveRelPath string) error {
+// RemoveArchive removes a terminal download by ID and optionally deletes its archive and index entry.
+func (ar *ArchiveService) RemoveArchive(gameID, archiveRelPath, downloadID string) error {
 	if !ar.s.gameConfigured(gameID) {
 		return fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
-	downloadsDir := config.DownloadsDir(gameID)
-	absArchive, err := archivePath(downloadsDir, archiveRelPath)
-	if err != nil {
-		return err
+	if archiveRelPath == "" && downloadID == "" {
+		return &UnsafePathError{Field: "archive_rel_path"}
+	}
+	var absArchive string
+	if archiveRelPath != "" {
+		var err error
+		absArchive, err = archivePath(config.DownloadsDir(gameID), archiveRelPath)
+		if err != nil {
+			return err
+		}
+	}
+	if downloadID != "" {
+		manager := ar.s.downloadStateSnapshot().manager
+		if manager != nil && (manager.IsActive(downloadID) ||
+			(absArchive != "" && manager.ActiveDownloadIDByArchive(absArchive) != "")) {
+			return download.ErrArchiveDownloadBusy
+		}
+		entries, err := download.LoadLedger(gameID)
+		if err != nil {
+			return err
+		}
+		var match *download.LedgerEntry
+		for i := range entries {
+			if entries[i].ID == downloadID {
+				match = &entries[i]
+				break
+			}
+		}
+		switch {
+		case match == nil || match.Status == download.LedgerDownloaded:
+			if archiveRelPath == "" {
+				return &download.DownloadNotFoundError{ID: downloadID}
+			}
+		case match.Status == download.LedgerQueued || match.Status == download.LedgerDownloading:
+			return download.ErrArchiveDownloadBusy
+		default:
+			if present, err := download.HasLanding(gameID, downloadID); err != nil {
+				return err
+			} else if present {
+				if err := download.DiscardLanding(gameID, downloadID); err != nil {
+					return err
+				}
+			}
+			if err := download.RemoveLedgerEntry(gameID, downloadID); err != nil {
+				return err
+			}
+		}
+	}
+	if archiveRelPath == "" {
+		return nil
 	}
 	_ = os.Remove(absArchive)
 	_ = os.Remove(download.SidecarPath(absArchive))
 	_ = os.Remove(download.PartPath(absArchive))
 	if err := download.RemoveEntry(gameID, archiveRelPath); err != nil {
 		return err
+	}
+	entries, err := download.LoadLedger(gameID)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.ArchiveRelPath == archiveRelPath {
+			if present, err := download.HasLanding(gameID, entry.ID); err != nil {
+				return err
+			} else if present {
+				if err := download.DiscardLanding(gameID, entry.ID); err != nil {
+					return err
+				}
+			}
+			if err := download.RemoveLedgerEntry(gameID, entry.ID); err != nil {
+				return err
+			}
+		}
 	}
 	ar.s.invalidateInstalledArchiveCache(gameID)
 	ar.s.archiveBus.Publish(gameID, dto.ArchiveEventResult{

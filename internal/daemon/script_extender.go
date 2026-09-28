@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/parka/gorganizer/internal/atomicfile"
@@ -51,6 +52,11 @@ type gitHubRelease struct {
 
 // fetchLatestGitHubRelease downloads a repo's latest GitHub release asset with the given suffix into destDir.
 func fetchLatestGitHubRelease(repo, suffix, destDir string) (archivePath, version string, err error) {
+	return fetchLatestGitHubReleaseWithClient(&http.Client{Timeout: 30 * time.Second}, repo, suffix, destDir)
+}
+
+// fetchLatestGitHubReleaseWithClient downloads a release asset through the supplied client.
+func fetchLatestGitHubReleaseWithClient(client *http.Client, repo, suffix, destDir string) (archivePath, version string, err error) {
 	if repo == "" {
 		return "", "", errors.New("empty repo")
 	}
@@ -59,7 +65,6 @@ func fetchLatestGitHubRelease(repo, suffix, destDir string) (archivePath, versio
 	}
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
 
-	client := &http.Client{Timeout: 30 * time.Second}
 	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
 	if err != nil {
 		return "", "", err
@@ -69,13 +74,12 @@ func fetchLatestGitHubRelease(repo, suffix, destDir string) (archivePath, versio
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("GET %s: %w", apiURL, err)
+		return "", "", fmt.Errorf("GitHub API request: %w", download.RedactHTTPError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", "", fmt.Errorf("GitHub API %s: HTTP %d: %s",
-			apiURL, resp.StatusCode, strings.TrimSpace(string(body)))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return "", "", fmt.Errorf("GitHub API HTTP %d: %s", resp.StatusCode, download.RedactHTTPBody(string(body)))
 	}
 
 	var rel gitHubRelease
@@ -96,13 +100,22 @@ func fetchLatestGitHubRelease(repo, suffix, destDir string) (archivePath, versio
 		return "", "", fmt.Errorf("no %q asset in release %s", suffix, rel.TagName)
 	}
 
-	archivePath = filepath.Join(destDir, chosen.Name)
-	if err := streamTo(chosen.BrowserDownloadURL, archivePath); err != nil {
-		return "", "", fmt.Errorf("downloading %s: %w", chosen.Name, err)
-	}
 	tag := rel.TagName
 	if tag == "" {
 		tag = rel.Name
+	}
+	name, ok := download.SafeArchiveFilename(chosen.Name)
+	if !ok {
+		name, ok = download.SafeArchiveFilename("extender-" + tag + ".archive")
+		if !ok {
+			name = "extender.archive"
+		}
+	}
+	archivePath = filepath.Join(destDir, name)
+	archiveClient := *client
+	archiveClient.Timeout = 10 * time.Minute
+	if err := streamToWithClient(&archiveClient, chosen.BrowserDownloadURL, archivePath); err != nil {
+		return "", "", fmt.Errorf("downloading extender archive: %w", err)
 	}
 	return archivePath, tag, nil
 }
@@ -496,25 +509,36 @@ func resolvePathCaseInsensitive(base, relPath string) string {
 	return cur
 }
 
-// streamTo downloads url to path with an HTTP GET, following redirects, under a 10-minute timeout.
+// streamTo downloads a URL into a new file under a 10-minute timeout.
 func streamTo(url, path string) error {
-	client := &http.Client{Timeout: 10 * time.Minute}
+	return streamToWithClient(&http.Client{Timeout: 10 * time.Minute}, url, path)
+}
+
+// streamToWithClient downloads a URL into a new file through the supplied client.
+func streamToWithClient(client *http.Client, url, path string) error {
 	resp, err := client.Get(url)
 	if err != nil {
-		return err
+		return fmt.Errorf("requesting archive: %w", download.RedactHTTPError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, download.RedactHTTPBody(string(body)))
 	}
-	out, err := os.Create(path)
+	fd, err := syscall.Open(path, syscall.O_CREAT|syscall.O_EXCL|syscall.O_WRONLY|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
-		return err
+		return fmt.Errorf("opening archive destination: %w", err)
 	}
-	defer out.Close()
-	_, err = io.Copy(out, resp.Body)
-	return err
+	out := os.NewFile(uintptr(fd), path)
+	_, copyErr := io.Copy(out, resp.Body)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return fmt.Errorf("writing archive: %w", download.RedactHTTPError(copyErr))
+	}
+	if closeErr != nil {
+		return fmt.Errorf("closing archive: %w", closeErr)
+	}
+	return nil
 }
 
 // findExtenderRoot returns the directory containing loaderExe, checking extractDir and its immediate subdirectories.

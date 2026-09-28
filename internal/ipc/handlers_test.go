@@ -3,8 +3,10 @@ package ipc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"os"
 	"reflect"
 	"testing"
 	"time"
@@ -51,7 +53,12 @@ type fakeController struct {
 	modList           []dto.ModListEntryResult
 	getModListArgs    []string
 	setModListArgs    []any
+	copyProfileArgs   []string
+	copyProfile       *dto.ProfileResult
 	vfsStatus         *dto.VFSStatusResult
+	restoreArgs       []any
+	retryGame         string
+	retryErr          error
 	mountCalled       string
 	mountArgs         []string
 	downloadID        string
@@ -59,16 +66,19 @@ type fakeController struct {
 	startDownloadURI  string
 	archives          []dto.ArchiveRowResult
 	listArchivesGame  string
+	removeArchiveArgs []string
 	bulkAffected      int
 	bulkArgs          []any
 	installFolder     string
 	installCount      int
 	installReq        dto.StartInstallRequest
+	installOutcome    dto.InstallOutcome
 	pluginOrderArgs   []any
 	pluginLoadoutArgs []any
 	launchPid         int
 	launchArgs        []any
 	readiness         dto.ReadinessResult
+	shutdownPlan      []dto.ShutdownPlanItem
 	statusCh          chan dto.StatusEventResult
 	exportReq         dto.ExportRequest
 	importReq         dto.ImportRequest
@@ -155,7 +165,7 @@ func (f *fakeController) GetMod(gameID, modName string) (*dto.ModInfoResult, err
 	return f.mod, f.modErr
 }
 
-func (f *fakeController) ReinstallMod(gameID, modName string) (int, int, int, error) {
+func (f *fakeController) ReinstallMod(_ context.Context, gameID, modName, _ string) (int, int, int, error) {
 	f.reinstallArgs = []string{gameID, modName}
 	return f.reinstallCounts[0], f.reinstallCounts[1], f.reinstallCounts[2], nil
 }
@@ -182,6 +192,30 @@ func (f *fakeController) MountVFSWithSwap(gameID, profileName string) (*dto.VFSS
 	return f.vfsStatus, nil
 }
 
+// MountVFSWithOptions records a retargeting request for the transport tests.
+func (f *fakeController) MountVFSWithOptions(gameID, profileName string, autoSwap, retarget bool) (*dto.VFSStatusResult, error) {
+	f.mountCalled = "MountVFSWithOptions"
+	f.mountArgs = []string{gameID, profileName, fmt.Sprint(autoSwap), fmt.Sprint(retarget)}
+	return f.vfsStatus, nil
+}
+
+// GetVFSStatus returns the canned VFS status.
+func (f *fakeController) GetVFSStatus(string) (*dto.VFSStatusResult, error) {
+	return f.vfsStatus, nil
+}
+
+// RestoreFromBackup records the expected kind and recovery identity.
+func (f *fakeController) RestoreFromBackup(gameID string, kind dto.RecoveryKind, id string) error {
+	f.restoreArgs = []any{gameID, kind, id}
+	return nil
+}
+
+// RetryDeferredRecovery records the game and returns the canned retry error.
+func (f *fakeController) RetryDeferredRecovery(gameID string) error {
+	f.retryGame = gameID
+	return f.retryErr
+}
+
 func (f *fakeController) StartDownload(nxmURI string) (string, int, error) {
 	f.startDownloadURI = nxmURI
 	return f.downloadID, f.queuedAhead, nil
@@ -190,6 +224,11 @@ func (f *fakeController) StartDownload(nxmURI string) (string, int, error) {
 func (f *fakeController) ListArchives(gameID string) ([]dto.ArchiveRowResult, error) {
 	f.listArchivesGame = gameID
 	return f.archives, nil
+}
+
+func (f *fakeController) RemoveArchive(gameID, archiveRelPath, downloadID string) error {
+	f.removeArchiveArgs = []string{gameID, archiveRelPath, downloadID}
+	return nil
 }
 
 func (f *fakeController) SetArchivesHiddenBulk(gameID string, hidden bool, scope dto.BulkHideScope) (int, error) {
@@ -206,9 +245,13 @@ func (f *fakeController) StreamPluginStatus(_ context.Context, _, _ string) (<-c
 	return out, nil
 }
 
-func (f *fakeController) StartInstall(req dto.StartInstallRequest) (string, int, error) {
+func (f *fakeController) StartInstall(_ context.Context, req dto.StartInstallRequest) (string, int, error) {
 	f.installReq = req
 	return f.installFolder, f.installCount, nil
+}
+
+func (f *fakeController) GetInstallOutcome(_, _ string) (dto.InstallOutcome, error) {
+	return f.installOutcome, nil
 }
 
 func (f *fakeController) SetPluginOrder(gameID, profileName string, filenames []string) error {
@@ -230,6 +273,10 @@ func (f *fakeController) Health() dto.ReadinessResult {
 	return f.readiness
 }
 
+func (f *fakeController) GetShutdownPlan() []dto.ShutdownPlanItem {
+	return f.shutdownPlan
+}
+
 func (f *fakeController) WatchStatus() <-chan dto.StatusEventResult {
 	return f.statusCh
 }
@@ -242,7 +289,7 @@ func (f *fakeController) ExportInstance(_ context.Context, req dto.ExportRequest
 	return f.transferSummary, f.transferErr
 }
 
-func (f *fakeController) PreviewImport(gameID, archivePath string) (dto.ImportPreview, error) {
+func (f *fakeController) PreviewImport(_ context.Context, gameID, archivePath string) (dto.ImportPreview, error) {
 	f.previewArgs = []string{gameID, archivePath}
 	return f.preview, f.transferErr
 }
@@ -253,6 +300,12 @@ func (f *fakeController) ImportInstance(_ context.Context, req dto.ImportRequest
 		emit(p)
 	}
 	return f.transferSummary, f.transferErr
+}
+
+// CopyProfile records the request and returns the copied profile for transport tests.
+func (f *fakeController) CopyProfile(gameID, sourceName, newName string) (*dto.ProfileResult, error) {
+	f.copyProfileArgs = []string{gameID, sourceName, newName}
+	return f.copyProfile, nil
 }
 
 // newTestClient serves the current handlers over bufconn and returns a connected client.
@@ -284,6 +337,20 @@ func mustEqualProto(t *testing.T, got, want proto.Message) {
 	if !proto.Equal(got, want) {
 		t.Errorf("proto mismatch:\n got: %v\nwant: %v", got, want)
 	}
+}
+
+// TestCopyProfileFieldMapping verifies request fields and response identity across the RPC.
+func TestCopyProfileFieldMapping(t *testing.T) {
+	fake := &fakeController{copyProfile: &dto.ProfileResult{Name: "Copy", GameID: "skyrimse", CreatedAt: "2026-09-27T12:00:00Z"}}
+	client := newTestClient(t, fake)
+	got, err := client.CopyProfile(context.Background(), &pb.CopyProfileRequest{GameId: "skyrimse", SourceName: "Original", Name: "Copy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fake.copyProfileArgs, []string{"skyrimse", "Original", "Copy"}) {
+		t.Fatalf("copy arguments = %v", fake.copyProfileArgs)
+	}
+	mustEqualProto(t, got, &pb.Profile{Name: "Copy", GameId: "skyrimse", CreatedAt: "2026-09-27T12:00:00Z"})
 }
 
 // TestListGamesFieldMapping locks dto.GameInfo → pb.Game field-by-field conversion.
@@ -531,6 +598,28 @@ func TestMountVFSAutoSwapRouting(t *testing.T) {
 	}
 }
 
+// TestMountVFSRetargetRouting forwards both retarget and auto-swap to the daemon controller.
+func TestMountVFSRetargetRouting(t *testing.T) {
+	for _, autoSwap := range []bool{false, true} {
+		t.Run(fmt.Sprint(autoSwap), func(t *testing.T) {
+			fake := &fakeController{vfsStatus: &dto.VFSStatusResult{Mounted: true, GameID: "skyrimse", ProfileName: "B"}}
+			client := newTestClient(t, fake)
+			resp, err := client.MountVFS(t.Context(), &pb.MountVFSRequest{
+				GameId: "skyrimse", ProfileName: "B", AutoSwap: autoSwap, RetargetIfMounted: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fake.mountCalled != "MountVFSWithOptions" || !reflect.DeepEqual(fake.mountArgs, []string{"skyrimse", "B", fmt.Sprint(autoSwap), "true"}) {
+				t.Errorf("controller call = %s %v", fake.mountCalled, fake.mountArgs)
+			}
+			if resp.GetStatus().GetProfileName() != "B" {
+				t.Errorf("status profile = %q, want B", resp.GetStatus().GetProfileName())
+			}
+		})
+	}
+}
+
 // TestStartDownloadMapping locks the StartDownload request and response mapping.
 func TestStartDownloadMapping(t *testing.T) {
 	fake := &fakeController{downloadID: "dl-1", queuedAhead: 3}
@@ -580,6 +669,22 @@ func TestListArchivesFieldMapping(t *testing.T) {
 		Status: pb.DownloadStatus_DOWNLOAD_STATUS_INSTALLED, InstalledModFolder: "SkyUI",
 		DownloadId: "dl-9", BytesDownloaded: 1024, QueuedAhead: 2, Merged: true,
 	})
+}
+
+// TestRemoveArchiveDownloadIDMapping passes an ID-only removal through the archive RPC.
+func TestRemoveArchiveDownloadIDMapping(t *testing.T) {
+	fake := &fakeController{}
+	client := newTestClient(t, fake)
+	resp, err := client.RemoveArchive(t.Context(), &pb.RemoveArchiveRequest{
+		GameId: "skyrimse", DownloadId: "dl-no-path",
+	})
+	if err != nil {
+		t.Fatalf("RemoveArchive: %v", err)
+	}
+	if got, want := fake.removeArchiveArgs, []string{"skyrimse", "", "dl-no-path"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("controller args = %v, want %v", got, want)
+	}
+	mustEqualProto(t, resp, &pb.RemoveArchiveResponse{})
 }
 
 // TestSetArchivesHiddenBulkScopeMapping locks proto scope → dto.BulkHideScope conversion and affected count.
@@ -651,6 +756,23 @@ func TestStartInstallRequestMapping(t *testing.T) {
 	mustEqualProto(t, resp, &pb.StartInstallResponse{ModFolder: "SkyUI", FileCount: 42})
 }
 
+// TestReplaceInstallRequestMapping passes the replace mode and target through the transport.
+func TestReplaceInstallRequestMapping(t *testing.T) {
+	fake := &fakeController{installFolder: "Existing", installCount: 2}
+	client := newTestClient(t, fake)
+	resp, err := client.StartInstall(t.Context(), &pb.StartInstallRequest{
+		GameId: "skyrimse", ArchiveRelPath: "Replacement.zip",
+		Mode: pb.InstallMode_INSTALL_MODE_REPLACE, TargetMod: "Existing",
+	})
+	if err != nil {
+		t.Fatalf("StartInstall: %v", err)
+	}
+	if fake.installReq.Mode != dto.InstallReplaceMod || fake.installReq.TargetMod != "Existing" {
+		t.Errorf("controller request = %+v, want replace of Existing", fake.installReq)
+	}
+	mustEqualProto(t, resp, &pb.StartInstallResponse{ModFolder: "Existing", FileCount: 2})
+}
+
 // TestSetPluginOrderArgMapping locks the SetPluginOrder request → controller argument mapping.
 func TestSetPluginOrderArgMapping(t *testing.T) {
 	fake := &fakeController{}
@@ -709,10 +831,120 @@ func TestLaunchGameMapping(t *testing.T) {
 	}
 }
 
+// TestRecoveryContractConversions checks the explicit wire mappings and their unknown-value fallbacks.
+func TestRecoveryContractConversions(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		domain dto.RecoveryKind
+		wire   pb.RecoveryKind
+	}{
+		{"unspecified", dto.RecoveryKindUnspecified, pb.RecoveryKind_RECOVERY_KIND_UNSPECIFIED},
+		{"data", dto.RecoveryKindData, pb.RecoveryKind_RECOVERY_KIND_DATA},
+		{"loader", dto.RecoveryKindModLoader, pb.RecoveryKind_RECOVERY_KIND_MOD_LOADER},
+		{"root", dto.RecoveryKindGameRoot, pb.RecoveryKind_RECOVERY_KIND_GAME_ROOT},
+		{"unknown domain", dto.RecoveryKind(99), pb.RecoveryKind_RECOVERY_KIND_UNSPECIFIED},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := recoveryKindToProto(tc.domain); got != tc.wire {
+				t.Errorf("to proto = %v, want %v", got, tc.wire)
+			}
+			if tc.domain != dto.RecoveryKind(99) && recoveryKindFromProto(tc.wire) != tc.domain {
+				t.Errorf("from proto = %v, want %v", recoveryKindFromProto(tc.wire), tc.domain)
+			}
+		})
+	}
+	if got := recoveryKindFromProto(pb.RecoveryKind(99)); got != dto.RecoveryKindUnspecified {
+		t.Errorf("unknown wire kind = %v", got)
+	}
+	for _, tc := range []struct {
+		name  string
+		state dto.VFSLifecycleState
+		wire  pb.VFSLifecycleState
+	}{
+		{"unspecified", dto.VFSLifecycleStateUnspecified, pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_UNSPECIFIED},
+		{"ready", dto.VFSLifecycleStateReady, pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_READY},
+		{"deferred", dto.VFSLifecycleStateRecoveryDeferred, pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_RECOVERY_DEFERRED},
+		{"pending", dto.VFSLifecycleStateRecoveryPending, pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_RECOVERY_PENDING},
+		{"unknown", dto.VFSLifecycleState(99), pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_UNSPECIFIED},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := vfsStatusToProto(&dto.VFSStatusResult{LifecycleState: tc.state, LifecycleReason: "game_running"}); got.GetLifecycleState() != tc.wire || got.GetLifecycleReason() != "game_running" {
+				t.Errorf("status = %+v, want state %v and reason game_running", got, tc.wire)
+			}
+		})
+	}
+}
+
+// TestVFSStatusToProtoCarriesPendingRecovery converts optional recovery details and every supported kind.
+func TestVFSStatusToProtoCarriesPendingRecovery(t *testing.T) {
+	if got := vfsStatusToProto(&dto.VFSStatusResult{GameID: "falloutnv"}); got.GetPendingRecovery() != nil {
+		t.Fatalf("status without recovery has pending item: %+v", got.GetPendingRecovery())
+	}
+	for _, tc := range []struct {
+		name string
+		kind dto.RecoveryKind
+		want pb.RecoveryKind
+	}{
+		{"data", dto.RecoveryKindData, pb.RecoveryKind_RECOVERY_KIND_DATA},
+		{"loader", dto.RecoveryKindModLoader, pb.RecoveryKind_RECOVERY_KIND_MOD_LOADER},
+		{"root", dto.RecoveryKindGameRoot, pb.RecoveryKind_RECOVERY_KIND_GAME_ROOT},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pending := &dto.RecoveryPendingResult{
+				GameID: "ttw", DataPath: "Data", BackupPath: "Data.orig",
+				Reason: "needs recovery", Kind: tc.kind, RecoveryID: "shared-id",
+			}
+			got := vfsStatusToProto(&dto.VFSStatusResult{GameID: "ttw", PendingRecovery: pending})
+			want := &pb.RecoveryPending{
+				GameId: "ttw", DataPath: "Data", BackupPath: "Data.orig",
+				Reason: "needs recovery", Kind: tc.want, RecoveryId: "shared-id",
+			}
+			if !proto.Equal(got.GetPendingRecovery(), want) {
+				t.Errorf("pending recovery = %+v, want %+v", got.GetPendingRecovery(), want)
+			}
+		})
+	}
+}
+
+// TestRecoveryRPCBindings checks confirmations, retry status and deferred retry refusals through the handlers.
+func TestRecoveryRPCBindings(t *testing.T) {
+	fake := &fakeController{vfsStatus: &dto.VFSStatusResult{GameID: "stardewvalley", LifecycleState: dto.VFSLifecycleStateReady}}
+	client := newTestClient(t, fake)
+	for _, tc := range []struct {
+		kind pb.RecoveryKind
+		want dto.RecoveryKind
+	}{
+		{pb.RecoveryKind_RECOVERY_KIND_DATA, dto.RecoveryKindData},
+		{pb.RecoveryKind_RECOVERY_KIND_MOD_LOADER, dto.RecoveryKindModLoader},
+		{pb.RecoveryKind_RECOVERY_KIND_GAME_ROOT, dto.RecoveryKindGameRoot},
+		{pb.RecoveryKind(99), dto.RecoveryKind(-1)},
+	} {
+		if _, err := client.RestoreFromBackup(t.Context(), &pb.RestoreFromBackupRequest{GameId: "stardewvalley", ExpectedKind: tc.kind, RecoveryId: "abc"}); err != nil {
+			t.Fatal(err)
+		}
+		if want := []any{"stardewvalley", tc.want, "abc"}; !reflect.DeepEqual(fake.restoreArgs, want) {
+			t.Errorf("restore args = %v, want %v", fake.restoreArgs, want)
+		}
+	}
+	result, err := client.RetryVFSRecovery(t.Context(), &pb.RetryVFSRecoveryRequest{GameId: "stardewvalley"})
+	if err != nil || result.GetLifecycleState() != pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_READY || fake.retryGame != "stardewvalley" {
+		t.Fatalf("retry = %+v (%v), game = %q", result, err, fake.retryGame)
+	}
+	fake.retryErr = &dto.RecoveryDeferredError{GameID: "stardewvalley", Operation: "recovery"}
+	if _, err := client.RetryVFSRecovery(t.Context(), &pb.RetryVFSRecoveryRequest{GameId: "stardewvalley"}); status.Code(err) != codes.FailedPrecondition {
+		t.Errorf("deferred retry = %v, want failed precondition", err)
+	}
+	fake.retryErr = os.ErrNotExist
+	if _, err := client.RetryVFSRecovery(t.Context(), &pb.RetryVFSRecoveryRequest{GameId: "unknown-game"}); status.Code(err) != codes.NotFound {
+		t.Errorf("unknown game retry = %v, want not found", err)
+	}
+}
+
 // TestHealthMapping locks dto.ReadinessResult → pb.Readiness conversion.
 func TestHealthMapping(t *testing.T) {
 	fake := &fakeController{readiness: dto.ReadinessResult{
 		SocketReady: true, RecoveryDone: true, GamesWarmed: false, LastInitStep: "warming games",
+		InstanceID: "instance-1", PID: 42, Version: "1.2.3", APIEpoch: 1, Stopping: true,
 	}}
 	client := newTestClient(t, fake)
 	resp, err := client.Health(t.Context(), &pb.HealthRequest{})
@@ -721,7 +953,25 @@ func TestHealthMapping(t *testing.T) {
 	}
 	mustEqualProto(t, resp, &pb.Readiness{
 		SocketReady: true, RecoveryDone: true, GamesWarmed: false, LastInitStep: "warming games",
+		InstanceId: "instance-1", Pid: 42, Version: "1.2.3", ApiEpoch: 1, Stopping: true,
 	})
+}
+
+// TestShutdownPlanMapping verifies mounted games and retention reasons reach the wire unchanged.
+func TestShutdownPlanMapping(t *testing.T) {
+	fake := &fakeController{shutdownPlan: []dto.ShutdownPlanItem{
+		{GameID: "skyrimse", ProfileName: "Current", RetainedReason: "game_running"},
+		{GameID: "stardewvalley", ProfileName: "Default", WillUnmount: true},
+	}}
+	client := newTestClient(t, fake)
+	resp, err := client.GetShutdownPlan(t.Context(), &pb.GetShutdownPlanRequest{})
+	if err != nil {
+		t.Fatalf("GetShutdownPlan: %v", err)
+	}
+	mustEqualProto(t, resp, &pb.ShutdownPlan{Items: []*pb.ShutdownPlanItem{
+		{GameId: "skyrimse", ProfileName: "Current", RetainedReason: "game_running"},
+		{GameId: "stardewvalley", ProfileName: "Default", WillUnmount: true},
+	}})
 }
 
 // TestWatchStatusStream locks the dto.StatusEventResult → pb.StatusEvent oneof mapping and stream termination.
@@ -731,10 +981,12 @@ func TestWatchStatusStream(t *testing.T) {
 		Mounted: true, GameID: "skyrimse", ProfileName: "Default",
 		MountPoint: "/games/SkyrimSE/Data", EnabledModCount: 2, TotalFileCount: 10,
 		Dirty: false, DesiredGen: 3, AppliedGen: 3,
+		LifecycleState: dto.VFSLifecycleStateRecoveryDeferred, LifecycleReason: "game_running",
 	}}
 	fake.statusCh <- dto.StatusEventResult{RecoveryPending: &dto.RecoveryPendingResult{
 		GameID: "skyrimse", DataPath: "/games/SkyrimSE/Data",
 		BackupPath: "/games/SkyrimSE/Data.gorganizer-backup", Reason: "unclean shutdown",
+		Kind: dto.RecoveryKindData, RecoveryID: "0123456789abcdef0123456789abcdef",
 	}}
 	fake.statusCh <- dto.StatusEventResult{DependencyWarning: &dto.DependencyWarningResult{
 		PluginFilename: "SkyUI_SE.esp", Detail: "missing master", Kind: dto.DepKindMasterAbsent,
@@ -755,6 +1007,7 @@ func TestWatchStatusStream(t *testing.T) {
 		Mounted: true, GameId: "skyrimse", ProfileName: "Default",
 		MountPoint: "/games/SkyrimSE/Data", EnabledModCount: 2, TotalFileCount: 10,
 		Dirty: false, DesiredGen: 3, AppliedGen: 3,
+		LifecycleState: pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_RECOVERY_DEFERRED, LifecycleReason: "game_running",
 	})
 	evt, err = stream.Recv()
 	if err != nil {
@@ -763,6 +1016,7 @@ func TestWatchStatusStream(t *testing.T) {
 	mustEqualProto(t, evt.GetRecoveryPending(), &pb.RecoveryPending{
 		GameId: "skyrimse", DataPath: "/games/SkyrimSE/Data",
 		BackupPath: "/games/SkyrimSE/Data.gorganizer-backup", Reason: "unclean shutdown",
+		Kind: pb.RecoveryKind_RECOVERY_KIND_DATA, RecoveryId: "0123456789abcdef0123456789abcdef",
 	})
 	evt, err = stream.Recv()
 	if err != nil {
@@ -875,6 +1129,7 @@ func TestExportInstanceStream(t *testing.T) {
 // TestPreviewImportMapping locks dto.ImportPreview → pb.PreviewImportResponse conversion.
 func TestPreviewImportMapping(t *testing.T) {
 	fake := &fakeController{preview: dto.ImportPreview{
+		ArchiveIdentity:   "v1:1:2:3:4:5",
 		SchemaVersion:     1,
 		GorganizerVersion: "1.0.0",
 		GameID:            "skyrimse",
@@ -899,6 +1154,7 @@ func TestPreviewImportMapping(t *testing.T) {
 		t.Errorf("controller args = %v", fake.previewArgs)
 	}
 	mustEqualProto(t, resp, &pb.PreviewImportResponse{
+		ArchiveIdentity:   "v1:1:2:3:4:5",
 		SchemaVersion:     1,
 		GorganizerVersion: "1.0.0",
 		GameId:            "skyrimse",
@@ -926,9 +1182,10 @@ func TestImportInstanceStream(t *testing.T) {
 	}
 	client := newTestClient(t, fake)
 	stream, err := client.ImportInstance(t.Context(), &pb.ImportInstanceRequest{
-		GameId:      "skyrimse",
-		ArchivePath: "/tmp/in.tar.zst",
-		Policy:      pb.TransferCollisionPolicy_TRANSFER_POLICY_RENAME,
+		GameId:                  "skyrimse",
+		ArchivePath:             "/tmp/in.tar.zst",
+		ExpectedArchiveIdentity: "v1:1:2:3:4:5",
+		Policy:                  pb.TransferCollisionPolicy_TRANSFER_POLICY_RENAME,
 		ModPolicyOverrides: map[string]pb.TransferCollisionPolicy{
 			"SkyUI": pb.TransferCollisionPolicy_TRANSFER_POLICY_SKIP,
 		},
@@ -952,9 +1209,10 @@ func TestImportInstanceStream(t *testing.T) {
 		t.Errorf("final Recv err = %v, want io.EOF", err)
 	}
 	want := dto.ImportRequest{
-		GameID:      "skyrimse",
-		ArchivePath: "/tmp/in.tar.zst",
-		Policy:      dto.PolicyRename,
+		GameID:                  "skyrimse",
+		ArchivePath:             "/tmp/in.tar.zst",
+		ExpectedArchiveIdentity: "v1:1:2:3:4:5",
+		Policy:                  dto.PolicyRename,
 		ModPolicyOverrides: map[string]dto.CollisionPolicy{
 			"SkyUI": dto.PolicySkip,
 		},

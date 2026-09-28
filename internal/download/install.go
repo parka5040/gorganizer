@@ -1,16 +1,21 @@
 package download
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 
 	"github.com/google/uuid"
+	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/fsutil"
 )
 
@@ -34,20 +39,26 @@ type InstallProgress struct {
 type ProgressSink func(InstallProgress)
 
 type InstallRequest struct {
-	GameID             string
-	ArchivePath        string
-	ExtractedRoot      string
-	Mode               InstallMode
-	TargetMod          string
-	SourceArchiveRef   SourceArchiveRef
-	DisplayName        string
-	Category           string
-	Version            string
-	ModPage            string
-	FomodSelectedFiles []FomodFile
-	ProgressSink       ProgressSink
-	InstallID          string
-	Layout             LayoutPlanner
+	Context             context.Context
+	OnPublished         func()
+	GameID              string
+	ArchivePath         string
+	ExtractedRoot       string
+	ContentRoot         string
+	LegacyFomodFlatCopy bool
+	Mode                InstallMode
+	TargetMod           string
+	RecordModName       string
+	SourceArchiveRef    SourceArchiveRef
+	DeferIndexUpdate    bool
+	DisplayName         string
+	Category            string
+	Version             string
+	ModPage             string
+	FomodSelectedFiles  []FomodFile
+	ProgressSink        ProgressSink
+	InstallID           string
+	Layout              LayoutPlanner
 }
 
 type InstallResult struct {
@@ -74,7 +85,9 @@ const (
 	StageFailed     InstallStage = 5
 )
 
-// Install is the canonical install path: extract, optionally apply FOMOD selection or a layout plan, stage, rename, write metadata.
+var renameInstallStageFn = os.Rename
+
+// Install extracts and stages an archive, records its files, and publishes the mod.
 func Install(req InstallRequest) (*InstallResult, error) {
 	if req.Layout != nil && len(req.FomodSelectedFiles) > 0 {
 		return nil, ErrFomodNotSupportedForLayout
@@ -114,21 +127,29 @@ func Install(req InstallRequest) (*InstallResult, error) {
 		}
 		extractTmp = tmp
 		extractRoot = tmp
+		defer os.RemoveAll(extractTmp)
+		budget := NewExtractBudget()
+		budget.Context = req.Context
 		emit(InstallProgress{Step: StageExtracting, Pct: -1})
-		if err := extractor.Extract(req.ArchivePath, tmp); err != nil {
-			os.RemoveAll(tmp)
+		if err := extractor.ExtractWithBudget(req.ArchivePath, tmp, budget); err != nil {
 			return nil, fmt.Errorf("extracting: %w", err)
 		}
 		if req.Layout == nil {
-			ExpandNestedFomods(tmp)
+			if err := ExpandNestedFomods(tmp, budget); err != nil {
+				return nil, fmt.Errorf("expanding nested installers: %w", err)
+			}
 		}
 	}
-	if extractTmp != "" {
-		defer os.RemoveAll(extractTmp)
-	}
 
-	if req.Layout == nil && len(req.FomodSelectedFiles) == 0 && HasFomodInstaller(extractRoot) {
+	if req.Layout == nil && len(req.FomodSelectedFiles) == 0 && !req.LegacyFomodFlatCopy && HasFomodInstaller(extractRoot) {
 		return nil, &installFomodMarker{Path: req.ArchivePath}
+	}
+	if req.Layout == nil && len(req.FomodSelectedFiles) > 0 {
+		moduleRoot, kind := FindFomodRootKind(extractRoot)
+		if kind == FomodKindNone {
+			return nil, fmt.Errorf("FOMOD selection requires an installer")
+		}
+		extractRoot = moduleRoot
 	}
 
 	var planned []PlannedCopy
@@ -164,11 +185,16 @@ func Install(req InstallRequest) (*InstallResult, error) {
 	var written []string
 	switch {
 	case len(req.FomodSelectedFiles) > 0:
-		written, err = copyFomodSelection(req.GameID, extractRoot, stageDir, req.FomodSelectedFiles, req.InstallID, req.ProgressSink)
+		written, err = copyFomodSelection(req.GameID, extractRoot, stageDir, req.FomodSelectedFiles, req.InstallID, req.ProgressSink, req.Context)
 	case req.Layout != nil:
-		written, err = copyPlanned(extractRoot, stageDir, planned, req.InstallID, req.ProgressSink)
+		written, err = copyPlanned(extractRoot, stageDir, planned, req.InstallID, req.ProgressSink, req.Context)
 	default:
-		written, err = copyFlatten(req.GameID, extractRoot, stageDir, req.InstallID, req.ProgressSink)
+		contentRoot := req.ContentRoot
+		if contentRoot == "" {
+			rel, _ := DetectContentRoot(extractRoot, req.GameID)
+			contentRoot = filepath.Join(extractRoot, filepath.FromSlash(rel))
+		}
+		written, err = copyFlatten(req.GameID, extractRoot, contentRoot, stageDir, req.InstallID, req.ProgressSink, req.LegacyFomodFlatCopy, req.Context)
 	}
 	if err != nil {
 		emit(InstallProgress{Step: StageFailed, Error: err.Error()})
@@ -177,13 +203,48 @@ func Install(req InstallRequest) (*InstallResult, error) {
 
 	emit(InstallProgress{Step: StageFinalizing, Pct: 100})
 
+	ref := req.SourceArchiveRef
+	if ref.InstalledAt == "" {
+		ref.InstalledAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	recordModName := req.TargetMod
+	if req.RecordModName != "" {
+		recordModName = req.RecordModName
+	}
+	record := func(dir string) (int, error) {
+		count, err := appendSourceArchive(
+			dir, recordModName, ref,
+			req.DisplayName, req.Category, req.Version, req.ModPage, written,
+		)
+		if err != nil {
+			recordErr := &InstallRecordError{Mod: recordModName, Err: err}
+			emit(InstallProgress{Step: StageFailed, Error: recordErr.Error()})
+			return 0, recordErr
+		}
+		return count, nil
+	}
+
+	var fileCount int
 	switch req.Mode {
 	case ModeNewMod:
-		if _, statErr := os.Stat(finalDir); statErr == nil {
-			return nil, &installCollisionMarker{Name: req.TargetMod}
+		ref.Merged = false
+		fileCount, err = record(stageDir)
+		if err != nil {
+			return nil, err
 		}
-		if err := os.Rename(stageDir, finalDir); err != nil {
+		if _, statErr := os.Lstat(finalDir); statErr == nil {
+			return nil, &installCollisionMarker{Name: req.TargetMod}
+		} else if !os.IsNotExist(statErr) {
+			return nil, fmt.Errorf("checking install destination: %w", statErr)
+		}
+		if err := installContextErr(req.Context); err != nil {
+			return nil, err
+		}
+		if err := renameInstallStageFn(stageDir, finalDir); err != nil {
 			return nil, fmt.Errorf("moving stage → %s: %w", finalDir, err)
+		}
+		if req.OnPublished != nil {
+			req.OnPublished()
 		}
 		stageCleanup = false
 	case ModeMergeIntoMod:
@@ -193,35 +254,22 @@ func Install(req InstallRequest) (*InstallResult, error) {
 		if err := mergeTree(stageDir, finalDir); err != nil {
 			return nil, fmt.Errorf("merging into %s: %w", finalDir, err)
 		}
+		if existing, lerr := LoadModMetadata(finalDir); lerr == nil && existing != nil && len(existing.SourceArchives) > 0 {
+			ref.Merged = true
+		}
+		fileCount, err = record(finalDir)
+		if err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("unknown install mode %d", req.Mode)
 	}
 
-	ref := req.SourceArchiveRef
-	if ref.InstalledAt == "" {
-		ref.InstalledAt = time.Now().UTC().Format(time.RFC3339)
-	}
-	if req.Mode == ModeMergeIntoMod {
-		if existing, lerr := LoadModMetadata(finalDir); lerr == nil && existing != nil && len(existing.SourceArchives) > 0 {
-			ref.Merged = true
-		}
-	}
-	if err := AppendSourceArchive(
-		finalDir, req.TargetMod, ref,
-		req.DisplayName, req.Category, req.Version, req.ModPage, written,
-	); err != nil {
-		slog.Warn("updating mod metadata failed", "err", err)
-	}
-
 	relFromDownloads := strings.TrimPrefix(ref.Path, "Downloads/")
-	if relFromDownloads != ref.Path {
-		_ = SetUninstalled(req.GameID, relFromDownloads, false)
-	}
-
-	final, _ := LoadModMetadata(finalDir)
-	fileCount := 0
-	if final != nil {
-		fileCount = final.FileCount
+	if relFromDownloads != ref.Path && !req.DeferIndexUpdate {
+		if err := SetUninstalled(req.GameID, relFromDownloads, false); err != nil {
+			slog.Warn("updating download index failed", "err", err)
+		}
 	}
 	emit(InstallProgress{Step: StageComplete, Pct: 100, FilesDone: int64(fileCount), FilesTotal: int64(fileCount)})
 
@@ -261,18 +309,53 @@ func IsCollisionMarker(err error) (string, bool) {
 	return "", false
 }
 
-// copyFlatten replays the archive's content root into stage.
-func copyFlatten(gameID, extractRoot, stageDir, installID string, sink ProgressSink) ([]string, error) {
-	contentRoot := findContentRoot(extractRoot)
-	rootedOblivionRemastered := gameID == "oblivionremastered" && hasOblivionRemasteredRootMarkers(contentRoot)
-	resolvedContentRoot, err := filepath.EvalSymlinks(contentRoot)
-	if err != nil {
-		return nil, fmt.Errorf("resolving archive content root: %w", err)
+// installContextErr returns a wrapped cancellation error when the install context has ended.
+func installContextErr(ctx context.Context) error {
+	if ctx != nil && ctx.Err() != nil {
+		return fmt.Errorf("install stopped: %w", ctx.Err())
 	}
+	return nil
+}
+
+// skipArchiveMetadata logs and skips a content-root installation record once per copy.
+func skipArchiveMetadata(rel string, logged *bool) bool {
+	if !strings.EqualFold(rel, "metadata.yaml") {
+		return false
+	}
+	if !*logged {
+		slog.Info("ignoring archive metadata.yaml")
+		*logged = true
+	}
+	return true
+}
+
+// copyFlatten replays the archive's content root into stage.
+func copyFlatten(gameID, extractRoot, contentRoot, stageDir, installID string, sink ProgressSink, excludeFomod bool, contexts ...context.Context) ([]string, error) {
+	var ctx context.Context
+	if len(contexts) > 0 {
+		ctx = contexts[0]
+	}
+	resolvedExtractRoot, err := filepath.EvalSymlinks(extractRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolving archive extraction root: %w", err)
+	}
+	resolvedContentRoot, err := filepath.EvalSymlinks(contentRoot)
+	if err != nil || !fsutil.ContainedBy(resolvedExtractRoot, resolvedContentRoot) {
+		return nil, fmt.Errorf("archive content root resolves outside extraction root")
+	}
+	info, err := os.Stat(contentRoot)
+	if err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("archive content root is not a directory")
+	}
+	rootedOblivionRemastered := gameID == "oblivionremastered" && hasOblivionRemasteredRootMarkers(contentRoot)
 
 	var written []string
+	var loggedMetadata bool
 	err = filepath.WalkDir(contentRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := installContextErr(ctx); err != nil {
 			return err
 		}
 		rel, err := filepath.Rel(contentRoot, path)
@@ -281,6 +364,17 @@ func copyFlatten(gameID, extractRoot, stageDir, installID string, sink ProgressS
 		}
 		if rel == "." {
 			return nil
+		}
+		if !d.IsDir() && skipArchiveMetadata(rel, &loggedMetadata) {
+			return nil
+		}
+		if excludeFomod {
+			if strings.EqualFold(rel, "fomod") && d.IsDir() {
+				return filepath.SkipDir
+			}
+			if !d.IsDir() && strings.EqualFold(filepath.Ext(rel), ".cs") {
+				return nil
+			}
 		}
 		installRel := routeOblivionRemasteredPath(rel, rootedOblivionRemastered)
 		dst := filepath.Join(stageDir, installRel)
@@ -319,17 +413,43 @@ func copyFlatten(gameID, extractRoot, stageDir, installID string, sink ProgressS
 	return written, err
 }
 
-// copyFomodSelection applies a FOMOD plugin's file/folder rules.
-func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile, installID string, sink ProgressSink) ([]string, error) {
+// copyFomodSelection applies a FOMOD plugin's file/folder rules in priority order.
+func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile, installID string, sink ProgressSink, contexts ...context.Context) ([]string, error) {
+	var ctx context.Context
+	if len(contexts) > 0 {
+		ctx = contexts[0]
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(extractRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolving FOMOD extraction root: %w", err)
+	}
+	ordered := append([]FomodFile(nil), files...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Priority < ordered[j].Priority })
 	var written []string
-	for _, f := range files {
-		src, err := fsutil.SafeJoin(extractRoot, f.Source, false)
+	var loggedMetadata bool
+	for _, f := range ordered {
+		if err := installContextErr(ctx); err != nil {
+			return written, err
+		}
+		src, err := resolveFomodSource(extractRoot, resolvedRoot, f.Source)
+		if errors.Is(err, os.ErrNotExist) {
+			slog.Warn("fomod file missing, skipping", "path", f.Source)
+			continue
+		}
 		if err != nil {
-			return written, fmt.Errorf("unsafe FOMOD source %q: %w", f.Source, err)
+			return written, err
+		}
+		info, err := os.Stat(src)
+		if err != nil {
+			return written, fmt.Errorf("reading FOMOD source %q: %w", f.Source, err)
 		}
 		destRel := f.Destination
 		if destRel == "" {
-			destRel = f.Source
+			if f.IsFolder || info.IsDir() {
+				destRel = "."
+			} else {
+				destRel = filepath.Base(src)
+			}
 		}
 		if gameID == "oblivionremastered" {
 			destRel = routeOblivionRemasteredPath(filepath.FromSlash(strings.ReplaceAll(destRel, `\`, `/`)), hasOblivionRemasteredRootMarkers(extractRoot))
@@ -338,24 +458,13 @@ func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile,
 		if err != nil {
 			return written, fmt.Errorf("unsafe FOMOD destination %q: %w", f.Destination, err)
 		}
-		info, err := os.Stat(src)
-		if err != nil {
-			slog.Warn("fomod file missing, skipping", "path", f.Source)
-			continue
-		}
-		resolvedSource, err := filepath.EvalSymlinks(src)
-		if err != nil {
-			return written, fmt.Errorf("resolving FOMOD source %q: %w", f.Source, err)
-		}
-		resolvedRoot, err := filepath.EvalSymlinks(extractRoot)
-		if err != nil || !fsutil.ContainedBy(resolvedRoot, resolvedSource) {
-			return written, fmt.Errorf("unsafe FOMOD source %q: resolves outside extraction root", f.Source)
-		}
-		src = resolvedSource
 		if f.IsFolder || info.IsDir() {
 			err := filepath.WalkDir(src, func(path string, d os.DirEntry, walkErr error) error {
 				if walkErr != nil {
 					return walkErr
+				}
+				if err := installContextErr(ctx); err != nil {
+					return err
 				}
 				rel, err := filepath.Rel(src, path)
 				if err != nil {
@@ -364,6 +473,13 @@ func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile,
 				dst := filepath.Join(destRoot, rel)
 				if d.IsDir() {
 					return os.MkdirAll(dst, 0755)
+				}
+				toRoot, destErr := filepath.Rel(stageDir, dst)
+				if destErr != nil {
+					return destErr
+				}
+				if skipArchiveMetadata(toRoot, &loggedMetadata) {
+					return nil
 				}
 				copySource := path
 				if d.Type()&os.ModeSymlink != 0 {
@@ -383,6 +499,13 @@ func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile,
 				return written, err
 			}
 		} else {
+			toRoot, err := filepath.Rel(stageDir, destRoot)
+			if err != nil {
+				return written, err
+			}
+			if skipArchiveMetadata(toRoot, &loggedMetadata) {
+				continue
+			}
 			if err := copyFile(src, destRoot); err != nil {
 				return written, err
 			}
@@ -396,7 +519,59 @@ func copyFomodSelection(gameID, extractRoot, stageDir string, files []FomodFile,
 			})
 		}
 	}
+	if len(written) == 0 {
+		return nil, ErrEmptyInstallSelection
+	}
 	return written, nil
+}
+
+// resolveFomodSource finds each source path component case-insensitively within the extraction root.
+func resolveFomodSource(extractRoot, resolvedRoot, source string) (string, error) {
+	joined, err := fsutil.SafeJoin(extractRoot, source, false)
+	if err != nil {
+		return "", fmt.Errorf("unsafe FOMOD source %q: %w", source, err)
+	}
+	rel, err := filepath.Rel(extractRoot, joined)
+	if err != nil {
+		return "", fmt.Errorf("unsafe FOMOD source %q: %w", source, err)
+	}
+	current := resolvedRoot
+	for _, component := range strings.Split(rel, string(filepath.Separator)) {
+		entries, err := os.ReadDir(current)
+		if err != nil {
+			return "", fmt.Errorf("reading FOMOD source %q: %w", source, err)
+		}
+		match := ""
+		ambiguous := false
+		for _, entry := range entries {
+			if entry.Name() == component {
+				match = component
+				ambiguous = false
+				break
+			}
+			if strings.EqualFold(entry.Name(), component) {
+				if match != "" {
+					ambiguous = true
+				}
+				match = entry.Name()
+			}
+		}
+		if ambiguous {
+			return "", fmt.Errorf("ambiguous FOMOD source %q: multiple entries match %q", source, component)
+		}
+		if match == "" {
+			return "", fmt.Errorf("FOMOD source %q: %w", source, os.ErrNotExist)
+		}
+		resolved, err := filepath.EvalSymlinks(filepath.Join(current, match))
+		if err != nil {
+			return "", fmt.Errorf("resolving FOMOD source %q: %w", source, err)
+		}
+		if !fsutil.ContainedBy(resolvedRoot, resolved) {
+			return "", fmt.Errorf("unsafe FOMOD source %q: resolves outside extraction root", source)
+		}
+		current = resolved
+	}
+	return current, nil
 }
 
 // mergeTree copies every file from src into dst, overwriting on collision.
@@ -412,24 +587,52 @@ func mergeTree(src, dst string) error {
 		if rel == "." {
 			return nil
 		}
+		if err := fsutil.CheckExistingPath(dst, rel); err != nil {
+			if errors.Is(err, fsutil.ErrExistingLink) || errors.Is(err, fsutil.ErrExistingNonDirectory) {
+				return &ArchiveRejectedError{Reason: ArchiveRejectedUnsafeEntry, Detail: rel}
+			}
+			return err
+		}
 		target := filepath.Join(dst, rel)
+		info, statErr := os.Lstat(target)
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return statErr
+		}
+		if statErr == nil && (d.IsDir() != info.IsDir() || !d.IsDir() && !info.Mode().IsRegular()) {
+			return &ArchiveRejectedError{Reason: ArchiveRejectedUnsafeEntry, Detail: rel}
+		}
 		if d.IsDir() {
 			return os.MkdirAll(target, 0755)
+		}
+		if !d.Type().IsRegular() {
+			return &ArchiveRejectedError{Reason: ArchiveRejectedUnsafeEntry, Detail: rel}
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return err
+		}
+		if statErr == nil {
+			_, err := atomicfile.CopyFileDurable(path, target, 0644, true)
+			return err
 		}
 		in, err := os.Open(path)
 		if err != nil {
 			return err
 		}
-		defer in.Close()
-		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-			return err
-		}
-		out, err := os.Create(target)
+		out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0644)
 		if err != nil {
-			return err
+			closeErr := in.Close()
+			if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EISDIR) {
+				return errors.Join(&ArchiveRejectedError{Reason: ArchiveRejectedUnsafeEntry, Detail: rel}, closeErr)
+			}
+			return errors.Join(err, closeErr)
 		}
-		defer out.Close()
 		_, err = io.Copy(out, in)
+		if closeErr := out.Close(); err == nil {
+			err = closeErr
+		}
+		if closeErr := in.Close(); err == nil {
+			err = closeErr
+		}
 		return err
 	})
 }

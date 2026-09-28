@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/parka/gorganizer/internal/config"
-	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/dto"
 )
 
@@ -51,7 +51,7 @@ func TestReinstallIsFencedAndSwapsUnderTheDaemonLock(t *testing.T) {
 		}
 		return nil
 	}
-	if _, _, _, err := d.ReinstallMod("stardewvalley", folder); err != nil {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "stardewvalley", folder, ""); err != nil {
 		t.Fatalf("ReinstallMod: %v", err)
 	}
 	d.reinstallFault = nil
@@ -100,7 +100,9 @@ func reinstallLeftovers(t *testing.T, gameID string) []string {
 	return leftovers
 }
 
-func TestReinstallRefusesAModStillLinkedIntoTheAppliedFarm(t *testing.T) {
+// TestReinstallAppliedButDisabledModRebuildsFarm checks that a disabled mod's applied files are removed before swapping its folder.
+func TestReinstallAppliedButDisabledModRebuildsFarm(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	install := newStardewInstall(t)
 	d := newIsolatedDaemon(t, newStardewGames(install))
 	folder, _ := installForReinstall(t, d, "stardewvalley", "Linked", map[string]string{
@@ -119,22 +121,18 @@ func TestReinstallRefusesAModStillLinkedIntoTheAppliedFarm(t *testing.T) {
 	})
 	setStardewModList(t, d, "Default", map[string]bool{folder: false})
 
-	_, _, _, err := d.ReinstallMod("stardewvalley", folder)
-	var refused *download.ModMountedError
-	if !errors.As(err, &refused) || refused.Mod != folder {
-		t.Fatalf("reinstall of a disabled but still deployed mod = %v, want ModMountedError", err)
+	if _, _, _, err := d.ReinstallMod(context.Background(), "stardewvalley", folder, ""); err != nil {
+		t.Fatalf("reinstall of a disabled but still deployed mod: %v", err)
 	}
 	farmFile := filepath.Join(install, "Mods", "Linked", "assets", "a.png")
-	var st syscall.Stat_t
-	if err := syscall.Stat(farmFile, &st); err != nil || st.Nlink != 2 {
-		t.Fatalf("farm file link count after the refusal = %d (%v), want the original mod still linked", st.Nlink, err)
+	if _, err := os.Lstat(farmFile); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("disabled mod still deployed after reinstall: %v", err)
 	}
-
-	if err := d.RebuildVFS("stardewvalley"); err != nil {
-		t.Fatalf("RebuildVFS: %v", err)
+	if status, err := d.GetVFSStatus("stardewvalley"); err != nil || status.Dirty {
+		t.Errorf("farm after applying pending disable = %+v, %v", status, err)
 	}
-	if _, _, _, err := d.ReinstallMod("stardewvalley", folder); err != nil {
-		t.Fatalf("reinstall after applying the disable: %v", err)
+	if _, err := os.Stat(filepath.Join(config.ModsDir("stardewvalley"), folder, "Linked", "assets", "a.png")); err != nil {
+		t.Errorf("reinstalled mod is missing: %v", err)
 	}
 	if err := d.UnmountVFS("stardewvalley"); err != nil {
 		t.Fatalf("UnmountVFS: %v", err)
@@ -148,7 +146,9 @@ func TestReinstallRefusesAModStillLinkedIntoTheAppliedFarm(t *testing.T) {
 	}
 }
 
+// TestReinstallSwapRefusalDiscardsTheStageAndIntent checks that a game starting before the swap leaves the original mod intact.
 func TestReinstallSwapRefusalDiscardsTheStageAndIntent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	install := newStardewInstall(t)
 	d := newIsolatedDaemon(t, newStardewGames(install))
 	folder, _ := installForReinstall(t, d, "stardewvalley", "Late", map[string]string{
@@ -158,22 +158,21 @@ func TestReinstallSwapRefusalDiscardsTheStageAndIntent(t *testing.T) {
 	modDir := filepath.Join(config.ModsDir("stardewvalley"), folder)
 	writeFileContent(t, filepath.Join(modDir, "Late", "assets", "a.png"), "kept")
 	setStardewModList(t, d, "Default", map[string]bool{folder: true})
+	if _, err := d.MountVFS("stardewvalley", "Default"); err != nil {
+		t.Fatal(err)
+	}
 	d.reinstallFault = func(step string) error {
 		if step == "intent-written" {
-			if _, err := d.MountVFS("stardewvalley", "Default"); err != nil {
-				t.Errorf("MountVFS between the intent and the swap: %v", err)
-			}
+			fakeProcesses(d, true, nil)
 		}
 		return nil
 	}
 	t.Cleanup(func() { _ = d.UnmountVFS("stardewvalley") })
 
-	_, _, _, err := d.ReinstallMod("stardewvalley", folder)
+	_, _, _, err := d.ReinstallMod(context.Background(), "stardewvalley", folder, "")
 	d.reinstallFault = nil
-	var refused *download.ModMountedError
-	if !errors.As(err, &refused) {
-		t.Fatalf("reinstall racing a mount = %v, want ModMountedError", err)
-	}
+	fakeProcesses(d, false, nil)
+	requireGameRunning(t, "reinstall after a game starts", err, dto.GameRunningOperationReinstall)
 	if leftovers := reinstallLeftovers(t, "stardewvalley"); len(leftovers) != 0 {
 		t.Errorf("refused swap left %v behind", leftovers)
 	}

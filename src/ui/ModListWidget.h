@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QHash>
+#include <QPointer>
 #include <QWidget>
 #include <QTreeView>
 #include "GameInfo.h"
@@ -11,15 +12,20 @@
 #include <vector>
 
 class QDropEvent;
+class QDragEnterEvent;
+class QDragMoveEvent;
 class QCheckBox;
 class QLabel;
 class QMenu;
 class QPushButton;
+class QProgressDialog;
 class QTimer;
 
 namespace gorganizer {
 
 class ModListWidget;
+class ModListSaveQueue;
+class InstallController;
 
 class ModListTreeView : public QTreeView {
     Q_OBJECT
@@ -27,6 +33,8 @@ public:
     explicit ModListTreeView(ModListWidget* owner, QWidget* parent = nullptr);
 
 protected:
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dragMoveEvent(QDragMoveEvent* event) override;
     void dropEvent(QDropEvent* event) override;
     // Runs the drag loop as a list interaction so outside reloads wait until the drop finished.
     void startDrag(Qt::DropActions supportedActions) override;
@@ -39,7 +47,7 @@ private:
 class ModListWidget : public QWidget {
     Q_OBJECT
 public:
-    explicit ModListWidget(GrpcClient* grpc, QWidget* parent = nullptr);
+    explicit ModListWidget(GrpcClient* grpc, InstallController* installs, QWidget* parent = nullptr);
 
     void loadForGame(const GameInfo& game);
     void loadForGame(const GameInfo& game, const QString& profileName);
@@ -54,19 +62,20 @@ public:
     QString loadedProfileName() const { return m_profileName; }
     // Reports whether a context menu or dialog opened from the list is running; outside reloads wait until it closes.
     bool isInteracting() const { return m_interactionDepth > 0; }
+    bool modListSavesIdle() const;
     // Returns a counter that grows whenever the list sends a mod-list change or reloads from disk.
     quint64 editSerial() const { return m_editSerial; }
     // Reports whether a mod folder is part of the loaded list.
     bool containsMod(const QString& folder) const;
     // Rescans the mod folders without re-reading separators, deferring until the current interaction ends.
     void reloadMods();
-    // Reloads the list after a failed mod-list save, first forgetting a manifest list's adopted profile state so the unsaved change cannot survive.
+    // Reloads the list after a failed mod-list save and re-adopts the profile's mod list.
     void reloadAfterFailedSave(const GameInfo& game, const QString& profileName);
-    // Rescans the mod folders and adopts the profile's modlist, showing every mod the list lacks as disabled; false when the list is busy or not loaded.
-    bool adoptModList(const std::vector<GrpcModListEntry>& entries);
-    // Enables names with one SetModList carrying only the authoritative modlist and those mods, returning its request id or 0 when nothing changed and listing the flipped mods in changedOut.
+    quint64 adoptModList(const std::vector<GrpcModListEntry>& entries);
+    // Enables names from the authoritative modlist and returns the tracked save request ID when flags change.
     quint64 enableModsInProfile(const std::vector<GrpcModListEntry>& authoritative, const QStringList& names,
                                 QStringList* changedOut);
+    bool readyForDependencyEnable() const;
     // Shows a SMAPI dependency report of the loaded profile as row indicators and context-menu actions.
     void setDependencyReport(const GrpcModDependencyReport& report);
     // Removes every SMAPI dependency indicator and forgets the report.
@@ -86,6 +95,10 @@ signals:
     void dependencyFetchRequested(const QStringList& uniqueIds);
     // The user asked to enable the disabled mods that satisfy one mod's SMAPI dependencies.
     void dependencyEnableRequested(const QStringList& modNames);
+    void modListReadyForEnable();
+    void modListAdopted(quint64 adoptionId);
+    void modListAdoptionDeferred(quint64 adoptionId);
+    void modListSavesDrained();
 
 private slots:
     void onConflictsReceived(const std::vector<GrpcFileConflict>& conflicts);
@@ -98,63 +111,135 @@ private slots:
     // Adopts the answer to the list's own modlist request once no menu or dialog is open.
     void onProfileModListReceived(quint64 requestId, const QString& gameId, const QString& profileName,
                                   const std::vector<GrpcModListEntry>& entries);
-    // Retries a failed modlist request of the list with backoff, and gives up after the last attempt so edits are possible again.
+    // Retries a failed modlist request with backoff and keeps edits locked after the last attempt.
     void onProfileModListFailed(quint64 requestId, const QString& gameId, const QString& profileName,
                                 const QString& error);
     // Sends the next modlist request after a failed one.
     void onProfileRetryTimeout();
-    // Writes the enabled flag of the mods a dependency enable saved into their metadata.yaml.
-    void onModListSaved(quint64 requestId, const QString& gameId, const QString& profileName);
-    // Reverts the flags of a failed dependency enable and re-reads the profile's modlist.
-    void onModListSaveFailed(quint64 requestId, const QString& gameId, const QString& profileName,
-                             const QString& error);
+    // Clears the tracking state of a saved dependency enable.
+    void onModListSaved(quint64 requestId);
+    // Reloads the saved profile after a queued mod-list save fails.
+    void onModListSaveFailed(quint64 requestId);
+    // Resumes a deferred profile read once every queued save has completed.
+    void onModListSavesDrained();
+    void onModReinstalled(quint64 requestId, const QString& gameId, const QString& modName,
+                          const GrpcReinstallResult& result);
+    void onModUninstalled(quint64 requestId, const QString& gameId, const QString& modName,
+                          const QStringList& flaggedArchives);
+    void onModRenamed(quint64 requestId, const QString& gameId, const QString& oldName, const QString& newName);
+    void onModActionFailed(quint64 requestId, const QString& gameId, const QString& modName,
+                           const QString& method, const QString& error, int grpcCode);
+    void onModActionWorkersStopped();
+    void onReinstallFailed(quint64 requestId, const QString& error);
+    void onReinstallCancelled(quint64 requestId);
+    void onReinstallUnknown(quint64 requestId);
 
 private:
     friend class ModListTreeView;
     void scanModsFolder();
-    // Builds the SetModList entries of a checkbox toggle, in display order in the flat view and in load order in the separator view.
+    struct ActionContext {
+        QString gameId;
+        QString profileName;
+        QString modsDir;
+    };
+    ActionContext actionContext() const;
+    bool matchesContext(const ActionContext& context) const;
+    int modIndexForFolder(const QString& folder) const;
+    int separatorIndexForName(const QString& name) const;
+    int availableModIndex(const ActionContext& context, const QString& folder);
+    int availableSeparatorIndex(const ActionContext& context, const QString& name);
+    QString metadataPathForFolder(const QString& folder) const;
+    // Builds the SetModList entries of a checkbox toggle in the profile's load order.
     std::vector<GrpcModListEntry> toggleEntries() const;
     // Rescans the mod catalog without re-reading separators.
     void rescanCatalog();
-    // Scans the mod folders, keeping the loaded profile's enabled flags and order once its modlist was adopted.
-    std::vector<ModMetadata> scanCatalog() const;
+    enum class ScanPurpose { Folder, Catalog, Adoption };
+    struct ScanTag {
+        ActionContext context;
+        quint64 generation = 0;
+    };
+    void requestScan(ScanPurpose purpose);
+    void startScan();
+    void onScanFinished(const ScanTag& tag, std::vector<ModMetadata> scanned);
+    void finishFolderScan(std::vector<ModMetadata> scanned, const ScanTag& tag);
+    void finishCatalogScan(std::vector<ModMetadata> scanned);
+    bool finishAdoption(const std::vector<GrpcModListEntry>& entries, std::vector<ModMetadata> scanned,
+                        quint64 adoptionId);
+    std::vector<ModMetadata> scanCatalog(std::vector<ModMetadata> scanned) const;
     // Records the order of a modlist the list sends as the loaded profile's order once its modlist was adopted.
     void noteSentModList(const std::vector<GrpcModListEntry>& entries);
-    // Requests the loaded profile's modlist for games whose list mirrors it, which the list adopts when it arrives, restarting the retry budget.
+    // Records an optimistic edit and queues its full mod list for saving.
+    quint64 submitModList(const std::vector<GrpcModListEntry>& entries);
+    // Requests the loaded profile's modlist and restarts the retry budget.
     void requestProfileModList();
-    // Sends one modlist request for the loaded profile when the game's list mirrors it.
+    // Sends one modlist request for the loaded profile.
     void sendProfileModListRequest();
     // Forgets the adopted profile modlist, its enabled flags and its order.
     void dropProfileAdoption();
-    // Reports whether a manifest list still waits for its profile's modlist, so toggles and reorders would push unrelated flags.
+    // Reports whether the loaded profile's modlist has not been adopted.
     bool editsBlocked() const;
     // Locks or unlocks checkboxes, dragging and separator edits and shows the profile loading state.
     void updateEditLock();
     // Sets the in-memory and shown enabled flag of the named mod folders without persisting anything.
     void applyEnabledFlags(const QStringList& folders, bool enabled);
+    void setSelectedModsEnabled(const ActionContext& context, const QStringList& folders, bool enabled);
     // Rebuilds the rows from m_mods in the current sort, keeping cached conflict counts, and re-requests conflicts.
     void refreshView();
     void beginInteraction();
     // Ends one interaction level, running a deferred reload and announcing the end once none remain.
     void endInteraction();
     void showContextMenu(const QPoint& pos);
+    enum class ModActionKind { Reinstall, Uninstall, Rename };
+    struct ModAction {
+        ModActionKind kind;
+        ActionContext context;
+        QString folder;
+        QString name;
+        QString newName;
+        quint64 requestId = 0;
+        bool forced = false;
+        bool submittedWhileConnected = false;
+    };
+    struct BulkReinstall {
+        ActionContext context;
+        QStringList folders;
+        QStringList names;
+        QStringList errors;
+        QStringList notices;
+        QPointer<QProgressDialog> progress;
+        int next = 0;
+        int total = 0;
+        int completed = 0;
+        int failed = 0;
+        int unknown = 0;
+        bool stopRequested = false;
+    };
+    bool refuseModAction() const;
+    void startModAction(ModAction action);
+    void startBulkReinstall(const ActionContext& context, const QStringList& folders, const QStringList& names);
+    void startNextBulkReinstall();
+    void finishBulkReinstall();
+    void showBulkSummary(const BulkReinstall& bulk);
+    void showPendingBulkSummaries();
+    void finishModAction(bool changed);
+    bool matchesModAction(quint64 requestId, const QString& gameId, const QString& modName,
+                          ModActionKind kind) const;
     // Adds the SMAPI dependency actions for one mod folder to its context menu.
     void addDependencyActions(QMenu& menu, const QString& folder);
     void restorePriorityOrder();
-    void setCategoryForRow(int modIdx, const QString& category);
-    // Sets or clears the mod_page key in metadata.yaml; empty url removes the key.
-    void updateModPageUrl(int row, const QString& url);
+    void setCategoryForFolder(const ActionContext& context, const QString& folder, const QString& category);
+    void updateModPageUrl(const ActionContext& context, const QString& folder, const QString& url);
 
     void onVisualToggled(bool on);
     void rebuildView();
     void applyOverwriteSpan();
     QHash<QString, std::vector<int>> hiddenModsBySeparator() const;
     void persistRowOrder();
-    void createSeparatorAt(int visualRow);
-    void renameSeparator(int row);
-    void removeSeparator(int row);
-    void toggleCollapseAt(int row);
-    void moveSeparatorTo(int row, bool toTop);
+    void createSeparatorAt(const ActionContext& context, ModRowKind anchorKind, const QString& anchorName);
+    void renameSeparator(const ActionContext& context, const QString& name);
+    void removeSeparator(const ActionContext& context, const QString& name);
+    void toggleCollapseAt(const ActionContext& context, const QString& name);
+    void moveSeparatorTo(const ActionContext& context, const QString& name, bool toTop);
     void persistSeparators();
     void onAddSeparatorClicked();
     void groupByCategory();
@@ -162,17 +247,21 @@ private:
     void updateConflictTints();
     void showConflictDetailsForMod(const QString& modName);
 
-    void onOverwriteContextMenu(const QPoint& globalPos);
-    void extractOverwriteAll();
-    void extractOverwriteSelected();
+    void onOverwriteContextMenu(const ActionContext& context, const QPoint& globalPos);
+    void extractOverwriteAll(const ActionContext& context);
+    void extractOverwriteSelected(const ActionContext& context);
 
     GrpcClient* m_grpc;
+    InstallController* m_installs;
+    ModListSaveQueue* m_saveQueue;
+    QPointer<QProgressDialog> m_reinstallProgress;
     ModListTreeView* m_view;
     ModListModel* m_model;
     QWidget* m_placeholder;
     QCheckBox* m_visualCheck = nullptr;
     QPushButton* m_addSeparatorBtn = nullptr;
     QLabel* m_profileStateLabel = nullptr;
+    QPushButton* m_profileRetryButton = nullptr;
     QTimer* m_profileRetryTimer = nullptr;
 
     std::vector<GrpcFileConflict> m_conflicts;
@@ -193,7 +282,19 @@ private:
     bool m_updatingModel = false;
     int m_interactionDepth = 0;
     quint64 m_editSerial = 0;
+    quint64 m_scanGeneration = 0;
+    bool m_scanRunning = false;
+    bool m_scanFirstPending = false;
+    bool m_scanFolderPending = false;
+    bool m_scanCatalogPending = false;
+    std::optional<std::vector<GrpcModListEntry>> m_scanAdoptionPending;
+    quint64 m_scanAdoptionSerial = 0;
+    quint64 m_scanAdoptionId = 0;
     bool m_reloadPending = false;
+    bool m_modActionInProgress = false;
+    std::optional<ModAction> m_modAction;
+    std::optional<BulkReinstall> m_bulkReinstall;
+    std::vector<BulkReinstall> m_pendingBulkSummaries;
     std::optional<GrpcModDependencyReport> m_dependencyReport;
     bool m_profileAdopted = false;
     QHash<QString, bool> m_profileFlags;
@@ -204,6 +305,8 @@ private:
     int m_profileRetryAttempts = 0;
     bool m_profileLoadFailed = false;
     QString m_profileLoadError;
+    bool m_restoringSavedProfile = false;
+    bool m_savedProfileRestored = false;
     struct EnableSave {
         QString gameId;
         QString profileName;

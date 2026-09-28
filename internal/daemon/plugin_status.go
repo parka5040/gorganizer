@@ -19,6 +19,7 @@ func (pl *PluginStatusService) SetPluginOrder(gameID, profileName string, filena
 	if !pl.s.gameConfigured(gameID) {
 		return fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
+	defer pl.s.lockProfiles(gameID)()
 	return pl.s.profileMgr.SavePluginOrder(gameID, profileName, filenames)
 }
 
@@ -34,6 +35,7 @@ func (pl *PluginStatusService) SetPluginLoadout(gameID, profileName string, entr
 			Enabled:  entry.Enabled,
 		})
 	}
+	defer pl.s.lockProfiles(gameID)()
 	return pl.s.profileMgr.SavePluginLoadout(gameID, profileName, loadout)
 }
 
@@ -94,7 +96,10 @@ func (pl *PluginStatusService) StreamPluginStatus(ctx context.Context, gameID, p
 	if mounted {
 		seedDir = mm.BackupPath()
 	}
-	if err := applyProfilePluginLoadout(pl.s.profileMgr, gameID, profileName, seedDir, spec, discovered); err != nil {
+	unlockProfiles := pl.s.lockProfiles(gameID)
+	err = applyProfilePluginLoadout(pl.s.profileMgr, gameID, profileName, seedDir, spec, discovered)
+	unlockProfiles()
+	if err != nil {
 		return nil, err
 	}
 

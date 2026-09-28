@@ -1,4 +1,5 @@
 #include "FomodInstallerDialog.h"
+#include "WindowFit.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -62,10 +63,10 @@ FomodInstallerDialog::FomodInstallerDialog(const FomodPlan& plan, QWidget* paren
     , m_descriptionText(new QTextEdit)
 {
     setWindowTitle(titleFor(plan));
-    resize(780, 560);
 
     auto* outer = new QVBoxLayout(this);
 
+    m_titleLabel->setTextFormat(Qt::PlainText);
     m_titleLabel->setStyleSheet("font-weight: bold; font-size: 14pt; padding: 4px;");
     outer->addWidget(m_titleLabel);
 
@@ -89,6 +90,8 @@ FomodInstallerDialog::FomodInstallerDialog(const FomodPlan& plan, QWidget* paren
 
     buildPages();
     showStep(0);
+    m_nextBtn->setDefault(true);
+    fitToScreen(this, QSize(780, 560));
 }
 
 void FomodInstallerDialog::buildPages()
@@ -102,16 +105,19 @@ void FomodInstallerDialog::buildPages()
         if (!m_plan.author.isEmpty())   meta << QString("Author: %1").arg(m_plan.author);
         if (!m_plan.version.isEmpty())  meta << QString("Version: %1").arg(m_plan.version);
         if (!meta.isEmpty()) {
-            auto* metaLbl = new QLabel(meta.join("    "));
+            auto* metaLbl = new QLabel;
+            metaLbl->setTextFormat(Qt::PlainText);
+            metaLbl->setText(meta.join("    "));
             metaLbl->setObjectName("hintLabel");
             layout->addWidget(metaLbl);
         }
 
-        if (!m_plan.screenshotPath.isEmpty()) {
-            QPixmap pm(m_plan.screenshotPath);
+        if (!m_plan.screenshotData.isEmpty()) {
+            QPixmap pm;
+            pm.loadFromData(m_plan.screenshotData);
             if (!pm.isNull()) {
                 auto* img = new QLabel;
-                img->setPixmap(pm.scaled(QSize(640, 360),
+                img->setPixmap(pm.scaled(QSize(420, 240),
                                          Qt::KeepAspectRatio,
                                          Qt::SmoothTransformation));
                 img->setAlignment(Qt::AlignCenter);
@@ -128,7 +134,10 @@ void FomodInstallerDialog::buildPages()
         layout->addWidget(note);
         layout->addStretch();
 
-        m_stack->addWidget(page);
+        auto* scroll = new QScrollArea;
+        scroll->setWidgetResizable(true);
+        scroll->setWidget(page);
+        m_stack->addWidget(scroll);
         m_stepWidgets.append(StepWidgets{});
         m_descriptionText->setPlainText(m_plan.description);
         return;

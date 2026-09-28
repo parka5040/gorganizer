@@ -23,6 +23,7 @@ func setRoot(t *testing.T, root string) {
 	t.Helper()
 	t.Setenv("GORGANIZER_ROOT", filepath.Join(root, "instance"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "xdg"))
+	t.Setenv("HOME", t.TempDir())
 }
 
 // writeFileT writes a file, creating parents.
@@ -63,7 +64,7 @@ func buildInstance(t *testing.T) {
 
 	profDir := filepath.Join(config.ProfilesDir(testGame), "Default")
 	writeFileT(t, filepath.Join(profDir, "profile.json"),
-		"{\n  \"name\": \"Default\",\n  \"game_id\": \"skyrimse\",\n  \"created_at\": \"2026-01-02T03:04:05Z\"\n}")
+		"{\n  \"created_at\": \"2026-01-02T03:04:05Z\",\n  \"game_id\": \"skyrimse\",\n  \"name\": \"Default\"\n}")
 	writeFileT(t, filepath.Join(profDir, "modlist.txt"),
 		"# Gorganizer modlist — do not edit while daemon is running\n+Alpha Mod\n-Beta\n+Gamma\n")
 	writeFileT(t, filepath.Join(profDir, "plugin_order.txt"),
@@ -233,8 +234,8 @@ func TestRerunWithSkipIsIdempotent(t *testing.T) {
 	if sum.ModsImported != 0 || sum.ProfilesTransferred != 0 {
 		t.Errorf("rerun summary = %+v, want nothing imported", sum)
 	}
-	if len(sum.Skipped) != 4 {
-		t.Errorf("skipped = %v, want 4 entries", sum.Skipped)
+	if len(sum.Skipped) != 6 {
+		t.Errorf("skipped = %v, want 6 entries including Overwrite and game settings", sum.Skipped)
 	}
 	after := snapshotTree(t, config.ModsDir(testGame))
 	if !reflect.DeepEqual(before, after) {
@@ -260,7 +261,7 @@ func TestExportSelection(t *testing.T) {
 	if sum.ModsExported != 1 || sum.ProfilesTransferred != 1 {
 		t.Errorf("summary = %+v, want 1 mod / 1 profile", sum)
 	}
-	preview, err := Preview(testGame, archive)
+	preview, err := Preview(context.Background(), testGame, archive)
 	if err != nil {
 		t.Fatalf("Preview: %v", err)
 	}

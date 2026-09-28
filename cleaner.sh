@@ -1,131 +1,159 @@
 #!/bin/bash
-# cleaner.sh — Reset gorganizer to a clean first-time-user state.
-# Removes all build artifacts, mod folders, config, and runtime data.
-# Source code is untouched.
-#
-# Usage:
-#   ./cleaner.sh                Clean everything (asks for confirmation)
-#   ./cleaner.sh --keep-mods    Clean build/config but keep mod folders
-#   ./cleaner.sh --yes          Skip confirmation (for scripted reset)
+# cleaner.sh — Developer reset of local build files and known old mod folders.
 set -euo pipefail
 
-if [ -t 1 ]; then
-    CYAN='\033[0;36m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[0;33m'
-    RESET='\033[0m'
-else
-    CYAN='' GREEN='' YELLOW='' RESET=''
-fi
-
-log()  { echo -e "${CYAN}[cleaner]${RESET} $*"; }
-ok()   { echo -e "${CYAN}[cleaner]${RESET} ${GREEN}✓${RESET} $*"; }
-warn() { echo -e "${CYAN}[cleaner]${RESET} ${YELLOW}⚠${RESET} $*"; }
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
-
+if [ -f "$SCRIPT_DIR/release.json" ]; then
+    printf '%s\n' 'This is a prebuilt copy of Gorganizer. Cleaner is only available in a source checkout.' >&2
+    exit 1
+fi
+CTL_BIN="$SCRIPT_DIR/gorganizerctl"
 KEEP_MODS=false
 ASSUME_YES=false
+LOCKED_RUN=false
 for arg in "$@"; do
     case "$arg" in
+        --cleaner-locked-run) LOCKED_RUN=true ;;
         --keep-mods) KEEP_MODS=true ;;
         --yes|-y) ASSUME_YES=true ;;
         --help|-h)
-            echo "Usage: $0 [--keep-mods] [--yes]"
-            echo ""
-            echo "  (no args)     Remove everything: build, mods, config, runtime"
-            echo "  --keep-mods   Keep mod folders (*_Mods/), clean everything else"
-            echo "  --yes, -y     Skip the destructive-action confirmation prompt"
-            exit 0
-            ;;
-        *) echo "Unknown flag: $arg"; exit 1 ;;
+            printf '%s\n' 'Usage: ./cleaner.sh [--keep-mods] [--yes]'
+            exit 0 ;;
+        *) printf 'Unknown option: %s\n' "$arg" >&2; exit 2 ;;
     esac
 done
 
-# Confirm before doing anything destructive. The script removes mods,
-# config, and downloads — without a gate, a fat-fingered tab-complete
-# can wipe a user's entire modding setup. --yes opts out for CI / dev
-# scripts that already know what they're doing.
-if ! $ASSUME_YES; then
-    if $KEEP_MODS; then
-        warn "About to remove: build artifacts, config (~/.config/gorganizer),"
-        warn "                 data (~/.local/share/gorganizer), runtime, desktop entries."
-        warn "Mod folders (*_Mods/) will be KEPT."
-    else
-        warn "About to remove: build artifacts, ALL *_Mods/ folders in $SCRIPT_DIR,"
-        warn "                 config (~/.config/gorganizer),"
-        warn "                 data (~/.local/share/gorganizer), runtime, desktop entries."
+if [ ! -x "$CTL_BIN" ]; then
+    printf '%s\n' "Gorganizer's maintenance tool is missing, so nothing was removed. Rebuild with ./gorganizer.sh, then run cleaner again." >&2
+    exit 1
+fi
+if ! $LOCKED_RUN || [ "${GORGANIZER_CLEANER_HELD:-}" != 1 ]; then
+    exec "$CTL_BIN" uninstall --check --hold-locks -- env GORGANIZER_CLEANER_HELD=1 bash "$SCRIPT_DIR/cleaner.sh" --cleaner-locked-run "$@"
+fi
+
+cleaner_validate_path() {
+    local path="$1" kind="$2" required="${3:-false}" part
+    if [[ "$path" != /* || "$path" == *$'\n'* || "$path" == *$'\r'* ]] ||
+        [[ "$path/" == *'/./'* || "$path/" == *'/../'* || "$path/" == *'//'* ]]; then
+        printf 'Cannot safely clean: invalid path %s. Nothing has been removed.\n' "$path" >&2
+        return 1
     fi
-    if [ -t 0 ]; then
-        read -r -p "$(echo -e "${CYAN}[cleaner]${RESET} Type 'yes' to proceed: ")" reply || reply=""
-        if [ "$reply" != "yes" ]; then
-            log "Cancelled."
-            exit 0
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        if [ -L "$path" ] || [ "$(stat -c %u -- "$path")" != "$(id -u)" ] ||
+            { [ "$kind" = directory ] && [ ! -d "$path" ]; } ||
+            { [ "$kind" = file ] && [ ! -f "$path" ]; }; then
+            printf 'Cannot safely clean: path is not an owned %s: %s. Nothing has been removed.\n' "$kind" "$path" >&2
+            return 1
         fi
-    else
-        warn "Non-interactive shell and --yes not given; aborting."
-        exit 1
+    elif $required; then
+        printf 'Cannot safely clean: missing %s: %s. Nothing has been removed.\n' "$kind" "$path" >&2
+        return 1
     fi
-fi
-
-# Stop a running daemon before deleting anything. SIGTERM lets it capture
-# new writes and restore each game's vanilla Data/ on the way out; wait out
-# the daemon's own 45s shutdown watchdog instead of killing it mid-teardown.
-if pgrep -x gorganizerd >/dev/null 2>&1; then
-    warn "Stopping running gorganizerd..."
-    pkill -TERM -x gorganizerd 2>/dev/null || true
-    for _ in $(seq 1 460); do
-        pgrep -x gorganizerd >/dev/null 2>&1 || break
-        sleep 0.1
+    part="${path%/*}"
+    [ -n "$part" ] || part=/
+    while [ "$part" != / ]; do
+        if { [ -e "$part" ] || [ -L "$part" ]; } && { [ -L "$part" ] || [ ! -d "$part" ]; }; then
+            printf 'Cannot safely clean: linked or non-directory ancestor %s. Nothing has been removed.\n' "$part" >&2
+            return 1
+        fi
+        part="${part%/*}"
+        [ -n "$part" ] || part=/
     done
-    if pgrep -x gorganizerd >/dev/null 2>&1; then
-        warn "gorganizerd did not exit. Nothing was removed; stop it and re-run."
+}
+
+cleaner_validate_desktop() {
+    local path="$1" name="$2" action="$3" line name_found=false exec_found=false
+    [ -e "$path" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ "$line" != "Name=$name" ] || name_found=true
+        [ "$line" != "Exec=$SCRIPT_DIR/gorganizer.sh $action" ] || exec_found=true
+    done < "$path"
+    if ! $name_found || ! $exec_found; then
+        if "$CTL_BIN" desktop status --checkout "$SCRIPT_DIR" --icon "$data_base/icons/hicolor/256x256/apps/gorganizer.png" >/dev/null 2>&1; then
+            return 0
+        fi
+        printf 'Cannot safely clean: desktop entry does not belong to this checkout: %s. Nothing has been removed.\n' "$path" >&2
+        return 1
+    fi
+}
+
+old_mods=()
+if ! $KEEP_MODS; then
+    old_list="$("$CTL_BIN" migrate-data --from "$SCRIPT_DIR" --dry-run --list)" || exit 1
+    if [ -n "$old_list" ]; then
+        mapfile -t old_mods <<< "$old_list"
+    fi
+fi
+
+extracts=()
+temp_base="${TMPDIR:-}"
+if [ -n "$temp_base" ]; then
+    if ! cleaner_validate_path "$temp_base" directory true; then
+        printf 'Cannot safely check the temporary folder. Nothing has been removed.\n' >&2
         exit 1
     fi
-    ok "Daemon stopped."
+    for path in "$temp_base"/gorganizer-extract-"$(id -u)"-*; do
+        [ -e "$path" ] || [ -L "$path" ] || continue
+        name="${path##*/}"
+        [[ "$name" =~ ^gorganizer-extract-$(id -u)-[0-9a-f]{12}$ ]] || continue
+        if ! cleaner_validate_path "$path" directory true; then
+            printf 'Cannot safely check extraction folder %s. Nothing has been removed.\n' "$path" >&2
+            exit 1
+        fi
+        extracts+=("$path")
+    done
 fi
 
-# Build artifacts.
-log "Removing build artifacts..."
-rm -rf "$SCRIPT_DIR/build"
-rm -rf "$SCRIPT_DIR/CMakeFiles"
-rm -f  "$SCRIPT_DIR/gorganizerd" "$SCRIPT_DIR/gorganizerctl"
-rm -f  "$SCRIPT_DIR/api/proto/"*.pb.go
-ok "Build artifacts removed."
-
-# Mod folders.
-if $KEEP_MODS; then
-    warn "Keeping mod folders (--keep-mods)."
-else
-    log "Removing mod folders..."
-    rm -rf "$SCRIPT_DIR/"*_Mods
-    ok "Mod folders removed."
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/gorganizer"
+data_base="${XDG_DATA_HOME:-$HOME/.local/share}"
+cleaner_check_paths() {
+    local path
+    cleaner_validate_path "$SCRIPT_DIR" directory true || return 1
+    cleaner_validate_path "$config_dir" directory || return 1
+    [ -z "$temp_base" ] || cleaner_validate_path "$temp_base" directory true || return 1
+    for path in "$SCRIPT_DIR/build" "$SCRIPT_DIR/.build-staging" "$SCRIPT_DIR/CMakeFiles" "$SCRIPT_DIR/.tools"; do
+        cleaner_validate_path "$path" directory || return 1
+    done
+    for path in "$SCRIPT_DIR/gorganizerd" "$CTL_BIN" "$SCRIPT_DIR/.build-fingerprint" \
+        "$SCRIPT_DIR/api/proto/gorganizer.pb.go" "$SCRIPT_DIR/api/proto/gorganizer_grpc.pb.go" \
+        "$data_base/applications/gorganizer.desktop" "$data_base/applications/gorganizer-nxm.desktop" \
+        "$data_base/gorganizer/bin/gorganizer"; do
+        cleaner_validate_path "$path" file || return 1
+    done
+    for path in "${old_mods[@]}"; do
+        if [ "${path%/*}" != "$SCRIPT_DIR" ] || [[ "${path##*/}" != *_Mods ]] ||
+            ! cleaner_validate_path "$path" directory true; then
+            printf 'Cannot safely check old mod folders. Nothing has been removed.\n' >&2
+            return 1
+        fi
+    done
+    for path in "${extracts[@]}"; do
+        cleaner_validate_path "$path" directory true || return 1
+    done
+    cleaner_validate_desktop "$data_base/applications/gorganizer.desktop" Gorganizer launch || return 1
+    cleaner_validate_desktop "$data_base/applications/gorganizer-nxm.desktop" 'Gorganizer NXM Handler' 'nxm %u' || return 1
+}
+cleaner_check_paths || exit 1
+printf 'Remove build files, settings, %s old mod folders and %s extraction folders?\n' "${#old_mods[@]}" "${#extracts[@]}"
+if ! $ASSUME_YES; then
+    if [ ! -t 0 ]; then
+        printf 'Use --yes in a non-interactive shell. Nothing has been removed.\n' >&2
+        exit 1
+    fi
+    read -r -p "Type 'yes' to proceed: " reply || reply=""
+    if [ "$reply" != yes ]; then
+        printf 'Nothing has been removed.\n'
+        exit 1
+    fi
 fi
+cleaner_check_paths || exit 1
+"$CTL_BIN" desktop unregister --checkout "$SCRIPT_DIR" || exit 1
 
-# Config (daemon config + Qt settings).
-log "Removing config..."
-rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/gorganizer"
-ok "Config removed."
-
-# Data (profiles, downloads).
-log "Removing data..."
-rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/gorganizer"
-ok "Data removed."
-
-# Runtime (socket, pid files).
-log "Removing runtime..."
-rm -rf "${XDG_RUNTIME_DIR:-/tmp}/gorganizer"
-rm -rf "/tmp/gorganizer-$(id -u)"
-rm -rf /tmp/gorganizer-extract-*
-ok "Runtime removed."
-
-# Desktop file registrations.
-log "Removing desktop registrations..."
-rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/gorganizer-nxm.desktop"
-rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/gorganizer.desktop"
-update-desktop-database "${XDG_DATA_HOME:-$HOME/.local/share}/applications" 2>/dev/null || true
-ok "Desktop registrations removed."
-
-echo ""
-ok "Clean. Run ${GREEN}./gorganizer.sh${RESET} for a fresh start."
+rm -rf -- "$SCRIPT_DIR/build" "$SCRIPT_DIR/.build-staging" "$SCRIPT_DIR/CMakeFiles" "$SCRIPT_DIR/.tools"
+rm -f -- "$SCRIPT_DIR/gorganizerd" "$SCRIPT_DIR/gorganizerctl" "$SCRIPT_DIR/.build-fingerprint" \
+    "$SCRIPT_DIR/api/proto/gorganizer.pb.go" "$SCRIPT_DIR/api/proto/gorganizer_grpc.pb.go"
+for path in "${old_mods[@]}" "${extracts[@]}"; do
+    rm -rf -- "$path"
+done
+rm -rf -- "$config_dir"
+printf 'Local cleanup complete. Run ./gorganizer.sh to rebuild.\n'

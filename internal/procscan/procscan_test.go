@@ -1,16 +1,12 @@
-package daemon
+package procscan
 
 import (
-	"errors"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 )
 
 // fakeProcess writes a /proc-style entry for pid whose exe and cwd links point at the given targets.
@@ -48,7 +44,7 @@ func TestScanProcessesInMatchesExecutablesAndWorkingDirectoriesInsideTheInstall(
 		pid      string
 		want     bool
 	}{
-		{name: "unrelated process", scanDir: install, pid: "100", exe: "/usr/bin/bash", cwd: "/home"},
+		{name: "unrelated process", scanDir: install, pid: "100", exe: "/usr/bin/bash", cwd: "/var/empty"},
 		{name: "working directory inside", scanDir: install, pid: "101", exe: "/usr/bin/bash", cwd: filepath.Join(install, "Content"), want: true},
 		{name: "working directory is the install", scanDir: install, pid: "102", cwd: install, want: true},
 		{name: "deleted executable inside", scanDir: install, pid: "103", exe: filepath.Join(install, "StardewModdingAPI") + procDeletedSuffix, cwd: "/", want: true},
@@ -56,90 +52,61 @@ func TestScanProcessesInMatchesExecutablesAndWorkingDirectoriesInsideTheInstall(
 		{name: "the daemon itself", scanDir: install, pid: self, exe: filepath.Join(install, "gorganizerd"), cwd: install},
 		{name: "non-process entry", scanDir: install, pid: "self", cwd: install},
 		{name: "symlinked install path", scanDir: linked, pid: "105", cwd: filepath.Join(install, "Content"), want: true},
-		{name: "unreadable links", scanDir: install, pid: "106"},
+		{name: "missing links", scanDir: install, pid: "106"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			procDir := filepath.Join(t.TempDir(), "proc")
 			fakeProcess(t, procDir, tc.pid, tc.exe, tc.cwd)
-			got, err := scanProcessesIn(procDir, tc.scanDir, nil)
+			got, err := RunningIn(procDir, tc.scanDir, nil)
 			if err != nil || got != tc.want {
 				t.Fatalf("scanProcessesIn = %v (%v), want %v", got, err, tc.want)
 			}
 		})
 	}
-	if _, err := scanProcessesIn(filepath.Join(base, "no-proc"), install, nil); err == nil {
+	if _, err := RunningIn(filepath.Join(base, "no-proc"), install, nil); err == nil {
 		t.Error("scanning a missing process table reported no error")
 	}
 }
 
-// startSleeper starts path with a long sleep in dir and stops it when the test ends.
-func startSleeper(t *testing.T, path, dir string) *exec.Cmd {
-	t.Helper()
-	var cmd *exec.Cmd
-	var err error
-	for attempt := 0; attempt < 50; attempt++ {
-		cmd = exec.Command(path, "600")
-		cmd.Dir = dir
-		if err = cmd.Start(); !errors.Is(err, syscall.ETXTBSY) {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if err != nil {
-		if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EACCES) {
-			t.Skipf("cannot execute %s here: %v", path, err)
-		}
+// TestRunningInResolvesRelativeInstallPath checks the scanner matches absolute process paths against a relative install root.
+func TestRunningInResolvesRelativeInstallPath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	install := filepath.Join(t.TempDir(), "Game")
+	if err := os.Mkdir(install, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
-	return cmd
+	procRoot := t.TempDir()
+	fakeProcess(t, procRoot, "101", filepath.Join(install, "game"), install)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(cwd, install)
+	if err != nil || filepath.IsAbs(relative) {
+		t.Fatalf("relative install = %q (%v)", relative, err)
+	}
+	if running, err := RunningIn(procRoot, relative, nil); err != nil || !running {
+		t.Fatalf("RunningIn = %t (%v), want running", running, err)
+	}
 }
 
-func TestScanProcessesInFindsARealProcessRunningFromTheInstall(t *testing.T) {
-	sleep, err := exec.LookPath("sleep")
-	if err != nil {
-		t.Skip("sleep is not available")
-	}
-	install := filepath.Join(t.TempDir(), "Game")
-	if err := os.MkdirAll(install, 0755); err != nil {
+// TestRunningInReportsUnreadableProcess checks that unexpected process-entry errors refuse the scan.
+func TestRunningInReportsUnreadableProcess(t *testing.T) {
+	install := t.TempDir()
+	procRoot := t.TempDir()
+	entry := filepath.Join(procRoot, "777")
+	if err := os.Mkdir(entry, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if running, err := scanProcessesIn(procRoot, install, nil); err != nil || running {
-		t.Fatalf("scan before starting = %v (%v), want nothing running", running, err)
-	}
-
-	cwdProcess := startSleeper(t, sleep, install)
-	if running, err := scanProcessesIn(procRoot, install, nil); err != nil || !running {
-		t.Fatalf("scan with a process working in the install = %v (%v), want running", running, err)
-	}
-	_ = cwdProcess.Process.Kill()
-	_ = cwdProcess.Wait()
-	if running, err := scanProcessesIn(procRoot, install, nil); err != nil || running {
-		t.Fatalf("scan after the process exited = %v (%v), want nothing running", running, err)
-	}
-
-	copied := filepath.Join(install, "game-binary")
-	src, err := os.Open(sleep)
-	if err != nil {
+	if err := os.WriteFile(filepath.Join(entry, "exe"), []byte("not a link"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	dst, err := os.OpenFile(copied, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0755)
-	if err != nil {
-		t.Fatal(err)
+	info, err := os.Stat(entry)
+	if err != nil || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Getuid()) {
+		t.Fatalf("fake process ownership = %v, %v; want the current user", info, err)
 	}
-	if _, err := io.Copy(dst, src); err != nil {
-		t.Fatal(err)
-	}
-	_ = src.Close()
-	if err := dst.Close(); err != nil {
-		t.Fatal(err)
-	}
-	startSleeper(t, copied, t.TempDir())
-	if running, err := scanProcessesIn(procRoot, install, nil); err != nil || !running {
-		t.Fatalf("scan with a process executing from the install = %v (%v), want running", running, err)
+	if _, err := RunningIn(procRoot, install, nil); err == nil {
+		t.Error("same-user process with an unreadable executable was reported as idle")
 	}
 }
 
@@ -179,7 +146,7 @@ func TestScanProcessesInMatchesSteamsLaunchWrapper(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			procDir := filepath.Join(t.TempDir(), "proc")
 			fakeCommandLine(t, procDir, "200", filepath.Join(proton, "files", "bin", "wine64"), filepath.Join(proton, "pfx"), tc.args...)
-			got, err := scanProcessesIn(procDir, install, tc.appIDs)
+			got, err := RunningIn(procDir, install, tc.appIDs)
 			if err != nil || got != tc.want {
 				t.Fatalf("scanProcessesIn = %v (%v), want %v", got, err, tc.want)
 			}

@@ -25,7 +25,63 @@ const (
 	guiStageRetention = 24 * time.Hour
 )
 
-// vfsStatus builds a VFSStatusResult from the mount's live generation counters.
+// recoveryLifecycleLocked returns the install's lifecycle state and a stable deferral reason; the caller holds s.mu.
+func (s *session) recoveryLifecycleLocked(gameID string) (dto.VFSLifecycleState, string) {
+	key := s.fenceKeyLocked(gameID)
+	s.pendingRecoveriesMu.Lock()
+	deferred, waiting := s.deferredRecoveries[key]
+	s.pendingRecoveriesMu.Unlock()
+	if waiting {
+		switch {
+		case strings.HasPrefix(deferred.reason, "a game process"):
+			return dto.VFSLifecycleStateRecoveryDeferred, "game_running"
+		case strings.HasPrefix(deferred.reason, "the game was launched"):
+			return dto.VFSLifecycleStateRecoveryDeferred, "launch_grace"
+		case strings.HasPrefix(deferred.reason, "the game process check"):
+			return dto.VFSLifecycleStateRecoveryDeferred, "process_scan_failed"
+		case deferred.reason == "the game launch record is invalid":
+			return dto.VFSLifecycleStateRecoveryDeferred, "launch_record_invalid"
+		case strings.HasPrefix(deferred.reason, "the game launch record could not be read"):
+			return dto.VFSLifecycleStateRecoveryDeferred, "launch_record_unreadable"
+		default:
+			return dto.VFSLifecycleStateRecoveryDeferred, "unknown"
+		}
+	}
+	if s.recoveryPendingFor(gameID) != nil {
+		return dto.VFSLifecycleStateRecoveryPending, ""
+	}
+	return dto.VFSLifecycleStateReady, ""
+}
+
+// pendingRecoveryForStatusLocked copies the pending recovery with the requested game's ID.
+func (s *session) pendingRecoveryForStatusLocked(gameID string) *dto.RecoveryPendingResult {
+	pending := s.recoveryPendingFor(gameID)
+	if pending == nil {
+		return nil
+	}
+	copy := *pending
+	copy.GameID = gameID
+	return &copy
+}
+
+// unmountedVFSStatusLocked reports an install's lifecycle without an active mount; the caller holds s.mu.
+func (s *session) unmountedVFSStatusLocked(gameID string) *dto.VFSStatusResult {
+	state, reason := s.recoveryLifecycleLocked(gameID)
+	status := &dto.VFSStatusResult{
+		GameID: gameID, LifecycleState: state, LifecycleReason: reason,
+		PendingRecovery: s.pendingRecoveryForStatusLocked(gameID),
+	}
+	if gc, err := s.config.EffectiveGameConfig(gameID); err == nil {
+		subpath := gc.DataSubpath
+		if subpath == "" {
+			subpath = "Data"
+		}
+		status.SteamMaintenance, status.PreservedBatches = s.steamStatusLocked(gameID, filepath.Join(s.mountInstallPath(gc), subpath))
+	}
+	return status
+}
+
+// vfsStatus builds a VFSStatusResult from the mount's live generation counters and recovery lifecycle; the caller holds s.mu.
 func (vs *VFSService) vfsStatus(gameID string, gc config.GameConfig, profileName string, mm *vfs.MountManager, entries []mod.ModListEntry) *dto.VFSStatusResult {
 	enabled := 0
 	for _, e := range entries {
@@ -42,35 +98,52 @@ func (vs *VFSService) vfsStatus(gameID string, gc config.GameConfig, profileName
 		fileCount, _ = t.Stats()
 	}
 	applied, desired := mm.Generations()
+	state, reason := vs.s.recoveryLifecycleLocked(gameID)
+	maintenance, batches := vs.s.steamStatusLocked(gameID, mm.DataPath())
 	return &dto.VFSStatusResult{
-		Mounted:         mm.IsMounted(),
-		GameID:          gameID,
-		ProfileName:     profileName,
-		MountPoint:      filepath.Join(gc.InstallPath, subpath),
-		EnabledModCount: enabled,
-		TotalFileCount:  fileCount,
-		Dirty:           mm.IsDirty(),
-		AppliedGen:      applied,
-		DesiredGen:      desired,
+		Mounted:          mm.IsMounted(),
+		GameID:           gameID,
+		ProfileName:      profileName,
+		MountPoint:       filepath.Join(gc.InstallPath, subpath),
+		EnabledModCount:  enabled,
+		TotalFileCount:   fileCount,
+		Dirty:            mm.IsDirty(),
+		AppliedGen:       applied,
+		DesiredGen:       desired,
+		LifecycleState:   state,
+		LifecycleReason:  reason,
+		PendingRecovery:  vs.s.pendingRecoveryForStatusLocked(gameID),
+		SteamMaintenance: maintenance,
+		PreservedBatches: batches,
 	}
 }
 
 func (vs *VFSService) MountVFS(gameID, profileName string) (*dto.VFSStatusResult, error) {
-	return vs.mountVFSWithSwap(gameID, profileName, false)
+	return vs.MountVFSWithOptions(gameID, profileName, false, false)
 }
 
 // MountVFSWithSwap is the auto-swap variant for gameID's mutex group.
 func (vs *VFSService) MountVFSWithSwap(gameID, profileName string) (*dto.VFSStatusResult, error) {
-	return vs.mountVFSWithSwap(gameID, profileName, true)
+	return vs.MountVFSWithOptions(gameID, profileName, true, false)
 }
 
-func (vs *VFSService) mountVFSWithSwap(gameID, profileName string, autoSwap bool) (*dto.VFSStatusResult, error) {
+// MountVFSWithOptions mounts or retargets a profile and optionally swaps a conflicting game.
+func (vs *VFSService) MountVFSWithOptions(gameID, profileName string, autoSwap, retarget bool) (*dto.VFSStatusResult, error) {
+	return vs.mountVFSOwned(gameID, profileName, autoSwap, retarget, 0)
+}
+
+// mountVFSOwned mounts a profile while excluding the caller's admission from a retarget or auto-swap conflict.
+func (vs *VFSService) mountVFSOwned(gameID, profileName string, autoSwap, retarget bool, owner uint64) (*dto.VFSStatusResult, error) {
 	if err := vs.s.awaitRecovery(); err != nil {
 		return nil, err
 	}
+	defer vs.s.lockProfiles(gameID)()
 	vs.s.mu.Lock()
 	defer vs.s.mu.Unlock()
 
+	if err := vs.s.deferredForLocked(gameID, dto.BusyOperationMount); err != nil {
+		return nil, err
+	}
 	if pending := vs.s.recoveryPendingFor(gameID); pending != nil {
 		return nil, fmt.Errorf("recovery pending for %s: %s — confirm via the GUI prompt or `gorganizerctl recover-confirm` first",
 			gameID, pending.Reason)
@@ -84,6 +157,19 @@ func (vs *VFSService) mountVFSWithSwap(gameID, profileName string, autoSwap bool
 	}
 	defer release()
 
+	targetGC, err := vs.s.config.EffectiveGameConfig(gameID)
+	if err != nil {
+		return nil, err
+	}
+	targetSubpath := targetGC.DataSubpath
+	if targetSubpath == "" {
+		targetSubpath = "Data"
+	}
+	targetDataPath := filepath.Join(vs.s.mountInstallPath(targetGC), targetSubpath)
+	if err := vs.s.maintenanceRefusalLocked(gameID, targetDataPath); err != nil {
+		return nil, err
+	}
+
 	if conflict := vs.s.findMutexConflict(gameID); conflict != "" {
 		if !autoSwap {
 			return nil, &VFSMutexError{
@@ -93,6 +179,9 @@ func (vs *VFSService) mountVFSWithSwap(gameID, profileName string, autoSwap bool
 			}
 		}
 		if conflictMM, ok := vs.s.mountMgrs[conflict]; ok && conflictMM.IsMounted() {
+			if busy := vs.s.pendingAdmissionLocked(gameID, owner); busy != nil {
+				return nil, busy
+			}
 			if vs.s.teardownBusyLocked(conflict) {
 				return nil, fmt.Errorf("cannot auto-swap while %s is running", conflict)
 			}
@@ -101,12 +190,16 @@ func (vs *VFSService) mountVFSWithSwap(gameID, profileName string, autoSwap bool
 				return nil, err
 			}
 			conflictState := vs.s.mountStates[conflict]
+			_, capture, err := vs.s.steamCaptureLocked(conflict, conflictMM.DataPath())
+			if err != nil {
+				return nil, err
+			}
 			if rootManager, rootOK := vs.s.rootDeployMgrs[conflict]; rootOK {
 				if _, err := rootManager.Deactivate(); err != nil {
 					return nil, fmt.Errorf("auto-swap root deactivate of %s failed: %w", conflict, err)
 				}
 			}
-			if err := conflictMM.Deactivate(); err != nil {
+			if err := conflictMM.DeactivateWithOptions(capture); err != nil {
 				if restoreErr := vs.s.applyRootDeployment(conflict, conflictGC, conflictState.profileName); restoreErr != nil {
 					return nil, fmt.Errorf("auto-swap deactivate of %s failed: %v; restoring root deployment also failed: %w", conflict, err, restoreErr)
 				}
@@ -114,9 +207,15 @@ func (vs *VFSService) mountVFSWithSwap(gameID, profileName string, autoSwap bool
 			}
 			delete(vs.s.mountStates, conflict)
 			vs.s.setSteamLaunched(conflict, false)
-			vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: &dto.VFSStatusResult{GameID: conflict}})
+			vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: vs.s.unmountedVFSStatusLocked(conflict)})
+			if err := removeLaunchTicket(conflictMM.DataPath()); err != nil {
+				return nil, err
+			}
 			slog.Info("auto-swap: deactivated conflicting VFS", "deactivated", conflict, "now_activating", gameID)
 		}
+	}
+	if err := vs.s.steamAdmissionLocked(gameID, targetDataPath); err != nil {
+		return nil, err
 	}
 
 	gc, ok := vs.s.config.Games[gameID]
@@ -138,7 +237,16 @@ func (vs *VFSService) mountVFSWithSwap(gameID, profileName string, autoSwap bool
 
 	mm := vs.s.ensureMountManager(gameID, effectiveGC)
 	if mm.IsMounted() {
+		if ms, ok := vs.s.mountStates[gameID]; retarget && ok && ms.profileName != profileName {
+			return vs.retargetVFSLocked(gameID, profileName, effectiveGC, mm, owner)
+		}
 		return vs.alreadyMountedStatus(gameID, profileName, effectiveGC, mm)
+	}
+	if busy := vs.s.pendingAdmissionLocked(gameID, owner); busy != nil {
+		return nil, busy
+	}
+	if vs.s.trackedInstallBusyLocked(gameID) || vs.s.unmountRunningLocked(gameID) || vs.s.mountRecoveryBusyLocked(gameID) {
+		return nil, &dto.GameRunningError{GameID: gameID, Operation: dto.GameRunningOperationMount}
 	}
 	if err := vs.ensureOptionalDataDir(gameID, mm); err != nil {
 		return nil, err
@@ -158,6 +266,7 @@ func (vs *VFSService) mountVFSWithSwap(gameID, profileName string, autoSwap bool
 	if _, err := rootManager.Apply(layers, profileName); err != nil {
 		return nil, fmt.Errorf("applying game-root deployment: %w", err)
 	}
+	mm.SetStorefrontBaseline(vs.s.steamBaselineLocked(gameID, effectiveGC))
 	if err := mm.Activate(layers, profileName); err != nil {
 		if _, rootErr := rootManager.Deactivate(); rootErr != nil {
 			return nil, fmt.Errorf("activating Data VFS failed: %v; rolling back game-root deployment also failed: %w", err, rootErr)
@@ -170,6 +279,133 @@ func (vs *VFSService) mountVFSWithSwap(gameID, profileName string, autoSwap bool
 	st := vs.vfsStatus(gameID, effectiveGC, profileName, mm, entries)
 	vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: st})
 	return st, nil
+}
+
+// mountRecoveryBusyLocked checks the install's processes and launch records before an initial mount; the caller holds s.mu.
+func (s *session) mountRecoveryBusyLocked(gameID string) bool {
+	key := s.fenceKeyLocked(gameID)
+	games := s.gamesOnFenceKeyLocked(gameID, key)
+	unit := &installRecoveryUnit{key: key, appIDs: s.steamAppIDsLocked(games)}
+	for _, id := range games {
+		gc, err := s.config.EffectiveGameConfig(id)
+		if err != nil {
+			slog.Warn("checking game install before mount failed", "game", id, "err", err)
+			return true
+		}
+		subpath := gc.DataSubpath
+		if subpath == "" {
+			subpath = "Data"
+		}
+		unit.dataPaths = append(unit.dataPaths, filepath.Join(s.mountInstallPath(gc), subpath))
+	}
+	if reason := s.recoveryIdle(unit); reason != "" {
+		slog.Warn("mount refused while a game may be running", "game", gameID, "reason", reason)
+		return true
+	}
+	return false
+}
+
+// trackedInstallBusyLocked reports whether any game on an install has a tracked launch or tool; the caller holds s.mu.
+func (s *session) trackedInstallBusyLocked(gameID string) bool {
+	key := s.fenceKeyLocked(gameID)
+	for _, id := range s.gamesOnFenceKeyLocked(gameID, key) {
+		if s.trackedMountBusy(id) {
+			return true
+		}
+	}
+	return false
+}
+
+// retargetVFSLocked replaces the active root deployment and Data farm only while the install is idle; the caller holds the profile lock and s.mu.
+func (vs *VFSService) retargetVFSLocked(gameID, profileName string, gc config.GameConfig, mm *vfs.MountManager, owner uint64) (*dto.VFSStatusResult, error) {
+	if busy := vs.s.pendingAdmissionLocked(gameID, owner); busy != nil {
+		return nil, busy
+	}
+	if vs.s.trackedInstallBusyLocked(gameID) || vs.s.unmountRunningLocked(gameID) {
+		return nil, &dto.GameRunningError{GameID: gameID, Operation: dto.GameRunningOperationRetarget}
+	}
+	_, entries, err := vs.s.profileMgr.Load(gameID, profileName)
+	if err != nil {
+		return nil, fmt.Errorf("loading profile %q: %w", profileName, err)
+	}
+	layers := vs.buildLayers(gameID, gc, entries)
+	oldProfile := vs.s.mountStates[gameID].profileName
+	oldLayers := mm.AppliedLayers()
+	rootManager, err := vs.s.ensureRootDeploymentManager(gameID, gc)
+	if err != nil {
+		return nil, fmt.Errorf("initializing game-root deployment: %w", err)
+	}
+	if _, err := rootManager.Apply(layers, profileName); err != nil {
+		return nil, fmt.Errorf("applying game-root deployment: %w", err)
+	}
+	retargetData := mm.Retarget
+	if vs.s.retargetData != nil {
+		retargetData = func(layers []vfs.Layer, profile string) error {
+			return vs.s.retargetData(mm, layers, profile)
+		}
+	}
+	if err := retargetData(layers, profileName); err != nil {
+		var committed *vfs.RetargetCommittedError
+		if errors.As(err, &committed) {
+			vs.s.mountStates[gameID] = mountState{profileName: profileName}
+			vs.registerRetargetDataRecoveryLocked(gameID, mm, err)
+			vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: vs.vfsStatus(gameID, gc, profileName, mm, entries)})
+			return nil, fmt.Errorf("switching Data mods: %w", err)
+		}
+		var cleanup *vfs.RetargetCleanupError
+		if errors.As(err, &cleanup) {
+			vs.registerRetargetDataRecoveryLocked(gameID, mm, err)
+		}
+		if _, restoreErr := rootManager.Apply(oldLayers, oldProfile); restoreErr != nil {
+			vs.registerRetargetRootRecoveryLocked(gameID, rootManager, restoreErr)
+			return nil, errors.Join(fmt.Errorf("switching Data mods: %w", err), fmt.Errorf("restoring game-root deployment: %w", restoreErr))
+		}
+		return nil, fmt.Errorf("switching Data mods: %w", err)
+	}
+	vs.s.mountStates[gameID] = mountState{profileName: profileName}
+	st := vs.vfsStatus(gameID, gc, profileName, mm, entries)
+	vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: st})
+	return st, nil
+}
+
+// registerRetargetDataRecoveryLocked prompts for Data repair when a profile transition needs recovery; the caller holds s.mu.
+func (vs *VFSService) registerRetargetDataRecoveryLocked(gameID string, mm *vfs.MountManager, cause error) {
+	dataPath, err := filepath.Abs(mm.DataPath())
+	if err != nil {
+		dataPath = mm.DataPath()
+	}
+	pending := &dto.RecoveryPendingResult{
+		GameID: gameID, DataPath: dataPath, BackupPath: mm.BackupPath(),
+		Reason: "Data profile switch left unfinished cleanup: " + cause.Error(),
+		Kind:   dto.RecoveryKindData,
+	}
+	vs.s.pendingRecoveriesMu.Lock()
+	pending = identifiedRecovery(vs.s.pendingRecoveries[dataPath], pending)
+	vs.s.pendingRecoveries[dataPath] = pending
+	var affected []string
+	for affectedGameID, manager := range vs.s.mountMgrs {
+		if filepath.Clean(manager.DataPath()) == dataPath {
+			affected = append(affected, affectedGameID)
+		}
+	}
+	vs.s.gamesAtPath[dataPath] = affected
+	vs.s.pendingRecoveriesMu.Unlock()
+	vs.s.publishRecoveryEvent(dto.StatusEventResult{RecoveryPending: pending})
+}
+
+// registerRetargetRootRecoveryLocked prompts for game-root repair when restoring the previous deployment fails; the caller holds s.mu.
+func (vs *VFSService) registerRetargetRootRecoveryLocked(gameID string, manager *vfs.RootDeploymentManager, cause error) {
+	pending := &dto.RecoveryPendingResult{
+		GameID: gameID, DataPath: manager.GameRoot(),
+		BackupPath: filepath.Join(manager.GameRoot(), vfs.RootBackupDirName),
+		Reason:     "game-root deployment: restoring the previous profile failed: " + cause.Error(),
+		Kind:       dto.RecoveryKindGameRoot,
+	}
+	vs.s.pendingRecoveriesMu.Lock()
+	pending = identifiedRecovery(vs.s.rootPendingRecoveries[gameID], pending)
+	vs.s.rootPendingRecoveries[gameID] = pending
+	vs.s.pendingRecoveriesMu.Unlock()
+	vs.s.publishRecoveryEvent(dto.StatusEventResult{RecoveryPending: pending})
 }
 
 // ensureOptionalDataDir creates a missing registry deploy folder before mounting a game whose deploy folder is optional.
@@ -241,8 +477,19 @@ func (vs *VFSService) alreadyMountedStatus(gameID, profileName string, gc config
 }
 
 func (vs *VFSService) UnmountVFS(gameID string) error {
+	if err := vs.s.awaitRecovery(); err != nil {
+		return err
+	}
 	vs.s.mu.Lock()
 	defer vs.s.mu.Unlock()
+	return vs.unmountVFSLocked(gameID, false)
+}
+
+// unmountVFSLocked deactivates the game's farm with the normal teardown checks while the caller holds s.mu.
+func (vs *VFSService) unmountVFSLocked(gameID string, allowUnmounted bool) error {
+	if err := vs.s.deferredForLocked(gameID, dto.BusyOperationUnmount); err != nil {
+		return err
+	}
 
 	mm, ok := vs.s.mountMgrs[gameID]
 	if !ok {
@@ -253,20 +500,40 @@ func (vs *VFSService) UnmountVFS(gameID string) error {
 		return err
 	}
 	defer release()
+	if busy := vs.s.pendingAdmissionLocked(gameID, 0); busy != nil {
+		return busy
+	}
 	if vs.s.trackedMountBusy(gameID) {
 		return fmt.Errorf("cannot unmount while %s has a tracked game or tool process", gameID)
+	}
+	if vs.s.unmountRunningLocked(gameID) {
+		return &dto.GameRunningError{GameID: gameID, Operation: dto.GameRunningOperationUnmount}
 	}
 	gc, err := vs.s.config.EffectiveGameConfig(gameID)
 	if err != nil {
 		return err
 	}
+	if allowUnmounted && !mm.IsMounted() {
+		if pending := vs.s.recoveryPendingFor(gameID); pending != nil {
+			return fmt.Errorf("recovery pending for %s: %s", gameID, pending.Reason)
+		}
+		steamState, readErr := vs.s.readSteamAppState(vs.s.mountInstallPath(gc), gc.SteamAppID)
+		if readErr == nil && !steamState.Idle() {
+			return &dto.SteamMaintenanceError{GameID: gameID, Reason: "busy"}
+		}
+		return nil
+	}
 	state := vs.s.mountStates[gameID]
+	_, capture, err := vs.s.steamCaptureLocked(gameID, mm.DataPath())
+	if err != nil {
+		return err
+	}
 	if rootManager, rootOK := vs.s.rootDeployMgrs[gameID]; rootOK {
 		if _, err := rootManager.Deactivate(); err != nil {
 			return fmt.Errorf("deactivating game-root deployment: %w", err)
 		}
 	}
-	if err := mm.Deactivate(); err != nil {
+	if err := mm.DeactivateWithOptions(capture); err != nil {
 		if restoreErr := vs.s.applyRootDeployment(gameID, gc, state.profileName); restoreErr != nil {
 			return fmt.Errorf("deactivating Data VFS failed: %v; restoring game-root deployment also failed: %w", err, restoreErr)
 		}
@@ -274,18 +541,15 @@ func (vs *VFSService) UnmountVFS(gameID string) error {
 	}
 	delete(vs.s.mountStates, gameID)
 	vs.s.setSteamLaunched(gameID, false)
-	vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: &dto.VFSStatusResult{GameID: gameID}})
-	return nil
+	vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: vs.s.unmountedVFSStatusLocked(gameID)})
+	return removeLaunchTicket(mm.DataPath())
 }
 
-// GetVFSStatus reports gameID's mount with the same profile, mount point, mod and file counts, dirty flag, and generations the status stream carries.
-func (vs *VFSService) GetVFSStatus(gameID string) (*dto.VFSStatusResult, error) {
-	vs.s.mu.RLock()
-	defer vs.s.mu.RUnlock()
-
+// statusLocked returns the current VFS status while the caller holds s.mu.
+func (vs *VFSService) statusLocked(gameID string) *dto.VFSStatusResult {
 	mm, ok := vs.s.mountMgrs[gameID]
 	if !ok {
-		return &dto.VFSStatusResult{GameID: gameID}, nil
+		return vs.s.unmountedVFSStatusLocked(gameID)
 	}
 	gc, err := vs.s.config.EffectiveGameConfig(gameID)
 	if err != nil {
@@ -303,13 +567,78 @@ func (vs *VFSService) GetVFSStatus(gameID string) (*dto.VFSStatusResult, error) 
 			entries = loaded
 		}
 	}
-	return vs.vfsStatus(gameID, gc, profileName, mm, entries), nil
+	return vs.vfsStatus(gameID, gc, profileName, mm, entries)
 }
 
-// RestoreFromBackup resolves one pending recovery of gameID per confirmation, the mod-loader entry first, re-announcing any entry that remains, and refuses once shutdown began.
-func (vs *VFSService) RestoreFromBackup(gameID string) error {
+// GetVFSStatus reports gameID's mount with the same profile, mount point, mod and file counts, dirty flag, and generations the status stream carries.
+func (vs *VFSService) GetVFSStatus(gameID string) (*dto.VFSStatusResult, error) {
+	vs.s.mu.RLock()
+	defer vs.s.mu.RUnlock()
+
+	return vs.statusLocked(gameID), nil
+}
+
+// RetryDeferredRecovery attempts to recover a game whose startup recovery was deferred until its install became idle.
+func (vs *VFSService) RetryDeferredRecovery(gameID string) error {
+	if !vs.s.gameConfigured(gameID) {
+		return fmt.Errorf("game %s: %w", gameID, os.ErrNotExist)
+	}
+	return vs.s.RetryDeferredRecovery(gameID)
+}
+
+// publishRecoveryStatuses announces the current lifecycle of every game sharing an install.
+func (s *session) publishRecoveryStatuses(gameID string) {
+	s.mu.RLock()
+	key := s.fenceKeyLocked(gameID)
+	games := s.gamesOnFenceKeyLocked(gameID, key)
+	s.mu.RUnlock()
+	for _, id := range games {
+		if status, err := s.svc.vfs.GetVFSStatus(id); err == nil {
+			s.publishGuarded(dto.StatusEventResult{VFSStatus: status})
+		}
+	}
+}
+
+// RestoreFromBackup resolves one pending recovery whose kind and identity match the confirmation, or the current item for legacy callers.
+func (vs *VFSService) RestoreFromBackup(gameID string, expectedKind dto.RecoveryKind, recoveryID string) error {
 	if err := vs.s.refuseWhenShuttingDown("restore_from_backup"); err != nil {
 		return err
+	}
+	if err := vs.s.awaitRecovery(); err != nil {
+		return err
+	}
+	if err := vs.s.deferredFor(gameID, "restore_from_backup"); err != nil {
+		return err
+	}
+	release, err := vs.s.acquireRecoveryExclusive(gameID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	vs.s.mu.RLock()
+	key := vs.s.fenceKeyLocked(gameID)
+	vs.s.mu.RUnlock()
+	unit := vs.s.installRecoveryUnits()[key]
+	if unit == nil {
+		return fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
+	}
+	if reason := vs.s.recoveryIdle(unit); reason != "" {
+		return &dto.RecoveryDeferredError{GameID: gameID, Operation: "restore_from_backup"}
+	}
+	vs.s.mu.RLock()
+	current := vs.s.recoveryPendingFor(gameID)
+	vs.s.mu.RUnlock()
+	if current != nil && current.Kind != dto.RecoveryKindUnspecified && current.RecoveryID == "" {
+		vs.s.publishRecoveryEvent(dto.StatusEventResult{RecoveryPending: current})
+		return &dto.RecoveryStaleError{GameID: gameID}
+	}
+	if (expectedKind != dto.RecoveryKindUnspecified || recoveryID != "") &&
+		(current == nil || expectedKind != dto.RecoveryKindUnspecified && expectedKind != current.Kind ||
+			recoveryID != "" && recoveryID != current.RecoveryID) {
+		if current != nil {
+			vs.s.publishRecoveryEvent(dto.StatusEventResult{RecoveryPending: current})
+		}
+		return &dto.RecoveryStaleError{GameID: gameID}
 	}
 	loaderHandled, err := vs.s.retryLoaderRecovery(gameID)
 	if err != nil {
@@ -322,6 +651,9 @@ func (vs *VFSService) RestoreFromBackup(gameID string) error {
 		if remaining != nil {
 			vs.s.publishGuarded(dto.StatusEventResult{RecoveryPending: remaining})
 		}
+		vs.s.publishRecoveryStatuses(gameID)
+		release()
+		vs.s.replayDeferredLandings(gameID)
 		return nil
 	}
 	vs.s.pendingRecoveriesMu.Lock()
@@ -353,6 +685,9 @@ func (vs *VFSService) RestoreFromBackup(gameID string) error {
 		}
 		vs.s.pendingRecoveriesMu.Unlock()
 		vs.s.mu.RUnlock()
+		vs.s.publishRecoveryStatuses(gameID)
+		release()
+		vs.s.replayDeferredLandings(gameID)
 		return nil
 	}
 	vs.s.mu.RLock()
@@ -374,8 +709,44 @@ func (vs *VFSService) RestoreFromBackup(gameID string) error {
 		return fmt.Errorf("no recovery pending for %s (path %s)", gameID, resolved)
 	}
 
-	if err := vfs.RestoreFromBackup(pending.DataPath); err != nil {
+	vs.s.mu.Lock()
+	mounted := mm.IsMounted()
+	if vs.s.trackedInstallBusyLocked(gameID) || vs.s.unmountRunningLocked(gameID) {
+		vs.s.mu.Unlock()
+		return &dto.GameRunningError{GameID: gameID, Operation: dto.GameRunningOperationUnmount}
+	}
+	_, capture, steamErr := vs.s.steamCaptureLocked(gameID, pending.DataPath)
+	if steamErr != nil {
+		vs.s.mu.Unlock()
+		return steamErr
+	}
+	manager := vs.s.rootDeployMgrs[gameID]
+	if manager != nil {
+		if _, err := manager.Deactivate(); err != nil {
+			vs.s.mu.Unlock()
+			return fmt.Errorf("deactivating game-root deployment before recovery: %w", err)
+		}
+	}
+	if err := vfs.RestoreFromBackup(pending.DataPath, capture); err != nil {
+		if mounted && manager != nil {
+			state := vs.s.mountStates[gameID]
+			if _, restoreErr := manager.Apply(mm.AppliedLayers(), state.profileName); restoreErr != nil {
+				vs.registerRetargetRootRecoveryLocked(gameID, manager, restoreErr)
+				err = errors.Join(err, fmt.Errorf("restoring game-root deployment: %w", restoreErr))
+			}
+		}
+		vs.s.mu.Unlock()
 		return fmt.Errorf("restoring %s: %w", pending.DataPath, err)
+	}
+	if mounted {
+		mm.ResetAfterRestore()
+	}
+	delete(vs.s.mountStates, gameID)
+	vs.s.setSteamLaunched(gameID, false)
+	vs.s.publishGuarded(dto.StatusEventResult{VFSStatus: vs.s.unmountedVFSStatusLocked(gameID)})
+	vs.s.mu.Unlock()
+	if err := removeLaunchTicket(pending.DataPath); err != nil {
+		slog.Warn("removing launch record after backup recovery failed", "game", gameID, "err", err)
 	}
 
 	vs.s.pendingRecoveriesMu.Lock()
@@ -388,12 +759,26 @@ func (vs *VFSService) RestoreFromBackup(gameID string) error {
 	for _, sibling := range siblings {
 		vs.s.publishGuarded(dto.StatusEventResult{Info: fmt.Sprintf("recovery resolved for %s", sibling)})
 	}
+	vs.s.publishRecoveryStatuses(gameID)
+	release()
+	vs.s.replayDeferredLandings(gameID)
 	return nil
 }
 
 func (vs *VFSService) RebuildVFS(gameID string) error {
+	return vs.rebuildVFSOwned(gameID, 0)
+}
+
+// rebuildVFSOwned applies pending mod changes while excluding the caller's own launch or tool reservation.
+func (vs *VFSService) rebuildVFSOwned(gameID string, owner uint64) error {
+	if err := vs.s.awaitRecovery(); err != nil {
+		return err
+	}
 	vs.s.mu.Lock()
 	defer vs.s.mu.Unlock()
+	if err := vs.s.deferredForLocked(gameID, dto.BusyOperationApply); err != nil {
+		return err
+	}
 
 	mm, ok := vs.s.mountMgrs[gameID]
 	if !ok || !mm.IsMounted() {
@@ -404,6 +789,9 @@ func (vs *VFSService) RebuildVFS(gameID string) error {
 		return err
 	}
 	defer release()
+	if busy := vs.s.pendingAdmissionLocked(gameID, owner); busy != nil {
+		return busy
+	}
 
 	if vs.s.applyBusyLocked(gameID) {
 		return &dto.GameRunningError{GameID: gameID, Operation: dto.GameRunningOperationApply}
@@ -414,6 +802,9 @@ func (vs *VFSService) RebuildVFS(gameID string) error {
 		return err
 	}
 	ms := vs.s.mountStates[gameID]
+	if err := vs.s.steamAdmissionLocked(gameID, mm.DataPath()); err != nil {
+		return err
+	}
 
 	_, entries, err := vs.s.profileMgr.Load(gameID, ms.profileName)
 	if err != nil {
@@ -469,6 +860,17 @@ func (vs *VFSService) buildLayers(gameID string, gc config.GameConfig, entries [
 			continue
 		}
 		m := mod.NewMod(e.Name, gameID, filepath.Join(modsDir, e.Name))
+		info, err := os.Lstat(m.BasePath)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			slog.Warn("skipping unreadable mod folder", "game", gameID, "mod", e.Name, "err", err)
+			continue
+		}
+		if !info.IsDir() {
+			continue
+		}
 		if guard != nil {
 			if problem := guard(m.BasePath); problem != "" {
 				slog.Warn("skipping mod with an invalid layout", "game", gameID, "mod", e.Name, "problem", problem)
@@ -547,7 +949,7 @@ func (vs *VFSService) GetConflicts(gameID, profileName string) ([]dto.FileConfli
 	return results, nil
 }
 
-// sweepOrphanStageDirs removes the `.stage-<rand>/` and `.gorganizer-import-<uuid>/` staging folders of gameID that predate this daemon by stageSweepMargin, and the GUI's `.stage-ui-*` folders once older than guiStageRetention, never one an install may still be writing.
+// sweepOrphanStageDirs removes old install, import, and profile-copy staging directories for a game.
 func (s *session) sweepOrphanStageDirs(gameID string) {
 	cutoff := s.startedAt.Add(-stageSweepMargin)
 	guiCutoff := s.startedAt.Add(-guiStageRetention)
@@ -561,13 +963,16 @@ func (s *session) sweepOrphanStageDirs(gameID string) {
 			if !e.IsDir() {
 				continue
 			}
-			if !strings.HasPrefix(e.Name(), ".stage-") && !strings.HasPrefix(e.Name(), mod.ImportStagePrefix) {
+			if !strings.HasPrefix(e.Name(), ".stage-") && !strings.HasPrefix(e.Name(), mod.ImportStagePrefix) &&
+				!(dir == config.ProfilesDir(gameID) && strings.HasPrefix(e.Name(), profile.CopyStagePrefix)) {
 				continue
 			}
 			path := filepath.Join(dir, e.Name())
 			info, err := e.Info()
 			limit := cutoff
-			if strings.HasPrefix(e.Name(), guiStagePrefix) {
+			if dir == config.ProfilesDir(gameID) && strings.HasPrefix(e.Name(), profile.CopyStagePrefix) {
+				limit = s.startedAt
+			} else if strings.HasPrefix(e.Name(), guiStagePrefix) {
 				limit = guiCutoff
 			}
 			if err != nil || !info.ModTime().Before(limit) {

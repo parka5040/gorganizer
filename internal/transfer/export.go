@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,6 +19,7 @@ import (
 )
 
 type ExportOptions struct {
+	limits              *importLimits
 	GameID              string
 	OutputPath          string
 	ModFolders          []string
@@ -64,6 +66,13 @@ func Export(ctx context.Context, opts ExportOptions, emit func(dto.TransferProgr
 	}
 	manifestBytes, err := EncodeManifest(manifest)
 	if err != nil {
+		return summary, err
+	}
+	limits := defaultImportLimits()
+	if opts.limits != nil {
+		limits = *opts.limits
+	}
+	if err := checkExportLimits(ctx, opts, folders, profiles, manifestBytes, limits); err != nil {
 		return summary, err
 	}
 
@@ -174,6 +183,91 @@ func Export(ctx context.Context, opts ExportOptions, emit func(dto.TransferProgr
 	keep = true
 	progress("done", "")
 	return summary, nil
+}
+
+// checkExportLimits measures every entry and payload before an export opens its destination.
+func checkExportLimits(ctx context.Context, opts ExportOptions, folders, profiles []string, manifest []byte, limits importLimits) error {
+	if len(folders) > 100_000 || len(profiles) > 100_000 || int64(len(manifest)) > limits.manifestBytes {
+		return &TransferTooLargeError{Reason: "manifest size", Item: manifestEntryName}
+	}
+	entries := int64(1)
+	payload := int64(len(manifest))
+	if entries > limits.entries {
+		return &TransferTooLargeError{Reason: "entry count", Item: manifestEntryName}
+	}
+	if payload > limits.payloadBytes {
+		return &TransferTooLargeError{Reason: "total payload", Item: manifestEntryName}
+	}
+	add := func(item string, size int64) error {
+		entries++
+		if entries > limits.entries {
+			return &TransferTooLargeError{Reason: "entry count", Item: item}
+		}
+		if size > limits.fileBytes {
+			return &TransferTooLargeError{Reason: "file size", Item: item}
+		}
+		if size > limits.payloadBytes-payload {
+			return &TransferTooLargeError{Reason: "total payload", Item: item}
+		}
+		payload += size
+		return nil
+	}
+	scanTree := func(root, prefix string) error {
+		return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if !d.IsDir() && !d.Type().IsRegular() {
+				return nil
+			}
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			item := prefix
+			if rel != "." {
+				item += "/" + filepath.ToSlash(rel)
+			}
+			if d.IsDir() {
+				return add(item, 0)
+			}
+			return add(item, info.Size())
+		})
+	}
+	for _, folder := range folders {
+		if err := scanTree(filepath.Join(config.ModsDir(opts.GameID), folder), "mods/"+folder); err != nil {
+			return err
+		}
+	}
+	if opts.IncludeOverwrite {
+		root := filepath.Join(config.ModsDir(opts.GameID), profile.OverwriteModName)
+		if _, err := os.Stat(root); err == nil {
+			if err := scanTree(root, "overwrite"); err != nil {
+				return err
+			}
+		}
+	}
+	for _, name := range profiles {
+		if err := scanTree(filepath.Join(config.ProfilesDir(opts.GameID), name), "profiles/"+name); err != nil {
+			return err
+		}
+	}
+	if opts.IncludeGameSettings {
+		path := config.GameSettingsPath(opts.GameID)
+		if info, err := os.Stat(path); err == nil {
+			if err := add("gamesettings/"+filepath.Base(path), info.Size()); err != nil {
+				return err
+			}
+		}
+	}
+	return ctx.Err()
 }
 
 // resolveExportMods expands an empty selection to every installed mod and validates explicit names.

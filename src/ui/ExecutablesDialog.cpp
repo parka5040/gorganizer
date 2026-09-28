@@ -1,6 +1,7 @@
 #include "ExecutablesDialog.h"
 #include "Dialogs.h"
-#include "InstallErrorText.h"
+#include "ErrorPresenter.h"
+#include "WindowFit.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -16,6 +17,7 @@
 #include <QFileInfo>
 #include <QComboBox>
 #include <QSpinBox>
+#include <QScrollArea>
 
 namespace gorganizer {
 
@@ -25,9 +27,10 @@ ExecutablesDialog::ExecutablesDialog(GrpcClient* grpc, const QString& gameId,
     : QDialog(parent), m_grpc(grpc), m_gameId(gameId), m_profileName(profileName)
 {
     setWindowTitle("External Tools");
-    resize(920, 700);
 
-    auto* root = new QHBoxLayout(this);
+    auto* root = new QVBoxLayout(this);
+    auto* body = new QHBoxLayout;
+    root->addLayout(body, 1);
 
     auto* leftCol = new QVBoxLayout;
     m_list = new QListWidget;
@@ -49,7 +52,7 @@ ExecutablesDialog::ExecutablesDialog(GrpcClient* grpc, const QString& gameId,
     leftCol->addLayout(listBtns);
     leftCol->addWidget(installLootBtn);
     leftCol->addWidget(rollbackLootBtn);
-    root->addLayout(leftCol, 1);
+    body->addLayout(leftCol, 1);
 
     auto* formBox = new QGroupBox("Tool");
     auto* form = new QFormLayout(formBox);
@@ -113,7 +116,11 @@ ExecutablesDialog::ExecutablesDialog(GrpcClient* grpc, const QString& gameId,
     form->addRow(m_formHint);
 
     auto* rightCol = new QVBoxLayout;
-    rightCol->addWidget(formBox, 1);
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setWidget(formBox);
+    rightCol->addWidget(scroll, 1);
 
     auto* formBtns = new QHBoxLayout;
     m_saveBtn = new QPushButton("Save");
@@ -142,9 +149,11 @@ ExecutablesDialog::ExecutablesDialog(GrpcClient* grpc, const QString& gameId,
     auto* closeBtn = new QPushButton("Close");
     connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
     closeRow->addWidget(closeBtn);
-    rightCol->addLayout(closeRow);
+    root->addLayout(closeRow);
 
-    root->addLayout(rightCol, 2);
+    body->addLayout(rightCol, 2);
+    closeBtn->setDefault(true);
+    fitToScreen(this, QSize(920, 700));
 
     reload();
     clearForm();
@@ -157,10 +166,10 @@ int ExecutablesDialog::currentIndex() const
 
 void ExecutablesDialog::reload()
 {
-    QString err;
+    GrpcError err;
     m_executables.clear();
     if (!m_grpc->listExecutables(m_gameId, m_executables, err)) {
-        dialogs::warn(this, "Tools", QString("Could not load tools: %1").arg(err));
+        presentError(this, "Tools", "load tools", err, false);
     }
     m_list->clear();
     for (const auto& e : m_executables) {
@@ -272,10 +281,10 @@ void ExecutablesDialog::onSave()
         dialogs::warn(this, "Tools", "A title and an executable path are required.");
         return;
     }
-    QString err;
+    GrpcError err;
     GrpcExecutable saved;
     if (!m_grpc->upsertExecutable(m_gameId, e, saved, err)) {
-        dialogs::warn(this, "Tools", QString("Could not save: %1").arg(err));
+        presentError(this, "Tools", "save this tool", err, true);
         return;
     }
     reload();
@@ -289,9 +298,9 @@ void ExecutablesDialog::onRemove()
     if (m_editingId.isEmpty()) return;
     if (!dialogs::confirm(this, "Remove tool", "Remove this tool from the list?"))
         return;
-    QString err;
+    GrpcError err;
     if (!m_grpc->removeExecutable(m_gameId, m_editingId, err)) {
-        dialogs::warn(this, "Tools", QString("Could not remove: %1").arg(err));
+        presentError(this, "Tools", "remove this tool", err, true);
         return;
     }
     reload();
@@ -300,10 +309,10 @@ void ExecutablesDialog::onRemove()
 
 void ExecutablesDialog::onDetect()
 {
-    QString err;
+    GrpcError err;
     QList<GrpcDetectedExecutable> found;
     if (!m_grpc->detectExecutables(m_gameId, found, err)) {
-        dialogs::warn(this, "Detect tools", QString("Detection failed: %1").arg(err));
+        presentError(this, "Detect tools", "detect installed tools", err, false);
         return;
     }
     if (found.isEmpty()) {
@@ -330,8 +339,12 @@ void ExecutablesDialog::onDetect()
         e.sanitizeEnv = true;
         e.autoDetected = true;
         GrpcExecutable saved;
-        QString serr;
-        if (m_grpc->upsertExecutable(m_gameId, e, saved, serr)) added++;
+        GrpcError serr;
+        if (!m_grpc->upsertExecutable(m_gameId, e, saved, serr)) {
+            presentError(this, "Detect tools", "save this tool", serr, true);
+            break;
+        }
+        added++;
     }
     reload();
     dialogs::info(this, "Detect tools",
@@ -346,11 +359,12 @@ void ExecutablesDialog::onRun()
     }
     m_runBtn->setEnabled(false);
     int pid = 0;
-    QString runId, err;
+    QString runId;
+    GrpcError err;
     bool ok = m_grpc->launchExecutable(m_gameId, m_editingId, m_profileName, pid, runId, err, false);
     m_runBtn->setEnabled(true);
     if (!ok) {
-        dialogs::plainWarn(this, "Run tool", QString("Launch failed:\n\n%1").arg(daemonErrorMessage(err)));
+        presentError(this, "Run tool", "launch this tool", err, true);
         return;
     }
     dialogs::info(this, "Run tool",
@@ -363,20 +377,21 @@ void ExecutablesDialog::onSortLOOT()
     if (m_toolId != "loot" || m_gameId == "ttw") return;
     m_sortBtn->setEnabled(false);
     int pid = 0;
-    QString runId, err;
+    QString runId;
+    GrpcError err;
     const bool ok = m_grpc->launchExecutable(m_gameId, m_editingId, m_profileName,
                                               pid, runId, err, true);
     m_sortBtn->setEnabled(true);
     if (!ok)
-        dialogs::plainWarn(this, "Sort with LOOT", QString("Launch failed:\n\n%1").arg(daemonErrorMessage(err)));
+        presentError(this, "Sort with LOOT", "sort plugins with LOOT", err, true);
 }
 
 void ExecutablesDialog::onInstallLOOT()
 {
     GrpcManagedToolStatus status;
-    QString err;
+    GrpcError err;
     if (!m_grpc->getManagedToolStatus("loot", status, err)) {
-        dialogs::warn(this, "LOOT", QString("Could not read LOOT status: %1").arg(err));
+        presentError(this, "LOOT", "check LOOT's status", err, false);
         return;
     }
     const QString prompt = status.installed
@@ -384,7 +399,7 @@ void ExecutablesDialog::onInstallLOOT()
         : "Download and install the latest stable Windows portable LOOT release from GitHub?";
     if (!dialogs::confirm(this, "Managed LOOT", prompt)) return;
     if (!m_grpc->installManagedTool("loot", status, err)) {
-        dialogs::warn(this, "LOOT", QString("Installation failed: %1").arg(err));
+        presentError(this, "LOOT", "install LOOT", err, true);
         return;
     }
     reload();
@@ -395,9 +410,9 @@ void ExecutablesDialog::onRollbackLOOT()
 {
     if (!dialogs::confirm(this, "Rollback LOOT", "Reactivate the previously installed LOOT version?")) return;
     GrpcManagedToolStatus status;
-    QString err;
+    GrpcError err;
     if (!m_grpc->rollbackManagedTool("loot", status, err)) {
-        dialogs::warn(this, "LOOT", QString("Rollback failed: %1").arg(err));
+        presentError(this, "LOOT", "roll back LOOT", err, true);
         return;
     }
     reload();

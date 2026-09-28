@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -78,7 +79,7 @@ func TestReinstallCrashAtEveryStepIsRecoverable(t *testing.T) {
 				}
 				return nil
 			}
-			if _, _, _, err := d.ReinstallMod("skyrimse", folder); !errors.Is(err, errSimulatedCrash) {
+			if _, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", folder, ""); !errors.Is(err, errSimulatedCrash) {
 				t.Fatalf("ReinstallMod error = %v, want the simulated crash", err)
 			}
 			d.reinstallFault = nil
@@ -113,7 +114,7 @@ func TestReinstallDoubleRenameFailureIsRecoveredAtStartup(t *testing.T) {
 		return nil
 	}
 
-	if _, _, _, err := d.ReinstallMod("skyrimse", folder); !errors.Is(err, renameFailure) {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", folder, ""); !errors.Is(err, renameFailure) {
 		t.Fatalf("ReinstallMod error = %v, want the rename failure", err)
 	}
 	if _, err := os.Lstat(modDir); !errors.Is(err, os.ErrNotExist) {
@@ -129,6 +130,7 @@ func TestReinstallDoubleRenameFailureIsRecoveredAtStartup(t *testing.T) {
 }
 
 func TestReinstallRecoveryReapsOrphans(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	d := newStardewDaemon(t)
 	modsDir := config.ModsDir("skyrimse")
 	writeTestModMetadata := func(dir, folder string) {
@@ -163,7 +165,10 @@ func TestReinstallRecoveryReapsOrphans(t *testing.T) {
 		t.Errorf("restored Lost = %v, want %v", got, lostSnapshot)
 	}
 	if _, err := os.Lstat(presentOld); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("previous copy of a present mod: %v, want removed", err)
+		t.Errorf("previous copy of a present mod: %v, want moved to recovered folder", err)
+	}
+	if got := snapshotTree(t, filepath.Join(modsDir, ".gorganizer-recovered-present-token")); !reflect.DeepEqual(got, presentSnapshot) {
+		t.Errorf("preserved previous copy = %v, want %v", got, presentSnapshot)
 	}
 	if got := snapshotTree(t, filepath.Join(modsDir, "Present")); !reflect.DeepEqual(got, presentSnapshot) {
 		t.Errorf("present mod changed: %v, want %v", got, presentSnapshot)
@@ -175,7 +180,9 @@ func TestReinstallRecoveryReapsOrphans(t *testing.T) {
 	}
 }
 
-func TestReinstallModRefusesModsEnabledInTheMountedProfile(t *testing.T) {
+// TestReinstallModTracksMountedProfileChangesDuringReplay checks that a mod enabled while sources replay is deployed at the swap.
+func TestReinstallModTracksMountedProfileChangesDuringReplay(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	install := filepath.Join(t.TempDir(), "Stardew Valley")
 	for _, marker := range []string{"Stardew Valley", "StardewValley"} {
 		writeFixture(t, filepath.Join(install, marker))
@@ -205,15 +212,8 @@ func TestReinstallModRefusesModsEnabledInTheMountedProfile(t *testing.T) {
 		}
 	})
 	farmFile := filepath.Join(install, "Mods", "Enabled", "manifest.json")
-	enabledDir := filepath.Join(modsDir, enabled)
-	before := snapshotTree(t, enabledDir)
-
-	var mountedErr *download.ModMountedError
-	if _, _, _, err := d.ReinstallMod("stardewvalley", enabled); !errors.As(err, &mountedErr) || mountedErr.Mod != enabled {
-		t.Fatalf("ReinstallMod(enabled) error = %v, want ModMountedError", err)
-	}
-	if got := snapshotTree(t, enabledDir); !reflect.DeepEqual(got, before) {
-		t.Errorf("refused reinstall changed the mod:\n got %v\nwant %v", got, before)
+	if _, _, _, err := d.ReinstallMod(context.Background(), "stardewvalley", enabled, ""); err != nil {
+		t.Fatalf("ReinstallMod(enabled): %v", err)
 	}
 	var st syscall.Stat_t
 	if err := syscall.Stat(farmFile, &st); err != nil || st.Nlink != 2 {
@@ -228,13 +228,11 @@ func TestReinstallModRefusesModsEnabledInTheMountedProfile(t *testing.T) {
 		}
 		return nil
 	}
-	disabledDir := filepath.Join(modsDir, disabled)
-	disabledBefore := snapshotTree(t, disabledDir)
-	if _, _, _, err := d.ReinstallMod("stardewvalley", disabled); !errors.As(err, &mountedErr) || mountedErr.Mod != disabled {
-		t.Fatalf("ReinstallMod enabled during replay error = %v, want ModMountedError", err)
+	if _, _, _, err := d.ReinstallMod(context.Background(), "stardewvalley", disabled, ""); err != nil {
+		t.Fatalf("ReinstallMod enabled during replay: %v", err)
 	}
-	if got := snapshotTree(t, disabledDir); !reflect.DeepEqual(got, disabledBefore) {
-		t.Errorf("mod enabled during replay changed:\n got %v\nwant %v", got, disabledBefore)
+	if _, err := os.Stat(filepath.Join(install, "Mods", "Disabled", "manifest.json")); err != nil {
+		t.Errorf("mod enabled during replay was not deployed: %v", err)
 	}
 	assertNoReinstallState(t, modsDir)
 	d.reinstallFault = nil
@@ -243,7 +241,7 @@ func TestReinstallModRefusesModsEnabledInTheMountedProfile(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := d.ReinstallMod("stardewvalley", disabled); err != nil {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "stardewvalley", disabled, ""); err != nil {
 		t.Fatalf("ReinstallMod(disabled) while mounted: %v", err)
 	}
 
@@ -254,7 +252,7 @@ func TestReinstallModRefusesModsEnabledInTheMountedProfile(t *testing.T) {
 	if entries, err := os.ReadDir(filepath.Join(modsDir, "Overwrite")); err == nil && len(entries) != 0 {
 		t.Errorf("unmount captured files into Overwrite: %v", entries)
 	}
-	if _, _, _, err := d.ReinstallMod("stardewvalley", enabled); err != nil {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "stardewvalley", enabled, ""); err != nil {
 		t.Fatalf("ReinstallMod(enabled) after unmount: %v", err)
 	}
 }
@@ -275,7 +273,7 @@ func TestReinstallModKeepsMetadataEditedDuringReplay(t *testing.T) {
 		}
 		return nil
 	}
-	if _, _, _, err := d.ReinstallMod("skyrimse", folder); err != nil {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", folder, ""); err != nil {
 		t.Fatalf("ReinstallMod: %v", err)
 	}
 	meta, err := download.LoadModMetadata(modDir)
@@ -308,7 +306,7 @@ func TestReinstallModConcurrentWithSetModListKeepsMetadataConsistent(t *testing.
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			_, _, _, reinstallErr = d.ReinstallMod("skyrimse", folder)
+			_, _, _, reinstallErr = d.ReinstallMod(context.Background(), "skyrimse", folder, "")
 		}()
 		go func() {
 			defer wg.Done()
@@ -338,7 +336,7 @@ func TestReinstallModRefusesFomodInstalledMods(t *testing.T) {
 	before := snapshotTree(t, modDir)
 
 	var fomodErr *download.FomodReinstallUnsupportedError
-	if _, _, _, err := d.ReinstallMod("skyrimse", folder); !errors.As(err, &fomodErr) || fomodErr.Mod != folder {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", folder, ""); !errors.As(err, &fomodErr) || fomodErr.Mod != folder {
 		t.Fatalf("ReinstallMod error = %v, want FomodReinstallUnsupportedError", err)
 	}
 	if got := snapshotTree(t, modDir); !reflect.DeepEqual(got, before) {
@@ -358,7 +356,7 @@ func TestReinstallModRefusesAFifoSourceWithoutBlocking(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, _, _, err := d.ReinstallMod("skyrimse", folder)
+		_, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", folder, "")
 		done <- err
 	}()
 	select {
@@ -386,7 +384,7 @@ func TestReinstallModRefusesASymlinkedModFolder(t *testing.T) {
 	before := snapshotTree(t, target)
 
 	var invalid *download.InvalidTargetModError
-	if _, _, _, err := d.ReinstallMod("skyrimse", folder); !errors.As(err, &invalid) {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", folder, ""); !errors.As(err, &invalid) {
 		t.Fatalf("ReinstallMod error = %v, want InvalidTargetModError", err)
 	}
 	if info, err := os.Lstat(filepath.Join(modsDir, folder)); err != nil || info.Mode()&os.ModeSymlink == 0 {
@@ -396,7 +394,7 @@ func TestReinstallModRefusesASymlinkedModFolder(t *testing.T) {
 		t.Errorf("symlink target changed:\n got %v\nwant %v", got, before)
 	}
 	var notFound *ModNotFoundError
-	if _, _, _, err := d.ReinstallMod("skyrimse", "Missing"); !errors.As(err, &notFound) {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", "Missing", ""); !errors.As(err, &notFound) {
 		t.Errorf("ReinstallMod(missing) error = %v, want ModNotFoundError", err)
 	}
 }
@@ -412,7 +410,7 @@ func TestReinstallModMergesCaseVariantManifestFolders(t *testing.T) {
 		"samplemod/manifest.json":    sampleManifest,
 		"samplemod/assets/extra.png": "png",
 	})
-	if _, _, err := d.StartInstall(dto.StartInstallRequest{
+	if _, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: "stardewvalley", ExternalArchivePath: update, Mode: dto.InstallMergeIntoMod, TargetMod: folder,
 	}); err != nil {
 		t.Fatalf("merge install: %v", err)
@@ -422,7 +420,7 @@ func TestReinstallModMergesCaseVariantManifestFolders(t *testing.T) {
 	if got := modFiles(t, modDir); !reflect.DeepEqual(got, want) {
 		t.Fatalf("merged files = %v, want %v", got, want)
 	}
-	if _, _, _, err := d.ReinstallMod("stardewvalley", folder); err != nil {
+	if _, _, _, err := d.ReinstallMod(context.Background(), "stardewvalley", folder, ""); err != nil {
 		t.Fatalf("ReinstallMod: %v", err)
 	}
 	if got := modFiles(t, modDir); !reflect.DeepEqual(got, want) {

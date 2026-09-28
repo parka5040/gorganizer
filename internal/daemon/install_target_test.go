@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -39,6 +40,10 @@ func TestStartInstallValidatesTargetMod(t *testing.T) {
 		{name: "merge symlinked mod", mode: dto.InstallMergeIntoMod, target: "Linked"},
 		{name: "merge file", mode: dto.InstallMergeIntoMod, target: "NotADir"},
 		{name: "merge valid", mode: dto.InstallMergeIntoMod, target: "Existing", wantFolder: "Existing"},
+		{name: "replace hidden", mode: dto.InstallReplaceMod, target: ".hidden"},
+		{name: "replace symlinked mod", mode: dto.InstallReplaceMod, target: "Linked"},
+		{name: "replace file", mode: dto.InstallReplaceMod, target: "NotADir"},
+		{name: "replace valid", mode: dto.InstallReplaceMod, target: "Existing", wantFolder: "Existing"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -56,7 +61,7 @@ func TestStartInstallValidatesTargetMod(t *testing.T) {
 			root := filepath.Dir(modsDir)
 			before := snapshotTree(t, root)
 
-			folder, _, err := d.StartInstall(dto.StartInstallRequest{
+			folder, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 				GameID: "skyrimse", ArchiveRelPath: "Patch.zip", Mode: tc.mode, TargetMod: tc.target,
 			})
 			if tc.wantFolder != "" {
@@ -92,7 +97,7 @@ func TestModNameEntryPointsRejectInvalidNames(t *testing.T) {
 			writeFixture(t, filepath.Join(modsDir, ".hidden", "metadata.yaml"))
 
 			var invalid *download.InvalidTargetModError
-			if _, _, _, err := d.ReinstallMod("skyrimse", name); !errors.As(err, &invalid) {
+			if _, _, _, err := d.ReinstallMod(context.Background(), "skyrimse", name, ""); !errors.As(err, &invalid) {
 				t.Errorf("ReinstallMod(%q) error = %v, want InvalidTargetModError", name, err)
 			}
 			if _, err := d.RegisterManualInstall("skyrimse", name, ""); !errors.As(err, &invalid) {
@@ -132,7 +137,7 @@ func TestStartInstallNormalizesDerivedModNames(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			folder, _, err := d.StartInstall(dto.StartInstallRequest{
+			folder, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 				GameID: "skyrimse", ArchiveRelPath: tc.archive, Mode: dto.InstallAsNewMod, TargetMod: tc.target,
 			})
 			if tc.wantRefuse {
@@ -160,7 +165,7 @@ func TestStartInstallRefusesAPreviewOfAnotherGameOrArchive(t *testing.T) {
 	writeZipFiles(t, filepath.Join(config.DownloadsDir("skyrimse"), "Skyrim.zip"), map[string]string{"plugin.esp": "plugin"})
 	writeZipFiles(t, filepath.Join(config.DownloadsDir("skyrimse"), "Other.zip"), map[string]string{"other.esp": "other"})
 	writeManifestArchive(t, filepath.Join(config.DownloadsDir("stardewvalley"), "Skyrim.zip"))
-	preview, err := d.PreviewInstall("skyrimse", "Skyrim.zip")
+	preview, err := d.PreviewInstall(dto.PreviewInstallRequest{GameID: "skyrimse", ArchiveRelPath: "Skyrim.zip"})
 	if err != nil {
 		t.Fatalf("PreviewInstall: %v", err)
 	}
@@ -176,7 +181,7 @@ func TestStartInstallRefusesAPreviewOfAnotherGameOrArchive(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.req.PreviewID = preview.PreviewID
 			var notFound *PreviewNotFoundError
-			if _, _, err := d.StartInstall(tc.req); !errors.As(err, &notFound) || notFound.PreviewID != preview.PreviewID {
+			if _, _, err := d.StartInstall(context.Background(), tc.req); !errors.As(err, &notFound) || notFound.PreviewID != preview.PreviewID {
 				t.Fatalf("StartInstall error = %v, want PreviewNotFoundError", err)
 			}
 			for _, gameID := range []string{"skyrimse", "stardewvalley"} {
@@ -188,7 +193,7 @@ func TestStartInstallRefusesAPreviewOfAnotherGameOrArchive(t *testing.T) {
 			}
 		})
 	}
-	folder, _, err := d.StartInstall(dto.StartInstallRequest{
+	folder, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{
 		GameID: "skyrimse", ArchiveRelPath: "Skyrim.zip", Mode: dto.InstallAsNewMod, PreviewID: preview.PreviewID,
 	})
 	if err != nil || folder != "Skyrim" {
@@ -204,7 +209,7 @@ func TestStartInstallCreatesAMissingModsDir(t *testing.T) {
 	}
 	archive := filepath.Join(t.TempDir(), "sample.zip")
 	writeManifestArchive(t, archive)
-	folder, _, err := d.StartInstall(dto.StartInstallRequest{GameID: depsGame, ExternalArchivePath: archive, Mode: dto.InstallAsNewMod, TargetMod: "Sample"})
+	folder, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{GameID: depsGame, ExternalArchivePath: archive, Mode: dto.InstallAsNewMod, TargetMod: "Sample"})
 	if err != nil {
 		t.Fatalf("StartInstall without a mods directory: %v", err)
 	}
@@ -216,7 +221,7 @@ func TestStartInstallCreatesAMissingModsDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFileContent(t, modsDir, "not a directory")
-	if _, _, err := d.StartInstall(dto.StartInstallRequest{GameID: depsGame, ExternalArchivePath: archive, Mode: dto.InstallAsNewMod, TargetMod: "Again"}); err == nil || !strings.Contains(err.Error(), "not a directory") {
+	if _, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{GameID: depsGame, ExternalArchivePath: archive, Mode: dto.InstallAsNewMod, TargetMod: "Again"}); err == nil || !strings.Contains(err.Error(), "not a directory") {
 		t.Fatalf("StartInstall over a file mods path = %v, want a refusal", err)
 	}
 	if data, err := os.ReadFile(modsDir); err != nil || string(data) != "not a directory" {

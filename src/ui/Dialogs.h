@@ -7,17 +7,14 @@ class QWidget;
 
 namespace gorganizer::dialogs {
 
-// One-shot informational message box.
+// Shows an informational message as plain text.
 void info(QWidget* parent, const QString& title, const QString& text);
 
-// One-shot warning message box.
+// Shows a warning as plain text.
 void warn(QWidget* parent, const QString& title, const QString& text);
 
-// One-shot error message box.
+// Shows an error as plain text.
 void error(QWidget* parent, const QString& title, const QString& text);
-
-// One-shot warning message box whose text always renders as rich text.
-void richWarn(QWidget* parent, const QString& title, const QString& text);
 
 // One-shot warning message box whose text always renders as plain text.
 void plainWarn(QWidget* parent, const QString& title, const QString& text);

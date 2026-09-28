@@ -1,8 +1,10 @@
 #include "GrpcWorker.h"
+#include "GrpcInstallPreview.h"
 
 #include <grpcpp/grpcpp.h>
 #include <chrono>
 #include <mutex>
+#include <utility>
 
 namespace gorganizer {
 
@@ -82,6 +84,64 @@ GrpcModLoaderState modLoaderStateFromProto(gorganizer::v1::ModLoaderState s)
         return GrpcModLoaderStateInterrupted;
     default:
         return GrpcModLoaderStateUnspecified;
+    }
+}
+
+GrpcVFSLifecycleState vfsLifecycleFromProto(gorganizer::v1::VFSLifecycleState state)
+{
+    switch (state) {
+    case gorganizer::v1::VFS_LIFECYCLE_STATE_READY:
+        return GrpcVFSLifecycleState::Ready;
+    case gorganizer::v1::VFS_LIFECYCLE_STATE_RECOVERY_DEFERRED:
+        return GrpcVFSLifecycleState::RecoveryDeferred;
+    case gorganizer::v1::VFS_LIFECYCLE_STATE_RECOVERY_PENDING:
+        return GrpcVFSLifecycleState::RecoveryPending;
+    default:
+        return GrpcVFSLifecycleState::Unspecified;
+    }
+}
+
+GrpcSteamMaintenanceState steamMaintenanceFromProto(gorganizer::v1::SteamMaintenanceState state)
+{
+    switch (state) {
+    case gorganizer::v1::STEAM_MAINTENANCE_STATE_NONE:
+        return GrpcSteamMaintenanceState::None;
+    case gorganizer::v1::STEAM_MAINTENANCE_STATE_STEAM_BUSY:
+        return GrpcSteamMaintenanceState::SteamBusy;
+    case gorganizer::v1::STEAM_MAINTENANCE_STATE_VERIFY_REQUIRED:
+        return GrpcSteamMaintenanceState::VerifyRequired;
+    case gorganizer::v1::STEAM_MAINTENANCE_STATE_USER_REQUESTED:
+        return GrpcSteamMaintenanceState::UserRequested;
+    default:
+        return GrpcSteamMaintenanceState::Unspecified;
+    }
+}
+
+GrpcRecoveryKind recoveryKindFromProto(gorganizer::v1::RecoveryKind kind)
+{
+    switch (kind) {
+    case gorganizer::v1::RECOVERY_KIND_DATA:
+        return GrpcRecoveryKind::Data;
+    case gorganizer::v1::RECOVERY_KIND_MOD_LOADER:
+        return GrpcRecoveryKind::ModLoader;
+    case gorganizer::v1::RECOVERY_KIND_GAME_ROOT:
+        return GrpcRecoveryKind::GameRoot;
+    default:
+        return GrpcRecoveryKind::Unspecified;
+    }
+}
+
+gorganizer::v1::RecoveryKind recoveryKindToProto(GrpcRecoveryKind kind)
+{
+    switch (kind) {
+    case GrpcRecoveryKind::Data:
+        return gorganizer::v1::RECOVERY_KIND_DATA;
+    case GrpcRecoveryKind::ModLoader:
+        return gorganizer::v1::RECOVERY_KIND_MOD_LOADER;
+    case GrpcRecoveryKind::GameRoot:
+        return gorganizer::v1::RECOVERY_KIND_GAME_ROOT;
+    default:
+        return gorganizer::v1::RECOVERY_KIND_UNSPECIFIED;
     }
 }
 
@@ -287,12 +347,14 @@ GrpcInstallCompleted installCompletedFromProto(const gorganizer::v1::InstallComp
     out.archiveRelPath = QString::fromStdString(c.archive_rel_path());
     out.batchId = QString::fromStdString(c.batch_id());
     out.batchIds = stringListFromProto(c.batch_ids());
+    out.clientRequestId = QString::fromStdString(c.client_request_id());
     return out;
 }
 }
 
 GrpcWorker::GrpcWorker(std::shared_ptr<grpc::Channel> channel)
-    : m_stub(gorganizer::v1::Gorganizer::NewStub(channel))
+    : m_channel(std::move(channel))
+    , m_stub(gorganizer::v1::Gorganizer::NewStub(m_channel))
 {
 }
 
@@ -303,11 +365,28 @@ void GrpcWorker::stop()
     std::lock_guard<std::mutex> lk(m_streamMu);
     if (m_streamCtx) m_streamCtx->TryCancel();
     if (m_unaryCtx) m_unaryCtx->TryCancel();
+    std::lock_guard<std::mutex> installLock(m_installMu);
+    if (m_installCtx) m_installCtx->TryCancel();
+}
+
+void GrpcWorker::cancelInstall(quint64 requestId)
+{
+    std::lock_guard<std::mutex> lock(m_installMu);
+    m_cancelledInstalls.insert(requestId);
+    if (m_installCtx && m_activeInstallId == requestId)
+        m_installCtx->TryCancel();
 }
 
 void GrpcWorker::cancelActiveStream()
 {
     std::lock_guard<std::mutex> lk(m_streamMu);
+    if (m_streamCtx) m_streamCtx->TryCancel();
+}
+
+void GrpcWorker::setStreamGeneration(quint64 generation)
+{
+    std::lock_guard<std::mutex> lk(m_streamMu);
+    m_streamGeneration.store(generation);
     if (m_streamCtx) m_streamCtx->TryCancel();
 }
 
@@ -322,12 +401,36 @@ grpc::Status GrpcWorker::invoke(Method method, const Req& req, Resp& resp,
 }
 
 template <typename Req, typename Resp, typename Method>
+grpc::Status GrpcWorker::invokeInstall(quint64 requestId, Method method, const Req& req,
+                                       Resp& resp, bool& sent)
+{
+    grpc::ClientContext ctx;
+    setUnaryDeadline(ctx, std::chrono::hours(3));
+    {
+        std::lock_guard<std::mutex> lock(m_installMu);
+        if (m_stopped.load() || m_cancelledInstalls.remove(requestId))
+            return grpc::Status(grpc::StatusCode::CANCELLED, "cancelled before sending");
+        m_activeInstallId = requestId;
+        m_installCtx = &ctx;
+        sent = true;
+    }
+    const auto status = ((*m_stub).*method)(&ctx, req, &resp);
+    {
+        std::lock_guard<std::mutex> lock(m_installMu);
+        m_installCtx = nullptr;
+        m_activeInstallId = 0;
+        m_cancelledInstalls.remove(requestId);
+    }
+    return status;
+}
+
+template <typename Req, typename Resp, typename Method>
 bool GrpcWorker::call(const char* rpcName, Method method, const Req& req, Resp& resp,
                       std::chrono::milliseconds deadline)
 {
     auto status = invoke(method, req, resp, deadline);
     if (!status.ok()) {
-        emit rpcError(rpcName, QString::fromStdString(status.error_message()));
+        emit rpcError(rpcName, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
         return false;
     }
     return true;
@@ -335,14 +438,21 @@ bool GrpcWorker::call(const char* rpcName, Method method, const Req& req, Resp& 
 
 template <typename Req, typename Ev, typename Dispatch>
 grpc::Status GrpcWorker::runStream(std::unique_ptr<grpc::ClientReader<Ev>> (Stub::*method)(grpc::ClientContext*, const Req&),
-                                   const Req& req, Dispatch dispatch)
+                                   const Req& req, Dispatch dispatch, quint64 generation)
 {
     grpc::ClientContext ctx;
     ScopedCtxRegistration reg(m_streamMu, m_streamCtx, ctx);
+    if (m_stopped.load() || (generation && m_streamGeneration.load() != generation))
+        return grpc::Status(grpc::StatusCode::CANCELLED, "stream cancelled");
     auto reader = ((*m_stub).*method)(&ctx, req);
     Ev event;
-    while (!m_stopped.load() && reader->Read(&event))
+    while (!m_stopped.load() && reader->Read(&event)) {
+        if (generation && m_streamGeneration.load() != generation) {
+            ctx.TryCancel();
+            break;
+        }
         dispatch(event);
+    }
     if (m_stopped.load()) ctx.TryCancel();
     return reader->Finish();
 }
@@ -383,11 +493,11 @@ void GrpcWorker::runTransferStream(std::unique_ptr<grpc::ClientReader<gorganizer
         }
     });
     if (!status.ok()) {
-        emit transferFailed(QString::fromStdString(status.error_message()));
+        emit transferFailed(QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
         return;
     }
     if (!haveSummary) {
-        emit transferFailed(QStringLiteral("transfer stream ended without a summary"));
+        emit transferFailed(QStringLiteral("transfer stream ended without a summary"), GrpcStatusUnknown);
         return;
     }
     emit transferCompleted(summary);
@@ -444,7 +554,7 @@ GrpcProfile GrpcWorker::profileFromProto(const gorganizer::v1::Profile& p)
 
 GrpcVFSStatus GrpcWorker::vfsStatusFromProto(const gorganizer::v1::VFSStatus& s)
 {
-    return {
+    GrpcVFSStatus out{
         .mounted = s.mounted(),
         .gameId = QString::fromStdString(s.game_id()),
         .profileName = QString::fromStdString(s.profile_name()),
@@ -452,7 +562,34 @@ GrpcVFSStatus GrpcWorker::vfsStatusFromProto(const gorganizer::v1::VFSStatus& s)
         .enabledModCount = s.enabled_mod_count(),
         .totalFileCount = s.total_file_count(),
         .dirty = s.dirty(),
+        .desiredGen = s.desired_gen(),
+        .appliedGen = s.applied_gen(),
+        .lifecycleState = vfsLifecycleFromProto(s.lifecycle_state()),
+        .lifecycleReason = QString::fromStdString(s.lifecycle_reason()),
+        .steamMaintenance = steamMaintenanceFromProto(s.steam_maintenance()),
     };
+    for (const auto& batch : s.preserved_batches()) {
+        out.preservedBatches.push_back({
+            QString::fromStdString(batch.batch_id()),
+            QString::fromStdString(batch.created_at()),
+            batch.file_count(),
+            QString::fromStdString(batch.reason()),
+            QString::fromStdString(batch.path()),
+        });
+    }
+    if (s.has_pending_recovery()) {
+        const auto& pending = s.pending_recovery();
+        out.hasPendingRecovery = true;
+        out.pendingRecovery = {
+            QString::fromStdString(pending.game_id()),
+            QString::fromStdString(pending.data_path()),
+            QString::fromStdString(pending.backup_path()),
+            QString::fromStdString(pending.reason()),
+            recoveryKindFromProto(pending.kind()),
+            QString::fromStdString(pending.recovery_id()),
+        };
+    }
+    return out;
 }
 
 GrpcFileConflict GrpcWorker::conflictFromProto(const gorganizer::v1::FileConflict& c)
@@ -583,6 +720,22 @@ void GrpcWorker::doConfigureGame(const QString& gameId, const QString& name,
     emit gameConfigured();
 }
 
+void GrpcWorker::doConfigureGameTracked(quint64 requestId, const QString& gameId, const QString& name,
+                                        uint32_t steamAppId, const QString& installPath,
+                                        const QString& dataSubpath)
+{
+    gorganizer::v1::ConfigureGameRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_name(name.toStdString());
+    req.set_steam_app_id(steamAppId);
+    req.set_install_path(installPath.toStdString());
+    req.set_data_subpath(dataSubpath.toStdString());
+    gorganizer::v1::ConfigureGameResponse resp;
+    auto status = invoke(&Stub::ConfigureGame, req, resp, std::chrono::seconds(90));
+    emit gameConfigurationFinished(requestId, gameId, status.ok(),
+                                   QString::fromStdString(status.error_message()));
+}
+
 void GrpcWorker::doListMods(const QString& gameId)
 {
     gorganizer::v1::ListModsRequest req;
@@ -633,6 +786,17 @@ void GrpcWorker::doCreateProfile(const QString& gameId, const QString& name)
     gorganizer::v1::Profile resp;
     if (!call("CreateProfile", &Stub::CreateProfile, req, resp)) return;
     emit profileCreated(profileFromProto(resp));
+}
+
+void GrpcWorker::doCopyProfile(const QString& gameId, const QString& source, const QString& name)
+{
+    gorganizer::v1::CopyProfileRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_source_name(source.toStdString());
+    req.set_name(name.toStdString());
+    gorganizer::v1::Profile resp;
+    if (!call("CopyProfile", &Stub::CopyProfile, req, resp, std::chrono::minutes(5))) return;
+    emit profileCopied(gameId, profileFromProto(resp));
 }
 
 void GrpcWorker::doDeleteProfile(const QString& gameId, const QString& name)
@@ -695,6 +859,22 @@ void GrpcWorker::doMountVfsWithSwap(const QString& gameId, const QString& profil
     emit vfsMounted(vfsStatusFromProto(resp.status()));
 }
 
+void GrpcWorker::doRetargetVfs(quint64 requestId, const QString& gameId, const QString& profileName)
+{
+    gorganizer::v1::MountVFSRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_profile_name(profileName.toStdString());
+    req.set_auto_swap(true);
+    req.set_retarget_if_mounted(true);
+    gorganizer::v1::MountVFSResponse resp;
+    auto status = invoke(&Stub::MountVFS, req, resp, std::chrono::minutes(10));
+    if (!status.ok()) {
+        emit vfsRetargetFailed(requestId, gameId, profileName, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
+        return;
+    }
+    emit vfsRetargeted(requestId, vfsStatusFromProto(resp.status()));
+}
+
 void GrpcWorker::doUnmountVfs(const QString& gameId)
 {
     gorganizer::v1::UnmountVFSRequest req;
@@ -719,13 +899,26 @@ void GrpcWorker::doUnmountVfsForMaintenance(quint64 requestId, const QString& ga
     emit maintenanceUnmountFinished(requestId, gameId, true, GrpcStatusOk, QString());
 }
 
-void GrpcWorker::doRestoreFromBackup(const QString& gameId)
+void GrpcWorker::doRestoreFromBackup(const QString& gameId, GrpcRecoveryKind kind, const QString& recoveryId)
 {
     gorganizer::v1::RestoreFromBackupRequest req;
     req.set_game_id(gameId.toStdString());
+    req.set_expected_kind(recoveryKindToProto(kind));
+    req.set_recovery_id(recoveryId.toStdString());
     gorganizer::v1::RestoreFromBackupResponse resp;
     if (!call("RestoreFromBackup", &Stub::RestoreFromBackup, req, resp)) return;
     emit daemonInfo(QString("Recovery resolved for %1.").arg(gameId));
+    doGetVfsStatus(gameId);
+}
+
+void GrpcWorker::doRetryVfsRecovery(const QString& gameId)
+{
+    gorganizer::v1::RetryVFSRecoveryRequest req;
+    req.set_game_id(gameId.toStdString());
+    gorganizer::v1::VFSStatus resp;
+    if (!call("RetryVFSRecovery", &Stub::RetryVFSRecovery, req, resp, std::chrono::seconds(30))) return;
+    emit vfsStatusReceived(vfsStatusFromProto(resp));
+    emit vfsRecoveryRetried(gameId);
 }
 
 void GrpcWorker::doGetVfsStatus(const QString& gameId)
@@ -744,7 +937,7 @@ void GrpcWorker::doQueryVfsStatus(quint64 requestId, const QString& gameId)
     gorganizer::v1::VFSStatus resp;
     auto status = invoke(&Stub::GetVFSStatus, req, resp);
     if (!status.ok()) {
-        emit vfsStatusQueryFailed(requestId, gameId, QString::fromStdString(status.error_message()));
+        emit vfsStatusQueryFailed(requestId, gameId, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
         return;
     }
     GrpcVFSStatus out = vfsStatusFromProto(resp);
@@ -752,6 +945,62 @@ void GrpcWorker::doQueryVfsStatus(quint64 requestId, const QString& gameId)
         out.gameId = gameId;
     emit vfsStatusReceived(out);
     emit vfsStatusQueried(requestId, out);
+}
+
+void GrpcWorker::doSetSteamMaintenance(quint64 requestId, const QString& gameId, bool enabled,
+                                       bool verificationConfirmed)
+{
+    gorganizer::v1::SetSteamMaintenanceRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_enabled(enabled);
+    req.set_verification_confirmed(verificationConfirmed);
+    gorganizer::v1::VFSStatus resp;
+    auto status = invoke(&Stub::SetSteamMaintenance, req, resp, std::chrono::minutes(10));
+    if (!status.ok()) {
+        emit steamMaintenanceSetFailed(requestId, gameId, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
+        return;
+    }
+    auto result = vfsStatusFromProto(resp);
+    if (result.gameId.isEmpty())
+        result.gameId = gameId;
+    emit vfsStatusReceived(result);
+    emit steamMaintenanceSet(requestId, result);
+}
+
+void GrpcWorker::doImportPreservedFiles(quint64 requestId, const QString& gameId, const QString& batchId,
+                                        const QString& modName, const QStringList& relativePaths)
+{
+    gorganizer::v1::ImportPreservedFilesRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_batch_id(batchId.toStdString());
+    req.set_mod_name(modName.toStdString());
+    for (const auto& path : relativePaths)
+        req.add_relative_paths(path.toStdString());
+    gorganizer::v1::ImportPreservedFilesResponse resp;
+    auto status = invoke(&Stub::ImportPreservedFiles, req, resp, std::chrono::minutes(10));
+    if (!status.ok()) {
+        emit preservedFilesImportFailed(requestId, gameId, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
+        return;
+    }
+    emit preservedFilesImported(requestId, gameId, QString::fromStdString(resp.mod_name()), resp.file_count());
+}
+
+void GrpcWorker::doDeletePreservedBatch(quint64 requestId, const QString& gameId, const QString& batchId)
+{
+    gorganizer::v1::DeletePreservedBatchRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_batch_id(batchId.toStdString());
+    gorganizer::v1::VFSStatus resp;
+    auto status = invoke(&Stub::DeletePreservedBatch, req, resp);
+    if (!status.ok()) {
+        emit preservedBatchDeleteFailed(requestId, gameId, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
+        return;
+    }
+    auto result = vfsStatusFromProto(resp);
+    if (result.gameId.isEmpty())
+        result.gameId = gameId;
+    emit vfsStatusReceived(result);
+    emit preservedBatchDeleted(requestId, result);
 }
 
 void GrpcWorker::doRebuildVfs(const QString& gameId)
@@ -783,7 +1032,7 @@ void GrpcWorker::doLaunchGame(const QString& gameId, bool useTool, const QString
     req.set_profile_name(profileName.toStdString());
     gorganizer::v1::LaunchGameResponse resp;
     auto status = invoke(&Stub::LaunchGame, req, resp);
-    if (!status.ok()) { emit gameLaunchFailed(QString::fromStdString(status.error_message())); return; }
+    if (!status.ok()) { emit gameLaunchFailed(QString::fromStdString(status.error_message()), static_cast<int>(status.error_code())); return; }
     emit gameLaunched(resp.pid());
 }
 
@@ -814,11 +1063,35 @@ void GrpcWorker::doRetryDownload(const QString& downloadId)
     emit downloadRetried(downloadId, resp.queued_ahead());
 }
 
+void GrpcWorker::doPreviewInstall(quint64 requestId, const QString& gameId,
+                                  const QString& archiveRelPath, const QString& externalArchivePath)
+{
+    auto req = previewInstallRequest(gameId, archiveRelPath, externalArchivePath);
+    gorganizer::v1::PreviewInstallResponse resp;
+    auto status = invoke(&Stub::PreviewInstall, req, resp, std::chrono::minutes(10));
+    if (!status.ok()) {
+        emit previewInstallFailed(requestId, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
+        return;
+    }
+    emit previewInstallCompleted(requestId, previewInstallResultFromProto(resp));
+}
+
+void GrpcWorker::doDiscardPreview(const QString& previewId)
+{
+    gorganizer::v1::DiscardPreviewRequest req;
+    req.set_preview_id(previewId.toStdString());
+    gorganizer::v1::DiscardPreviewResponse resp;
+    auto status = invoke(&Stub::DiscardPreview, req, resp, std::chrono::seconds(30));
+    if (!status.ok()) qWarning("GrpcWorker: DiscardPreview failed: %s", status.error_message().c_str());
+}
+
 void GrpcWorker::doStartInstall(quint64 requestId, const QString& gameId,
                                  const QString& archiveRelPath,
                                  const QString& externalArchivePath, int mode,
                                  const QString& targetMod, const QString& previewId,
-                                 const std::vector<GrpcFomodFile>& fomodSelectedFiles)
+                                 const std::vector<GrpcFomodFile>& fomodSelectedFiles,
+                                 bool fomodConfirmed, const QString& selectedRoot,
+                                 const QString& clientRequestId)
 {
     gorganizer::v1::StartInstallRequest req;
     req.set_game_id(gameId.toStdString());
@@ -827,6 +1100,9 @@ void GrpcWorker::doStartInstall(quint64 requestId, const QString& gameId,
     req.set_mode(static_cast<gorganizer::v1::InstallMode>(mode));
     req.set_target_mod(targetMod.toStdString());
     req.set_preview_id(previewId.toStdString());
+    req.set_fomod_confirmed(fomodConfirmed);
+    req.set_selected_root(selectedRoot.toStdString());
+    req.set_client_request_id(clientRequestId.toStdString());
     for (const auto& f : fomodSelectedFiles) {
         auto* pb = req.add_fomod_selected_files();
         pb->set_source(f.source.toStdString());
@@ -835,12 +1111,52 @@ void GrpcWorker::doStartInstall(quint64 requestId, const QString& gameId,
         pb->set_priority(f.priority);
     }
     gorganizer::v1::StartInstallResponse resp;
-    auto status = invoke(&Stub::StartInstall, req, resp, std::chrono::minutes(10));
+    bool sent = false;
+    auto status = invokeInstall(requestId, &Stub::StartInstall, req, resp, sent);
     if (!status.ok()) {
-        emit installRequestFailed(requestId, QString::fromStdString(status.error_message()));
+        emit installRequestFailed(requestId, static_cast<int>(status.error_code()),
+                                  QString::fromStdString(status.error_message()), sent);
         return;
     }
     emit installRequestCompleted(requestId, QString::fromStdString(resp.mod_folder()), resp.file_count());
+}
+
+void GrpcWorker::doGetInstallOutcome(quint64 requestId, const QString& gameId,
+                                      const QString& clientRequestId)
+{
+    gorganizer::v1::GetInstallOutcomeRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_client_request_id(clientRequestId.toStdString());
+    gorganizer::v1::GetInstallOutcomeResponse resp;
+    const auto status = invoke(&Stub::GetInstallOutcome, req, resp, std::chrono::seconds(8));
+    if (!status.ok()) {
+        emit installOutcomeFailed(requestId, static_cast<int>(status.error_code()),
+                                  QString::fromStdString(status.error_message()));
+        return;
+    }
+    GrpcInstallOutcome outcome;
+    switch (resp.state()) {
+    case gorganizer::v1::INSTALL_OUTCOME_STATE_RUNNING:
+        outcome.state = GrpcInstallOutcomeState::Running;
+        break;
+    case gorganizer::v1::INSTALL_OUTCOME_STATE_SUCCEEDED:
+        outcome.state = GrpcInstallOutcomeState::Succeeded;
+        break;
+    case gorganizer::v1::INSTALL_OUTCOME_STATE_FAILED:
+        outcome.state = GrpcInstallOutcomeState::Failed;
+        break;
+    case gorganizer::v1::INSTALL_OUTCOME_STATE_CANCELLED:
+        outcome.state = GrpcInstallOutcomeState::Cancelled;
+        break;
+    default:
+        outcome.state = GrpcInstallOutcomeState::Unknown;
+        break;
+    }
+    outcome.modFolder = QString::fromStdString(resp.mod_folder());
+    outcome.fileCount = resp.file_count();
+    outcome.error = QString::fromStdString(resp.error());
+    outcome.errorCode = resp.error_code();
+    emit installOutcomeReceived(requestId, outcome);
 }
 
 void GrpcWorker::doSetNexusAPIKey(const QString& apiKey)
@@ -852,6 +1168,17 @@ void GrpcWorker::doSetNexusAPIKey(const QString& apiKey)
     emit nexusAPIKeySet(resp.valid(), QString::fromStdString(resp.error_message()));
 }
 
+void GrpcWorker::doSetNexusAPIKeyTracked(quint64 requestId, const QString& apiKey)
+{
+    gorganizer::v1::SetNexusAPIKeyRequest req;
+    req.set_api_key(apiKey.toStdString());
+    gorganizer::v1::SetNexusAPIKeyResponse resp;
+    auto status = invoke(&Stub::SetNexusAPIKey, req, resp, std::chrono::seconds(12));
+    emit nexusKeySaveFinished(requestId, status.ok() && resp.valid(),
+                              status.ok() ? QString::fromStdString(resp.error_message())
+                                          : QString::fromStdString(status.error_message()));
+}
+
 void GrpcWorker::doShutdownDaemon()
 {
     gorganizer::v1::ShutdownRequest req;
@@ -859,7 +1186,7 @@ void GrpcWorker::doShutdownDaemon()
     invoke(&Stub::Shutdown, req, resp, std::chrono::seconds(3));
 }
 
-void GrpcWorker::doStartWatching()
+void GrpcWorker::doStartWatching(quint64 generation)
 {
     gorganizer::v1::WatchStatusRequest req;
     runStream(&Stub::WatchStatus, req, [this](const gorganizer::v1::StatusEvent& event) {
@@ -875,11 +1202,14 @@ void GrpcWorker::doStartWatching()
             break;
         case gorganizer::v1::StatusEvent::kRecoveryPending: {
             const auto& rp = event.recovery_pending();
-            emit recoveryPending(
+            emit recoveryPending(GrpcRecoveryPending{
                 QString::fromStdString(rp.game_id()),
                 QString::fromStdString(rp.data_path()),
                 QString::fromStdString(rp.backup_path()),
-                QString::fromStdString(rp.reason()));
+                QString::fromStdString(rp.reason()),
+                recoveryKindFromProto(rp.kind()),
+                QString::fromStdString(rp.recovery_id()),
+            });
             break;
         }
         case gorganizer::v1::StatusEvent::kDependencyWarning: {
@@ -894,14 +1224,14 @@ void GrpcWorker::doStartWatching()
         default:
             break;
         }
-    });
+    }, generation);
 }
 
-void GrpcWorker::doStreamArchiveEvents(const QString& gameId)
+void GrpcWorker::doStreamArchiveEvents(const QString& gameId, quint64 generation)
 {
     gorganizer::v1::StreamArchiveEventsRequest req;
     req.set_game_id(gameId.toStdString());
-    runStream(&Stub::StreamArchiveEvents, req, [this](const gorganizer::v1::ArchiveEvent& event) {
+    auto status = runStream(&Stub::StreamArchiveEvents, req, [this, generation](const gorganizer::v1::ArchiveEvent& event) {
         GrpcArchiveEvent out;
         switch (event.event_case()) {
         case gorganizer::v1::ArchiveEvent::kDownloadProgress:
@@ -919,26 +1249,33 @@ void GrpcWorker::doStreamArchiveEvents(const QString& gameId)
         default:
             return;
         }
-        emit archiveEventReceived(out);
-    });
+        emit streamEventReceived(StreamArchive, generation);
+        emit archiveEventReceived(generation, out);
+    }, generation);
+    if (!m_stopped.load() && m_streamGeneration.load() == generation)
+        emit streamEnded(StreamArchive, generation, static_cast<int>(status.error_code()));
 }
 
-void GrpcWorker::doStreamInstallEvents(const QString& gameId)
+void GrpcWorker::doStreamInstallEvents(const QString& gameId, quint64 generation)
 {
     gorganizer::v1::StreamInstallEventsRequest req;
     req.set_game_id(gameId.toStdString());
-    runStream(&Stub::StreamInstallEvents, req, [this](const gorganizer::v1::InstallEvent& event) {
+    auto status = runStream(&Stub::StreamInstallEvents, req, [this, generation](const gorganizer::v1::InstallEvent& event) {
         switch (event.event_case()) {
         case gorganizer::v1::InstallEvent::kInstallProgress:
-            emit installProgressEvent(installProgressFromProto(event.install_progress()));
+            emit streamEventReceived(StreamInstall, generation);
+            emit installProgressEvent(generation, installProgressFromProto(event.install_progress()));
             break;
         case gorganizer::v1::InstallEvent::kInstallCompleted:
-            emit installCompletedHintReceived(installCompletedFromProto(event.install_completed()));
+            emit streamEventReceived(StreamInstall, generation);
+            emit installCompletedHintReceived(generation, installCompletedFromProto(event.install_completed()));
             break;
         default:
             break;
         }
-    });
+    }, generation);
+    if (!m_stopped.load() && m_streamGeneration.load() == generation)
+        emit streamEnded(StreamInstall, generation, static_cast<int>(status.error_code()));
 }
 
 void GrpcWorker::doExportInstance(const QString& gameId, const QString& outputPath,
@@ -959,11 +1296,13 @@ void GrpcWorker::doExportInstance(const QString& gameId, const QString& outputPa
 
 void GrpcWorker::doImportInstance(const QString& gameId, const QString& archivePath,
                                   int policy, const QMap<QString, int>& modPolicyOverrides,
-                                  const QStringList& modFolders, const QStringList& profileNames)
+                                  const QStringList& modFolders, const QStringList& profileNames,
+                                  const QString& expectedArchiveIdentity)
 {
     gorganizer::v1::ImportInstanceRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_archive_path(archivePath.toStdString());
+    req.set_expected_archive_identity(expectedArchiveIdentity.toStdString());
     req.set_policy(static_cast<gorganizer::v1::TransferCollisionPolicy>(policy));
     for (auto it = modPolicyOverrides.constBegin(); it != modPolicyOverrides.constEnd(); ++it)
         (*req.mutable_mod_policy_overrides())[it.key().toStdString()] =
@@ -975,12 +1314,12 @@ void GrpcWorker::doImportInstance(const QString& gameId, const QString& archiveP
     runTransferStream(&Stub::ImportInstance, req);
 }
 
-void GrpcWorker::doStreamPluginStatus(const QString& gameId, const QString& profileName)
+void GrpcWorker::doStreamPluginStatus(const QString& gameId, const QString& profileName, quint64 generation)
 {
     gorganizer::v1::StreamPluginStatusRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
-    runStream(&Stub::StreamPluginStatus, req, [this](const gorganizer::v1::PluginStatusEvent& event) {
+    auto status = runStream(&Stub::StreamPluginStatus, req, [this, generation](const gorganizer::v1::PluginStatusEvent& event) {
         switch (event.event_case()) {
         case gorganizer::v1::PluginStatusEvent::kSnapshot: {
             std::vector<GrpcPluginStatus> items;
@@ -988,16 +1327,20 @@ void GrpcWorker::doStreamPluginStatus(const QString& gameId, const QString& prof
             for (const auto& p : event.snapshot().plugins()) {
                 items.push_back(pluginStatusFromProto(p));
             }
-            emit pluginStatusSnapshot(items);
+            emit streamEventReceived(StreamPluginStatus, generation);
+            emit pluginStatusSnapshot(generation, items);
             break;
         }
         case gorganizer::v1::PluginStatusEvent::kUpdate:
-            emit pluginStatusUpdate(pluginStatusFromProto(event.update().plugin()));
+            emit streamEventReceived(StreamPluginStatus, generation);
+            emit pluginStatusUpdate(generation, pluginStatusFromProto(event.update().plugin()));
             break;
         default:
             break;
         }
-    });
+    }, generation);
+    if (!m_stopped.load() && m_streamGeneration.load() == generation)
+        emit streamEnded(StreamPluginStatus, generation, static_cast<int>(status.error_code()));
 }
 
 // Queries the game's mod-loader status, allowing the longer network deadline when the latest release is resolved too.
@@ -1010,7 +1353,7 @@ void GrpcWorker::doGetModLoaderStatus(quint64 requestId, const QString& gameId, 
     const std::chrono::milliseconds deadline = checkLatest ? std::chrono::seconds(60) : std::chrono::seconds(30);
     auto status = invoke(&Stub::GetModLoaderStatus, req, resp, deadline);
     if (!status.ok()) {
-        emit modLoaderStatusFailed(requestId, gameId, QString::fromStdString(status.error_message()));
+        emit modLoaderStatusFailed(requestId, gameId, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
         return;
     }
     emit modLoaderStatusReceived(requestId, gameId, modLoaderStatusFromProto(resp));
@@ -1082,6 +1425,63 @@ void GrpcWorker::doSetModListRequest(quint64 requestId, const QString& gameId, c
     emit modListSaved(requestId, gameId, profileName);
 }
 
+void GrpcWorker::doReinstallMod(quint64 requestId, const QString& gameId, const QString& modName,
+                                 const QString& clientRequestId)
+{
+    gorganizer::v1::ReinstallModRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_mod_name(modName.toStdString());
+    req.set_client_request_id(clientRequestId.toStdString());
+    gorganizer::v1::ReinstallModResponse resp;
+    bool sent = false;
+    const auto status = invokeInstall(requestId, &Stub::ReinstallMod, req, resp, sent);
+    if (!status.ok()) {
+        emit reinstallRequestFailed(requestId, static_cast<int>(status.error_code()),
+                                    QString::fromStdString(status.error_message()), sent);
+        return;
+    }
+    GrpcReinstallResult result;
+    result.archivesReplayed = resp.archives_replayed();
+    result.archivesSkipped = resp.archives_skipped();
+    result.fileCount = resp.file_count();
+    emit modReinstalled(requestId, gameId, modName, result);
+}
+
+void GrpcWorker::doUninstallMod(quint64 requestId, const QString& gameId, const QString& modName, bool force)
+{
+    gorganizer::v1::UninstallModRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_mod_name(modName.toStdString());
+    req.set_force(force);
+    gorganizer::v1::UninstallModResponse resp;
+    const auto status = invoke(&Stub::UninstallMod, req, resp, std::chrono::minutes(10));
+    if (!status.ok()) {
+        emit modActionFailed(requestId, gameId, modName, QStringLiteral("UninstallMod"),
+                             QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
+        return;
+    }
+    QStringList flaggedArchives;
+    for (const auto& archive : resp.archives_flagged_uninstalled())
+        flaggedArchives.append(QString::fromStdString(archive));
+    emit modUninstalled(requestId, gameId, modName, flaggedArchives);
+}
+
+void GrpcWorker::doRenameMod(quint64 requestId, const QString& gameId, const QString& oldName, const QString& newName)
+{
+    gorganizer::v1::RenameModRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_old_name(oldName.toStdString());
+    req.set_new_name(newName.toStdString());
+    gorganizer::v1::RenameModResponse resp;
+    const auto status = invoke(&Stub::RenameMod, req, resp, std::chrono::minutes(10));
+    if (!status.ok()) {
+        emit modActionFailed(requestId, gameId, oldName, QStringLiteral("RenameMod"),
+                             QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
+        return;
+    }
+    emit modRenamed(requestId, gameId, oldName, newName);
+}
+
 // Requests a SMAPI dependency report, allowing a longer deadline when smapi.io is consulted.
 void GrpcWorker::doGetModDependencyReport(quint64 requestId, const QString& gameId, const QString& profileName,
                                           bool refreshRemote, bool forceRemote)
@@ -1142,6 +1542,55 @@ void GrpcWorker::doAckDependencyEnable(quint64 requestId, const QString& gameId,
         return;
     }
     emit dependencyEnableAcknowledged(requestId, gameId, batchId, resp.acknowledged());
+}
+
+// Saves one profile INI and reports whether the game received the settings.
+void GrpcWorker::doSaveProfileIniFile(quint64 requestId, const QString& gameId, const QString& profileName,
+                                      const QString& filename, const QString& content)
+{
+    gorganizer::v1::SaveProfileIniFileRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_profile_name(profileName.toStdString());
+    req.set_filename(filename.toStdString());
+    req.set_content(content.toStdString());
+    gorganizer::v1::SaveProfileIniFileResponse resp;
+    auto status = invoke(&Stub::SaveProfileIniFile, req, resp);
+    if (!status.ok()) {
+        emit profileIniSaveFailed(requestId, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
+        return;
+    }
+    GrpcIniSaveResult result;
+    switch (resp.outcome()) {
+    case gorganizer::v1::INI_SAVE_OUTCOME_SAVED:
+        result.outcome = GrpcIniSaveOutcome::Saved;
+        break;
+    case gorganizer::v1::INI_SAVE_OUTCOME_SAVED_AND_APPLIED:
+        result.outcome = GrpcIniSaveOutcome::SavedAndApplied;
+        break;
+    case gorganizer::v1::INI_SAVE_OUTCOME_SAVED_APPLY_FAILED:
+        result.outcome = GrpcIniSaveOutcome::SavedApplyFailed;
+        break;
+    default:
+        emit profileIniSaveFailed(requestId, QStringLiteral("Unknown INI save result"), GrpcStatusUnknown);
+        return;
+    }
+    result.applyError = QString::fromStdString(resp.apply_error());
+    emit profileIniSaved(requestId, result);
+}
+
+// Copies the profile's INIs to the game without changing the profile toggle.
+void GrpcWorker::doApplyProfileIniFiles(quint64 requestId, const QString& gameId, const QString& profileName)
+{
+    gorganizer::v1::ApplyProfileIniFilesRequest req;
+    req.set_game_id(gameId.toStdString());
+    req.set_profile_name(profileName.toStdString());
+    gorganizer::v1::ApplyProfileIniFilesResponse resp;
+    auto status = invoke(&Stub::ApplyProfileIniFiles, req, resp);
+    if (!status.ok()) {
+        emit profileIniFilesApplyFailed(requestId, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
+        return;
+    }
+    emit profileIniFilesApplied(requestId, resp.applied_file_count());
 }
 
 }

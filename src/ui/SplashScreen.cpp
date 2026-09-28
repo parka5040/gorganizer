@@ -1,5 +1,6 @@
 #include "SplashScreen.h"
 #include "GrpcClient.h"
+#include "ErrorPresenter.h"
 
 #include <QVBoxLayout>
 #include <QLabel>
@@ -20,7 +21,6 @@ SplashScreen::SplashScreen(GrpcClient* grpc, QWidget* parent)
     , m_grpc(grpc)
 {
     setAttribute(Qt::WA_DeleteOnClose, false);
-    setFixedSize(480, 240);
 
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(40, 40, 40, 40);
@@ -55,8 +55,9 @@ SplashScreen::SplashScreen(GrpcClient* grpc, QWidget* parent)
     layout->addWidget(hint);
 
     if (auto* screen = QApplication::primaryScreen()) {
-        QRect g = screen->geometry();
-        move(g.center().x() - width() / 2, g.center().y() - height() / 2);
+        const QRect available = screen->availableGeometry();
+        setFixedSize(QSize(480, 240).boundedTo(available.size()));
+        move(available.center() - QPoint(width() / 2, height() / 2));
     }
 
     m_timer = new QTimer(this);
@@ -76,7 +77,7 @@ void SplashScreen::poll()
     if (m_done) return;
 
     GrpcReadiness r;
-    QString err;
+    GrpcError err;
     if (m_grpc->health(r, err)) {
         if (!r.lastInitStep.isEmpty())
             m_stepLabel->setText(r.lastInitStep);
@@ -87,7 +88,8 @@ void SplashScreen::poll()
             return;
         }
     } else {
-        m_stepLabel->setText("Waiting for daemon...");
+        m_stepLabel->setText(err.unavailable() ? QStringLiteral("Starting Gorganizer's background service…")
+                                                : errorSummary("check the background service", err, false));
     }
 
     m_elapsedMs += kPollIntervalMs;

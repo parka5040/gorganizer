@@ -69,37 +69,61 @@ func FindByID(gameID string) (GameDefinition, bool) {
 	return GameDefinition{}, false
 }
 
-// DetectInstalledGames scans all Steam library folders for known games and appends synthetic entries.
+// DetectInstalledGames scans every Steam installation for known games.
 func DetectInstalledGames() ([]DetectedGame, error) {
-	steamRoot, err := steam.FindRoot()
-	if err != nil {
-		return nil, err
-	}
+	return DetectInstalledGamesWithPaths(nil)
+}
 
-	folders, err := findLibraryFolders(steamRoot)
+// DetectInstalledGamesWithPaths prefers configured installs when an app appears in multiple libraries.
+func DetectInstalledGamesWithPaths(configured map[string]string) ([]DetectedGame, error) {
+	roots, err := steam.FindRoots()
 	if err != nil {
 		return nil, err
 	}
 
 	var detected []DetectedGame
-	for _, folder := range folders {
-		steamapps := filepath.Join(folder, "steamapps")
-		entries, err := os.ReadDir(steamapps)
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			name := entry.Name()
-			if !strings.HasPrefix(name, "appmanifest_") || !strings.HasSuffix(name, ".acf") {
+	indices := make(map[uint32]int)
+	seenLibraries := make(map[string]bool)
+	for _, root := range roots {
+		for _, folder := range root.Libraries {
+			if seenLibraries[folder] {
 				continue
 			}
-			game, err := parseAppManifest(filepath.Join(steamapps, name), folder)
+			seenLibraries[folder] = true
+			steamapps := filepath.Join(folder, "steamapps")
+			entries, err := os.ReadDir(steamapps)
 			if err != nil {
-				slog.Debug("skipping manifest", "file", name, "err", err)
 				continue
 			}
-			if game != nil {
-				detected = append(detected, *game)
+			for _, entry := range entries {
+				name := entry.Name()
+				if !strings.HasPrefix(name, "appmanifest_") || !strings.HasSuffix(name, ".acf") {
+					continue
+				}
+				found, err := parseAppManifest(filepath.Join(steamapps, name), folder)
+				if err != nil {
+					slog.Debug("skipping manifest", "file", name, "err", err)
+					continue
+				}
+				if found == nil {
+					continue
+				}
+				index, exists := indices[found.SteamAppID]
+				if !exists {
+					indices[found.SteamAppID] = len(detected)
+					detected = append(detected, *found)
+					continue
+				}
+				previous := &detected[index]
+				if sameInstall(previous.InstallPath, found.InstallPath) {
+					continue
+				}
+				wanted := configured[found.ID]
+				if sameInstall(wanted, found.InstallPath) {
+					*previous = *found
+				} else if !sameInstall(wanted, previous.InstallPath) {
+					slog.Warn("game is installed in multiple Steam libraries; keeping first install", "app_id", found.SteamAppID, "first", previous.InstallPath, "other", found.InstallPath)
+				}
 			}
 		}
 	}
@@ -108,8 +132,20 @@ func DetectInstalledGames() ([]DetectedGame, error) {
 		return detected[i].SteamAppID < detected[j].SteamAppID
 	})
 
-	detected = AppendSyntheticGames(detected, nil)
-	return detected, nil
+	return AppendSyntheticGames(detected, nil), nil
+}
+
+// sameInstall compares two existing install directories after resolving their symlinks.
+func sameInstall(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	left, err := filepath.EvalSymlinks(a)
+	if err != nil {
+		return false
+	}
+	right, err := filepath.EvalSymlinks(b)
+	return err == nil && left == right
 }
 
 type TTWPlayableProbe func() (fnvInstallPath string, ok bool)
@@ -167,46 +203,6 @@ func HasTTWMarker(fnvInstallPath string) bool {
 	}
 	info, err := os.Stat(filepath.Join(fnvInstallPath, TTWMarkerFilename))
 	return err == nil && info.Mode().IsRegular()
-}
-
-// findLibraryFolders parses libraryfolders.vdf for Steam library paths.
-func findLibraryFolders(steamRoot string) ([]string, error) {
-	vdfPath := filepath.Join(steamRoot, "steamapps", "libraryfolders.vdf")
-	f, err := os.Open(vdfPath)
-	if err != nil {
-		return nil, fmt.Errorf("opening %s: %w", vdfPath, err)
-	}
-	defer f.Close()
-
-	parsed, err := steam.ParseVDF(f)
-	if err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", vdfPath, err)
-	}
-
-	lf, ok := parsed["libraryfolders"]
-	if !ok {
-		return nil, fmt.Errorf("libraryfolders key not found in %s", vdfPath)
-	}
-	lfMap, ok := lf.(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("libraryfolders is not an object in %s", vdfPath)
-	}
-
-	var folders []string
-	for _, v := range lfMap {
-		entry, ok := v.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		path, ok := entry["path"].(string)
-		if !ok || path == "" {
-			continue
-		}
-		if fsutil.DirExists(filepath.Join(path, "steamapps")) {
-			folders = append(folders, path)
-		}
-	}
-	return folders, nil
 }
 
 // parseAppManifest reads an appmanifest_*.acf and matches against KnownGames.

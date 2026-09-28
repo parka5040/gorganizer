@@ -1,6 +1,7 @@
 #include "IniEditorDialog.h"
 #include "ThemeManager.h"
-#include "Dialogs.h"
+#include "ErrorPresenter.h"
+#include "WindowFit.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -11,7 +12,6 @@
 #include <QPushButton>
 #include <QFontDatabase>
 #include <QMessageBox>
-#include <QDialogButtonBox>
 #include <QScrollArea>
 #include <QFrame>
 #include <QFormLayout>
@@ -25,7 +25,6 @@
 namespace gorganizer {
 
 namespace {
-// Status-text hues from the active theme so they read in both light and dark.
 QString okHex() { return ThemeManager::currentPalette().successFg.name(); }
 QString errHex() { return ThemeManager::currentPalette().errorFg.name(); }
 }
@@ -44,9 +43,9 @@ IniEditorDialog::IniEditorDialog(GrpcClient* grpc,
     , m_pathLabel(new QLabel)
     , m_statusLabel(new QLabel)
     , m_saveBtn(new QPushButton("Save"))
+    , m_applyBtn(new QPushButton("Apply to Game"))
 {
     setWindowTitle(QString("INI Editor — %1 / %2").arg(gameDisplayName, profileName));
-    resize(900, 640);
 
     auto* layout = new QVBoxLayout(this);
 
@@ -57,6 +56,7 @@ IniEditorDialog::IniEditorDialog(GrpcClient* grpc,
     layout->addWidget(m_enabledCheck);
 
     m_pathLabel->setWordWrap(true);
+    m_pathLabel->setTextFormat(Qt::PlainText);
     m_pathLabel->setObjectName("monoHintLabel");
     m_pathLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     layout->addWidget(m_pathLabel);
@@ -67,6 +67,8 @@ IniEditorDialog::IniEditorDialog(GrpcClient* grpc,
 
     buildFindBar(layout);
 
+    m_statusLabel->setTextFormat(Qt::RichText);
+    m_statusLabel->setWordWrap(true);
     m_statusLabel->setObjectName("hintLabel");
     layout->addWidget(m_statusLabel);
 
@@ -74,19 +76,25 @@ IniEditorDialog::IniEditorDialog(GrpcClient* grpc,
     connect(findSc, &QShortcut::activated, this, &IniEditorDialog::onFindShortcut);
 
     auto* buttons = new QHBoxLayout;
-    auto* applyBtn = new QPushButton("Apply Now");
-    applyBtn->setToolTip("Copy all INIs to the game's Documents folder immediately.");
-    connect(applyBtn, &QPushButton::clicked, this, &IniEditorDialog::onApplyNow);
-    buttons->addWidget(applyBtn);
+    m_applyBtn->setToolTip("Copy all INIs to the game's Documents folder immediately.");
+    connect(m_applyBtn, &QPushButton::clicked, this, &IniEditorDialog::onApplyNow);
+    buttons->addWidget(m_applyBtn);
     buttons->addStretch();
     connect(m_saveBtn, &QPushButton::clicked, this, &IniEditorDialog::onSave);
     buttons->addWidget(m_saveBtn);
     auto* closeBtn = new QPushButton("Close");
+    closeBtn->setDefault(true);
     connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
     buttons->addWidget(closeBtn);
     layout->addLayout(buttons);
 
+    connect(m_grpc, &GrpcClient::profileIniSaved, this, &IniEditorDialog::onIniSaved);
+    connect(m_grpc, &GrpcClient::profileIniSaveFailed, this, &IniEditorDialog::onIniSaveFailed);
+    connect(m_grpc, &GrpcClient::profileIniFilesApplied, this, &IniEditorDialog::onIniApplied);
+    connect(m_grpc, &GrpcClient::profileIniFilesApplyFailed, this, &IniEditorDialog::onIniApplyFailed);
+
     reload();
+    fitToScreen(this, QSize(900, 640));
 }
 
 void IniEditorDialog::reload()
@@ -100,10 +108,13 @@ void IniEditorDialog::reload()
 
     std::vector<GrpcProfileIniFile> files;
     GrpcProfileIniStatus status;
-    QString err;
+    GrpcError err;
     if (!m_grpc->listProfileIniFiles(m_gameId, m_profileName, files, status, err)) {
-        m_statusLabel->setText(QString("<span style='color:%1;'>Error: %2</span>").arg(errHex(), err));
+        m_statusLabel->setText(QString("<span style='color:%1;'>%2</span>")
+                                   .arg(errHex(), errorSummary("load profile INI files", err, false).toHtmlEscaped()));
         m_pathLabel->clear();
+        m_saveBtn->setEnabled(false);
+        m_applyBtn->setEnabled(false);
         return;
     }
 
@@ -125,9 +136,11 @@ void IniEditorDialog::reload()
         placeholder->setObjectName("hintLabel");
         m_tabs->addTab(placeholder, "—");
         m_saveBtn->setEnabled(false);
+        m_applyBtn->setEnabled(false);
         return;
     }
 
+    m_applyBtn->setEnabled(true);
     buildTweaksTab();
     buildResolutionTab(files);
 
@@ -158,8 +171,10 @@ void IniEditorDialog::reload()
 void IniEditorDialog::buildTweaksTab()
 {
     std::vector<GrpcIniTweakState> tweaks;
-    QString err;
+    GrpcError err;
     if (!m_grpc->listIniTweaks(m_gameId, m_profileName, tweaks, err)) {
+        m_statusLabel->setText(QString("<span style='color:%1;'>%2</span>")
+                                   .arg(errHex(), errorSummary("load INI tweaks", err, false).toHtmlEscaped()));
         return;
     }
     if (tweaks.empty())
@@ -226,22 +241,22 @@ void IniEditorDialog::buildTweaksTab()
 void IniEditorDialog::onTweakToggled(const QString& tweakId, bool enabled)
 {
     GrpcIniTweakState state;
-    QString err;
+    GrpcError err;
     if (!m_grpc->setIniTweak(m_gameId, m_profileName, tweakId, enabled, state, err)) {
-        dialogs::warn(this, "Tweak Failed", err);
+        presentError(this, "Tweak Failed", "change this INI tweak", err, true);
         return;
     }
     m_statusLabel->setText(QString("<span style='color:%1;'>%2 %3 %4.</span>")
         .arg(okHex())
-        .arg(state.name)
+        .arg(state.name.toHtmlEscaped())
         .arg(state.enabled ? "enabled" : "disabled")
-        .arg("(" + state.targetFile + ")"));
+        .arg(("(" + state.targetFile + ")").toHtmlEscaped()));
 
     for (int i = 0; i < m_handles.size(); ++i) {
         if (m_handles[i].filename == state.targetFile) {
             std::vector<GrpcProfileIniFile> files;
             GrpcProfileIniStatus st;
-            QString lerr;
+            GrpcError lerr;
             if (m_grpc->listProfileIniFiles(m_gameId, m_profileName, files, st, lerr)) {
                 for (const auto& f : files) {
                     if (f.filename == state.targetFile) {
@@ -256,6 +271,9 @@ void IniEditorDialog::onTweakToggled(const QString& tweakId, bool enabled)
                         break;
                     }
                 }
+            } else {
+                m_statusLabel->setText(QString("<span style='color:%1;'>%2</span>")
+                                           .arg(errHex(), errorSummary("refresh profile INI files", lerr, false).toHtmlEscaped()));
             }
             break;
         }
@@ -274,7 +292,7 @@ void IniEditorDialog::onTabChanged(int index)
     int handleIdx = index - prefix;
     if (handleIdx < 0 || handleIdx >= m_handles.size())
         return;
-    m_statusLabel->setText("File on disk: " + m_handles[handleIdx].diskPath);
+    m_statusLabel->setText("File on disk: " + m_handles[handleIdx].diskPath.toHtmlEscaped());
 }
 
 void IniEditorDialog::markDirty(int handleIndex, bool dirty)
@@ -288,7 +306,7 @@ void IniEditorDialog::markDirty(int handleIndex, bool dirty)
     if (m_tweaksTabIndex >= 0) ++prefix;
     if (m_resolutionTabIndex >= 0) ++prefix;
     m_tabs->setTabText(handleIndex + prefix, label);
-    m_saveBtn->setEnabled(anyDirty());
+    m_saveBtn->setEnabled(!m_operationRunning && anyDirty());
 }
 
 bool IniEditorDialog::anyDirty() const
@@ -302,25 +320,109 @@ bool IniEditorDialog::anyDirty() const
 
 void IniEditorDialog::onSave()
 {
-    int prefix = 0;
-    if (m_tweaksTabIndex >= 0) ++prefix;
-    if (m_resolutionTabIndex >= 0) ++prefix;
-    for (int i = 0; i < m_handles.size(); ++i) {
-        auto& h = m_handles[i];
-        QString current = h.editor->toPlainText();
+    startSave(false);
+}
+
+void IniEditorDialog::startSave(bool applyAfterSave)
+{
+    if (m_operationRunning)
+        return;
+    m_operationRunning = true;
+    m_applyAfterSave = applyAfterSave;
+    m_savingIndex = -1;
+    m_saveOutcome = GrpcIniSaveOutcome::SavedAndApplied;
+    m_applyError.clear();
+    m_saveBtn->setEnabled(false);
+    m_applyBtn->setEnabled(false);
+    m_enabledCheck->setEnabled(false);
+    m_tabs->setEnabled(false);
+    m_statusLabel->setText("Saving settings…");
+    saveNextFile();
+}
+
+void IniEditorDialog::saveNextFile()
+{
+    for (int i = m_savingIndex + 1; i < m_handles.size(); ++i) {
+        const auto& h = m_handles[i];
+        const QString current = h.editor->toPlainText();
         if (current == h.originalContent)
             continue;
-        QString err;
-        if (!m_grpc->saveProfileIniFile(m_gameId, m_profileName, h.filename, current, err)) {
-            dialogs::warn(this, "Save Failed",
-                QString("Failed to save %1: %2").arg(h.filename, err));
-            return;
-        }
-        h.originalContent = current;
-        m_tabs->setTabText(i + prefix, h.filename);
+        m_savingIndex = i;
+        m_savingContent = current;
+        m_requestId = m_grpc->saveProfileIniFile(m_gameId, m_profileName, h.filename, current);
+        return;
     }
-    m_saveBtn->setEnabled(false);
-    m_statusLabel->setText(QString("<span style='color:%1;'>Saved.</span>").arg(okHex()));
+    if (m_applyAfterSave) {
+        m_statusLabel->setText("Applying settings…");
+        m_requestId = m_grpc->applyProfileIniFiles(m_gameId, m_profileName);
+        return;
+    }
+    finishOperation();
+    if (m_saveOutcome == GrpcIniSaveOutcome::SavedApplyFailed) {
+        m_statusLabel->setText(QString("<span style='color:%1;'>Settings were saved to this profile, but could not be applied to the game.</span>").arg(errHex()));
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Warning);
+        box.setWindowTitle("Settings Not Applied");
+        box.setTextFormat(Qt::PlainText);
+        box.setText("Settings were saved to this profile, but could not be applied to the game.");
+        box.setDetailedText(m_applyError);
+        box.exec();
+    } else if (m_saveOutcome == GrpcIniSaveOutcome::SavedAndApplied) {
+        m_statusLabel->setText(QString("<span style='color:%1;'>Settings applied to the game.</span>").arg(okHex()));
+    } else {
+        m_statusLabel->setText(QString("<span style='color:%1;'>Saved to profile.</span>").arg(okHex()));
+    }
+}
+
+void IniEditorDialog::finishOperation()
+{
+    m_operationRunning = false;
+    m_requestId = 0;
+    m_tabs->setEnabled(true);
+    m_enabledCheck->setEnabled(!m_handles.isEmpty());
+    m_saveBtn->setEnabled(anyDirty());
+    m_applyBtn->setEnabled(!m_handles.isEmpty());
+}
+
+void IniEditorDialog::onIniSaved(quint64 requestId, const GrpcIniSaveResult& result)
+{
+    if (!m_operationRunning || requestId != m_requestId || m_savingIndex < 0)
+        return;
+    auto& h = m_handles[m_savingIndex];
+    h.originalContent = m_savingContent;
+    markDirty(m_savingIndex, false);
+    m_saveOutcome = result.outcome;
+    m_applyError = result.applyError;
+    saveNextFile();
+}
+
+void IniEditorDialog::onIniSaveFailed(quint64 requestId, const QString& error, int grpcCode)
+{
+    if (!m_operationRunning || requestId != m_requestId || m_savingIndex < 0)
+        return;
+    finishOperation();
+    m_statusLabel->setText(QString("<span style='color:%1;'>Couldn't save settings to the profile.</span>").arg(errHex()));
+    presentError(this, "Save Failed", "save this INI file", GrpcError{grpcCode, QStringLiteral("SaveProfileIniFile"), error}, true);
+}
+
+void IniEditorDialog::onIniApplied(quint64 requestId, int)
+{
+    if (!m_operationRunning || requestId != m_requestId || !m_applyAfterSave)
+        return;
+    finishOperation();
+    m_statusLabel->setText(QString("<span style='color:%1;'>Settings applied to the game.</span>").arg(okHex()));
+}
+
+void IniEditorDialog::onIniApplyFailed(quint64 requestId, const QString& error, int grpcCode)
+{
+    if (!m_operationRunning || requestId != m_requestId || !m_applyAfterSave)
+        return;
+    finishOperation();
+    m_statusLabel->setText(QString("<span style='color:%1;'>%2</span>").arg(errHex(),
+        m_savingIndex >= 0
+            ? "Settings were saved to this profile, but could not be applied to the game."
+            : "Settings could not be applied to the game."));
+    presentError(this, "Settings Not Applied", "apply settings to the game", GrpcError{grpcCode, QStringLiteral("ApplyProfileIniFiles"), error}, true);
 }
 
 void IniEditorDialog::onToggleEnabled(bool checked)
@@ -328,9 +430,9 @@ void IniEditorDialog::onToggleEnabled(bool checked)
     if (m_suppressEnabledSignal)
         return;
     GrpcProfileIniStatus status;
-    QString err;
+    GrpcError err;
     if (!m_grpc->setProfileIniEnabled(m_gameId, m_profileName, checked, status, err)) {
-        dialogs::warn(this, "Error", err);
+        presentError(this, "INI Settings", "change profile INI settings", err, true);
         m_suppressEnabledSignal = true;
         m_enabledCheck->setChecked(!checked);
         m_suppressEnabledSignal = false;
@@ -343,34 +445,16 @@ void IniEditorDialog::onToggleEnabled(bool checked)
 
 void IniEditorDialog::onApplyNow()
 {
-    if (anyDirty()) {
-        if (!dialogs::confirm(this, "Unsaved Edits",
-            "You have unsaved edits. Save before applying?",
-            QMessageBox::NoButton, QMessageBox::Save, QMessageBox::Cancel))
-            return;
-        onSave();
-    }
-    GrpcProfileIniStatus status;
-    QString err;
-    if (!m_grpc->getProfileIniStatus(m_gameId, m_profileName, status, err)) {
-        dialogs::warn(this, "Error", err);
+    startSave(true);
+}
+
+void IniEditorDialog::done(int result)
+{
+    if (m_operationRunning && QMessageBox::question(this, "Close INI Editor",
+            "Changes are still being saved. Close anyway?",
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
         return;
-    }
-    if (status.useCustomIni) {
-        if (!m_handles.isEmpty()) {
-            const auto& h = m_handles.first();
-            m_grpc->saveProfileIniFile(m_gameId, m_profileName, h.filename, h.originalContent, err);
-        }
-        m_statusLabel->setText(QString("<span style='color:%1;'>Applied to %2</span>").arg(okHex(), status.myGamesDir));
-        return;
-    }
-    m_grpc->setProfileIniEnabled(m_gameId, m_profileName, true, status, err);
-    if (!m_handles.isEmpty()) {
-        const auto& h = m_handles.first();
-        m_grpc->saveProfileIniFile(m_gameId, m_profileName, h.filename, h.originalContent, err);
-    }
-    m_grpc->setProfileIniEnabled(m_gameId, m_profileName, false, status, err);
-    m_statusLabel->setText(QString("<span style='color:%1;'>Pushed one-shot. Toggle \"Use profile-specific INI\" to make it persistent.</span>").arg(okHex()));
+    QDialog::done(result);
 }
 
 namespace {
@@ -392,7 +476,7 @@ const QVector<Resolution>& commonResolutions()
     return list;
 }
 
-// Line-preserving patch of one section.key=value, creating the section if missing.
+// patchIniSectionKey updates a section key in an INI document while preserving other lines.
 QString patchIniSectionKey(const QString& original, const QString& section,
                             const QString& key, const QString& value)
 {
@@ -525,9 +609,13 @@ void IniEditorDialog::buildResolutionTab(const std::vector<GrpcProfileIniFile>& 
     outer->addWidget(m_resolutionStatus);
     outer->addStretch();
 
-    m_resolutionTab = container;
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setWidget(container);
+    m_resolutionTab = scroll;
     m_resolutionTabIndex = m_tabs->count();
-    m_tabs->addTab(container, "Resolution");
+    m_tabs->addTab(scroll, "Resolution");
 }
 
 void IniEditorDialog::onApplyResolution()
@@ -543,7 +631,7 @@ void IniEditorDialog::onApplyResolution()
     applyResolutionTo(target, w, h);
     m_resolutionStatus->setText(
         QString("<span style='color:%1;'>Staged %2×%3 into [Display] of %4. "
-                "Click Save to persist.</span>").arg(okHex()).arg(w).arg(h).arg(target));
+                "Click Save to persist.</span>").arg(okHex()).arg(w).arg(h).arg(target.toHtmlEscaped()));
 }
 
 void IniEditorDialog::applyResolutionTo(const QString& filename, int width, int height)
@@ -555,19 +643,6 @@ void IniEditorDialog::applyResolutionTo(const QString& filename, int width, int 
         content = patchIniSectionKey(content, "Display", "iWidth", QString::number(width));
         content = patchIniSectionKey(content, "Display", "iHeight", QString::number(height));
         m_handles[i].editor->setPlainText(content);
-        return;
-    }
-    std::vector<GrpcProfileIniFile> files;
-    GrpcProfileIniStatus st;
-    QString err;
-    if (!m_grpc->listProfileIniFiles(m_gameId, m_profileName, files, st, err))
-        return;
-    for (const auto& f : files) {
-        if (f.filename != filename) continue;
-        QString content = f.content;
-        content = patchIniSectionKey(content, "Display", "iWidth", QString::number(width));
-        content = patchIniSectionKey(content, "Display", "iHeight", QString::number(height));
-        m_grpc->saveProfileIniFile(m_gameId, m_profileName, filename, content, err);
         return;
     }
 }
@@ -586,7 +661,8 @@ void IniEditorDialog::buildFindBar(QVBoxLayout* parentLayout)
     row->addWidget(nextBtn);
     auto* closeBtn = new QPushButton("×");
     closeBtn->setFixedWidth(28);
-    closeBtn->setToolTip("Close (Esc)");
+    closeBtn->setToolTip("Close");
+    closeBtn->setAccessibleName("Close");
     row->addWidget(closeBtn);
     m_findStatus = new QLabel;
     m_findStatus->setObjectName("hintLabel");

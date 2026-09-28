@@ -1,4 +1,6 @@
 #include "ModLoaderProgressDialog.h"
+#include "ErrorPresenter.h"
+#include "WindowFit.h"
 
 #include <QDialogButtonBox>
 #include <QLabel>
@@ -22,7 +24,6 @@ ModLoaderProgressDialog::ModLoaderProgressDialog(QWidget* parent)
     : QDialog(parent)
 {
     setModal(false);
-    resize(520, 320);
 
     auto* root = new QVBoxLayout(this);
 
@@ -59,8 +60,10 @@ ModLoaderProgressDialog::ModLoaderProgressDialog(QWidget* parent)
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close);
     buttons->button(QDialogButtonBox::Close)->setText("Hide");
+    buttons->button(QDialogButtonBox::Close)->setDefault(true);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::hide);
     root->addWidget(buttons);
+    fitToScreen(this, QSize(520, 320));
 }
 
 void ModLoaderProgressDialog::begin(const QString& title, const QString& headline)
@@ -106,9 +109,11 @@ void ModLoaderProgressDialog::onDaemonInfo(const QString& info)
     if (phase == QLatin1String("failed"))
         m_lastFailure = capped(detail, kFailureLimit);
     const QString label = phaseLabel(phase);
+    const QString shown = phase == QLatin1String("failed") || phase == QLatin1String("warning")
+        ? errorSummary(QStringLiteral("change SMAPI"), detail, true) : detail;
     m_phase->setText(label);
-    m_detail->setText(capped(detail, kDetailLimit));
-    m_log->appendPlainText(detail.isEmpty() ? label : capped(QStringLiteral("%1: %2").arg(label, detail), kLogEntryLimit));
+    m_detail->setText(capped(shown, kDetailLimit));
+    m_log->appendPlainText(shown.isEmpty() ? label : capped(QStringLiteral("%1: %2").arg(label, shown), kLogEntryLimit));
 }
 
 QString ModLoaderProgressDialog::capped(const QString& text, int limit)

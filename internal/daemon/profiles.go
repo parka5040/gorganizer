@@ -51,6 +51,29 @@ func (ps *ProfileService) CreateProfile(gameID, name string) (*dto.ProfileResult
 	}, nil
 }
 
+// CopyProfile copies a profile while holding its game's profile mutation lock.
+func (ps *ProfileService) CopyProfile(gameID, sourceName, newName string) (*dto.ProfileResult, error) {
+	if err := ps.s.refuseWhenShuttingDown("copy_profile"); err != nil {
+		return nil, err
+	}
+	if err := ps.s.awaitRecovery(); err != nil {
+		return nil, err
+	}
+	defer ps.s.lockProfiles(gameID)()
+	if err := ps.s.refuseWhenShuttingDown("copy_profile"); err != nil {
+		return nil, err
+	}
+	p, err := ps.s.profileMgr.Copy(gameID, sourceName, newName)
+	if err != nil {
+		return nil, err
+	}
+	return &dto.ProfileResult{
+		Name:      p.Name,
+		GameID:    p.GameID,
+		CreatedAt: p.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+	}, nil
+}
+
 func (ps *ProfileService) DeleteProfile(gameID, name string) error {
 	if err := validateProfileName(name); err != nil {
 		return err
@@ -109,7 +132,10 @@ func (ps *ProfileService) SetModList(gameID, profileName string, entries []dto.M
 		if err := mm.MarkDirty(layers); err != nil {
 			slog.Warn("VFS mark-dirty after modlist change failed", "game", gameID, "err", err)
 		} else {
-			ps.s.publishGuarded(dto.StatusEventResult{VFSStatus: ps.s.svc.vfs.vfsStatus(gameID, gc, profileName, mm, modEntries)})
+			ps.s.mu.RLock()
+			status := ps.s.svc.vfs.vfsStatus(gameID, gc, profileName, mm, modEntries)
+			ps.s.mu.RUnlock()
+			ps.s.publishGuarded(dto.StatusEventResult{VFSStatus: status})
 		}
 	}
 	return nil
@@ -192,7 +218,10 @@ func (ps *ProfileService) ListSeparators(gameID, profileName string) ([]dto.Sepa
 	if err := validateProfileName(profileName); err != nil {
 		return nil, false, err
 	}
-	dir := ps.s.profileMgr.ProfileDir(gameID, profileName)
+	dir, err := ps.s.profileMgr.CheckedProfileDir(gameID, profileName)
+	if err != nil {
+		return nil, false, err
+	}
 	layout, err := separators.LoadLayout(dir)
 	if err != nil {
 		return nil, false, err
@@ -212,7 +241,10 @@ func (ps *ProfileService) SetSeparators(gameID, profileName string, seps []dto.S
 	if err := validateProfileName(profileName); err != nil {
 		return err
 	}
-	dir := ps.s.profileMgr.ProfileDir(gameID, profileName)
+	dir, err := ps.s.profileMgr.CheckedProfileDir(gameID, profileName)
+	if err != nil {
+		return err
+	}
 	out := make([]separators.Separator, len(seps))
 	for i, s := range seps {
 		out[i] = separators.Separator{
@@ -221,6 +253,7 @@ func (ps *ProfileService) SetSeparators(gameID, profileName string, seps []dto.S
 			Collapsed:   s.Collapsed,
 		}
 	}
+	defer ps.s.lockProfiles(gameID)()
 	return separators.SaveLayout(dir, separators.Layout{
 		ViewEnabled: viewEnabled,
 		Separators:  out,

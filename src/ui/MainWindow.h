@@ -3,17 +3,23 @@
 #include <QMainWindow>
 #include <QTabWidget>
 #include <QLabel>
+#include <QHash>
+#include <QSet>
 #include <QActionGroup>
 #include <optional>
 #include "AppConfig.h"
 #include "GrpcTypes.h"
 
 class QCloseEvent;
+class QDragEnterEvent;
+class QDragMoveEvent;
+class QDropEvent;
 class QToolButton;
 
 namespace gorganizer {
 
 class GrpcClient;
+class InstallController;
 class GameSelectorWidget;
 class ModListWidget;
 class PluginListWidget;
@@ -28,7 +34,9 @@ class FalloutPatchController;
 class GameSetupController;
 class ModLoaderController;
 class ModDependencyController;
+class SteamMaintenanceController;
 class SmapiModsWidget;
+struct ArchiveDrop;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -41,6 +49,9 @@ public:
 protected:
     // Asks before closing while a SMAPI operation or an asynchronous mod install that quitting could interrupt is still running.
     void closeEvent(QCloseEvent* event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dragMoveEvent(QDragMoveEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
 
 private slots:
     void onInstallMod();
@@ -53,8 +64,18 @@ private slots:
     void onInstallRequestCompleted(quint64 requestId, const QString& modFolder, int fileCount);
     // Resolves the matching pending install's failure, or reports any other asynchronous install failure.
     void onInstallRequestFailed(quint64 requestId, const QString& error);
+    void onInstallCancelled(quint64 requestId);
+    void onInstallUnknown(quint64 requestId);
 
 private:
+    enum class ArchiveInstallResult { Started, Succeeded, Failed, Unknown };
+
+    struct DropQueue {
+        GameInfo game;
+        QStringList remaining;
+        quint64 waitingRequestId = 0;
+    };
+
     struct PendingExternalInstall {
         quint64 requestId = 0;
         QString gameId;
@@ -63,6 +84,15 @@ private:
         GrpcInstallMode mode = GrpcInstallAsNewMod;
     };
 
+    struct DetachedInstall {
+        QString gameId;
+        QString modName;
+        bool fromDropQueue = false;
+    };
+
+    void onInstallDialogDetached(quint64 requestId, const QString& gameId, const QString& modName,
+                                 bool fromDropQueue = false);
+    void refreshDetachedInstall(const QString& gameId);
     void setupUi();
     void createControllers();
     void wireConnections();
@@ -70,19 +100,23 @@ private:
     void refreshAfterImport();
     // Shows or hides game-specific tabs and actions from the active game's daemon capabilities.
     void applyGameCapabilities(const GameInfo& game);
+    bool canInstallArchive(const GameInfo& game);
+    ArchiveInstallResult installArchiveFromPath(const QString& path, const GameInfo& game);
+    void handleArchiveDrop(const ArchiveDrop& drop);
+    void startNextDroppedArchive();
+    void finishDroppedArchive(bool succeeded);
     // Installs an archive for a manifest-layout game through the daemon, asking only for the mod name.
-    void installThroughDaemonLayout(const QString& gameId, const QString& path);
+    bool installThroughDaemonLayout(const QString& gameId, const QString& path);
     // Asks for a mod name until it passes local validation, returning an empty string on cancel.
     QString askModName(const QString& title, const QString& label, const QString& initial);
     // Issues an asynchronous external-archive install and records it as pending under its request id.
     void startExternalInstall(const PendingExternalInstall& request);
     // Reports or resolves a failed pending external install.
     void onExternalInstallFailed(const PendingExternalInstall& request, const QString& error);
-    // Offers merge, rename, or cancel when a pending install hit an existing mod folder.
-    void resolveExternalInstallCollision(const PendingExternalInstall& request, const QString& existingName);
 
     AppConfig& m_config;
     GrpcClient* m_grpc;
+    InstallController* m_installs;
     GameSelectorWidget* m_gameSelector = nullptr;
     ModListWidget* m_modList = nullptr;
     PluginListWidget* m_pluginList = nullptr;
@@ -95,6 +129,7 @@ private:
     ProfileSelectorWidget* m_profileSelector = nullptr;
     ConnectionIndicator* m_connectionIndicator = nullptr;
     QLabel* m_statusInfo = nullptr;
+    QToolButton* m_cancelInstallButton = nullptr;
     QToolButton* m_applyButton = nullptr;
 
     SessionController* m_session = nullptr;
@@ -103,19 +138,26 @@ private:
     GameSetupController* m_gameSetup = nullptr;
     ModLoaderController* m_modLoader = nullptr;
     ModDependencyController* m_modDependencies = nullptr;
+    SteamMaintenanceController* m_steamMaintenance = nullptr;
 
     QActionGroup* m_themeActions = nullptr;
     QActionGroup* m_appearanceActions = nullptr;
     QAction* m_addGameAction = nullptr;
+    QAction* m_locateGameAction = nullptr;
     QAction* m_exportAction = nullptr;
     QAction* m_importAction = nullptr;
     QAction* m_unmountAction = nullptr;
+    QAction* m_steamHelpAction = nullptr;
+    QAction* m_pauseForSteamAction = nullptr;
     QAction* m_patch4GBAction = nullptr;
     QAction* m_installTtwAction = nullptr;
     QAction* m_iniEditorAction = nullptr;
     QMenu* m_smapiMenu = nullptr;
 
     std::optional<PendingExternalInstall> m_pendingExternalInstall;
+    QHash<quint64, DetachedInstall> m_detachedInstalls;
+    QSet<QString> m_pendingInstallRefresh;
+    std::optional<DropQueue> m_dropQueue;
     bool m_restorePluginsTab = false;
     bool m_daemonOwned = false;
 };

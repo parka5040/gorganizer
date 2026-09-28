@@ -16,6 +16,7 @@ public:
     void loadForGame(const QString& gameId);
     void loadForGame(const QString& gameId, const QString& preferred);
     QString currentProfile() const;
+    void selectProfileSilently(const QString& profileName);
 
 signals:
     void profileChanged(const QString& profileName);
@@ -23,7 +24,9 @@ signals:
 private slots:
     void onProfilesListed(const std::vector<GrpcProfile>& profiles);
     void onProfileCreated(const GrpcProfile& profile);
+    void onProfileCopied(const QString& gameId, const GrpcProfile& profile);
     void onProfileDeleted();
+    void onRpcError(const QString& method, const QString& error, int grpcCode);
     void onComboChanged(int index);
     void onCreateClicked();
     void onDeleteClicked();
@@ -37,6 +40,8 @@ private:
     QToolButton* m_copyBtn;
     QString m_gameId;
     QString m_pendingPreferred;
+    QString m_copyGameId;
+    bool m_copyPending = false;
 };
 
 }

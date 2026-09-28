@@ -1,46 +1,12 @@
 # Gorganizer
 
-Native Linux mod organizer for Bethesda games and Stardew Valley. A Go gRPC
-daemon (`gorganizerd`) backs a Qt6 GUI; on activation, it merges your enabled
-mods into the game's `Data/` folder (or Stardew Valley's `Mods/` folder) via a
-hardlink farm. Built as a Linux-native
-alternative to Mod Organizer 2 — no Wine, no Protontricks for the manager
-itself.
-
-**Status:** early. Targets Bethesda games: Skyrim SE, Skyrim, Fallout New
-Vegas, Fallout 3, Fallout 4, Starfield, Oblivion, Oblivion Remastered,
-Morrowind, and Tale of Two Wastelands (TTW) — plus Stardew Valley with SMAPI.
-
-Oblivion Remastered uses its nested `OblivionRemastered/Content/Dev/ObvData/Data`
-directory, with OBSE64 and PAK/Win64/root-file mods handled alongside classic
-ESP/ESM mods. Put game-root files under a mod's `.gorganizer-root/` directory;
-Gorganizer deploys them as recoverable profile-scoped symlinks.
-
-Stardew Valley (the native Linux Steam version) is managed through SMAPI.
-**Tools → SMAPI** installs or updates SMAPI from its official GitHub release:
-the download is checked against GitHub's published SHA-256, SMAPI's own Linux
-installer runs against a private copy of the game, and the verified result is
-applied with automatic rollback if anything goes wrong. If a Steam update
-restores the game's original launcher, **Repair SMAPI** puts SMAPI back without
-downloading anything; **Uninstall** restores the game's original files. SMAPI
-mod folders are kept intact when you install an archive, and the **SMAPI** tab
-lists every mod's dependencies and available updates (looked up on smapi.io).
-**Fetch missing** downloads required mods — directly with Nexus Premium,
-otherwise by opening each mod's Nexus page for "Mod Manager Download" — and
-enables them once installed. Files mods create while you play (such as
-`config.json`) are kept in Overwrite. The Windows/Proton build and GOG copies of
-Stardew Valley are not supported.
-
-The External Tools dialog can install/update the official Windows portable
-LOOT release, open it through the selected game's Proton prefix, or run an
-isolated automatic sort. LOOT works from a disposable profile projection so it
-cannot change hardlinked source mods. TTW may open LOOT in Fallout New Vegas
-mode, but automatic sorting is intentionally disabled. Common Skyrim tools such
-as xEdit, Creation Kit, Pandora, Nemesis, FNIS, BodySlide, DynDOLOD/xLODGen,
-Synthesis, Wrye Bash, BethINI, and EasyNPC have built-in discovery and write
-policies; their proprietary downloads are not redistributed.
+Gorganizer helps you install and manage game mods on Linux without running the manager through Wine. It supports Steam installs of Morrowind, Oblivion, Oblivion Remastered, Skyrim, Skyrim Special Edition, Fallout 3, Fallout: New Vegas, Fallout 4, Starfield, Tale of Two Wastelands (TTW), and Stardew Valley with SMAPI. For Stardew Valley, you need the native Linux Steam build; the Windows/Proton build and GOG copies are not supported.
 
 ## Install
+
+You need a Steam install of a supported game. TTW needs both Fallout 3 and Fallout: New Vegas. To build Gorganizer from source, you also need Git, Go 1.26.2 or newer, CMake 3.21 or newer, a C++20 compiler, Ninja or Make, `pkg-config`, the protobuf compiler, and Qt6 and gRPC development files. On Arch, Debian/Ubuntu, Fedora, and openSUSE, the install script offers to install missing build packages through your package manager. It may also offer optional tools for specific features. You do not need to install `7z` or `unzip` separately to extract ordinary mod archives.
+
+Open a terminal and run:
 
 ```bash
 git clone https://github.com/parka5040/gorganizer ~/gorganizer
@@ -48,151 +14,113 @@ cd ~/gorganizer
 ./gorganizer.sh
 ```
 
-The clone path is up to you — `~/Apps/gorganizer` works just as well. On
-first run the script:
+You can choose another folder instead of `~/gorganizer`. The script builds Gorganizer and adds an application-menu entry and an `nxm://` handler for Nexus Mods links. Both use a launcher that stays at the same location if you rebuild Gorganizer. Installation does **not** open the window.
 
-1. Detects your distro (Arch, Debian/Ubuntu, Fedora, openSUSE) and prompts
-   `[Y/n]` to install build dependencies via the system package manager.
-2. Builds the Go daemon and Qt6 GUI in-tree.
-3. Migrates any `*_Mods/` folders left behind by a previous install.
-4. Installs a `gorganizer.desktop` entry + icon so the app appears in your
-   start menu (works on KDE, GNOME, Niri, anything that reads
-   `~/.local/share/applications/`) and registers `nxm://` so Nexus "Mod
-   Manager Download" buttons route to the running daemon.
+Open **Gorganizer** from your application menu, or run `./gorganizer.sh launch` from the folder you cloned. Running `./gorganizer.sh` again is safe: it checks the build and refreshes the menu entry when needed.
 
-It does not start the GUI. Launch Gorganizer from your application menu, or
-run `./gorganizer.sh launch`.
+## First start
 
-Re-running `./gorganizer.sh` later is an in-place update: it rebuilds only
-when sources changed and refreshes the desktop entry if you moved the clone.
+The setup wizard looks for games in all your Steam libraries, including libraries used by Flatpak or Snap Steam. Select the games you want to manage. If Steam does not list a game, choose **Locate game…** and select that game's program file.
 
-Mod folders live alongside the script: `<clone>/<Game>_Mods/` (e.g.
-`~/gorganizer/FalloutNV_Mods/`). The daemon log lands at
-`~/.local/state/gorganizer/gorganizerd.log`.
+A Nexus Mods personal API key is optional during setup. To use Nexus downloads, paste your key on the **Nexus Mods API Key** page and choose **Save Nexus key**. The wizard links to [your API key page on Nexus Mods](https://www.nexusmods.com/users/myaccount?tab=api+access). You can also add it later under **Tools → Settings...**. Choose **Finish** to save your selected games.
 
-### Manual register / unregister
+## Everyday use
 
-The default flow handles registration. If you ever need to force-refresh the
-desktop entries (`gorganizer.desktop` and the `nxm://` handler) without
-launching the app:
+### Install mods
 
-```bash
-./gorganizer.sh register     # idempotent
-./gorganizer.sh unregister   # remove menu entry + nxm handler + icon
-```
+- Choose **Mod Manager Download** on a Nexus Mods file page. Gorganizer adds it to the **Downloads** tab. Registered links can open Gorganizer even when its window is closed.
+- Double-click a downloaded archive in **Downloads** to install it. You can also use **File → Install Mod...**, or drop a `.zip`, `.7z`, or `.rar` archive onto the Gorganizer window. Select a game first.
+- If a mod with the same name already exists, choose **Replace** to install an update while keeping its settings, **Merge into existing** to keep old files and add the new ones, or **Install as a separate mod…** to keep both. You can also cancel.
 
-### Subcommands
+Tick mods in the mod list to enable them. Drag them to change their order; mods lower in the list take priority when they contain the same file. For games with plugins, use the **Plugins** tab to enable and order them. To drag plugins, first sort by **Index** in ascending order.
 
-| Command | What it does |
+**Apply Changes** updates the game's mod view after you change your choices. You can also choose **Run**: launching applies pending changes automatically. If **Apply Changes** is not showing, there are no pending changes to apply.
+
+The status at the bottom of the window tells you what is happening:
+
+- **Mods active** — your selected mods are in the game folder.
+- **Changes pending** — choose **Apply Changes** or launch to use your latest choices.
+- **Mods inactive** — no mods are active for this game.
+- **Connection lost** — the background service disconnected; mod status is unknown.
+- **Paused for Steam** — mods are paused until you finish the Steam update or verification.
+- **Waiting for the game to close** — mods were left active because the game may still be running.
+- **Needs your decision** — review an interrupted mod change before Gorganizer continues.
+- **Steam changed the game** — Steam changed files while mods were active; open **Tools → Steam Update Help…**.
+
+### Profiles
+
+A profile saves a set of mod and plugin choices. Use **+** beside **Profile:** to create one, or **Copy** to copy the current profile, including its order and settings. Pick a profile from the same menu to use it.
+
+## Where your files are
+
+By default, your files are in your home folder, not in the cloned source folder:
+
+| What | Location |
 |---|---|
-| `./gorganizer.sh` | Install or update: build if needed (prompting for deps), register the desktop entry. |
-| `./gorganizer.sh launch` | Start the daemon and GUI (what the desktop entry runs). |
-| `./gorganizer.sh setup` | Detect distro, install build deps via `sudo $PM`. |
-| `./gorganizer.sh doctor` | Check build and runtime dependencies without changing anything. |
-| `./gorganizer.sh build [--rebuild]` | Build only. `--rebuild` forces a clean rebuild. |
-| `./gorganizer.sh update [--restart]` | Pull the latest `main`, rebuild, re-register. `--restart` bounces a running daemon. |
-| `./gorganizer.sh register` | Install menu entry + icon + nxm:// handler. |
-| `./gorganizer.sh unregister` | Reverse `register`. |
-| `./gorganizer.sh nxm <URI>` | One-shot: forward an `nxm://` URL to the daemon. |
-| `./gorganizer.sh import [--from PATH]` | Migrate `*_Mods/` folders from a previous install. |
-| `./gorganizer.sh uninstall [--purge]` | Stop the daemon, unregister, delete build artifacts. User data is kept unless `--purge`. |
-| `./gorganizer.sh --version` | Print the version. |
-| `./gorganizer.sh --help` | Usage. |
+| Mods | `~/.local/share/gorganizer/<game>/mods/` |
+| Downloads | `~/.local/share/gorganizer/<game>/mods/Downloads/` |
+| Profiles | `~/.local/share/gorganizer/<game>/profiles/` |
+| Settings | `~/.config/gorganizer/` |
+| Background-service log | `~/.local/state/gorganizer/daemon.log` |
 
-### Migrating from a previous install
+`<game>` is a short ID, such as `skyrimse` or `stardewvalley`. If you have set `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, or `XDG_STATE_HOME`, Gorganizer uses those locations instead of the defaults above.
 
-**From a prior `install.sh` (system install):** detected automatically on
-first run. The script prompts to move
-`~/.local/share/gorganizer/<gameID>/mods/` → `<clone>/<GameName>_Mods/`. If
-you said no the first time, run `./gorganizer.sh import` to revisit.
+On launch, Gorganizer tries to move old `*_Mods` folders from the cloned source folder to your personal data folder. This is a one-time move. If it cannot start the move, it warns you, uses the old mod folders for that session, and tries again the next time. If a move was interrupted, it tries to finish it before opening; if that fails, it stops and tells you what went wrong. Do not delete the source folder while it still contains your mods.
 
-**From an older `gorganizer.sh` clone:**
+### How it works
 
-```bash
-./gorganizer.sh import --from ~/old-gorganizer
-```
+Gorganizer builds a **hardlink farm**: a game folder assembled from your enabled mods, with the original game files kept aside. You do not need to keep the window open while playing.
 
-Walks the source for any known `*_Mods/` folders (Skyrim_Mods, FalloutNV_Mods,
-…) and moves them into the current clone after a confirmation prompt.
+## While a game is running
 
-## Usage
+Your mods stay active while the game runs, even if you close Gorganizer. Gorganizer will not replace or remove the active mod view until the game has closed. If a change cannot be applied yet, close the game and try again.
 
-After install, launch from your application menu, or:
+## Steam updates and “Verify integrity”
 
-```bash
-./gorganizer.sh launch
-```
+Before you ask Steam to update or verify a game, choose **Tools → Pause Mods for a Steam Update…**. This puts the original game files back so Steam can work. When Steam is done, open **Tools → Steam Update Help…** and choose **Steam Finished**.
 
-The script manages the daemon's lifetime — it spawns `gorganizerd`, waits
-for the gRPC socket to bind, then runs the GUI in the foreground. When you
-exit the GUI, the daemon shuts down cleanly (it waits on any in-flight
-directly-launched Proton processes — the script extender and external tools —
-before tearing down the mod hardlink farm; the game itself launches through
-Steam, which the daemon does not track).
+If Steam changes files while mods are active, Gorganizer shows **Steam changed the game**. Open **Tools → Steam Update Help…** and choose **Pause Mods**. Gorganizer saves Steam's changed files separately and restores the original game files. Then use Steam's **Properties → Installed Files → Verify integrity of game files**. When Steam finishes, choose **Verification Finished** in Gorganizer.
 
-### Runtime requirements
+To inspect what was kept, choose **Show Saved Files…** in Steam Update Help. **Recover as New Mod…** copies the files you select into a new, disabled mod. If you select no files, it recovers them all. Enable that mod only if you need those files.
 
-The normal install flow offers to install the applicable packages; for reference:
+## Good to know
 
-- Qt6 (Core, Gui, Widgets, Network) — runtime libraries
-- gRPC C++ runtime + libprotobuf
-- (optional) `fusermount3` — only used to clean up stale mounts left by
-  pre-hardlink-farm versions of gorganizer
-- `7z` and `unzip` for archive extraction. 7-Zip handles RAR archives too,
-  so `unrar` is not required.
-- `protontricks` for installing Proton prefix runtimes such as .NET and VC++
-  for managed Windows modding tools
-- GStreamer for audio conversion during Tale of Two Wastelands installs
+Do not edit files directly in the game's `Data` folder while mods are active. A direct edit can also change the mod's own copy of a file. Make mod changes through Gorganizer instead.
 
-`./gorganizer.sh doctor` reports missing build dependencies and these optional
-runtime tools without changing anything.
+## Update or uninstall
 
-### Crash recovery
+From the folder you cloned, run `./gorganizer.sh update` to fetch updates from this checkout's configured branch, rebuild, and refresh the menu entry. It refuses if you have uncommitted changes, no configured update source, or local commits that are not in that source. It does not stop a running Gorganizer session. Close and reopen Gorganizer to use an installed update; `--restart` only prints a reminder to reopen it.
 
-If the daemon dies while a game's mods are deployed, it repairs the game's
-`Data/` folder on its next start, asking you to confirm only when the on-disk
-state is ambiguous. To recover by hand instead, stop Gorganizer and run:
+Close Gorganizer and your games before running `./gorganizer.sh uninstall`. It checks and restores your games before removing the menu entry and build files. By default, it keeps your mods, downloads, profiles, and settings. It also leaves SMAPI installed; use Steam's file verification if you want to remove it. To delete your Gorganizer data too, run `./gorganizer.sh uninstall --purge`. This needs an additional confirmation and cannot be undone. Uninstall refuses to proceed if a game is running or cannot be safely restored; it does not forcibly stop Gorganizer.
+
+If uninstall warns that mods are still inside the cloned folder, follow the move command it prints **before deleting that folder**. Otherwise you will lose those mods.
+
+## Troubleshooting
+
+- Run `./gorganizerctl doctor` from the cloned folder to check your local setup, games, and background service. If the build tool is missing, run `./gorganizer.sh` first.
+- Run `./gorganizerctl bug-report` to save a report on your computer. Nothing is uploaded. Review the bundle before you share it.
+- After a crash, open Gorganizer again. It repairs interrupted changes on startup and asks you only when it cannot decide safely. For offline recovery, close Gorganizer and the game, then run `./gorganizerctl recover --game <id>` with a game ID such as `skyrimse`. If it asks for confirmation, inspect the files it names before following its instructions.
+- If Nexus **Mod Manager Download** links do not open Gorganizer, run `./gorganizer.sh register` to refresh the menu entry and link handler.
+- If a Windows modding tool needs .NET or Visual C++ inside its game's Proton setup, install **protontricks**. Gorganizer can use either a native or Flatpak installation.
+
+## Stardew Valley and SMAPI
+
+SMAPI is the mod loader used by Stardew Valley mods. Gorganizer supports the native Linux Steam build only. With Stardew Valley selected, use **Tools → SMAPI → Install SMAPI…** to download the official release and install it. Gorganizer checks its published SHA-256 checksum and runs the installer on a private copy of the game before applying the result. If a Steam update replaces SMAPI's launcher, choose **Tools → SMAPI → Repair SMAPI…** to reuse the saved installer. **Tools → SMAPI → Uninstall SMAPI…** removes the loader but keeps your mod folders.
+
+SMAPI mod folders stay together when you install an archive. The **SMAPI** tab shows mod dependencies and can check smapi.io for updates. **Fetch Missing** downloads missing dependencies with Nexus Premium, or opens their Nexus pages so you can choose **Mod Manager Download**. New files created by mods while you play are kept in **Overwrite**.
+
+## Tools
+
+Under **Tools → External Tools...**, you can find installed tools or add your own. You can also choose **Install/Update LOOT…** for the official Windows portable LOOT release and **Sort with LOOT** to sort plugins. Gorganizer sorts using a separate working folder instead of giving LOOT your live mod files. Automatic LOOT sorting is not available for TTW. The built-in catalogue knows where to look for common modding tools, but does not download proprietary tools for you.
+
+## For developers
 
 ```bash
-./gorganizerctl recover --game skyrimse
+make all       # generate Go protobuf files; build the daemon and maintenance tool
+make gui       # build the Qt6 window
+make test      # run Go tests with the race detector
+make verify    # vet, race tests, and comment-policy check
+make clean     # remove build files and generated Go protobuf files
 ```
 
-If recovery reports that it needs confirmation, inspect the listed folder
-first, then follow the `recover-confirm` command it prints.
-`./gorganizerctl export` and `./gorganizerctl import` back up and restore a
-game's mods and profiles while the daemon is running; see
-`./gorganizerctl --help`.
-
-## Building manually
-
-If you'd rather drive `make` yourself:
-
-```bash
-make all      # generate proto, build gorganizerd + gorganizerctl
-make gui      # CMake/Qt6 frontend → build/src/gorganizer
-make test     # Go unit tests
-make verify   # vet + tests + comment-policy check
-make clean    # wipe build artifacts and generated proto
-```
-
-Build dependencies (in addition to runtime deps): Go 1.26+, CMake 3.21+,
-Ninja or Make, g++ with C++20, `protoc`, `pkg-config`, Qt6 dev headers,
-gRPC dev headers.
-
-## Repo layout
-
-- `cmd/gorganizerd/` — daemon entry point
-- `cmd/gorganizerctl/` — maintenance CLI: offline crash recovery, plus
-  instance export/import against the running daemon
-- `cmd/vfs-smoke/`, `cmd/runtime-probe/` — developer diagnostics
-- `internal/` — Go packages (daemon services, ipc, vfs, download, transfer, ...)
-- `api/proto/` — gRPC service definition
-- `src/` — Qt6 GUI (C++)
-- `scripts/` — dev tooling (comment-policy checker)
-- `resources/icons/` — bundled app icon
-- `gorganizer.sh` — single entry point: build, run, register, uninstall
-- `cleaner.sh` — developer reset to a first-run state (deletes mods and config)
-
-## License
-
-GPL-3.0. See [LICENSE](LICENSE).
+For contribution rules and architecture notes, see [CLAUDE.md](CLAUDE.md). The daemon and maintenance tool live in `cmd/`; Go packages are in `internal/`; the gRPC definition is in `api/proto/`; the Qt6 GUI is in `src/`. Gorganizer is licensed under [GPL-3.0](LICENSE).

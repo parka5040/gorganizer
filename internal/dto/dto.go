@@ -63,16 +63,55 @@ type SeparatorResult struct {
 	Collapsed   bool
 }
 
+type VFSLifecycleState int
+
+const (
+	VFSLifecycleStateUnspecified      VFSLifecycleState = 0
+	VFSLifecycleStateReady            VFSLifecycleState = 1
+	VFSLifecycleStateRecoveryDeferred VFSLifecycleState = 2
+	VFSLifecycleStateRecoveryPending  VFSLifecycleState = 3
+)
+
+type SteamMaintenanceState int32
+
+const (
+	SteamMaintenanceUnspecified SteamMaintenanceState = 0
+	SteamMaintenanceNone        SteamMaintenanceState = 1
+	SteamMaintenanceBusy        SteamMaintenanceState = 2
+	SteamMaintenanceVerify      SteamMaintenanceState = 3
+	SteamMaintenanceUser        SteamMaintenanceState = 4
+)
+
+type PreservedBatchResult struct {
+	BatchID   string
+	CreatedAt string
+	FileCount int
+	Reason    string
+	Path      string
+}
+
 type VFSStatusResult struct {
-	Mounted         bool
-	GameID          string
-	ProfileName     string
-	MountPoint      string
-	EnabledModCount int
-	TotalFileCount  int
-	Dirty           bool
-	DesiredGen      uint64
-	AppliedGen      uint64
+	Mounted          bool
+	GameID           string
+	ProfileName      string
+	MountPoint       string
+	EnabledModCount  int
+	TotalFileCount   int
+	Dirty            bool
+	DesiredGen       uint64
+	AppliedGen       uint64
+	LifecycleState   VFSLifecycleState
+	LifecycleReason  string
+	PendingRecovery  *RecoveryPendingResult
+	SteamMaintenance SteamMaintenanceState
+	PreservedBatches []PreservedBatchResult
+}
+
+type ShutdownPlanItem struct {
+	GameID         string
+	ProfileName    string
+	WillUnmount    bool
+	RetainedReason string
 }
 
 type FileConflictResult struct {
@@ -198,6 +237,7 @@ type InstallMode int
 const (
 	InstallAsNewMod     InstallMode = 0
 	InstallMergeIntoMod InstallMode = 1
+	InstallReplaceMod   InstallMode = 2
 )
 
 type InstallStep int
@@ -267,16 +307,29 @@ type FomodPlanResult struct {
 	ScreenshotPath string
 	Version        string
 	Author         string
+
+	ModuleConfigXML []byte
+	ScreenshotData  []byte
+}
+
+type PreviewInstallRequest struct {
+	GameID              string
+	ArchiveRelPath      string
+	ExternalArchivePath string
 }
 
 type PreviewResult struct {
-	PreviewID    string
-	HasFomod     bool
-	Plan         *FomodPlanResult
-	FlatFileList []string
+	PreviewID       string
+	HasFomod        bool
+	Plan            *FomodPlanResult
+	FlatFileList    []string
+	SelectableRoots []string
+	DetectedRoot    string
+	RootAmbiguous   bool
 }
 
 type StartInstallRequest struct {
+	ClientRequestID     string
 	GameID              string
 	ArchiveRelPath      string
 	ExternalArchivePath string
@@ -284,6 +337,8 @@ type StartInstallRequest struct {
 	TargetMod           string
 	PreviewID           string
 	FomodSelectedFiles  []FomodFileResult
+	FomodConfirmed      bool
+	SelectedRoot        string
 }
 
 type GameSettingsResult struct {
@@ -353,11 +408,22 @@ type PluginLoadoutEntryResult struct {
 	Enabled  bool
 }
 
+type RecoveryKind int
+
+const (
+	RecoveryKindUnspecified RecoveryKind = 0
+	RecoveryKindData        RecoveryKind = 1
+	RecoveryKindModLoader   RecoveryKind = 2
+	RecoveryKindGameRoot    RecoveryKind = 3
+)
+
 type RecoveryPendingResult struct {
 	GameID     string
 	DataPath   string
 	BackupPath string
 	Reason     string
+	Kind       RecoveryKind
+	RecoveryID string
 }
 
 type ReadinessResult struct {
@@ -365,6 +431,11 @@ type ReadinessResult struct {
 	RecoveryDone bool
 	GamesWarmed  bool
 	LastInitStep string
+	InstanceID   string
+	PID          int32
+	Version      string
+	APIEpoch     int32
+	Stopping     bool
 }
 
 type ProfileIniFileResult struct {
@@ -378,6 +449,20 @@ type ProfileIniListResult struct {
 	MyGamesDir   string
 	UseCustomIni bool
 }
+
+type ProfileIniSaveResult struct {
+	Outcome    IniSaveOutcome
+	ApplyError string
+}
+
+type IniSaveOutcome int
+
+const (
+	IniSaveUnspecified IniSaveOutcome = iota
+	IniSaveSaved
+	IniSaveSavedAndApplied
+	IniSaveSavedApplyFailed
+)
 
 type ProfileIniStatusResult struct {
 	GameID          string

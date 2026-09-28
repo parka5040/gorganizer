@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
+
+var ErrVerificationConfirmationRequired = errors.New("confirm that Steam finished verifying the game files")
 
 type ArchiveMissingError struct {
 	GameID string

@@ -8,6 +8,7 @@ import (
 	"github.com/parka/gorganizer/internal/daemon"
 	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/dto"
+	"github.com/parka/gorganizer/internal/profile"
 	"github.com/parka/gorganizer/internal/smapi"
 	"github.com/parka/gorganizer/internal/tools"
 	"github.com/parka/gorganizer/internal/transfer"
@@ -57,6 +58,17 @@ func registeredTokenSamples() map[string]error {
 		tokenTransferPath:               &transfer.TransferPathError{Entry: "../evil"},
 		tokenTransferCollision:          &transfer.TransferCollisionError{Name: "SkyUI"},
 		tokenTransferOverwriteMounted:   &daemon.TransferOverwriteMountedError{Name: "SkyUI"},
+		tokenArchiveRejected:            &download.ArchiveRejectedError{Reason: download.ArchiveRejectedNestedInstaller, Detail: "...fomod"},
+		tokenBundleRejected:             &transfer.BundleRejectedError{Reason: transfer.BundleRejectedLink, Item: "mods/M/a"},
+		tokenProfileIdentityInvalid:     &profile.IdentityInvalidError{Name: "../.."},
+		tokenInstallSelectionEmpty:      download.ErrEmptyInstallSelection,
+		tokenPluginStateFailed:          &dto.PluginStateError{GameID: "skyrimse", Cause: fmt.Errorf("disk full")},
+		tokenFarmRecoveryDeferred:       &dto.RecoveryDeferredError{GameID: "skyrimse", Operation: "mount"},
+		tokenRecoveryStale:              &dto.RecoveryStaleError{GameID: "skyrimse"},
+		tokenInstallRecordFailed:        &download.InstallRecordError{Mod: "SkyUI", Err: fmt.Errorf("disk full")},
+		tokenSteamMaintenanceRequired:   &dto.SteamMaintenanceError{GameID: "skyrimse", Reason: "verify"},
+		tokenBundleIncomplete:           &transfer.BundleIncompleteError{Items: 2, Recovery: "none", Err: fmt.Errorf("disk full")},
+		tokenReplacementPending:         &download.ReplacementPendingError{Name: "SkyUI"},
 	}
 }
 
@@ -138,14 +150,18 @@ func TestMapErrorShuttingDownIsUnavailable(t *testing.T) {
 	assertStatus(t, mapped, codes.Unavailable, "daemon_shutting_down:")
 }
 
-// TestMapErrorGameRunningEscapesItsValues locks the code, message and escaping of the pending-changes refusal.
+// TestMapErrorGameRunningEscapesItsValues checks the code and encoded operation of game-running refusals.
 func TestMapErrorGameRunningEscapesItsValues(t *testing.T) {
 	for _, tc := range []struct {
 		err  error
 		want string
 	}{
 		{&dto.GameRunningError{GameID: "stardewvalley", Operation: dto.GameRunningOperationLaunch}, "game_running:game=stardewvalley:operation=launch"},
+		{&dto.GameRunningError{GameID: "skyrimse", Operation: dto.GameRunningOperationMount}, "game_running:game=skyrimse:operation=mount"},
 		{fmt.Errorf("apply: %w", &dto.GameRunningError{GameID: "skyrimse", Operation: dto.GameRunningOperationApply}), "game_running:game=skyrimse:operation=apply"},
+		{&dto.GameRunningError{GameID: "stardewvalley", Operation: dto.GameRunningOperationUnmount}, "game_running:game=stardewvalley:operation=unmount"},
+		{&dto.GameRunningError{GameID: "skyrimse", Operation: dto.GameRunningOperationReinstall}, "game_running:game=skyrimse:operation=reinstall"},
+		{&dto.GameRunningError{GameID: "skyrimse", Operation: dto.GameRunningOperationMerge}, "game_running:game=skyrimse:operation=merge"},
 		{&dto.GameRunningError{GameID: "a:b=c", Operation: "x y"}, "game_running:game=a%3Ab%3Dc:operation=x%20y"},
 	} {
 		mapped, handled := MapError(tc.err)

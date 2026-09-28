@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/xml"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,11 +30,25 @@ func ParseLegacyFomodInfo(moduleRoot string) LegacyFomodInfo {
 	}
 	infoPath, err := findCaseInsensitiveChild(fomodDir, "info.xml")
 	if err != nil || infoPath == "" {
+		slog.Debug("ignoring missing FOMOD info.xml", "root", moduleRoot)
 		return info
 	}
 
-	raw, err := os.ReadFile(infoPath)
+	const maxInfoXMLBytes = 1 << 20
+	file, err := os.Open(infoPath)
 	if err != nil {
+		slog.Warn("ignoring unreadable FOMOD info.xml", "err", err)
+		return info
+	}
+	defer file.Close()
+	stat, err := file.Stat()
+	if err != nil || !stat.Mode().IsRegular() || stat.Size() > maxInfoXMLBytes {
+		slog.Warn("ignoring oversized or unreadable FOMOD info.xml", "path", infoPath)
+		return info
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, maxInfoXMLBytes+1))
+	if err != nil || len(raw) > maxInfoXMLBytes {
+		slog.Warn("ignoring oversized or unreadable FOMOD info.xml", "path", infoPath)
 		return info
 	}
 	utf8Bytes, err := decodeXMLBytes(raw)

@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -14,7 +15,10 @@ import (
 	pb "github.com/parka/gorganizer/api/proto"
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/daemon"
+	"github.com/parka/gorganizer/internal/instancelock"
 	"github.com/parka/gorganizer/internal/ipc"
+	"github.com/parka/gorganizer/internal/migrate"
+	"github.com/parka/gorganizer/internal/protontricks"
 	"github.com/parka/gorganizer/internal/transfer"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -32,8 +36,13 @@ func main() {
 	logLevel := flag.String("log-level", "", "Log level (debug, info, warn, error)")
 	handleNXM := flag.String("handle-nxm", "", "Forward NXM URI to running daemon and exit")
 	showVersion := flag.Bool("version", false, "Print version and exit")
+	printSocket := flag.Bool("print-socket-path", false, "Print the daemon socket path and exit")
 	flag.Parse()
 
+	if *printSocket {
+		printSocketPath(os.Stdout, *socketPath)
+		return
+	}
 	if *showVersion {
 		fmt.Printf("gorganizerd %s (commit %s, built %s)\n", version, commit, buildDate)
 		return
@@ -63,19 +72,21 @@ func main() {
 		Level: level,
 	})))
 
-	sock := config.SocketPath()
-	if *socketPath != "" {
-		sock = *socketPath
-	}
+	sock := socketPathFor(*socketPath)
 
-	releaseLock, err := acquireSingleInstanceLock()
+	releaseLock, err := instancelock.Acquire()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 	defer releaseLock()
 
-	d, err := daemon.New(cfg)
+	if err := checkMigrationBeforeStart(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	d, err := daemon.NewWithVersion(cfg, version)
 	if err != nil {
 		slog.Error("failed to create daemon", "err", err)
 		os.Exit(1)
@@ -115,13 +126,34 @@ func main() {
 	}
 }
 
-// hardExit is the last-resort cleanup path; replicates releaseLock's socket+lock removal best-effort.
+// socketPathFor resolves the daemon socket path without creating directories.
+func socketPathFor(override string) string {
+	if override != "" {
+		return override
+	}
+	return config.SocketPath()
+}
+
+// printSocketPath prints the socket path without starting the daemon.
+func printSocketPath(out io.Writer, override string) {
+	fmt.Fprintln(out, socketPathFor(override))
+}
+
+// checkMigrationBeforeStart refuses to start the daemon until an interrupted move is finished.
+func checkMigrationBeforeStart() error {
+	exists, err := migrate.JournalExists()
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("A move of your mods is unfinished. Run gorganizerctl migrate-data --resume.")
+	}
+	return nil
+}
+
+// hardExit removes the daemon socket before exiting immediately.
 func hardExit(socketPath string, code int) {
 	_ = os.Remove(socketPath)
-	lockPath := config.LockPath()
-	if lockPath != "" {
-		_ = os.Remove(lockPath)
-	}
 	os.Exit(code)
 }
 
@@ -142,23 +174,23 @@ func forwardNXM(uri, socketPath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	client := pb.NewGorganizerClient(conn)
-	resp, err := client.StartDownload(ctx, &pb.StartDownloadRequest{NxmUri: uri})
+	_, err = client.StartDownload(ctx, &pb.StartDownloadRequest{NxmUri: uri})
 	if err != nil {
-		return fmt.Errorf("StartDownload RPC: %w", err)
+		return errors.New("Gorganizer could not add the download")
 	}
 
-	fmt.Printf("Download started: %s (queued ahead: %d)\n",
-		resp.GetDownloadId(), resp.GetQueuedAhead())
+	fmt.Println("Download added to Gorganizer.")
 	return nil
 }
 
-// checkProtontricksAvailable warns once at startup when protontricks is missing.
+// checkProtontricksAvailable reports whether Protontricks can install Windows runtime components.
 func checkProtontricksAvailable() {
-	if _, err := exec.LookPath("protontricks"); err != nil {
-		slog.Warn("protontricks not found on PATH — required for heavy mod loadouts (DX9/VC++/XAudio redists). Install via your package manager: pacman -S protontricks (Arch/Artix), emerge protontricks (Gentoo), apt install protontricks (Debian/Ubuntu), or flatpak install com.github.Matoking.protontricks")
+	invocation, err := protontricks.Resolve(context.Background(), protontricks.Options{})
+	if err != nil {
+		slog.Warn("protontricks not installed; Windows runtime components cannot be added automatically")
 		return
 	}
-	slog.Info("protontricks available — Proton prefix redists will auto-install on script extender install")
+	slog.Info("protontricks available (" + string(invocation.Kind()) + ")")
 }
 
 // parseLogLevel maps a log level name to its slog level, defaulting to info.

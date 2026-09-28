@@ -35,9 +35,16 @@ target_include_directories(gorganizer_grpc PUBLIC
     ${PROTO_OUT_DIR}
 )
 
+if(GORGANIZER_RELEASE)
+    set(GORGANIZER_PROTOBUF_LIB protobuf::libprotobuf)
+    set(GORGANIZER_GRPC_LIB gRPC::grpc++)
+else()
+    set(GORGANIZER_PROTOBUF_LIB PkgConfig::PROTOBUF)
+    set(GORGANIZER_GRPC_LIB PkgConfig::GRPC)
+endif()
 target_link_libraries(gorganizer_grpc PUBLIC
     gorganizer_core
     Qt6::Core
-    PkgConfig::PROTOBUF
-    PkgConfig::GRPC
+    ${GORGANIZER_PROTOBUF_LIB}
+    ${GORGANIZER_GRPC_LIB}
 )

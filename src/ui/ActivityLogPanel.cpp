@@ -1,6 +1,7 @@
 #include "ActivityLogPanel.h"
 #include "GrpcClient.h"
 #include "InstallErrorText.h"
+#include "ErrorPresenter.h"
 #include "ThemeManager.h"
 
 #include <QVBoxLayout>
@@ -172,8 +173,8 @@ void ActivityLogPanel::onInstallProgress(const GrpcInstallProgress& p)
         break;
     case 5:
         if (stepChanged) {
-            QString msg = p.error.isEmpty() ? QString("(unknown error)") : p.error;
-            if (parseInstallError(msg).token == QLatin1String("fomod_required")) {
+            const QString msg = errorSummary("install this mod", p.error, true);
+            if (parseInstallError(p.error).token == QLatin1String("fomod_required")) {
                 log(Severity::Info, QString("%1 needs the FOMOD installer wizard...").arg(name));
             } else {
                 log(Severity::Error, QString("Install of %1 failed: %2").arg(name, msg));
@@ -222,7 +223,7 @@ void ActivityLogPanel::onArchiveEvent(const GrpcArchiveEvent& evt)
             break;
         case 8:
             if (changed) {
-                QString msg = d.error.isEmpty() ? QString("(unknown error)") : d.error;
+                const QString msg = errorSummary("download this archive", d.error);
                 log(Severity::Error, QString("Download of %1 failed: %2").arg(name, msg));
             }
             m_lastDownloadStatus.remove(key);
@@ -244,12 +245,17 @@ void ActivityLogPanel::onDaemonInfo(const QString& info)
             log(Severity::Info, info);
         return;
     }
-    log(Severity::Info, info);
+    if (info.startsWith(QLatin1String("[smapi:failed]")))
+        log(Severity::Error, errorSummary("change SMAPI", info.mid(14).trimmed(), true));
+    else if (info.startsWith(QLatin1String("[smapi:warning]")))
+        log(Severity::Warning, errorSummary("change SMAPI", info.mid(15).trimmed(), true));
+    else
+        log(Severity::Info, info);
 }
 
 void ActivityLogPanel::onDaemonError(const QString& err)
 {
-    log(Severity::Error, err);
+    log(Severity::Error, errorSummary("complete this request", err));
 }
 
 }

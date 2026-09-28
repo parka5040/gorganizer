@@ -49,7 +49,7 @@ RunButtonWidget::RunButtonWidget(QWidget* parent)
     layout->setSpacing(0);
 
     m_combo = new QComboBox;
-    m_combo->setMinimumWidth(160);
+    m_combo->setMinimumWidth(120);
     m_combo->setToolTip(
         "Choose what the Run button launches — the game directly, or a "
         "script extender (xNVSE/SKSE64/F4SE/…).");
@@ -57,7 +57,7 @@ RunButtonWidget::RunButtonWidget(QWidget* parent)
 
     m_runBtn = new QToolButton;
     m_runBtn->setText("Run");
-    m_runBtn->setMinimumWidth(140);
+    setFocusProxy(m_runBtn);
     layout->addWidget(m_runBtn);
 
     connect(m_runBtn, &QToolButton::clicked, this, [this]() { emit runRequested(); });
@@ -257,10 +257,8 @@ void RunButtonWidget::syncRunLabel()
                 m_runBtn->setText(QString("Run %1").arg(m_game.name));
             if (modLoaderStateIs(GrpcModLoaderStateUnsupportedBuild))
                 m_runBtn->setToolTip(kUnsupportedBuildTip);
-            else if (managesSmapi(m_game))
-                m_runBtn->setToolTip("Launch through Steam; enabled mods are deployed into the game's Mods folder first.");
             else
-                m_runBtn->setToolTip("Launch through Steam; the mod hardlink farm + plugins.txt are deployed first.");
+                m_runBtn->setToolTip("Apply pending mod changes, then launch the game through Steam.");
             break;
         case TargetTool:
             m_runBtn->setText(t.label);

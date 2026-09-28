@@ -115,7 +115,7 @@ func runImport(args []string) int {
 	client := pb.NewGorganizerClient(conn)
 
 	if *dryRun {
-		return runImportPreview(client, *gameID, archivePath)
+		return runImportPreview(context.Background(), client, *gameID, archivePath)
 	}
 
 	stream, err := client.ImportInstance(context.Background(), &pb.ImportInstanceRequest{
@@ -131,8 +131,7 @@ func runImport(args []string) int {
 }
 
 // runImportPreview prints the archive manifest and per-item collisions.
-func runImportPreview(client pb.GorganizerClient, gameID, archivePath string) int {
-	ctx := context.Background()
+func runImportPreview(ctx context.Context, client pb.GorganizerClient, gameID, archivePath string) int {
 	resp, err := client.PreviewImport(ctx, &pb.PreviewImportRequest{
 		GameId:      gameID,
 		ArchivePath: archivePath,

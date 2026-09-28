@@ -43,6 +43,9 @@ func TestSentinel_RoundTripWriteReadValidate(t *testing.T) {
 		OverwriteRoot:       filepath.Join(base, "mods", "Overwrite"),
 		Layers:              layers,
 		MaterializerVersion: CurrentMaterializerVersion,
+		FarmID:              "12345678-1234-1234-1234-123456789abc",
+		Manifest:            ".gorganizer-farm-12345678-1234-1234-1234-123456789abc.jsonl",
+		ManifestSHA256:      "test-digest",
 	}
 
 	if err := WriteSentinel(dataPath, want); err != nil {
@@ -54,7 +57,9 @@ func TestSentinel_RoundTripWriteReadValidate(t *testing.T) {
 	}
 	if got.GameID != want.GameID || got.Magic != want.Magic ||
 		got.BackupPath != want.BackupPath || got.OverwriteMod != want.OverwriteMod ||
-		got.ActivationPID != want.ActivationPID {
+		got.ActivationPID != want.ActivationPID || got.FarmID != want.FarmID ||
+		got.Manifest != want.Manifest || got.ManifestSHA256 != want.ManifestSHA256 ||
+		got.ManifestEntries != want.ManifestEntries {
 		t.Errorf("round-trip mismatch:\n want=%+v\n  got=%+v", want, got)
 	}
 	if len(got.Layers) != len(want.Layers) {
@@ -187,6 +192,9 @@ func TestFarmSiblingSuffixesNameEveryLifecycleSibling(t *testing.T) {
 		applyingIntentPath(dataPath):                           true,
 		stagingDirPath(dataPath):                               true,
 		oldFarmPath(dataPath):                                  true,
+		deactivationJournalPath(dataPath):                      true,
+		retiredFarmPath(dataPath):                              true,
+		dataPath + restoringSuffix:                             true,
 		NewMountManager(dataPath, "", "skyrimse").BackupPath(): true,
 	}
 	got := FarmSiblingSuffixes()
@@ -197,5 +205,13 @@ func TestFarmSiblingSuffixesNameEveryLifecycleSibling(t *testing.T) {
 		if !want[dataPath+suffix] {
 			t.Errorf("suffix %q names no farm lifecycle sibling", suffix)
 		}
+		if suffix == RetainedSessionSiblingSuffix {
+			t.Error("retained launch ticket must not appear among pending farm transitions")
+		}
+	}
+	retained := RetainedFarmSiblingSuffixes()
+	if len(retained) != 3 || retained[0] != RetainedSessionSiblingSuffix ||
+		retained[1] != preservedSuffix || retained[2] != maintenanceSuffix {
+		t.Errorf("retained farm siblings = %v, want launch ticket, preserved batches, and maintenance marker", retained)
 	}
 }

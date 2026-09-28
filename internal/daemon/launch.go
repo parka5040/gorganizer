@@ -26,11 +26,11 @@ func (ls *LaunchService) LaunchGame(gameID string, useTool bool, profileName str
 	if err := ls.s.awaitRecovery(); err != nil {
 		return 0, err
 	}
-	gc, mm, release, err := ls.admitLaunch(gameID)
+	gc, mm, reservation, err := ls.admitLaunch(gameID)
 	if err != nil {
 		return 0, err
 	}
-	defer release()
+	defer reservation.Release()
 	if err := ls.s.launchStep("admitted"); err != nil {
 		return 0, err
 	}
@@ -41,22 +41,30 @@ func (ls *LaunchService) LaunchGame(gameID string, useTool bool, profileName str
 		}
 	}
 
+	if err := ls.s.steamAdmission(gameID); err != nil {
+		return 0, err
+	}
 	if err := ls.loaderPreflight(gameID, mm, profileName); err != nil {
 		return 0, err
 	}
-	if !mm.IsMounted() && profileName != "" {
-		slog.Info("auto-mounting VFS before launch", "game", gameID, "profile", profileName)
-		if _, err := ls.s.svc.vfs.MountVFS(gameID, profileName); err != nil {
-			return 0, fmt.Errorf("auto-mount of %s VFS failed: %w", gameID, err)
+	if profileName != "" {
+		if !mm.IsMounted() {
+			slog.Info("auto-mounting VFS before launch", "game", gameID, "profile", profileName)
+		}
+		if _, err := ls.s.svc.vfs.mountVFSOwned(gameID, profileName, false, true, reservation.id); err != nil {
+			return 0, fmt.Errorf("preparing %s mods for launch: %w", gameID, err)
 		}
 	}
 
+	if err := ls.s.steamAdmission(gameID); err != nil {
+		return 0, err
+	}
 	if mm.IsMounted() && mm.IsDirty() {
 		if err := ls.refuseDirtyRunningFarm(gameID); err != nil {
 			return 0, err
 		}
 		slog.Info("applying pending mod changes before launch", "game", gameID)
-		if err := ls.s.svc.vfs.RebuildVFS(gameID); err != nil {
+		if err := ls.s.svc.vfs.rebuildVFSOwned(gameID, reservation.id); err != nil {
 			return 0, fmt.Errorf("applying pending mod changes before launch: %w", err)
 		}
 	}
@@ -111,7 +119,7 @@ func (ls *LaunchService) LaunchGame(gameID string, useTool bool, profileName str
 
 	if profileName != "" {
 		if err := ls.writePluginsTxt(gameID, gc, profileName); err != nil {
-			slog.Warn("writing plugins.txt failed", "game", gameID, "err", err)
+			return 0, &dto.PluginStateError{GameID: gameID, Cause: err}
 		}
 	}
 
@@ -135,6 +143,9 @@ func (ls *LaunchService) LaunchGame(gameID string, useTool bool, profileName str
 			slog.Warn("could not verify script extender manifest", "err", verr)
 		}
 		preferred := ls.s.preferredProton()
+		if err := ls.s.writeLaunchTicketForGame(gameID, profileName, mm.DataPath()); err != nil {
+			return 0, err
+		}
 		handle, err := ls.s.toolMgr.LaunchGame(gameID, true, &gc, preferred)
 		if err != nil {
 			return 0, fmt.Errorf("launching via script extender: %w", err)
@@ -143,6 +154,9 @@ func (ls *LaunchService) LaunchGame(gameID string, useTool bool, profileName str
 		return handle.PID, nil
 	}
 
+	if err := ls.s.writeLaunchTicketForGame(gameID, profileName, mm.DataPath()); err != nil {
+		return 0, err
+	}
 	pid, err := ls.s.openSteamURL(fmt.Sprintf("steam://rungameid/%d", gc.SteamAppID))
 	if err != nil {
 		return 0, fmt.Errorf("launching via Steam: %w", err)
@@ -172,45 +186,48 @@ func xdgOpenURL(url string) (int, error) {
 }
 
 // admitLaunch refuses, under s.mu, a launch of gameID while a recovery is pending or a mutex sibling is mounted, then takes its shared launch reservation and resolves its effective config and mount manager.
-func (ls *LaunchService) admitLaunch(gameID string) (config.GameConfig, *vfs.MountManager, func(), error) {
+func (ls *LaunchService) admitLaunch(gameID string) (config.GameConfig, *vfs.MountManager, sharedReservation, error) {
 	ls.s.mu.Lock()
 	defer ls.s.mu.Unlock()
+	if err := ls.s.deferredForLocked(gameID, dto.BusyOperationLaunch); err != nil {
+		return config.GameConfig{}, nil, sharedReservation{}, err
+	}
 	if pending := ls.s.recoveryPendingFor(gameID); pending != nil {
-		return config.GameConfig{}, nil, nil, fmt.Errorf("recovery pending for %s: %s — confirm via the GUI prompt or `gorganizerctl recover-confirm` first",
+		return config.GameConfig{}, nil, sharedReservation{}, fmt.Errorf("recovery pending for %s: %s — confirm via the GUI prompt or `gorganizerctl recover-confirm` first",
 			gameID, pending.Reason)
 	}
 	if conflict := ls.s.findMutexConflict(gameID); conflict != "" {
-		return config.GameConfig{}, nil, nil, &VFSMutexError{
+		return config.GameConfig{}, nil, sharedReservation{}, &VFSMutexError{
 			GameID:      gameID,
 			Conflicting: conflict,
 			Group:       mutexGroupOf(gameID),
 		}
 	}
-	release, err := ls.s.reserveShared(gameID, dto.BusyOperationLaunch)
+	reservation, err := ls.s.reserveSharedOwned(gameID, dto.BusyOperationLaunch)
 	if err != nil {
-		return config.GameConfig{}, nil, nil, err
+		return config.GameConfig{}, nil, sharedReservation{}, err
 	}
 	gc, ok := ls.s.config.Games[gameID]
 	if !ok {
-		release()
-		return config.GameConfig{}, nil, nil, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
+		reservation.Release()
+		return config.GameConfig{}, nil, sharedReservation{}, fmt.Errorf("%w: %s", config.ErrInvalidGameID, gameID)
 	}
 	if gc.LinkedFromGameID != "" {
 		if _, parentOk := ls.s.config.Games[gc.LinkedFromGameID]; !parentOk {
-			release()
-			return config.GameConfig{}, nil, nil, &ErrLinkedParentMissing{
+			reservation.Release()
+			return config.GameConfig{}, nil, sharedReservation{}, &ErrLinkedParentMissing{
 				GameID:       gameID,
 				ParentGameID: gc.LinkedFromGameID,
 			}
 		}
 		eff, err := ls.s.config.EffectiveGameConfig(gameID)
 		if err != nil {
-			release()
-			return config.GameConfig{}, nil, nil, err
+			reservation.Release()
+			return config.GameConfig{}, nil, sharedReservation{}, err
 		}
 		gc = eff
 	}
-	return cloneGameConfig(gc), ls.s.ensureMountManager(gameID, gc), release, nil
+	return cloneGameConfig(gc), ls.s.ensureMountManager(gameID, gc), reservation, nil
 }
 
 // refuseDirtyRunningFarm returns a GameRunningError while a tracked launch or tool, a game process, or a fresh Steam launch may still read gameID's farm, so pending changes are never skipped silently before a launch.
@@ -267,7 +284,10 @@ func (ls *LaunchService) writePluginsTxt(gameID string, gc config.GameConfig, pr
 	if mounted && mm.IsMounted() {
 		seedDir = mm.BackupPath()
 	}
-	if err := applyProfilePluginLoadout(ls.s.profileMgr, gameID, profileName, seedDir, spec, list); err != nil {
+	unlockProfiles := ls.s.lockProfiles(gameID)
+	err = applyProfilePluginLoadout(ls.s.profileMgr, gameID, profileName, seedDir, spec, list)
+	unlockProfiles()
+	if err != nil {
 		return fmt.Errorf("loading plugin loadout: %w", err)
 	}
 
@@ -335,7 +355,7 @@ func (ls *LaunchService) loaderPreflight(gameID string, mm *vfs.MountManager, pr
 	}
 	mounted := mm.IsMounted()
 	evaluated := profileName
-	if mounted && hasState {
+	if mounted && hasState && profileName == "" {
 		evaluated = state.profileName
 	}
 	roots, err := ls.launchModRoots(gameID, mm, mounted, evaluated)

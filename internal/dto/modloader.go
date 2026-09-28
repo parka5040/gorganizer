@@ -29,20 +29,24 @@ type ModLoaderStatusResult struct {
 }
 
 const (
-	BusyOperationModLoader      = "modloader"
-	BusyOperationMounted        = "mounted"
-	BusyOperationRunning        = "running"
-	BusyOperationRootDeployment = "root_deployment"
-	BusyOperationTransaction    = "transaction"
-	BusyOperationLaunch         = "launch"
-	BusyOperationTool           = "tool"
-	BusyOperationMount          = "mount"
-	BusyOperationUnmount        = "unmount"
-	BusyOperationApply          = "apply"
-	BusyOperationConfigure      = "configure"
-	BusyOperationScriptExtender = "script_extender"
-	BusyOperationImport         = "import"
-	BusyOperationReinstall      = "reinstall"
+	BusyOperationModLoader        = "modloader"
+	BusyOperationMounted          = "mounted"
+	BusyOperationRunning          = "running"
+	BusyOperationRootDeployment   = "root_deployment"
+	BusyOperationTransaction      = "transaction"
+	BusyOperationLaunch           = "launch"
+	BusyOperationTool             = "tool"
+	BusyOperationMount            = "mount"
+	BusyOperationUnmount          = "unmount"
+	BusyOperationApply            = "apply"
+	BusyOperationConfigure        = "configure"
+	BusyOperationScriptExtender   = "script_extender"
+	BusyOperationImport           = "import"
+	BusyOperationReinstall        = "reinstall"
+	BusyOperationInstall          = "install"
+	BusyOperationRegisterInstall  = "register_install"
+	BusyOperationExtractOverwrite = "extract_overwrite"
+	BusyOperationRecovery         = "recovery"
 )
 
 type OperationBusyError struct {

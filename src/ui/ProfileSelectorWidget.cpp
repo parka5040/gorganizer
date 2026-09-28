@@ -1,9 +1,13 @@
 #include "ProfileSelectorWidget.h"
 #include "Dialogs.h"
+#include "ErrorPresenter.h"
 
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QInputDialog>
+#include <QMainWindow>
+#include <QSignalBlocker>
+#include <QStatusBar>
 
 namespace gorganizer {
 
@@ -19,23 +23,27 @@ ProfileSelectorWidget::ProfileSelectorWidget(GrpcClient* grpc, QWidget* parent)
 
     m_combo = new QComboBox;
     m_combo->setMinimumWidth(120);
+    setFocusProxy(m_combo);
     layout->addWidget(m_combo);
 
     m_createBtn = new QToolButton;
     m_createBtn->setText("+");
-    m_createBtn->setToolTip("Create new profile");
+    m_createBtn->setToolTip("Create profile");
+    m_createBtn->setAccessibleName("Create profile");
     m_createBtn->setFixedWidth(28);
     layout->addWidget(m_createBtn);
 
     m_deleteBtn = new QToolButton;
     m_deleteBtn->setText("-");
-    m_deleteBtn->setToolTip("Delete current profile");
+    m_deleteBtn->setToolTip("Delete profile");
+    m_deleteBtn->setAccessibleName("Delete profile");
     m_deleteBtn->setFixedWidth(28);
     layout->addWidget(m_deleteBtn);
 
     m_copyBtn = new QToolButton;
     m_copyBtn->setText("Copy");
-    m_copyBtn->setToolTip("Copy current profile");
+    m_copyBtn->setToolTip("Copy profile");
+    m_copyBtn->setAccessibleName("Copy profile");
     layout->addWidget(m_copyBtn);
 
     connect(m_combo, &QComboBox::currentIndexChanged, this, &ProfileSelectorWidget::onComboChanged);
@@ -45,7 +53,9 @@ ProfileSelectorWidget::ProfileSelectorWidget(GrpcClient* grpc, QWidget* parent)
 
     connect(m_grpc, &GrpcClient::profilesListed, this, &ProfileSelectorWidget::onProfilesListed);
     connect(m_grpc, &GrpcClient::profileCreated, this, &ProfileSelectorWidget::onProfileCreated);
+    connect(m_grpc, &GrpcClient::profileCopied, this, &ProfileSelectorWidget::onProfileCopied);
     connect(m_grpc, &GrpcClient::profileDeleted, this, &ProfileSelectorWidget::onProfileDeleted);
+    connect(m_grpc, &GrpcClient::rpcError, this, &ProfileSelectorWidget::onRpcError);
 }
 
 void ProfileSelectorWidget::loadForGame(const QString& gameId)
@@ -65,6 +75,16 @@ QString ProfileSelectorWidget::currentProfile() const
     return m_combo->currentData().toString();
 }
 
+void ProfileSelectorWidget::selectProfileSilently(const QString& profileName)
+{
+    m_pendingPreferred = profileName;
+    const int index = m_combo->findData(profileName);
+    if (index >= 0) {
+        const QSignalBlocker blocker(m_combo);
+        m_combo->setCurrentIndex(index);
+    }
+}
+
 void ProfileSelectorWidget::onProfilesListed(const std::vector<GrpcProfile>& profiles)
 {
     m_combo->blockSignals(true);
@@ -82,15 +102,47 @@ void ProfileSelectorWidget::onProfilesListed(const std::vector<GrpcProfile>& pro
         m_combo->setCurrentIndex(idx);
     m_combo->blockSignals(false);
 
-    m_deleteBtn->setEnabled(m_combo->count() > 1);
+    m_deleteBtn->setEnabled(!m_copyPending && m_combo->count() > 1);
 
-    emit profileChanged(m_combo->currentData().toString());
+    if (isEnabled())
+        emit profileChanged(m_combo->currentData().toString());
 }
 
 void ProfileSelectorWidget::onProfileCreated(const GrpcProfile&)
 {
     if (!m_gameId.isEmpty())
         m_grpc->listProfiles(m_gameId);
+}
+
+void ProfileSelectorWidget::onProfileCopied(const QString& gameId, const GrpcProfile& profile)
+{
+    if (!m_copyPending || gameId != m_copyGameId)
+        return;
+    m_copyPending = false;
+    m_copyGameId.clear();
+    m_createBtn->setEnabled(true);
+    m_deleteBtn->setEnabled(m_combo->count() > 1);
+    m_copyBtn->setEnabled(true);
+    if (auto* main = qobject_cast<QMainWindow*>(window()))
+        main->statusBar()->showMessage("Profile copied.", 5000);
+    if (m_gameId == gameId) {
+        m_pendingPreferred = profile.name;
+        m_grpc->listProfiles(gameId);
+    }
+}
+
+void ProfileSelectorWidget::onRpcError(const QString& method, const QString& error, int grpcCode)
+{
+    if (method != "CopyProfile" || !m_copyPending)
+        return;
+    m_copyPending = false;
+    m_copyGameId.clear();
+    m_createBtn->setEnabled(true);
+    m_deleteBtn->setEnabled(m_combo->count() > 1);
+    m_copyBtn->setEnabled(true);
+    if (auto* main = qobject_cast<QMainWindow*>(window()))
+        main->statusBar()->clearMessage();
+    presentError(this, "Copy Profile", "copy this profile", GrpcError{grpcCode, method, error}, true);
 }
 
 void ProfileSelectorWidget::onProfileDeleted()
@@ -137,7 +189,7 @@ void ProfileSelectorWidget::onDeleteClicked()
 
 void ProfileSelectorWidget::onCopyClicked()
 {
-    if (m_gameId.isEmpty())
+    if (m_gameId.isEmpty() || m_copyPending)
         return;
 
     QString source = currentProfile();
@@ -146,13 +198,20 @@ void ProfileSelectorWidget::onCopyClicked()
 
     bool ok = false;
     QString name = QInputDialog::getText(this, "Copy Profile",
-                                          "New profile name:",
-                                          QLineEdit::Normal,
-                                          source + " (Copy)", &ok);
+                                         "New profile name:\nCopies mod choices, their order, plugins and profile settings.",
+                                         QLineEdit::Normal,
+                                         source + " (Copy)", &ok);
     if (!ok || name.trimmed().isEmpty())
         return;
 
-    m_grpc->createProfile(m_gameId, name.trimmed());
+    m_copyPending = true;
+    m_copyGameId = m_gameId;
+    m_createBtn->setEnabled(false);
+    m_deleteBtn->setEnabled(false);
+    m_copyBtn->setEnabled(false);
+    if (auto* main = qobject_cast<QMainWindow*>(window()))
+        main->statusBar()->showMessage("Copying profile…");
+    m_grpc->copyProfile(m_gameId, source, name.trimmed());
 }
 
 }

@@ -21,6 +21,16 @@ type fenceHolder struct {
 	gameID string
 }
 
+type sharedReservation struct {
+	id      uint64
+	release func()
+}
+
+// Release drops a shared reservation once.
+func (r sharedReservation) Release() {
+	r.release()
+}
+
 // fenceKeyLocked returns the cleaned physical install root of gameID, or a game-ID key when it has none; the caller holds s.mu.
 func (s *session) fenceKeyLocked(gameID string) string {
 	if s.config != nil {
@@ -49,56 +59,99 @@ func (s *session) gamesOnFenceKeyLocked(gameID, key string) []string {
 	return append(games, others...)
 }
 
-// reserveShared takes a non-blocking shared reservation for op on gameID's install root, refusing during shutdown or while an exclusive operation holds it; the caller holds s.mu.
+// reserveShared takes a non-blocking shared reservation for op on gameID's install root; the caller holds s.mu.
 func (s *session) reserveShared(gameID, op string) (func(), error) {
-	if err := s.refuseWhenShuttingDown(op); err != nil {
+	reservation, err := s.reserveSharedOwned(gameID, op)
+	if err != nil {
 		return nil, err
+	}
+	return reservation.Release, nil
+}
+
+// reserveSharedOwned returns an identifiable shared reservation for op on gameID's install root; the caller holds s.mu.
+func (s *session) reserveSharedOwned(gameID, op string) (sharedReservation, error) {
+	if err := s.refuseWhenShuttingDown(op); err != nil {
+		return sharedReservation{}, err
+	}
+	if err := s.deferredForLocked(gameID, op); err != nil {
+		return sharedReservation{}, err
 	}
 	key := s.fenceKeyLocked(gameID)
 	holder := fenceHolder{op: op, gameID: gameID}
 	s.fenceMu.Lock()
 	defer s.fenceMu.Unlock()
 	if exclusive, ok := s.fenceExclusive[key]; ok {
-		return nil, &dto.OperationBusyError{GameID: gameID, Operation: exclusive.op, Holder: exclusive.gameID}
+		return sharedReservation{}, &dto.OperationBusyError{GameID: gameID, Operation: exclusive.op, Holder: exclusive.gameID}
 	}
 	if s.fenceShared == nil {
-		s.fenceShared = make(map[string]map[fenceHolder]int)
+		s.fenceShared = make(map[string]map[uint64]fenceHolder)
 	}
 	holders := s.fenceShared[key]
 	if holders == nil {
-		holders = make(map[fenceHolder]int)
+		holders = make(map[uint64]fenceHolder)
 		s.fenceShared[key] = holders
 	}
-	holders[holder]++
+	s.nextFenceID++
+	id := s.nextFenceID
+	holders[id] = holder
 	var once sync.Once
-	return func() { once.Do(func() { s.releaseShared(key, holder) }) }, nil
+	return sharedReservation{id: id, release: func() { once.Do(func() { s.releaseShared(key, id) }) }}, nil
 }
 
 // acquireShared takes a shared reservation for a caller that holds no daemon lock.
 func (s *session) acquireShared(gameID, op string) (func(), error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.reserveShared(gameID, op)
+	reservation, err := s.acquireSharedOwned(gameID, op)
+	if err != nil {
+		return nil, err
+	}
+	return reservation.Release, nil
 }
 
-// releaseShared drops one shared reservation of holder on key.
-func (s *session) releaseShared(key string, holder fenceHolder) {
+// acquireSharedOwned returns an identifiable shared reservation for a caller that holds no daemon lock.
+func (s *session) acquireSharedOwned(gameID, op string) (sharedReservation, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.reserveSharedOwned(gameID, op)
+}
+
+// releaseShared drops one shared reservation by id on key.
+func (s *session) releaseShared(key string, id uint64) {
 	s.fenceMu.Lock()
 	defer s.fenceMu.Unlock()
 	holders := s.fenceShared[key]
-	if holders[holder] > 1 {
-		holders[holder]--
-		return
-	}
-	delete(holders, holder)
+	delete(holders, id)
 	if len(holders) == 0 {
 		delete(s.fenceShared, key)
 	}
 }
 
+// pendingAdmissionLocked reports a launch, tool, or script-extender reservation on gameID's install other than owner; the caller holds s.mu.
+func (s *session) pendingAdmissionLocked(gameID string, owner uint64) *dto.OperationBusyError {
+	key := s.fenceKeyLocked(gameID)
+	s.fenceMu.Lock()
+	defer s.fenceMu.Unlock()
+	var first fenceHolder
+	var firstID uint64
+	for id, holder := range s.fenceShared[key] {
+		if id == owner || holder.op != dto.BusyOperationLaunch && holder.op != dto.BusyOperationTool && holder.op != dto.BusyOperationScriptExtender {
+			continue
+		}
+		if firstID == 0 || id < firstID {
+			firstID, first = id, holder
+		}
+	}
+	if firstID == 0 {
+		return nil
+	}
+	return &dto.OperationBusyError{GameID: gameID, Operation: first.op, Holder: first.gameID}
+}
+
 // reserveExclusiveLocked takes the exclusive reservation for op once the daemon is not shutting down and no game on gameID's install root is pending recovery, mounted, running, root-deployed, or reserved; the caller holds s.mu for writing.
 func (s *session) reserveExclusiveLocked(gameID, op string) (func(), error) {
 	if err := s.refuseWhenShuttingDown(op); err != nil {
+		return nil, err
+	}
+	if err := s.deferredForLocked(gameID, op); err != nil {
 		return nil, err
 	}
 	key := s.fenceKeyLocked(gameID)
@@ -122,6 +175,32 @@ func (s *session) reserveExclusiveLocked(gameID, op string) (func(), error) {
 		return nil, err
 	}
 	holder := fenceHolder{op: op, gameID: gameID}
+	s.fenceMu.Lock()
+	defer s.fenceMu.Unlock()
+	if exclusive, ok := s.fenceExclusive[key]; ok {
+		return nil, &dto.OperationBusyError{GameID: gameID, Operation: exclusive.op, Holder: exclusive.gameID}
+	}
+	if holders := s.fenceShared[key]; len(holders) > 0 {
+		first := firstFenceHolder(holders)
+		return nil, &dto.OperationBusyError{GameID: gameID, Operation: first.op, Holder: first.gameID}
+	}
+	if s.fenceExclusive == nil {
+		s.fenceExclusive = make(map[string]fenceHolder)
+	}
+	s.fenceExclusive[key] = holder
+	var once sync.Once
+	return func() { once.Do(func() { s.releaseExclusive(key, holder) }) }, nil
+}
+
+// acquireRecoveryExclusive reserves an install for a deferred recovery without requiring its old farm or root deployment to be idle.
+func (s *session) acquireRecoveryExclusive(gameID string) (func(), error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.refuseWhenShuttingDown(dto.BusyOperationRecovery); err != nil {
+		return nil, err
+	}
+	key := s.fenceKeyLocked(gameID)
+	holder := fenceHolder{op: dto.BusyOperationRecovery, gameID: gameID}
 	s.fenceMu.Lock()
 	defer s.fenceMu.Unlock()
 	if exclusive, ok := s.fenceExclusive[key]; ok {
@@ -204,6 +283,31 @@ func (s *session) runningHolderLocked(gameID, key string, games []string) string
 	return ""
 }
 
+// unmountRunningLocked reports whether a game process, fresh Steam launch, or failed process scan forbids unmounting without clearing any flags; the caller holds s.mu.
+func (s *session) unmountRunningLocked(gameID string) bool {
+	key := s.fenceKeyLocked(gameID)
+	games := s.gamesOnFenceKeyLocked(gameID, key)
+	flagged, launchedAt := s.steamLaunchesAmong(games)
+	if !filepath.IsAbs(key) {
+		return len(flagged) > 0
+	}
+	running, err := s.processRunningIn(key, s.steamAppIDsLocked(games))
+	if err != nil {
+		slog.Warn("scanning processes before unmount failed", "game", gameID, "path", key, "err", err)
+		return true
+	}
+	if running {
+		return true
+	}
+	now := s.clock()
+	for _, id := range flagged {
+		if now.Sub(launchedAt[id]) < steamLaunchGrace {
+			return true
+		}
+	}
+	return false
+}
+
 // clearSteamLaunchedIfUnchanged clears gameID's Steam-launch flag only while it still carries the launch time at, reporting whether it did.
 func (s *session) clearSteamLaunchedIfUnchanged(gameID string, at time.Time) bool {
 	s.launchedMu.Lock()
@@ -236,7 +340,7 @@ func (s *session) sharedHeldLocked(gameID string, ops ...string) bool {
 	key := s.fenceKeyLocked(gameID)
 	s.fenceMu.Lock()
 	defer s.fenceMu.Unlock()
-	for holder := range s.fenceShared[key] {
+	for _, holder := range s.fenceShared[key] {
 		for _, op := range ops {
 			if holder.op == op {
 				return true
@@ -289,9 +393,9 @@ func (s *session) requireRootDeploymentIdleLocked(gameID, id string) error {
 }
 
 // firstFenceHolder returns the shared holder that sorts first by operation, then game.
-func firstFenceHolder(holders map[fenceHolder]int) fenceHolder {
+func firstFenceHolder(holders map[uint64]fenceHolder) fenceHolder {
 	all := make([]fenceHolder, 0, len(holders))
-	for holder := range holders {
+	for _, holder := range holders {
 		all = append(all, holder)
 	}
 	sort.Slice(all, func(i, j int) bool {

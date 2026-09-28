@@ -93,6 +93,21 @@ func TestGameDataPath(t *testing.T) {
 	}
 }
 
+// TestXDGModsDirIgnoresRootOverride checks migration targets personal storage while legacy lookups use the override.
+func TestXDGModsDirIgnoresRootOverride(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("GORGANIZER_ROOT", filepath.Join(root, "checkout"))
+	if got := XDGModsDir("skyrimse"); got != filepath.Join(root, "data", "gorganizer", "skyrimse", "mods") {
+		t.Fatalf("XDGModsDir = %q", got)
+	}
+	if got := ModsDir("skyrimse"); got != filepath.Join(root, "checkout", "SkyrimSE_Mods") {
+		t.Fatalf("ModsDir = %q", got)
+	}
+}
+
 func TestXDGPaths(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", "/custom/data")
 	t.Setenv("XDG_CONFIG_HOME", "/custom/config")

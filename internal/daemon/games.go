@@ -101,12 +101,32 @@ func (gs *GameService) ListConfiguredGames() ([]dto.GameInfo, error) {
 
 // DetectInstalledGames configures every newly detected game, recovers interrupted mod-loader transactions at their installs once startup recovery finished, and lists the detected games.
 func (gs *GameService) DetectInstalledGames() ([]dto.GameInfo, error) {
-	detected, err := game.DetectInstalledGames()
+	gs.s.mu.RLock()
+	configured := make(map[string]string, len(gs.s.config.Games))
+	for id, gc := range gs.s.config.Games {
+		configured[id] = gc.InstallPath
+	}
+	gs.s.mu.RUnlock()
+	detected, err := game.DetectInstalledGamesWithPaths(configured)
 	if err != nil {
 		return nil, err
 	}
 
-	detected = gs.applyTTWPlayableProbe(detected)
+	retained := detected[:0]
+	for _, g := range detected {
+		if path := configured[g.ID]; path != "" {
+			configuredPath, configuredErr := filepath.EvalSymlinks(path)
+			detectedPath, detectedErr := filepath.EvalSymlinks(g.InstallPath)
+			if configuredErr != nil || detectedErr != nil || configuredPath != detectedPath {
+				slog.Warn("detected Steam install differs from configured game; keeping configured install", "game", g.ID, "configured", path, "detected", g.InstallPath)
+				continue
+			}
+			g.InstallPath = path
+			g.DataPath = filepath.Join(path, g.DataSubpath)
+		}
+		retained = append(retained, g)
+	}
+	detected = gs.applyTTWPlayableProbe(retained)
 
 	gs.s.mu.Lock()
 	var added []string

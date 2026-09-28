@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -51,7 +52,7 @@ func TestRestartResumesAnInterruptedDependencyInstall(t *testing.T) {
 		d, _, _, _ := newFetchDaemon(t, premiumTestKey)
 		fetchOne(t, d, "Default", depUniqueID)
 		abs, _ := writeLandedArchive(t, depNexusID, depFileID, "Dep Core", depArchiveFiles())
-		if _, _, err := d.StartInstall(dto.StartInstallRequest{GameID: depsGame, ArchiveRelPath: relFromDownloads(depsGame, abs), Mode: dto.InstallAsNewMod, TargetMod: "Installed Dep"}); err != nil {
+		if _, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{GameID: depsGame, ArchiveRelPath: relFromDownloads(depsGame, abs), Mode: dto.InstallAsNewMod, TargetMod: "Installed Dep"}); err != nil {
 			t.Fatalf("StartInstall: %v", err)
 		}
 		markInstalling(t, d, "install-crashed")
@@ -262,7 +263,7 @@ func TestAdoptionListsTheModInTheRequestingProfile(t *testing.T) {
 	d, _, _, _ := newFetchDaemon(t, premiumTestKey)
 	fetchOne(t, d, "Default", depUniqueID)
 	abs, _ := writeLandedArchive(t, depNexusID, depFileID, "Dep Core", depArchiveFiles())
-	if _, _, err := d.StartInstall(dto.StartInstallRequest{GameID: depsGame, ArchiveRelPath: relFromDownloads(depsGame, abs), Mode: dto.InstallAsNewMod, TargetMod: "Killed Dep"}); err != nil {
+	if _, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{GameID: depsGame, ArchiveRelPath: relFromDownloads(depsGame, abs), Mode: dto.InstallAsNewMod, TargetMod: "Killed Dep"}); err != nil {
 		t.Fatalf("StartInstall: %v", err)
 	}
 	dropFromModList(t, d, "Default", "Killed Dep")

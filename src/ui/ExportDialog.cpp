@@ -1,7 +1,9 @@
 #include "ExportDialog.h"
 #include "Dialogs.h"
 #include "GrpcClient.h"
+#include "ErrorPresenter.h"
 #include "ThemeManager.h"
+#include "WindowFit.h"
 
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -16,6 +18,7 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QStackedWidget>
+#include <QScrollArea>
 #include <QVBoxLayout>
 
 namespace gorganizer {
@@ -48,7 +51,6 @@ ExportDialog::ExportDialog(GrpcClient* grpc, const QString& gameId, QWidget* par
     , m_gameId(gameId)
 {
     setWindowTitle(QString("Export Mods — %1").arg(m_gameId));
-    resize(640, 560);
     setModal(true);
 
     auto* root = new QVBoxLayout(this);
@@ -63,24 +65,31 @@ ExportDialog::ExportDialog(GrpcClient* grpc, const QString& gameId, QWidget* par
 
     loadSelections();
     m_stack->setCurrentIndex(PAGE_CONFIG);
+    fitToScreen(this, QSize(640, 560));
 }
 
 QWidget* ExportDialog::buildConfigPage()
 {
     auto* page = new QWidget;
     auto* lay = new QVBoxLayout(page);
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    auto* content = new QWidget;
+    auto* contentLay = new QVBoxLayout(content);
 
     auto* profileBox = new QGroupBox("Profiles");
     auto* profileLay = new QVBoxLayout(profileBox);
     m_profileList = new QListWidget;
     m_profileList->setSelectionMode(QAbstractItemView::NoSelection);
+    m_profileList->setMinimumHeight(110);
     profileLay->addWidget(m_profileList);
-    lay->addWidget(profileBox, 1);
+    contentLay->addWidget(profileBox, 1);
 
     auto* modBox = new QGroupBox("Mods");
     auto* modLay = new QVBoxLayout(modBox);
     m_modList = new QListWidget;
     m_modList->setSelectionMode(QAbstractItemView::NoSelection);
+    m_modList->setMinimumHeight(110);
     modLay->addWidget(m_modList, 1);
 
     auto* modBtnRow = new QHBoxLayout;
@@ -92,15 +101,15 @@ QWidget* ExportDialog::buildConfigPage()
     modBtnRow->addStretch(1);
     modBtnRow->addWidget(m_selectionLabel);
     modLay->addLayout(modBtnRow);
-    lay->addWidget(modBox, 2);
+    contentLay->addWidget(modBox, 2);
 
     m_overwriteCheck = new QCheckBox("Include Overwrite folder");
     m_overwriteCheck->setChecked(true);
-    lay->addWidget(m_overwriteCheck);
+    contentLay->addWidget(m_overwriteCheck);
 
     m_settingsCheck = new QCheckBox("Include game settings (profile INIs, load order)");
     m_settingsCheck->setChecked(true);
-    lay->addWidget(m_settingsCheck);
+    contentLay->addWidget(m_settingsCheck);
 
     auto* destRow = new QHBoxLayout;
     destRow->addWidget(new QLabel("Destination:"));
@@ -110,13 +119,15 @@ QWidget* ExportDialog::buildConfigPage()
     auto* browseBtn = new QPushButton("Browse...");
     destRow->addWidget(m_destinationEdit, 1);
     destRow->addWidget(browseBtn);
-    lay->addLayout(destRow);
+    contentLay->addLayout(destRow);
 
     m_configErrorLabel = new QLabel;
     m_configErrorLabel->setWordWrap(true);
     m_configErrorLabel->setStyleSheet(QString("color: %1;").arg(errHex()));
     m_configErrorLabel->setVisible(false);
-    lay->addWidget(m_configErrorLabel);
+    contentLay->addWidget(m_configErrorLabel);
+    scroll->setWidget(content);
+    lay->addWidget(scroll, 1);
 
     auto* btnRow = new QHBoxLayout;
     m_closeConfigBtn = new QPushButton("Close");
@@ -188,10 +199,10 @@ QWidget* ExportDialog::buildProgressPage()
 // Fills the profile and mod checklists from synchronous daemon queries; everything starts checked.
 void ExportDialog::loadSelections()
 {
-    QString err;
+    GrpcError err;
     std::vector<GrpcProfile> profiles;
     if (!m_grpc->listProfilesSync(m_gameId, profiles, err))
-        m_loadError = QString("Could not list profiles: %1").arg(err);
+        m_loadError = errorSummary("list profiles for export", err, false);
     for (const auto& p : profiles) {
         auto* item = new QListWidgetItem(p.name, m_profileList);
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
@@ -199,7 +210,7 @@ void ExportDialog::loadSelections()
     }
 
     if (!m_grpc->listModsSync(m_gameId, m_mods, err))
-        m_loadError = QString("Could not list mods: %1").arg(err);
+        m_loadError = errorSummary("list mods for export", err, false);
     for (const auto& m : m_mods) {
         auto* item = new QListWidgetItem(
             QString("%1  (%2 files, %3)").arg(m.name).arg(m.fileCount).arg(humanBytes(m.totalSize)),
@@ -291,6 +302,7 @@ void ExportDialog::onStartExport()
     m_closeBtn->setVisible(false);
     m_cancelBtn->setVisible(true);
     m_cancelBtn->setEnabled(true);
+    m_cancelBtn->setDefault(true);
     m_stack->setCurrentIndex(PAGE_PROGRESS);
 
     m_grpc->startExport(m_gameId, m_destinationEdit->text().trimmed(),
@@ -347,7 +359,7 @@ void ExportDialog::onTransferCompleted(const GrpcTransferSummary& summary)
     m_closeBtn->setDefault(true);
 }
 
-void ExportDialog::onTransferFailed(const QString& error)
+void ExportDialog::onTransferFailed(const QString& error, int grpcCode)
 {
     if (!m_running) return;
     m_running = false;
@@ -360,12 +372,14 @@ void ExportDialog::onTransferFailed(const QString& error)
     } else {
         m_stepLabel->setText("Export failed.");
         m_resultLabel->setStyleSheet(QString("color: %1;").arg(errHex()));
-        m_resultLabel->setText(error);
+        m_resultLabel->setText(errorSummary("export these mods", GrpcError{grpcCode, QStringLiteral("ExportInstance"), error}, true));
+        presentError(this, "Export Failed", "export these mods", GrpcError{grpcCode, QStringLiteral("ExportInstance"), error}, true);
     }
     m_resultLabel->setVisible(true);
     m_cancelBtn->setVisible(false);
     m_backBtn->setVisible(true);
     m_closeBtn->setVisible(true);
+    m_closeBtn->setDefault(true);
 }
 
 bool ExportDialog::confirmAbortWhileRunning()

@@ -769,7 +769,7 @@ func TestStartInstallPublishesInstallCompleted(t *testing.T) {
 	installs := subscribeInstalls(t, d)
 	rel := filepath.Join("manual", "sample.zip")
 	writeManifestArchive(t, filepath.Join(config.DownloadsDir(depsGame), rel))
-	folder, _, err := d.StartInstall(dto.StartInstallRequest{GameID: depsGame, ArchiveRelPath: rel, Mode: dto.InstallAsNewMod, TargetMod: "Sample"})
+	folder, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{GameID: depsGame, ArchiveRelPath: rel, Mode: dto.InstallAsNewMod, TargetMod: "Sample"})
 	if err != nil {
 		t.Fatalf("StartInstall: %v", err)
 	}
@@ -777,7 +777,7 @@ func TestStartInstallPublishesInstallCompleted(t *testing.T) {
 	if !reflect.DeepEqual(completed, dto.InstallCompletedResult{GameID: depsGame, ModName: folder, ArchiveRelPath: rel}) {
 		t.Fatalf("InstallCompleted = %+v, want the registered mod without a batch", completed)
 	}
-	if _, _, err := d.StartInstall(dto.StartInstallRequest{GameID: depsGame, ArchiveRelPath: rel, Mode: dto.InstallAsNewMod, TargetMod: "Sample"}); err == nil {
+	if _, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{GameID: depsGame, ArchiveRelPath: rel, Mode: dto.InstallAsNewMod, TargetMod: "Sample"}); err == nil {
 		t.Fatal("a colliding install succeeded")
 	}
 	for {

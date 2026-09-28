@@ -7,8 +7,17 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/parka/gorganizer/internal/atomicfile"
 )
+
+var removeActivationData = os.RemoveAll
+var removeFailedStaging = os.RemoveAll
+var removeOldFarm = os.RemoveAll
+var syncFarmParent = atomicfile.SyncDir
 
 type MountManager struct {
 	gameDataPath  string
@@ -21,6 +30,7 @@ type MountManager struct {
 	appliedLayers []Layer
 	profileName   string
 	mounted       bool
+	storefront    *StorefrontSnapshot
 
 	desiredGen uint64
 	appliedGen uint64
@@ -43,6 +53,34 @@ func (m *MountManager) SetOverwriteRoot(root string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.overwriteRoot = root
+}
+
+// SetStorefrontBaseline sets the snapshot to record on the next activation.
+func (m *MountManager) SetStorefrontBaseline(baseline *StorefrontSnapshot) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.storefront = nil
+	if baseline != nil {
+		copy := *baseline
+		m.storefront = &copy
+	}
+}
+
+// StorefrontBaseline reads the current farm's recorded storefront snapshot.
+func (m *MountManager) StorefrontBaseline() (*StorefrontSnapshot, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, err := ReadSentinel(m.gameDataPath)
+	if errors.Is(err, ErrSentinelMissing) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateSentinel(s); err != nil {
+		return nil, err
+	}
+	return s.Storefront, nil
 }
 
 // SetMountedForTesting flips the mounted flag without filesystem work; test-only.
@@ -73,10 +111,21 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 	if _, err := os.Stat(backupPath); err == nil {
 		return fmt.Errorf("%w: %s", ErrBackupExists, backupPath)
 	}
-
-	_ = os.RemoveAll(stagingDirPath(dataPath))
-	_ = os.RemoveAll(oldFarmPath(dataPath))
-	_ = RemoveIntent(applyingIntentPath(dataPath))
+	if _, err := os.Lstat(filepath.Join(dataPath, SentinelFilename)); err == nil {
+		return fmt.Errorf("%w: %s still holds a mod farm", ErrBackupExists, dataPath)
+	}
+	for _, leftover := range []string{deactivationJournalPath(dataPath), retiredFarmPath(dataPath)} {
+		if _, err := os.Lstat(leftover); err == nil {
+			return fmt.Errorf("%w: %s is left from an unfinished mod removal", ErrBackupExists, leftover)
+		}
+	}
+	for _, leftover := range []string{stagingDirPath(dataPath), oldFarmPath(dataPath), applyingIntentPath(dataPath)} {
+		if _, err := os.Lstat(leftover); err == nil {
+			return fmt.Errorf("%w: %s is left from an unfinished mod change", ErrBackupExists, leftover)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("checking %s: %w", leftover, err)
+		}
+	}
 
 	if len(layers) > 0 && layers[0].Name == "__base__" {
 		layers[0].RootPath = backupPath
@@ -84,39 +133,63 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 	overwriteName := m.deriveOverwriteName(layers)
 	sentLayers := layersForSentinel(layers)
 
+	original, exists, err := directoryAt(dataPath)
+	if err != nil {
+		return fmt.Errorf("checking original Data: %w", err)
+	}
+	if !exists || original.Dev == 0 || original.Ino == 0 {
+		return fmt.Errorf("%w: %s is not a real directory", ErrDataDirMissing, dataPath)
+	}
 	intentPath := activatingIntentPath(dataPath)
-	if err := WriteIntent(intentPath, &ActivationIntent{
+	intent := &ActivationIntent{
 		SchemaVersion: CurrentIntentSchema,
 		Magic:         IntentMagic,
 		Kind:          IntentActivating,
+		OperationID:   uuid.NewString(),
+		Original:      original,
 		GameID:        m.gameID,
 		DataPath:      dataPath,
 		BackupPath:    backupPath,
 		OverwriteRoot: m.overwriteRoot,
 		PID:           os.Getpid(),
-	}); err != nil {
+	}
+	if err := WriteIntent(intentPath, intent); err != nil {
 		return fmt.Errorf("writing activation intent: %w", err)
 	}
 
 	slog.Info("renaming data directory", "from", dataPath, "to", backupPath)
 	if err := os.Rename(dataPath, backupPath); err != nil {
-		_ = RemoveIntent(intentPath)
-		return fmt.Errorf("renaming %s to %s: %w", dataPath, backupPath, err)
+		return errors.Join(fmt.Errorf("renaming %s to %s: %w", dataPath, backupPath, err), RemoveIntent(intentPath))
+	}
+	rollback := func(err error) error {
+		return errors.Join(err, rollbackActivation(dataPath, backupPath, intentPath, original, intent.Farm))
+	}
+	if err := syncFarmParent(filepath.Dir(dataPath)); err != nil {
+		return rollback(fmt.Errorf("syncing renamed Data: %w", err))
+	}
+	if err := os.Mkdir(dataPath, 0755); err != nil {
+		return rollback(fmt.Errorf("creating farm Data: %w", err))
+	}
+	farm, exists, err := directoryAt(dataPath)
+	if err != nil || !exists || farm.Dev == 0 || farm.Ino == 0 {
+		return rollback(fmt.Errorf("checking new farm Data: %w", err))
+	}
+	intent.Farm = &farm
+	if err := syncFarmParent(filepath.Dir(dataPath)); err != nil {
+		return rollback(fmt.Errorf("syncing new farm Data: %w", err))
+	}
+	if err := WriteIntent(intentPath, intent); err != nil {
+		return rollback(fmt.Errorf("recording new farm Data: %w", err))
 	}
 
 	tree := NewMergedTree()
 	if err := tree.Build(layers); err != nil {
-		_ = os.Rename(backupPath, dataPath)
-		_ = RemoveIntent(intentPath)
-		return fmt.Errorf("building merged tree: %w", err)
+		return rollback(fmt.Errorf("building merged tree: %w", err))
 	}
 
 	stats, err := BuildInto(dataPath, tree, layers, overwriteName)
 	if err != nil {
-		_ = os.RemoveAll(dataPath)
-		_ = os.Rename(backupPath, dataPath)
-		_ = RemoveIntent(intentPath)
-		return fmt.Errorf("materializing overlay: %w", err)
+		return rollback(fmt.Errorf("materializing overlay: %w", err))
 	}
 
 	sentinel := &Sentinel{
@@ -132,15 +205,19 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 		OverwriteRoot:       m.overwriteRoot,
 		Layers:              sentLayers,
 		MaterializerVersion: CurrentMaterializerVersion,
+		FarmID:              stats.FarmID,
+		Manifest:            stats.Manifest,
+		ManifestSHA256:      stats.ManifestSHA256,
+		ManifestEntries:     stats.ManifestEntries,
+		Storefront:          m.storefront,
 	}
 	if err := WriteSentinel(dataPath, sentinel); err != nil {
-		_ = os.RemoveAll(dataPath)
-		_ = os.Rename(backupPath, dataPath)
-		_ = RemoveIntent(intentPath)
-		return fmt.Errorf("writing sentinel: %w", err)
+		return rollback(fmt.Errorf("writing sentinel: %w", err))
 	}
 
-	_ = RemoveIntent(intentPath)
+	if err := RemoveIntent(intentPath); err != nil {
+		slog.Warn("activation committed but could not remove intent", "path", intentPath, "err", err)
+	}
 
 	m.tree = tree
 	m.layers = layers
@@ -161,22 +238,70 @@ func (m *MountManager) Activate(layers []Layer, profileName string) error {
 	return nil
 }
 
+// rollbackActivation restores the recorded original directory after verifying the identity of any partial farm.
+func rollbackActivation(dataPath, backupPath, intentPath string, original directoryIdentity, farm *directoryIdentity) error {
+	backup, backupExists, err := directoryAt(backupPath)
+	if err != nil {
+		return fmt.Errorf("checking activation backup: %w", err)
+	}
+	if !backupExists || backup != original {
+		return fmt.Errorf("activation backup does not match the recorded original directory")
+	}
+	data, dataExists, err := directoryAt(dataPath)
+	if err != nil {
+		return fmt.Errorf("checking partial Data: %w", err)
+	}
+	if dataExists {
+		if farm == nil || farm.Dev == 0 || farm.Ino == 0 || data != *farm {
+			return errors.New(foreignActivationDataReason)
+		}
+		if err := removeActivationData(dataPath); err != nil {
+			return fmt.Errorf("removing partial Data: %w", err)
+		}
+	}
+	if err := renameActivationBackup(backupPath, dataPath); err != nil {
+		return fmt.Errorf("restoring original Data: %w", err)
+	}
+	if err := syncFarmParent(filepath.Dir(dataPath)); err != nil {
+		return fmt.Errorf("syncing restored Data: %w", err)
+	}
+	return RemoveIntent(intentPath)
+}
+
 // Deactivate captures new writes into Overwrite and restores Data.orig, leaving the farm intact if capture fails.
-func (m *MountManager) Deactivate() error { return m.deactivate(false) }
+func (m *MountManager) Deactivate() error { return m.deactivate(false, CaptureOptions{}) }
+
+// DeactivateWithOptions restores the original Data folder while routing Steam-changed output into preserved files.
+func (m *MountManager) DeactivateWithOptions(opts CaptureOptions) error {
+	return m.deactivate(false, opts)
+}
 
 // ForceDeactivate tears down the farm even if capture fails, discarding uncaptured files.
-func (m *MountManager) ForceDeactivate() error { return m.deactivate(true) }
+func (m *MountManager) ForceDeactivate() error { return m.deactivate(true, CaptureOptions{}) }
 
-func (m *MountManager) deactivate(force bool) error {
+func (m *MountManager) deactivate(force bool, opts CaptureOptions) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	dataPath := m.gameDataPath
+	backupPath := dataPath + m.backupSuffix
+	journalPath := deactivationJournalPath(dataPath)
+	if _, err := os.Lstat(journalPath); err == nil {
+		j, err := readDeactivationJournal(journalPath)
+		if err != nil {
+			return fmt.Errorf("reading unfinished mod removal: %w", err)
+		}
+		if err := resumeFarmRetirement(dataPath, backupPath, j, force); err != nil {
+			return m.retirementErrorLocked(dataPath, backupPath, j.Backup, err)
+		}
+		m.clearMountedLocked()
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("checking unfinished mod removal: %w", err)
+	}
 	if !m.mounted {
 		return ErrNotMounted
 	}
-
-	dataPath := m.gameDataPath
-	backupPath := dataPath + m.backupSuffix
 
 	s, err := ReadSentinel(dataPath)
 	if err != nil {
@@ -186,7 +311,7 @@ func (m *MountManager) deactivate(force bool) error {
 		return fmt.Errorf("sentinel rejected: %w", vErr)
 	}
 
-	if m.overwriteRoot != "" {
+	if opts.PreserveInto == "" && m.overwriteRoot != "" {
 		moved, capErr := CaptureNewFiles(dataPath, m.overwriteRoot)
 		if capErr != nil {
 			if !force {
@@ -200,30 +325,59 @@ func (m *MountManager) deactivate(force bool) error {
 		}
 	}
 
+	backupID, _, err := directoryAt(backupPath)
+	if err != nil {
+		return fmt.Errorf("checking original Data before teardown: %w", err)
+	}
 	slog.Info("tearing down materialized overlay", "path", dataPath)
-	if err := os.RemoveAll(dataPath); err != nil {
-		return fmt.Errorf("removing materialized %s: %w", dataPath, err)
+	if err := retireFarm(dataPath, backupPath, s, force, opts); err != nil {
+		return m.retirementErrorLocked(dataPath, backupPath, backupID, err)
 	}
 
-	if err := os.Rename(backupPath, dataPath); err != nil {
-		return fmt.Errorf("restoring %s from %s: %w", dataPath, backupPath, err)
-	}
+	m.clearMountedLocked()
+	slog.Info("VFS deactivated and data directory restored", "path", dataPath)
+	return nil
+}
 
+// clearMountedLocked clears the manager's active farm state after Data has been restored.
+func (m *MountManager) clearMountedLocked() {
 	m.tree = nil
 	m.layers = nil
 	m.appliedLayers = nil
+	m.profileName = ""
 	m.mounted = false
+	m.storefront = nil
 	m.desiredGen = 0
 	m.appliedGen = 0
+}
 
-	slog.Info("VFS deactivated and data directory restored", "path", dataPath)
-	return nil
+// ResetAfterRestore clears the manager's mount state after external recovery restored the original Data directory.
+func (m *MountManager) ResetAfterRestore() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.clearMountedLocked()
+}
+
+// retirementErrorLocked reports unfinished cleanup and clears the mount state once the original is live.
+func (m *MountManager) retirementErrorLocked(dataPath, backupPath string, backupID directoryIdentity, cause error) error {
+	dataID, dataExists, dataErr := directoryAt(dataPath)
+	_, backupExists, backupErr := directoryAt(backupPath)
+	if dataErr == nil && backupErr == nil && dataExists && dataID == backupID && backupID.Dev != 0 && !backupExists {
+		m.clearMountedLocked()
+		return fmt.Errorf("Gorganizer restored the original files, but cleanup will finish on the next unmount or restart: %w", cause)
+	}
+	return fmt.Errorf("restoring %s from %s: %w", dataPath, backupPath, errors.Join(cause, dataErr, backupErr))
 }
 
 // MarkDirty updates the in-memory desired layout and advances desiredGen without touching the on-disk farm.
 func (m *MountManager) MarkDirty(layers []Layer) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.markDirtyLocked(layers)
+}
+
+// markDirtyLocked replaces the desired tree while the manager lock is held.
+func (m *MountManager) markDirtyLocked(layers []Layer) error {
 	if !m.mounted {
 		return ErrNotMounted
 	}
@@ -240,10 +394,37 @@ func (m *MountManager) MarkDirty(layers []Layer) error {
 	return nil
 }
 
+// Retarget atomically deploys another profile's layers and restores the old desired state if the swap fails.
+func (m *MountManager) Retarget(layers []Layer, profileName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	oldTree, oldLayers, oldApplied := m.tree, m.layers, m.appliedLayers
+	oldProfile, oldDesired, oldAppliedGen := m.profileName, m.desiredGen, m.appliedGen
+	if err := m.markDirtyLocked(layers); err != nil {
+		return err
+	}
+	m.profileName = profileName
+	if err := m.reMaterializeLocked(true); err != nil {
+		var committed *RetargetCommittedError
+		if errors.As(err, &committed) {
+			return err
+		}
+		m.tree, m.layers, m.appliedLayers = oldTree, oldLayers, oldApplied
+		m.profileName, m.desiredGen, m.appliedGen = oldProfile, oldDesired, oldAppliedGen
+		return err
+	}
+	return nil
+}
+
 // ReMaterialize captures new writes and atomically swaps in a farm rebuilt from the current in-memory tree.
 func (m *MountManager) ReMaterialize() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.reMaterializeLocked(false)
+}
+
+// reMaterializeLocked applies the desired tree while the manager lock is held.
+func (m *MountManager) reMaterializeLocked(retarget bool) error {
 	if !m.mounted {
 		return ErrNotMounted
 	}
@@ -261,6 +442,13 @@ func (m *MountManager) ReMaterialize() error {
 	if vErr := ValidateSentinel(s); vErr != nil {
 		return fmt.Errorf("sentinel rejected: %w", vErr)
 	}
+	for _, path := range []string{applyingIntentPath(dataPath), stagingDirPath(dataPath), oldFarmPath(dataPath)} {
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("an unfinished mod change at %s is still being cleaned up; restart Gorganizer, then try again", path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("checking mod change at %s: %w", path, err)
+		}
+	}
 
 	if m.overwriteRoot != "" {
 		if _, capErr := CaptureNewFiles(dataPath, m.overwriteRoot); capErr != nil {
@@ -275,11 +463,10 @@ func (m *MountManager) ReMaterialize() error {
 	m.tree = tree
 
 	staging := stagingDirPath(dataPath)
-	_ = os.RemoveAll(staging)
 	overwriteName := m.deriveOverwriteName(m.layers)
-	if _, err := BuildInto(staging, tree, m.layers, overwriteName); err != nil {
-		_ = os.RemoveAll(staging)
-		return fmt.Errorf("materializing staging overlay: %w", err)
+	stats, err := BuildInto(staging, tree, m.layers, overwriteName)
+	if err != nil {
+		return retargetCleanupFailure(retarget, fmt.Errorf("materializing staging overlay: %w", err), removeFailedStaging(staging))
 	}
 
 	sentLayers := layersForSentinel(m.layers)
@@ -296,51 +483,101 @@ func (m *MountManager) ReMaterialize() error {
 		OverwriteRoot:       m.overwriteRoot,
 		Layers:              sentLayers,
 		MaterializerVersion: CurrentMaterializerVersion,
+		FarmID:              stats.FarmID,
+		Manifest:            stats.Manifest,
+		ManifestSHA256:      stats.ManifestSHA256,
+		ManifestEntries:     stats.ManifestEntries,
+		Storefront:          s.Storefront,
 	}); err != nil {
-		_ = os.RemoveAll(staging)
-		return fmt.Errorf("writing staging sentinel: %w", err)
+		return retargetCleanupFailure(retarget, fmt.Errorf("writing staging sentinel: %w", err), removeFailedStaging(staging))
 	}
 
 	applyPath := applyingIntentPath(dataPath)
-	if err := WriteIntent(applyPath, &ActivationIntent{
+	applyIntent := &ActivationIntent{
 		SchemaVersion: CurrentIntentSchema,
 		Magic:         IntentMagic,
 		Kind:          IntentApplying,
+		OperationID:   uuid.NewString(),
+		LiveFarmID:    s.FarmID,
+		StagingFarmID: stats.FarmID,
 		GameID:        m.gameID,
 		DataPath:      dataPath,
 		BackupPath:    dataPath + m.backupSuffix,
 		OverwriteRoot: m.overwriteRoot,
 		StagingPath:   staging,
 		PID:           os.Getpid(),
-	}); err != nil {
-		_ = os.RemoveAll(staging)
-		return fmt.Errorf("writing apply intent: %w", err)
+	}
+	if s.FarmID == "" {
+		applyIntent.SchemaVersion = 1
+		applyIntent.OperationID, applyIntent.LiveFarmID, applyIntent.StagingFarmID = "", "", ""
+	}
+	if err := WriteIntent(applyPath, applyIntent); err != nil {
+		return retargetCleanupFailure(retarget, fmt.Errorf("writing apply intent: %w", err), removeFailedStaging(staging))
 	}
 
 	if err := renameExchange(dataPath, staging); err != nil {
-		oldFarm := oldFarmPath(dataPath)
-		_ = os.RemoveAll(oldFarm)
-		if rerr := os.Rename(dataPath, oldFarm); rerr != nil {
-			_ = os.RemoveAll(staging)
-			_ = RemoveIntent(applyPath)
-			return fmt.Errorf("apply swap (fallback, aside): %w", rerr)
+		var cleanupErr error
+		if rmErr := removeFailedStaging(staging); rmErr != nil {
+			cleanupErr = fmt.Errorf("removing staging overlay: %w", rmErr)
+		} else {
+			cleanupErr = RemoveIntent(applyPath)
 		}
-		if rerr := os.Rename(staging, dataPath); rerr != nil {
-			_ = os.Rename(oldFarm, dataPath)
-			_ = RemoveIntent(applyPath)
-			return fmt.Errorf("apply swap (fallback, in): %w", rerr)
+		if errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EINVAL) {
+			err = fmt.Errorf("this game's drive does not support the atomic folder swap Gorganizer needs to apply changes while mods are active; deactivate mods, then apply: %w", err)
+		} else {
+			err = fmt.Errorf("apply swap: %w", err)
 		}
-		_ = os.RemoveAll(oldFarm)
+		return retargetCleanupFailure(retarget, err, cleanupErr)
 	}
-
-	_ = os.RemoveAll(staging)
-	_ = RemoveIntent(applyPath)
+	if err := syncFarmParent(filepath.Dir(dataPath)); err != nil {
+		if !retarget {
+			return fmt.Errorf("syncing applied farm: %w", err)
+		}
+		if rollbackErr := renameExchange(dataPath, staging); rollbackErr != nil {
+			m.appliedGen = targetGen
+			m.appliedLayers = append([]Layer(nil), m.layers...)
+			return &RetargetCommittedError{Cause: errors.Join(fmt.Errorf("syncing applied farm: %w", err), fmt.Errorf("returning the old farm: %w", rollbackErr))}
+		}
+		cleanupErr := syncFarmParent(filepath.Dir(dataPath))
+		if rmErr := removeFailedStaging(staging); rmErr != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("removing the failed new farm: %w", rmErr))
+		} else {
+			cleanupErr = errors.Join(cleanupErr, RemoveIntent(applyPath))
+		}
+		if cleanupErr != nil {
+			return &RetargetCleanupError{Cause: errors.Join(fmt.Errorf("syncing applied farm: %w", err), cleanupErr)}
+		}
+		return fmt.Errorf("syncing applied farm: %w", err)
+	}
+	if err := removeOldFarm(staging); err != nil {
+		if !retarget {
+			return fmt.Errorf("removing old farm: %w", err)
+		}
+		m.appliedGen = targetGen
+		m.appliedLayers = append([]Layer(nil), m.layers...)
+		return &RetargetCommittedError{Cause: fmt.Errorf("removing old farm: %w", err)}
+	}
+	if err := RemoveIntent(applyPath); err != nil {
+		slog.Warn("apply committed but could not remove intent", "path", applyPath, "err", err)
+	}
 	m.appliedGen = targetGen
 	m.appliedLayers = append([]Layer(nil), m.layers...)
 
 	slog.Info("VFS re-materialized to apply pending changes",
 		"path", dataPath, "applied_gen", m.appliedGen, "desired_gen", m.desiredGen)
 	return nil
+}
+
+// retargetCleanupFailure reports a failed profile switch and whether its staging cleanup needs recovery.
+func retargetCleanupFailure(retarget bool, cause, cleanupErr error) error {
+	if cleanupErr == nil {
+		return cause
+	}
+	joined := errors.Join(cause, fmt.Errorf("cleaning failed staging: %w", cleanupErr))
+	if retarget {
+		return &RetargetCleanupError{Cause: joined}
+	}
+	return joined
 }
 
 // IsDirty reports whether pending edits are not yet applied to the on-disk farm.
@@ -364,11 +601,11 @@ func (m *MountManager) AppliedLayers() []Layer {
 }
 
 // RecoverIfNeeded handles startup recovery via CleanupStale.
-func (m *MountManager) RecoverIfNeeded() (RecoveryOutcome, error) {
+func (m *MountManager) RecoverIfNeeded(capture ...CaptureOptions) (RecoveryOutcome, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	outcome, err := CleanupStale(m.gameDataPath)
+	outcome, err := CleanupStale(m.gameDataPath, capture...)
 	if err != nil {
 		return outcome, fmt.Errorf("recovering %s: %w", m.gameDataPath, err)
 	}
@@ -435,5 +672,3 @@ func layersForSentinel(layers []Layer) []SentinelLayer {
 	}
 	return out
 }
-
-var _ = errors.Is

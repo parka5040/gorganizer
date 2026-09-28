@@ -18,7 +18,7 @@ class FomodInstallerDialog : public QDialog {
 public:
     FomodInstallerDialog(const FomodPlan& plan, QWidget* parent = nullptr);
 
-    // Source/destination copy ops with sources relative to plan.modulePath.
+    // Returns the selected files for the daemon installer.
     QList<FomodFile> selectedFiles() const { return m_selectedFiles; }
 
 private slots:

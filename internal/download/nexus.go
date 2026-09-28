@@ -101,27 +101,27 @@ func refuseCrossHostRedirect(next func(*http.Request, []*http.Request) error) fu
 	}
 }
 
-// redactKey replaces every occurrence of the API key in s with a placeholder.
-func (c *NexusClient) redactKey(s string) string {
-	if c.apiKey == "" {
-		return s
-	}
-	return strings.ReplaceAll(s, c.apiKey, redactedAPIKey)
-}
-
-// readErrorBody reads at most limit bytes of body and returns them with the API key redacted, dropping any key prefix cut off at the limit.
-func (c *NexusClient) readErrorBody(body io.Reader, limit int64) string {
-	data, _ := io.ReadAll(io.LimitReader(body, limit+1))
-	if int64(len(data)) <= limit {
-		return c.redactKey(string(data))
-	}
-	snippet := c.redactKey(string(data[:limit]))
-	for n := len(c.apiKey) - 1; n > 0; n-- {
-		if strings.HasSuffix(snippet, c.apiKey[:n]) {
-			return snippet[:len(snippet)-n]
+// readErrorBody reads a bounded response and removes API and link credentials.
+func (c *NexusClient) readErrorBody(body io.Reader, limit int64, secrets ...string) string {
+	data, _ := io.ReadAll(io.LimitReader(body, limit))
+	snippet := string(data)
+	secrets = append(secrets, c.apiKey)
+	if int64(len(data)) == limit {
+		for _, secret := range secrets {
+			for n := min(len(secret)-1, len(snippet)); n > 0; n-- {
+				if strings.HasSuffix(snippet, secret[:n]) {
+					snippet = snippet[:len(snippet)-n]
+					break
+				}
+			}
 		}
 	}
-	return snippet
+	for _, secret := range secrets {
+		if secret != "" {
+			snippet = strings.ReplaceAll(snippet, secret, redactedAPIKey)
+		}
+	}
+	return RedactHTTPBody(snippet)
 }
 
 // captureRateLimit reads the X-RL-* headers Nexus emits on every response.
@@ -170,19 +170,19 @@ func (c *NexusClient) ResolveDownloadURL(link *NXMLink) (string, error) {
 
 	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
-		return "", err
+		return "", redactHTTPError(err)
 	}
 	c.setHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("nexus API request failed: %w", err)
+		return "", fmt.Errorf("nexus API request failed: %w", redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("nexus download_link API returned %d: %s", resp.StatusCode, c.redactKey(string(body)))
+		body := c.readErrorBody(resp.Body, 4096, link.Key, url.QueryEscape(link.Key))
+		return "", fmt.Errorf("nexus download_link API returned %d: %s", resp.StatusCode, body)
 	}
 
 	var links []struct {
@@ -209,13 +209,13 @@ func (c *NexusClient) GetModInfo(gameSlug string, modID int) (*NexusModInfo, err
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("nexus API request failed: %w", err)
+		return nil, fmt.Errorf("nexus API request failed: %w", redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("nexus mods API returned %d: %s", resp.StatusCode, c.redactKey(string(body)))
+		body := c.readErrorBody(resp.Body, 4096)
+		return nil, fmt.Errorf("nexus mods API returned %d: %s", resp.StatusCode, body)
 	}
 
 	var info NexusModInfo
@@ -238,13 +238,13 @@ func (c *NexusClient) GetFileDetails(gameSlug string, modID, fileID int) (*Nexus
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("nexus API request failed: %w", err)
+		return nil, fmt.Errorf("nexus API request failed: %w", redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("nexus file details API returned %d: %s", resp.StatusCode, c.redactKey(string(body)))
+		body := c.readErrorBody(resp.Body, 4096)
+		return nil, fmt.Errorf("nexus file details API returned %d: %s", resp.StatusCode, body)
 	}
 
 	var details NexusFileDetails
@@ -271,12 +271,12 @@ func (c *NexusClient) ListModFilesContext(ctx context.Context, gameSlug string, 
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("nexus API request failed: %w", err)
+		return nil, fmt.Errorf("nexus API request failed: %w", redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("nexus files API returned %d: %s", resp.StatusCode, c.redactKey(string(body)))
+		body := c.readErrorBody(resp.Body, 4096)
+		return nil, fmt.Errorf("nexus files API returned %d: %s", resp.StatusCode, body)
 	}
 	var list NexusFileList
 	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
@@ -291,18 +291,18 @@ func (c *NexusClient) ResolveDownloadURLByID(gameSlug string, modID, fileID int)
 		c.baseURL, gameSlug, modID, fileID)
 	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
-		return "", err
+		return "", redactHTTPError(err)
 	}
 	c.setHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("nexus API request failed: %w", err)
+		return "", fmt.Errorf("nexus API request failed: %w", redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("nexus download_link returned %d: %s", resp.StatusCode, c.redactKey(string(body)))
+		body := c.readErrorBody(resp.Body, 4096)
+		return "", fmt.Errorf("nexus download_link returned %d: %s", resp.StatusCode, body)
 	}
 	var links []struct {
 		URI string `json:"URI"`
@@ -327,7 +327,7 @@ func (c *NexusClient) ValidateAPIKey(ctx context.Context) error {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("API key validation request failed: %w", err)
+		return fmt.Errorf("API key validation request failed: %w", redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 
@@ -337,8 +337,8 @@ func (c *NexusClient) ValidateAPIKey(ctx context.Context) error {
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return ErrInvalidKey
 	default:
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("validation failed: HTTP %d: %s", resp.StatusCode, c.redactKey(string(body)))
+		body := c.readErrorBody(resp.Body, 4096)
+		return fmt.Errorf("validation failed: HTTP %d: %s", resp.StatusCode, body)
 	}
 }
 
@@ -353,7 +353,7 @@ func (c *NexusClient) ValidateUser(ctx context.Context) (*NexusUser, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("Nexus user validation request failed: %w", err)
+		return nil, fmt.Errorf("Nexus user validation request failed: %w", redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 	c.captureRateLimit(resp.Header)
@@ -416,14 +416,14 @@ func (c *NexusClient) GetModFile(ctx context.Context, gameDomain, gameScopedID s
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("nexus v3 mod-file request failed: %w", err)
+		return nil, fmt.Errorf("nexus v3 mod-file request failed: %w", redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 	c.captureRateLimit(resp.Header)
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("nexus v3 mod-file returned %d: %s", resp.StatusCode, c.redactKey(string(body)))
+		body := c.readErrorBody(resp.Body, 4096)
+		return nil, fmt.Errorf("nexus v3 mod-file returned %d: %s", resp.StatusCode, body)
 	}
 	var env struct {
 		Data V3ModFile `json:"data"`
@@ -445,14 +445,14 @@ func (c *NexusClient) GetModFileDependencyRanges(ctx context.Context, globalFile
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("nexus v3 dep-ranges request failed: %w", err)
+		return nil, fmt.Errorf("nexus v3 dep-ranges request failed: %w", redactHTTPError(err))
 	}
 	defer resp.Body.Close()
 	c.captureRateLimit(resp.Header)
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("nexus v3 dep-ranges returned %d: %s", resp.StatusCode, c.redactKey(string(body)))
+		body := c.readErrorBody(resp.Body, 4096)
+		return nil, fmt.Errorf("nexus v3 dep-ranges returned %d: %s", resp.StatusCode, body)
 	}
 	var out V3DepRangesResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {

@@ -1,8 +1,10 @@
 #include "SetupWizard.h"
 #include "GameDetector.h"
 #include "DirectoryManager.h"
-#include "ThemeManager.h"
 #include "Dialogs.h"
+#include "GrpcClient.h"
+#include "ErrorPresenter.h"
+#include "WindowFit.h"
 
 #include <QLabel>
 #include <QListWidget>
@@ -13,69 +15,36 @@
 #include <QLineEdit>
 #include <QFormLayout>
 #include <QMenu>
-#include <QDesktopServices>
-#include <QUrl>
-#include <QNetworkAccessManager>
-#include <QNetworkRequest>
-#include <QNetworkReply>
-#include <QEventLoop>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QFile>
+#include <QScrollArea>
 #include <QDir>
-#include <QSysInfo>
-
-namespace {
-
-// Persists the API key to the daemon's config.json directly (wizard runs before daemon spawn).
-bool saveNexusApiKeyToConfig(const QString& apiKey)
-{
-    QString configDir = QString::fromUtf8(qgetenv("XDG_CONFIG_HOME"));
-    if (configDir.isEmpty())
-        configDir = QDir::homePath() + "/.config";
-    configDir += "/gorganizer";
-    QDir().mkpath(configDir);
-
-    QString path = configDir + "/config.json";
-    QJsonObject root;
-    QFile f(path);
-    if (f.exists() && f.open(QIODevice::ReadOnly)) {
-        auto doc = QJsonDocument::fromJson(f.readAll());
-        if (doc.isObject())
-            root = doc.object();
-        f.close();
-    }
-    root.insert("nexus_api_key", apiKey);
-    if (!root.contains("games"))
-        root.insert("games", QJsonObject{});
-    if (!root.contains("log_level"))
-        root.insert("log_level", "info");
-
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        return false;
-    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-    f.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-    f.close();
-    return true;
-}
-
-}
+#include <algorithm>
 
 namespace gorganizer {
 
 namespace {
-// Status-text hues from the active theme so they read in both light and dark.
-QString okHex() { return ThemeManager::currentPalette().successFg.name(); }
-QString errHex() { return ThemeManager::currentPalette().errorFg.name(); }
-QString mutedHex() { return ThemeManager::currentPalette().textMuted.name(); }
+
+QVBoxLayout* scrollablePageLayout(QWizardPage* page)
+{
+    auto* scroll = new QScrollArea(page);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    auto* content = new QWidget;
+    auto* layout = new QVBoxLayout(content);
+    scroll->setWidget(content);
+    auto* pageLayout = new QVBoxLayout(page);
+    pageLayout->setContentsMargins(0, 0, 0, 0);
+    pageLayout->addWidget(scroll);
+    return layout;
 }
 
-SetupWizard::SetupWizard(AppConfig& config, QWidget* parent)
+}
+
+SetupWizard::SetupWizard(AppConfig& config, GrpcClient* grpc, QWidget* parent)
     : QWizard(parent)
     , m_config(config)
+    , m_grpc(grpc)
 {
     setWindowTitle("Gorganizer Setup");
-    setMinimumSize(640, 480);
 
     addPage(createWelcomePage());
     addPage(createSteamDetectionPage());
@@ -83,23 +52,131 @@ SetupWizard::SetupWizard(AppConfig& config, QWidget* parent)
     addPage(createApiKeyPage());
     addPage(createDirectorySetupPage());
     addPage(createFinishPage());
+    fitToScreen(this, QSize(640, 480), QSize(560, 420));
+    connect(this, &QWizard::currentIdChanged, this, [this](int id) {
+        static_cast<QPushButton*>(button(QWizard::NextButton))->setDefault(id != 5);
+        static_cast<QPushButton*>(button(QWizard::FinishButton))->setDefault(id == 5);
+    });
+    static_cast<QPushButton*>(button(QWizard::NextButton))->setDefault(true);
+
+    connect(m_grpc, &GrpcClient::nexusKeySaveFinished, this,
+        [this](quint64 requestId, bool saved, const QString& error) {
+            if (requestId != m_keyRequestId || currentId() != 3)
+                return;
+            m_keyRequestId = 0;
+            m_apiKeySaveBtn->setEnabled(true);
+            m_apiKeySaveBtn->setText("Save Nexus key");
+            if (saved) {
+                m_apiKeySaved = true;
+                m_apiKeyStatus->setText("Nexus key saved.");
+            } else {
+                if (error == QLatin1String("invalid API key"))
+                    m_apiKeyStatus->setText("This key was not accepted by Nexus Mods. Check it and try again.");
+                else if (error.startsWith(QLatin1String("saving config:")))
+                    m_apiKeyStatus->setText("Couldn't save the key to Gorganizer's settings. Try again later.");
+                else
+                    m_apiKeyStatus->setText("Couldn't reach Nexus Mods. You can add the key later in Tools → Settings.");
+            }
+        });
+    connect(m_grpc, &GrpcClient::gameConfigurationFinished, this,
+        [this](quint64 requestId, const QString&, bool ok, const QString& error) {
+            if (requestId == m_manualRequestId) {
+                m_manualRequestId = 0;
+                m_manualLocateBtn->setEnabled(true);
+                if (currentId() == 1)
+                    button(QWizard::NextButton)->setEnabled(true);
+                if (!ok) {
+                    if (currentId() == 1)
+                        presentError(this, "Couldn't add game", "add this game", error, true);
+                    return;
+                }
+                auto it = std::find_if(m_manualGames.begin(), m_manualGames.end(),
+                    [this](const GameInfo& game) { return game.shortName == m_pendingManualGame.shortName; });
+                if (it == m_manualGames.end())
+                    m_manualGames.push_back(m_pendingManualGame);
+                else
+                    *it = m_pendingManualGame;
+                if (currentId() == 1) {
+                    refreshDetectedGames();
+                    m_steamPathLabel->setText(QString("%1 added.").arg(m_pendingManualGame.name));
+                }
+            } else if (requestId == m_finishRequestId && m_finishing && currentId() == 5) {
+                m_finishRequestId = 0;
+                if (!ok)
+                    m_finishErrors.append(m_selectedGames[m_finishIndex].name + ": "
+                        + errorSummary("save this game", error, true) + "\nDetails: " + error);
+                ++m_finishIndex;
+                configureNextGame();
+            }
+        });
+    connect(m_grpc, &GrpcClient::disconnected, this, [this] {
+        if (m_keyRequestId && currentId() == 3) {
+            m_keyRequestId = 0;
+            m_apiKeySaveBtn->setText("Save Nexus key");
+            m_apiKeySaveBtn->setEnabled(true);
+            m_apiKeyStatus->setText("Couldn't reach Nexus Mods. You can add the key later in Tools → Settings.");
+        }
+        if (m_manualRequestId && currentId() == 1) {
+            m_manualRequestId = 0;
+            m_manualLocateBtn->setEnabled(true);
+            button(QWizard::NextButton)->setEnabled(true);
+            dialogs::warn(this, "Couldn't add game", "The background service disconnected. Try again.");
+        }
+        if (m_finishing && currentId() == 5) {
+            m_finishing = false;
+            m_finishRequestId = 0;
+            button(QWizard::FinishButton)->setEnabled(true);
+            button(QWizard::BackButton)->setEnabled(true);
+            m_finishStatus->setText("Couldn't finish setup. Your selections are still available.\nThe background service disconnected. Try again.");
+        }
+    });
 }
 
 void SetupWizard::accept()
 {
-    m_config.markSetupComplete();
+    if (m_finishing || currentId() != 5)
+        return;
+    m_finishing = true;
+    m_finishIndex = 0;
+    m_finishErrors.clear();
+    m_finishStatus->setText("Saving your games…");
+    button(QWizard::FinishButton)->setEnabled(false);
+    button(QWizard::BackButton)->setEnabled(false);
+    configureNextGame();
+}
 
+void SetupWizard::reject()
+{
+    m_keyRequestId = 0;
+    m_manualRequestId = 0;
+    m_finishRequestId = 0;
+    m_finishing = false;
+    QWizard::reject();
+}
+
+void SetupWizard::configureNextGame()
+{
+    if (m_finishIndex < m_selectedGames.size()) {
+        const auto& game = m_selectedGames[m_finishIndex];
+        m_finishRequestId = m_grpc->configureGameTracked(game.shortName, game.name, game.appId,
+            QString::fromStdString(game.installDir.string()), game.dataSubpath);
+        return;
+    }
+    if (!m_finishErrors.isEmpty()) {
+        m_finishing = false;
+        button(QWizard::FinishButton)->setEnabled(true);
+        button(QWizard::BackButton)->setEnabled(true);
+        m_finishStatus->setText("Couldn't finish setup. Your selections are still available.\n"
+            + m_finishErrors.join("\n"));
+        return;
+    }
     std::vector<QString> shortNames;
-    for (const auto& g : m_selectedGames)
-        shortNames.push_back(g.shortName);
+    for (const auto& game : m_selectedGames)
+        shortNames.push_back(game.shortName);
     m_config.setManagedGames(shortNames);
-
     if (!m_selectedGames.empty())
         m_config.setActiveGameShortName(m_selectedGames.front().shortName);
-
-    if (m_apiKeyValid && !m_validatedApiKey.isEmpty())
-        saveNexusApiKeyToConfig(m_validatedApiKey);
-
+    m_config.markSetupComplete();
     QWizard::accept();
 }
 
@@ -109,7 +186,7 @@ QWizardPage* SetupWizard::createWelcomePage()
     page->setTitle("Welcome to Gorganizer");
     page->setSubTitle("A native Linux mod organizer for Bethesda games");
 
-    auto* layout = new QVBoxLayout(page);
+    auto* layout = scrollablePageLayout(page);
     auto* label = new QLabel(
         "Gorganizer manages mods for Bethesda games running through Steam and Proton.\n\n"
         "It creates a virtual file system overlay so you can enable, disable, and "
@@ -130,7 +207,7 @@ QWizardPage* SetupWizard::createSteamDetectionPage()
     page->setTitle("Steam Detection");
     page->setSubTitle("Locating your Steam installation and installed games");
 
-    auto* layout = new QVBoxLayout(page);
+    auto* layout = scrollablePageLayout(page);
 
     m_steamPathLabel = new QLabel("Searching...");
     layout->addWidget(m_steamPathLabel);
@@ -140,11 +217,8 @@ QWizardPage* SetupWizard::createSteamDetectionPage()
     layout->addWidget(m_detectedList);
 
     auto* btnRow = new QHBoxLayout;
-    m_manualLocateBtn = new QPushButton("Manually locate game executable...");
-    m_manualLocateBtn->setToolTip(
-        "Pick the .exe file for a Bethesda game (e.g. SkyrimSE.exe, Fallout4.exe, OblivionRemastered.exe). "
-        "Use this for Lutris, GOG, or any install Steam does not recognize. "
-        "Steam is still required for launching.");
+    m_manualLocateBtn = new QPushButton("Locate game…");
+    m_manualLocateBtn->setToolTip("Choose a supported game's program file.");
     btnRow->addWidget(m_manualLocateBtn);
     btnRow->addStretch();
     layout->addLayout(btnRow);
@@ -159,28 +233,16 @@ QWizardPage* SetupWizard::createSteamDetectionPage()
 
         auto detected = GameDetector::fromExecutable(std::filesystem::path(path.toStdString()));
         if (!detected) {
-            dialogs::warn(this, "Unrecognized Executable",
-                "That file doesn't match any known Bethesda game. "
-                "Expected one of: Morrowind.exe, Oblivion.exe, TESV.exe, SkyrimSE.exe, "
-                "Fallout3.exe, FalloutNV.exe, Fallout4.exe, Starfield.exe, OblivionRemastered.exe, "
-                "OblivionRemastered-Win64-Shipping.exe. "
-                "Stardew Valley is detected automatically from your Steam library.");
+            dialogs::warn(this, "Unsupported game", "This file is not a supported game executable.");
             return;
         }
-
-        bool exists = std::any_of(m_detectedGames.begin(), m_detectedGames.end(),
-            [&](const GameInfo& g) { return g.appId == detected->appId; });
-        if (exists) {
-            dialogs::info(this, "Already detected",
-                QString("%1 is already in the list.").arg(detected->name));
-            return;
-        }
-
-        m_detectedGames.push_back(*detected);
-        m_detectedList->addItem(
-            QString("%1 (manually located: %2)")
-                .arg(detected->name)
-                .arg(QString::fromStdString(detected->installDir.string())));
+        m_pendingManualGame = *detected;
+        m_manualLocateBtn->setEnabled(false);
+        button(QWizard::NextButton)->setEnabled(false);
+        m_steamPathLabel->setText("Adding game…");
+        m_manualRequestId = m_grpc->configureGameTracked(detected->shortName, detected->name,
+            detected->appId, QString::fromStdString(detected->installDir.string()),
+            detected->dataSubpath);
     });
 
     connect(this, &QWizard::currentIdChanged, this, [this](int id) {
@@ -188,29 +250,36 @@ QWizardPage* SetupWizard::createSteamDetectionPage()
 
         auto root = GameDetector::findSteamRoot();
         if (!root) {
-            m_steamPathLabel->setText(
-                "Steam installation not found. You can still add games "
-                "manually using the button below.");
+            m_steamPathLabel->setText("Steam not found. You can locate a game below.");
+            m_detectedGames.clear();
         } else {
-            m_steamPathLabel->setText("Steam found at: " + QString::fromStdString(root->string()));
-            auto folders = GameDetector::findLibraryFolders(*root);
-            m_detectedGames = GameDetector::detectGames(folders);
+            m_steamPathLabel->setText("Steam installations found. Searching all game libraries.");
+            m_detectedGames = GameDetector::detectAll();
         }
-
-        m_detectedList->clear();
-        if (m_detectedGames.empty()) {
-            m_detectedList->addItem(
-                "No supported Bethesda games found in Steam. "
-                "Use 'Manually locate' to add one.");
-        } else {
-            for (const auto& game : m_detectedGames) {
-                m_detectedList->addItem(
-                    QString("%1 (App ID: %2)").arg(game.name).arg(game.appId));
-            }
-        }
+        refreshDetectedGames();
     });
 
     return page;
+}
+
+void SetupWizard::refreshDetectedGames()
+{
+    for (const auto& manual : m_manualGames) {
+        auto it = std::find_if(m_detectedGames.begin(), m_detectedGames.end(),
+            [&manual](const GameInfo& game) { return game.shortName == manual.shortName; });
+        if (it == m_detectedGames.end())
+            m_detectedGames.push_back(manual);
+        else
+            *it = manual;
+    }
+    m_detectedList->clear();
+    if (m_detectedGames.empty()) {
+        m_detectedList->addItem("No supported games found in Steam. Use Locate game… to add one.");
+        return;
+    }
+    for (const auto& game : m_detectedGames)
+        m_detectedList->addItem(QString("%1 (%2)").arg(game.name,
+            QString::fromStdString(game.installDir.string())));
 }
 
 class GameSelectionPage : public QWizardPage {
@@ -236,7 +305,7 @@ QWizardPage* SetupWizard::createGameSelectionPage()
     page->setTitle("Game Selection");
     page->setSubTitle("Select which games you want to manage. Right-click for quick actions.");
 
-    auto* layout = new QVBoxLayout(page);
+    auto* layout = scrollablePageLayout(page);
 
     m_selectionList = new QListWidget;
     m_selectionList->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -305,11 +374,10 @@ QWizardPage* SetupWizard::createApiKeyPage()
     page->setTitle("Nexus Mods API Key");
     page->setSubTitle("Optional — required for downloads and script extender install");
 
-    auto* layout = new QVBoxLayout(page);
+    auto* layout = scrollablePageLayout(page);
 
     auto* help = new QLabel(
-        "Paste your Nexus Mods personal API key below. The key is saved to the "
-        "daemon's config and used to authenticate NXM downloads.\n\n"
+        "Paste your Nexus Mods personal API key below. Save it to use Nexus Mods downloads.\n\n"
         "You can skip this step and paste the key later in Tools → Settings.");
     help->setWordWrap(true);
     layout->addWidget(help);
@@ -328,71 +396,44 @@ QWizardPage* SetupWizard::createApiKeyPage()
     layout->addLayout(form);
 
     auto* btnRow = new QHBoxLayout;
-    m_apiKeyValidateBtn = new QPushButton("Validate && Save");
-    btnRow->addWidget(m_apiKeyValidateBtn);
+    m_apiKeySaveBtn = new QPushButton("Save Nexus key");
+    btnRow->addWidget(m_apiKeySaveBtn);
     btnRow->addStretch();
     layout->addLayout(btnRow);
 
     m_apiKeyStatus = new QLabel;
+    m_apiKeyStatus->setTextFormat(Qt::PlainText);
     m_apiKeyStatus->setWordWrap(true);
     layout->addWidget(m_apiKeyStatus);
     layout->addStretch();
 
-    connect(m_apiKeyValidateBtn, &QPushButton::clicked, this, [this]() {
+    connect(m_apiKeyEdit, &QLineEdit::textChanged, this, [this] {
+        m_apiKeySaved = false;
+        m_keyRequestId = 0;
+        m_apiKeyStatus->clear();
+        m_apiKeySaveBtn->setText("Save Nexus key");
+        m_apiKeySaveBtn->setEnabled(true);
+    });
+    connect(m_apiKeySaveBtn, &QPushButton::clicked, this, [this] {
         QString key = m_apiKeyEdit->text().trimmed();
         if (key.isEmpty()) {
-            m_apiKeyStatus->setText(
-                QString("<span style='color:%1;'>Please enter a key.</span>").arg(errHex()));
+            m_apiKeyStatus->setText("Please enter a key.");
             return;
         }
-        validateApiKey(key);
+        m_apiKeySaveBtn->setEnabled(false);
+        m_apiKeySaveBtn->setText("Saving…");
+        m_apiKeyStatus->clear();
+        m_keyRequestId = m_grpc->saveNexusAPIKey(key);
+    });
+    connect(this, &QWizard::currentIdChanged, this, [this](int id) {
+        if (id == 3 || !m_keyRequestId)
+            return;
+        m_keyRequestId = 0;
+        m_apiKeySaveBtn->setEnabled(true);
+        m_apiKeySaveBtn->setText("Save Nexus key");
     });
 
     return page;
-}
-
-void SetupWizard::validateApiKey(const QString& key)
-{
-    m_apiKeyStatus->setText(QString("<span style='color:%1;'>Validating...</span>").arg(mutedHex()));
-    m_apiKeyValidateBtn->setEnabled(false);
-
-    QNetworkAccessManager manager;
-    QNetworkRequest req(QUrl("https://api.nexusmods.com/v3/games/skyrimspecialedition/mods/12604"));
-    req.setRawHeader("apikey", key.toUtf8());
-    req.setRawHeader("User-Agent",
-        QString("Gorganizer/0.1.0 (%1) Qt").arg(QSysInfo::productType()).toUtf8());
-    req.setRawHeader("Application-Name", "Gorganizer");
-    req.setRawHeader("Application-Version", "0.1.0");
-    req.setRawHeader("Protocol-Version", "1.0.0");
-    req.setRawHeader("Content-Type", "application/json");
-
-    QEventLoop loop;
-    QNetworkReply* reply = manager.get(req);
-    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    loop.exec();
-
-    int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    QByteArray body = reply->readAll();
-    reply->deleteLater();
-    m_apiKeyValidateBtn->setEnabled(true);
-
-    if (status == 200) {
-        m_apiKeyValid = true;
-        m_validatedApiKey = key;
-        m_apiKeyStatus->setText(
-            QString("<b style='color:%1;'>Validated — the key will be saved on finish.</b>").arg(okHex()));
-    } else if (status == 401 || status == 403) {
-        m_apiKeyValid = false;
-        m_validatedApiKey.clear();
-        m_apiKeyStatus->setText(
-            QString("<b style='color:%1;'>Key rejected. Check that you copied it correctly.</b>").arg(errHex()));
-    } else {
-        m_apiKeyValid = false;
-        m_validatedApiKey.clear();
-        m_apiKeyStatus->setText(
-            QString("<b style='color:%1;'>Validation failed (HTTP %2). Network issue?</b>")
-                .arg(errHex()).arg(status));
-    }
 }
 
 QWizardPage* SetupWizard::createDirectorySetupPage()
@@ -401,7 +442,7 @@ QWizardPage* SetupWizard::createDirectorySetupPage()
     page->setTitle("Directory Setup");
     page->setSubTitle("Creating mod management directories");
 
-    auto* layout = new QVBoxLayout(page);
+    auto* layout = scrollablePageLayout(page);
     m_dirStatusLabel = new QLabel;
     m_dirStatusLabel->setWordWrap(true);
     layout->addWidget(m_dirStatusLabel);
@@ -424,8 +465,17 @@ QWizardPage* SetupWizard::createDirectorySetupPage()
                 m_selectedGames.push_back(*it);
                 continue;
             }
-            if (auto known = GameInfo::findByShortName(shortName))
+            if (auto known = GameInfo::findByShortName(shortName)) {
+                if (known->synthetic) {
+                    auto parent = std::find_if(m_detectedGames.begin(), m_detectedGames.end(),
+                        [&known](const GameInfo& game) { return game.shortName == known->linkedFromShortName; });
+                    if (parent != m_detectedGames.end()) {
+                        known->installDir = parent->installDir;
+                        known->dataDir = parent->dataDir;
+                    }
+                }
                 m_selectedGames.push_back(*known);
+            }
         }
 
         auto configDir = m_config.configDir();
@@ -462,27 +512,33 @@ QWizardPage* SetupWizard::createDirectorySetupPage()
 QWizardPage* SetupWizard::createFinishPage()
 {
     auto* page = new QWizardPage;
-    page->setTitle("Setup Complete");
-    page->setSubTitle("Gorganizer is ready to use");
+    page->setTitle("Finish setup");
+    page->setSubTitle("Save your choices to the background service");
 
-    auto* layout = new QVBoxLayout(page);
+    auto* layout = scrollablePageLayout(page);
     m_summaryLabel = new QLabel;
     m_summaryLabel->setWordWrap(true);
     layout->addWidget(m_summaryLabel);
+    m_finishStatus = new QLabel;
+    m_finishStatus->setTextFormat(Qt::PlainText);
+    m_finishStatus->setWordWrap(true);
+    layout->addWidget(m_finishStatus);
     layout->addStretch();
 
     connect(this, &QWizard::currentIdChanged, this, [this](int id) {
         if (id != 5) return;
-        QString apiKeyMsg = m_apiKeyValid
-            ? "Nexus API key saved."
-            : "No Nexus API key set — you can paste one in Tools → Settings later.";
+        m_finishStatus->clear();
+        QString apiKeyMsg = m_apiKeySaved
+            ? "Your Nexus key has been saved."
+            : "No Nexus key saved — you can add one in Tools → Settings later.";
         m_summaryLabel->setText(
-            QString("Setup complete. Managing %1 game(s).\n\n%2\n\n"
+            QString("Ready to manage %1 game(s). Click Finish to save your games.\n\n%2\n\n"
                     "Script extenders (xNVSE, SKSE64, F4SE, FOSE) can be installed "
                     "directly from the main window: pick the extender in the Run "
                     "dropdown and the first click downloads + installs it. Next "
                     "click runs the game through it.\n\n"
-                    "Drop archives into the Downloads tab or double-click to install mods.")
+                    "Use Install Mod or drop an archive onto the window to install it. "
+                    "Then tick the mod to enable it.")
                 .arg(m_selectedGames.size())
                 .arg(apiKeyMsg));
     });

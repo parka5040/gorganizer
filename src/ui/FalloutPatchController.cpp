@@ -3,6 +3,7 @@
 #include "SessionController.h"
 #include "RunButtonWidget.h"
 #include "Dialogs.h"
+#include "ErrorPresenter.h"
 
 #include <QAction>
 #include <QMessageBox>
@@ -73,26 +74,16 @@ void FalloutPatchController::onPatchFalloutTo4GB()
         return;
 
     m_statusBar->showMessage("Downloading FNV 4GB patcher from Nexus...");
-    QString patcherExePath, version, err;
+    QString patcherExePath, version;
+    GrpcError err;
     if (!m_grpc->install4GBPatcher(m_session->activeGame().shortName, patcherExePath, version, err)) {
-        const QString lower = err.toLower();
+        const QString lower = err.message.toLower();
         if (lower.contains("xnvse")) {
-            dialogs::warn(m_parentWindow, "xNVSE Required",
-                "<p>xNVSE must be installed before applying the 4GB patch. "
-                "The patcher relies on the script extender being in place.</p>"
-                "<p>Open the Run combo and choose <b>Install xNVSE...</b>, then try "
-                "again.</p>");
+            presentError(m_parentWindow, "xNVSE Required", "download the Fallout patcher", err, true);
         } else if (lower.contains("api key") || lower.contains("apikey")) {
-            dialogs::warn(m_parentWindow, "Nexus API Key Required",
-                "<p>A Nexus Mods API key is required to download the 4GB patcher.</p>"
-                "<p>Open <b>Tools &#x2192; Settings</b> and paste a key, then try "
-                "again.</p>");
+            presentError(m_parentWindow, "Nexus API Key Required", "download the Fallout patcher", err, true);
         } else {
-            dialogs::warn(m_parentWindow, "Download Failed",
-                QString("<p>%1</p>"
-                        "<p>If you are a non-premium Nexus user, open the mod page "
-                        "in a browser and click 'Download with Manager' to trigger "
-                        "an NXM download.</p>").arg(err.toHtmlEscaped()));
+            presentError(m_parentWindow, "Download Failed", "download the Fallout patcher", err, true);
         }
         m_statusBar->clearMessage();
         return;
@@ -116,20 +107,18 @@ void FalloutPatchController::onPatchFalloutTo4GB()
     }
 
     m_statusBar->showMessage("Applying 4GB patch...");
-    QString output, applyErr;
+    QString output;
+    GrpcError applyErr;
     if (!m_grpc->apply4GBPatch(m_session->activeGame().shortName, patcherExePath, output, applyErr)) {
-        dialogs::warn(m_parentWindow, "Patch Failed",
-            QString("<p>%1</p>"
-                    "<p>Patcher output:</p><pre>%2</pre>")
-                .arg(applyErr.toHtmlEscaped(), output.toHtmlEscaped()));
+        presentError(m_parentWindow, "Patch Failed", "patch Fallout", applyErr, true,
+                     output.isEmpty() ? QString() : QStringLiteral("Patcher output:\n") + output);
         m_statusBar->clearMessage();
         return;
     }
 
     dialogs::info(m_parentWindow, "Patch Applied",
-        QString("<p>FalloutNV.exe has been patched to 4GB.</p>"
-                "<p>Patcher output:</p><pre>%1</pre>")
-            .arg(output.isEmpty() ? "(no output)" : output.toHtmlEscaped()));
+        QString("FalloutNV.exe has been patched to 4GB.\n\nPatcher output:\n%1")
+            .arg(output.isEmpty() ? "(no output)" : output));
 
     if (m_patchAction) {
         m_patchAction->setEnabled(false);

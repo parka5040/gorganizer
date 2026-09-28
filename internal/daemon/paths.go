@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"os"
 	"path/filepath"
 
 	"github.com/parka/gorganizer/internal/config"
+	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/fsutil"
 )
 
@@ -13,6 +15,33 @@ func resolveModDir(gameID, modName string) (string, error) {
 		return "", &UnsafePathError{Field: "mod_name"}
 	}
 	return filepath.Join(config.ModsDir(gameID), modName), nil
+}
+
+// resolveExistingModDir returns an existing real mod folder with a valid, non-reserved name.
+func resolveExistingModDir(gameID, name string) (string, error) {
+	if err := download.ValidateTargetModName(name); err != nil {
+		return "", err
+	}
+	modDir := filepath.Join(config.ModsDir(gameID), name)
+	if err := requireRealModDir(gameID, name, modDir); err != nil {
+		return "", err
+	}
+	return modDir, nil
+}
+
+// requireRealModDir returns ModNotFoundError for a missing mod folder and refuses a non-directory or symlink.
+func requireRealModDir(gameID, name, modDir string) error {
+	info, err := os.Lstat(modDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &ModNotFoundError{GameID: gameID, Name: name}
+		}
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return &download.InvalidTargetModError{Name: name, Reason: "not a real mod folder"}
+	}
+	return nil
 }
 
 // archivePath resolves a validated archive path under downloadsDir.

@@ -6,16 +6,18 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/dto"
 	"github.com/parka/gorganizer/internal/httpx"
 )
@@ -48,14 +50,25 @@ type Download struct {
 	cancel context.CancelFunc
 }
 
+type archivePart interface {
+	Write([]byte) (int, error)
+	Truncate(int64) error
+	Sync() error
+	Close() error
+}
+
 type Manager struct {
-	nexus      URLResolver
-	httpClient *http.Client
-	mu         sync.RWMutex
-	active     map[string]*Download
-	queued     []*Download
-	hooks      ManagerHooks
-	maxConcur  int
+	nexus        URLResolver
+	httpClient   *http.Client
+	openPart     func(string, string, bool) (archivePart, error)
+	landing      landingActions
+	mu           sync.RWMutex
+	active       map[string]*Download
+	queued       []*Download
+	retrying     map[string]bool
+	destinations map[string]string
+	hooks        ManagerHooks
+	maxConcur    int
 
 	queuePump chan struct{}
 	stop      chan struct{}
@@ -81,20 +94,37 @@ type DownloadSnapshot struct {
 
 // NewManager creates a download Manager; caller must Stop() on shutdown.
 func NewManager(nexus URLResolver, maxConcurrent int, hooks ManagerHooks) *Manager {
+	return NewManagerWithClient(nexus, maxConcurrent, hooks, httpx.DownloadClient())
+}
+
+// NewManagerWithClient creates a download Manager with the supplied HTTP client.
+func NewManagerWithClient(nexus URLResolver, maxConcurrent int, hooks ManagerHooks, client *http.Client) *Manager {
+	if client == nil {
+		client = httpx.DownloadClient()
+	}
 	if maxConcurrent < 1 {
 		maxConcurrent = 3
 	}
 	m := &Manager{
-		nexus:      nexus,
-		httpClient: httpx.DownloadClient(),
-		active:     make(map[string]*Download),
-		hooks:      hooks,
-		maxConcur:  maxConcurrent,
-		queuePump:  make(chan struct{}, 1),
-		stop:       make(chan struct{}),
+		nexus:        nexus,
+		httpClient:   client,
+		active:       make(map[string]*Download),
+		retrying:     make(map[string]bool),
+		destinations: make(map[string]string),
+		hooks:        hooks,
+		maxConcur:    maxConcurrent,
+		queuePump:    make(chan struct{}, 1),
+		stop:         make(chan struct{}),
 	}
 	go m.runQueuePump()
 	return m
+}
+
+// SetResolver changes the resolver used by pipelines started after the change.
+func (m *Manager) SetResolver(r URLResolver) {
+	m.mu.Lock()
+	m.nexus = r
+	m.mu.Unlock()
 }
 
 // Stop halts the queue pump; active downloads keep running.
@@ -128,7 +158,7 @@ func (m *Manager) StartDownloadForGame(uri, overrideGameID string) (id string, q
 		gameID = overrideGameID
 	}
 	if link.IsExpired(time.Now()) {
-		return "", 0, &NXMExpiredError{URI: uri}
+		return "", 0, &NXMExpiredError{URI: redactURL(uri)}
 	}
 
 	id = "dl-" + uuid.NewString()
@@ -155,28 +185,42 @@ func (m *Manager) StartDownloadForGame(uri, overrideGameID string) (id string, q
 		ahead = 0
 	}
 	dl.QueuedAhead = int32(ahead)
+	state := *dl
 	m.mu.Unlock()
 
-	m.emitProgress(dl)
+	m.emitProgress(state)
 	m.signalPump()
 	return id, ahead, nil
 }
 
-// RetryDownload restarts a failed/cancelled download, resuming from .part if present.
+// RetryDownload restarts a failed/cancelled download, returning its live position or refusing a concurrent admission.
 func (m *Manager) RetryDownload(id string, gameIDs []string) (queuedAhead int, err error) {
 	m.mu.Lock()
-	if dl, ok := m.active[id]; ok {
-		_ = dl
+	if _, ok := m.active[id]; ok {
 		m.mu.Unlock()
 		return 0, nil
 	}
 	for _, dl := range m.queued {
 		if dl.ID == id {
+			ahead := dl.QueuedAhead
 			m.mu.Unlock()
-			return int(dl.QueuedAhead), nil
+			return int(ahead), nil
 		}
 	}
+	if m.retrying[id] {
+		m.mu.Unlock()
+		return 0, ErrRetryInProgress
+	}
+	if m.retrying == nil {
+		m.retrying = make(map[string]bool)
+	}
+	m.retrying[id] = true
 	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.retrying, id)
+		m.mu.Unlock()
+	}()
 
 	for _, gameID := range gameIDs {
 		entries, err := LoadLedger(gameID)
@@ -187,6 +231,10 @@ func (m *Manager) RetryDownload(id string, gameIDs []string) (queuedAhead int, e
 			if e.ID != id {
 				continue
 			}
+			if err := validateLedgerDestination(gameID, e); err != nil {
+				m.rejectLedgerEntry(gameID, e, err)
+				return 0, err
+			}
 			if e.NXMURI == "" {
 				return 0, fmt.Errorf("ledger entry %q has no NXM URI; cannot retry", id)
 			}
@@ -195,7 +243,7 @@ func (m *Manager) RetryDownload(id string, gameIDs []string) (queuedAhead int, e
 				return 0, err
 			}
 			if link.IsExpired(time.Now()) {
-				return 0, &NXMExpiredError{URI: e.NXMURI}
+				return 0, &NXMExpiredError{URI: redactURL(e.NXMURI)}
 			}
 			dl := &Download{
 				ID: e.ID, GameID: e.GameID, GameSlug: e.GameSlug,
@@ -215,9 +263,10 @@ func (m *Manager) RetryDownload(id string, gameIDs []string) (queuedAhead int, e
 				ahead = 0
 			}
 			dl.QueuedAhead = int32(ahead)
+			state := *dl
 			m.mu.Unlock()
 
-			m.emitProgress(dl)
+			m.emitProgress(state)
 			m.signalPump()
 			return ahead, nil
 		}
@@ -229,10 +278,11 @@ func (m *Manager) RetryDownload(id string, gameIDs []string) (queuedAhead int, e
 func (m *Manager) CancelDownload(id string, gameIDs []string) error {
 	m.mu.Lock()
 	if dl, ok := m.active[id]; ok {
-		if dl.cancel != nil {
-			dl.cancel()
-		}
+		cancel := dl.cancel
 		m.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 		return nil
 	}
 	for i, dl := range m.queued {
@@ -240,13 +290,14 @@ func (m *Manager) CancelDownload(id string, gameIDs []string) error {
 			m.queued = append(m.queued[:i], m.queued[i+1:]...)
 			dl.Status = StatusCancelled
 			dl.Error = "cancelled"
+			state := *dl
 			m.mu.Unlock()
-			m.emitProgress(dl)
+			m.emitProgress(state)
 			_ = UpsertLedgerEntry(LedgerEntry{
-				ID: id, GameID: dl.GameID, NXMURI: dl.NXMURI,
-				GameSlug: dl.GameSlug, ModID: dl.ModID, FileID: dl.FileID,
-				ArchiveRelPath: dl.ArchiveRel, BytesDone: dl.BytesDownloaded,
-				BytesTotal: dl.BytesTotal, Status: LedgerCancelled,
+				ID: id, GameID: state.GameID, NXMURI: state.NXMURI,
+				GameSlug: state.GameSlug, ModID: state.ModID, FileID: state.FileID,
+				ArchiveRelPath: state.ArchiveRel, BytesDone: state.BytesDownloaded,
+				BytesTotal: state.BytesTotal, Status: LedgerCancelled,
 				Error: "cancelled",
 			})
 			return nil
@@ -267,6 +318,21 @@ func (m *Manager) CancelDownload(id string, gameIDs []string) error {
 		}
 	}
 	return &DownloadNotFoundError{ID: id}
+}
+
+// IsActive reports whether a download is running, queued, or being retried.
+func (m *Manager) IsActive(id string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if _, ok := m.active[id]; ok || m.retrying[id] {
+		return true
+	}
+	for _, dl := range m.queued {
+		if dl.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) GetProgress(downloadID string) (*DownloadSnapshot, error) {
@@ -293,7 +359,8 @@ func (m *Manager) ActiveDownloadIDByArchive(absArchive string) string {
 		if dl.ArchiveRel == "" {
 			continue
 		}
-		if filepath.Join(config.DownloadsDir(dl.GameID), dl.ArchiveRel) == absArchive {
+		path, err := resolveArchiveDestination(dl.GameID, dl.ArchiveRel)
+		if err == nil && path == absArchive {
 			return dl.ID
 		}
 	}
@@ -329,6 +396,22 @@ func (m *Manager) RehydrateLedger(gameIDs []string) {
 			if e.Terminal() {
 				continue
 			}
+			if present, err := HasLanding(gameID, e.ID); present || err != nil {
+				if err != nil {
+					slog.Warn("checking archive landing failed", "game", gameID, "id", e.ID, "err", err)
+				} else {
+					e.Status = LedgerFailed
+					e.Error = (&ArchiveInformationSaveError{}).Error()
+					if err := UpsertLedgerEntry(e); err != nil {
+						slog.Warn("marking unfinished landing failed", "game", gameID, "id", e.ID, "err", err)
+					}
+				}
+				continue
+			}
+			if err := validateLedgerDestination(gameID, e); err != nil {
+				m.rejectLedgerEntry(gameID, e, err)
+				continue
+			}
 			if e.NXMURI == "" {
 				slog.Warn("ledger entry has no URI; marking failed", "id", e.ID)
 				upd := e
@@ -339,7 +422,7 @@ func (m *Manager) RehydrateLedger(gameIDs []string) {
 			}
 			link, parseErr := ParseNXM(e.NXMURI)
 			if parseErr != nil || link.IsExpired(time.Now()) {
-				slog.Warn("ledger NXM expired; marking failed", "id", e.ID, "uri", e.NXMURI)
+				slog.Warn("ledger NXM expired; marking failed", "id", e.ID, "uri", redactURL(e.NXMURI))
 				upd := e
 				upd.Status = LedgerFailed
 				upd.Error = "nxm_expired"
@@ -359,6 +442,17 @@ func (m *Manager) RehydrateLedger(gameIDs []string) {
 		}
 	}
 	m.signalPump()
+}
+
+// rejectLedgerEntry records a refused destination without changing its persisted path.
+func (m *Manager) rejectLedgerEntry(gameID string, e LedgerEntry, err error) {
+	e.GameID = gameID
+	e.Status = LedgerFailed
+	e.Error = err.Error()
+	if saveErr := UpsertLedgerEntry(e); saveErr != nil {
+		slog.Warn("could not mark download failed", "id", e.ID, "err", saveErr)
+	}
+	m.emitProgress(Download{ID: e.ID, GameID: gameID, Status: StatusFailed, Error: e.Error})
 }
 
 func (m *Manager) signalPump() {
@@ -391,21 +485,24 @@ func (m *Manager) runQueuePump() {
 			dl.Status = StatusDownloading
 			dl.QueuedAhead = 0
 			m.active[dl.ID] = dl
+			snapshots := []Download{*dl}
+			for _, q := range m.queued {
+				snapshots = append(snapshots, *q)
+			}
 			m.mu.Unlock()
 
-			m.emitProgress(dl)
-			m.mu.RLock()
-			for _, q := range m.queued {
-				m.emitProgress(q)
+			for _, state := range snapshots {
+				m.emitProgress(state)
 			}
-			m.mu.RUnlock()
-
 			go m.runPipeline(ctx, dl)
 		}
 	}
 }
 
 func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
+	m.mu.RLock()
+	resolver := m.nexus
+	m.mu.RUnlock()
 	defer func() {
 		m.mu.Lock()
 		delete(m.active, dl.ID)
@@ -413,90 +510,125 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 		m.signalPump()
 	}()
 
-	link, err := ParseNXM(dl.NXMURI)
+	state := m.snapshot(dl)
+	link, err := ParseNXM(state.NXMURI)
 	if err != nil {
 		m.fail(dl, fmt.Errorf("parsing NXM: %w", err))
 		return
 	}
 
-	modInfo, err := m.nexus.GetModInfo(link.GameSlug, link.ModID)
+	modInfo, err := resolver.GetModInfo(link.GameSlug, link.ModID)
 	modName := fmt.Sprintf("mod_%d", link.ModID)
 	if err == nil && modInfo != nil {
 		modName = modInfo.Name
 	}
-	dl.ModName = modName
-	m.emitProgress(dl)
+	state = m.update(dl, func(d *Download) { d.ModName = modName })
+	m.emitProgress(state)
 
-	fileDetails, _ := m.nexus.GetFileDetails(link.GameSlug, link.ModID, link.FileID)
+	fileDetails, _ := resolver.GetFileDetails(link.GameSlug, link.ModID, link.FileID)
+	cdnURL, err := resolver.ResolveDownloadURL(link)
+	if err != nil {
+		m.fail(dl, fmt.Errorf("resolving CDN URL: %w", redactHTTPError(err)))
+		return
+	}
 
-	archiveFilename := pickArchiveFilename(fileDetails, "", link)
+	restartFromZero := state.ArchiveRel != "" && state.BytesDownloaded == 0
+	archiveFilename := pickArchiveFilename(fileDetails, cdnURL, link)
 	folder := fmt.Sprintf("%d_%s", link.ModID, SanitizeForFolder(modName))
 	if strings.TrimSpace(modName) == "" {
 		folder = fmt.Sprintf("%d", link.ModID)
 	}
-	if dl.ArchiveRel == "" {
-		dl.ArchiveRel = filepath.Join(folder, archiveFilename)
+	if state.ArchiveRel == "" {
+		state = m.update(dl, func(d *Download) { d.ArchiveRel = filepath.Join(folder, archiveFilename) })
 	}
-	downloadsDir := config.DownloadsDir(dl.GameID)
-	archivePath := filepath.Join(downloadsDir, dl.ArchiveRel)
-	if err := os.MkdirAll(filepath.Dir(archivePath), 0755); err != nil {
-		m.fail(dl, fmt.Errorf("creating archive dir: %w", err))
+	archivePath, err := resolveArchiveDestination(state.GameID, state.ArchiveRel)
+	if err != nil {
+		m.fail(dl, err)
+		return
+	}
+	if !m.claimDestination(state.GameID, state.ArchiveRel, state.ID) {
+		m.fail(dl, ErrArchiveDownloadBusy)
+		return
+	}
+	defer m.releaseDestination(state.GameID, state.ArchiveRel, state.ID)
+	if err := ensureArchiveFolder(archivePath, state.ArchiveRel); err != nil {
+		m.fail(dl, err)
 		return
 	}
 	partPath := PartPath(archivePath)
-
-	cdnURL, err := m.nexus.ResolveDownloadURL(link)
+	resumeFrom, err := partSize(partPath, state.ArchiveRel)
 	if err != nil {
-		m.fail(dl, fmt.Errorf("resolving CDN URL: %w", err))
+		m.fail(dl, err)
 		return
 	}
-
-	var resumeFrom int64
-	if fi, statErr := os.Stat(partPath); statErr == nil {
-		resumeFrom = fi.Size()
-		dl.BytesDownloaded = resumeFrom
+	if restartFromZero {
+		resumeFrom = 0
 	}
+	state = m.update(dl, func(d *Download) { d.BytesDownloaded = resumeFrom })
 
 	_ = UpsertLedgerEntry(LedgerEntry{
-		ID: dl.ID, GameID: dl.GameID, NXMURI: dl.NXMURI,
-		GameSlug: dl.GameSlug, ModID: dl.ModID, FileID: dl.FileID,
-		ArchiveRelPath: dl.ArchiveRel,
-		BytesDone:      dl.BytesDownloaded, BytesTotal: dl.BytesTotal,
+		ID: state.ID, GameID: state.GameID, NXMURI: state.NXMURI,
+		GameSlug: state.GameSlug, ModID: state.ModID, FileID: state.FileID,
+		ArchiveRelPath: state.ArchiveRel,
+		BytesDone:      state.BytesDownloaded, BytesTotal: state.BytesTotal,
 		Status: LedgerDownloading,
 	})
 
 	if err := m.streamToFile(ctx, cdnURL, partPath, resumeFrom, dl); err != nil {
-		if errors.Is(err, context.Canceled) {
-			dl.Status = StatusCancelled
-			dl.Error = "cancelled"
-			m.emitProgress(dl)
+		var saveErr *ArchiveSaveError
+		if errors.Is(err, context.Canceled) && !errors.As(err, &saveErr) {
+			state = m.update(dl, func(d *Download) {
+				d.Status = StatusCancelled
+				d.Error = "cancelled"
+			})
+			m.emitProgress(state)
 			_ = UpsertLedgerEntry(LedgerEntry{
-				ID: dl.ID, GameID: dl.GameID, NXMURI: dl.NXMURI,
-				GameSlug: dl.GameSlug, ModID: dl.ModID, FileID: dl.FileID,
-				ArchiveRelPath: dl.ArchiveRel,
-				BytesDone:      dl.BytesDownloaded, BytesTotal: dl.BytesTotal,
+				ID: state.ID, GameID: state.GameID, NXMURI: state.NXMURI,
+				GameSlug: state.GameSlug, ModID: state.ModID, FileID: state.FileID,
+				ArchiveRelPath: state.ArchiveRel,
+				BytesDone:      state.BytesDownloaded, BytesTotal: state.BytesTotal,
 				Status: LedgerCancelled, Error: "cancelled",
 			})
-			os.Remove(partPath)
+			if checkArchiveFolder(archivePath, state.ArchiveRel) == nil {
+				_ = os.Remove(partPath)
+			}
 			return
 		}
 		m.fail(dl, err)
 		return
 	}
 
-	if err := os.Rename(partPath, archivePath); err != nil {
-		m.fail(dl, fmt.Errorf("renaming .part: %w", err))
+	state = m.snapshot(dl)
+	if err := checkArchiveFolder(archivePath, state.ArchiveRel); err != nil {
+		m.fail(dl, err)
 		return
 	}
-
-	relArchive := dl.ArchiveRel
+	partBytes, err := partSize(partPath, state.ArchiveRel)
+	if err != nil {
+		m.fail(dl, err)
+		return
+	}
+	if partBytes != state.BytesDownloaded || state.BytesTotal > 0 && partBytes != state.BytesTotal {
+		m.fail(dl, fmt.Errorf("%w: incomplete archive part", ErrDownloadFailed))
+		return
+	}
+	if err := UpsertLedgerEntry(LedgerEntry{
+		ID: state.ID, GameID: state.GameID, NXMURI: state.NXMURI,
+		GameSlug: state.GameSlug, ModID: state.ModID, FileID: state.FileID,
+		ArchiveRelPath: state.ArchiveRel,
+		BytesDone:      state.BytesDownloaded, BytesTotal: state.BytesTotal,
+		Status: LedgerDownloading,
+	}); err != nil {
+		m.fail(dl, &ArchiveSaveError{Err: fmt.Errorf("saving download ledger: %w", err)})
+		return
+	}
 	sidecar := ArchiveSidecar{
 		ModID:           link.ModID,
 		ModName:         modName,
 		GameDomain:      link.GameSlug,
 		FileID:          link.FileID,
-		FileArchiveName: archiveFilename,
-		SizeBytes:       dl.BytesDownloaded,
+		FileArchiveName: filepath.Base(archivePath),
+		SizeBytes:       state.BytesDownloaded,
 	}
 	if modInfo != nil {
 		sidecar.ThumbnailURL = modInfo.PictureURL
@@ -508,70 +640,155 @@ func (m *Manager) runPipeline(ctx context.Context, dl *Download) {
 		sidecar.Category = NormalizeCategory(fileDetails.CategoryName)
 		sidecar.UploadedAt = fileDetails.UploadedTime
 	}
-	if err := SaveSidecar(archivePath, sidecar, time.Now()); err != nil {
-		slog.Warn("writing sidecar failed", "err", err)
+	info, err := os.Lstat(partPath)
+	if err != nil {
+		m.fail(dl, fmt.Errorf("checking archive part identity: %w", err))
+		return
 	}
-	if err := UpsertEntry(dl.GameID, IndexEntry{
-		Path: relArchive, ModID: link.ModID, FileID: link.FileID,
-	}); err != nil {
-		slog.Warn("updating downloads index failed", "err", err)
+	if !info.Mode().IsRegular() {
+		m.fail(dl, &ArchiveRejectedError{Reason: ArchiveRejectedDestination, Detail: state.ArchiveRel})
+		return
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		m.fail(dl, fmt.Errorf("checking archive part identity: unsupported file identity"))
+		return
+	}
+	created := time.Now().UTC()
+	sidecar.DownloadedAt = created.Format(time.RFC3339)
+	record := landingRecord{
+		SchemaVersion: landingSchemaVersion, ID: state.ID, GameID: state.GameID,
+		ArchiveRel: state.ArchiveRel, Size: info.Size(),
+		PartDev: uint64(stat.Dev), PartIno: stat.Ino,
+		Sidecar: sidecar, IndexEntry: landingIndexEntry{
+			Path: state.ArchiveRel, ModID: link.ModID, FileID: link.FileID,
+		}, CreatedAt: created,
+	}
+	lock := landingLock(state.GameID)
+	lock.Lock()
+	err = writeLanding(record)
+	if err != nil {
+		err = &ArchiveSaveError{Err: err}
+	} else {
+		_, err = finishLandingLocked(record, m.landing)
+		if err != nil {
+			var informationErr *ArchiveInformationSaveError
+			if !errors.As(err, &informationErr) {
+				err = &ArchiveInformationSaveError{Err: err}
+			}
+		}
+	}
+	lock.Unlock()
+	if err != nil {
+		m.fail(dl, err)
+		return
 	}
 
-	_ = RemoveLedgerEntry(dl.GameID, dl.ID)
-
-	dl.Status = StatusDownloaded
-	m.emitProgress(dl)
+	state = m.update(dl, func(d *Download) { d.Status = StatusDownloaded })
+	m.emitProgress(state)
 
 	if m.hooks.OnArchiveLanded != nil {
-		m.hooks.OnArchiveLanded(snapshotOf(dl), archivePath, sidecar)
+		m.hooks.OnArchiveLanded(snapshotOf(&state), archivePath, sidecar)
 	}
 
-	slog.Info("download complete", "name", modName, "game", dl.GameID,
-		"archive", archivePath, "bytes", dl.BytesDownloaded)
+	slog.Info("download complete", "name", modName, "game", state.GameID,
+		"archive", archivePath, "bytes", state.BytesDownloaded)
 }
 
-// streamToFile GETs cdnURL with optional resume Range header and writes to destPath.
-func (m *Manager) streamToFile(ctx context.Context, cdnURL, destPath string, resumeFrom int64, dl *Download) error {
+// streamToFile GETs cdnURL with optional resume Range header and saves a complete part.
+func (m *Manager) streamToFile(ctx context.Context, cdnURL, destPath string, resumeFrom int64, dl *Download) (result error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cdnURL, nil)
 	if err != nil {
-		return err
+		return redactHTTPError(err)
 	}
 	if resumeFrom > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", resumeFrom))
 	}
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrDownloadFailed, err)
+		return fmt.Errorf("%w: %w", ErrDownloadFailed, redactHTTPError(err))
+	}
+	if resumeFrom > 0 && resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		resp.Body.Close()
+		req.Header.Del("Range")
+		resumeFrom = 0
+		resp, err = m.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrDownloadFailed, redactHTTPError(err))
+		}
 	}
 	defer resp.Body.Close()
-
+	state := m.snapshot(dl)
+	var rangeTotal, rangeEnd int64
 	switch resp.StatusCode {
 	case http.StatusOK:
 		if resumeFrom > 0 {
-			slog.Warn("server ignored Range header; restarting from 0", "url", cdnURL)
-			resumeFrom = 0
-			_ = os.Truncate(destPath, 0)
-			dl.BytesDownloaded = 0
+			slog.Warn("server ignored Range header; restarting from 0", "url", redactURL(cdnURL))
 		}
+		resumeFrom = 0
 	case http.StatusPartialContent:
+		if resumeFrom == 0 {
+			return fmt.Errorf("%w: unexpected partial response", ErrDownloadFailed)
+		}
+		rangeTotal, rangeEnd, err = parseDownloadRange(resp.Header.Get("Content-Range"), resumeFrom)
+		if err == nil && resp.ContentLength > 0 && resp.ContentLength-1 != rangeEnd-resumeFrom {
+			err = fmt.Errorf("range length does not match response length")
+		}
+		if err != nil {
+			m.update(dl, func(d *Download) { d.BytesDownloaded, d.BytesTotal = 0, 0 })
+			return fmt.Errorf("%w: invalid Content-Range: %w", ErrDownloadFailed, err)
+		}
 	default:
 		return fmt.Errorf("%w: HTTP %d", ErrDownloadFailed, resp.StatusCode)
 	}
 
-	if cl := resp.ContentLength; cl > 0 {
-		dl.BytesTotal = cl + resumeFrom
+	expected := int64(-1)
+	if resp.ContentLength > 0 || resp.ContentLength == 0 && resp.Header.Get("Content-Length") == "0" {
+		if resp.ContentLength > math.MaxInt64-resumeFrom {
+			return fmt.Errorf("%w: invalid response length", ErrDownloadFailed)
+		}
+		expected = resp.ContentLength + resumeFrom
 	}
+	if rangeTotal > 0 {
+		expected = rangeTotal
+	} else if resp.StatusCode == http.StatusPartialContent {
+		expected = rangeEnd + 1
+	}
+	state = m.update(dl, func(d *Download) {
+		d.BytesDownloaded = resumeFrom
+		d.BytesTotal = 0
+		if expected >= 0 {
+			d.BytesTotal = expected
+		}
+	})
 
-	var out *os.File
-	if resumeFrom > 0 {
-		out, err = os.OpenFile(destPath, os.O_WRONLY|os.O_APPEND, 0644)
-	} else {
-		out, err = os.Create(destPath)
+	if err := checkArchiveFolder(destPath, state.ArchiveRel); err != nil {
+		return err
 	}
+	open := m.openPart
+	if open == nil {
+		open = func(path, rel string, appendData bool) (archivePart, error) {
+			return openArchivePart(path, rel, appendData)
+		}
+	}
+	out, err := open(destPath, state.ArchiveRel, resumeFrom > 0)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() {
+		if err := out.Close(); err != nil {
+			var saveErr *ArchiveSaveError
+			if errors.As(result, &saveErr) {
+				result = saveErr.Err
+			}
+			result = &ArchiveSaveError{Err: errors.Join(result, fmt.Errorf("closing archive part: %w", err))}
+		}
+	}()
+	if resumeFrom == 0 {
+		if err := out.Truncate(0); err != nil {
+			return &ArchiveSaveError{Err: fmt.Errorf("truncating archive part: %w", err)}
+		}
+	}
 
 	buf := make([]byte, 64*1024)
 	var lastLedger time.Time
@@ -581,48 +798,155 @@ func (m *Manager) streamToFile(ctx context.Context, cdnURL, destPath string, res
 		}
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
-			if _, writeErr := out.Write(buf[:n]); writeErr != nil {
-				return writeErr
+			if expected >= 0 && int64(n) > expected-state.BytesDownloaded {
+				return fmt.Errorf("%w: response exceeds expected total", ErrDownloadFailed)
 			}
-			dl.BytesDownloaded += int64(n)
-			m.emitProgress(dl)
+			for written := 0; written < n; {
+				count, writeErr := out.Write(buf[written:n])
+				if count > 0 {
+					written += count
+					state = m.update(dl, func(d *Download) { d.BytesDownloaded += int64(count) })
+				}
+				if writeErr != nil {
+					return &ArchiveSaveError{Err: fmt.Errorf("writing archive part: %w", writeErr)}
+				}
+				if written < n {
+					return &ArchiveSaveError{Err: fmt.Errorf("writing archive part: %w", io.ErrShortWrite)}
+				}
+			}
+			m.emitProgress(state)
 			if time.Since(lastLedger) > time.Second {
 				lastLedger = time.Now()
 				_ = UpsertLedgerEntry(LedgerEntry{
-					ID: dl.ID, GameID: dl.GameID, NXMURI: dl.NXMURI,
-					GameSlug: dl.GameSlug, ModID: dl.ModID, FileID: dl.FileID,
-					ArchiveRelPath: dl.ArchiveRel,
-					BytesDone:      dl.BytesDownloaded, BytesTotal: dl.BytesTotal,
+					ID: state.ID, GameID: state.GameID, NXMURI: state.NXMURI,
+					GameSlug: state.GameSlug, ModID: state.ModID, FileID: state.FileID,
+					ArchiveRelPath: state.ArchiveRel,
+					BytesDone:      state.BytesDownloaded, BytesTotal: state.BytesTotal,
 					Status: LedgerDownloading,
 				})
 			}
 		}
 		if readErr != nil {
-			if readErr == io.EOF {
-				return nil
+			if readErr != io.EOF {
+				if expected >= 0 && state.BytesDownloaded < expected {
+					return fmt.Errorf("%w: incomplete: %w", ErrDownloadFailed, redactHTTPError(readErr))
+				}
+				return fmt.Errorf("%w: reading response: %w", ErrDownloadFailed, redactHTTPError(readErr))
 			}
-			return readErr
+			if expected >= 0 && state.BytesDownloaded != expected {
+				return fmt.Errorf("%w: incomplete", ErrDownloadFailed)
+			}
+			if err := out.Sync(); err != nil {
+				return &ArchiveSaveError{Err: fmt.Errorf("syncing archive part: %w", err)}
+			}
+			return nil
 		}
 	}
 }
 
+// parseDownloadRange checks that a partial response covers the requested suffix.
+func parseDownloadRange(value string, start int64) (int64, int64, error) {
+	bounds, totalText, ok := strings.Cut(value, "/")
+	if !ok || !strings.HasPrefix(bounds, "bytes ") {
+		return 0, 0, fmt.Errorf("missing byte range")
+	}
+	first, last, ok := strings.Cut(strings.TrimPrefix(bounds, "bytes "), "-")
+	if !ok || first == "" || last == "" || strings.Trim(first, "0123456789") != "" || strings.Trim(last, "0123456789") != "" {
+		return 0, 0, fmt.Errorf("invalid byte bounds")
+	}
+	from, err := strconv.ParseInt(first, 10, 64)
+	if err != nil || from != start {
+		return 0, 0, fmt.Errorf("unexpected range start")
+	}
+	end, err := strconv.ParseInt(last, 10, 64)
+	if err != nil || end < from {
+		return 0, 0, fmt.Errorf("invalid range end")
+	}
+	if totalText == "*" {
+		if end == math.MaxInt64 {
+			return 0, 0, fmt.Errorf("invalid range end")
+		}
+		return 0, end, nil
+	}
+	if totalText == "" || strings.Trim(totalText, "0123456789") != "" {
+		return 0, 0, fmt.Errorf("invalid range total")
+	}
+	total, err := strconv.ParseInt(totalText, 10, 64)
+	if err != nil || total <= 0 || end != total-1 {
+		return 0, 0, fmt.Errorf("invalid range total")
+	}
+	return total, end, nil
+}
+
 func (m *Manager) fail(dl *Download, err error) {
-	dl.Status = StatusFailed
-	dl.Error = err.Error()
-	m.emitProgress(dl)
-	slog.Error("download failed", "id", dl.ID, "err", err)
+	state := m.update(dl, func(d *Download) {
+		d.Status = StatusFailed
+		d.Error = err.Error()
+	})
+	m.emitProgress(state)
+	var saveErr *ArchiveSaveError
+	var informationErr *ArchiveInformationSaveError
+	if errors.As(err, &saveErr) {
+		slog.Error("download failed", "id", state.ID, "err", redactHTTPError(saveErr.Err))
+	} else if errors.As(err, &informationErr) {
+		slog.Error("saving archive information failed", "id", state.ID, "err", informationErr.Err)
+	} else {
+		slog.Error("download failed", "id", state.ID, "err", err)
+	}
 	_ = UpsertLedgerEntry(LedgerEntry{
-		ID: dl.ID, GameID: dl.GameID, NXMURI: dl.NXMURI,
-		GameSlug: dl.GameSlug, ModID: dl.ModID, FileID: dl.FileID,
-		ArchiveRelPath: dl.ArchiveRel,
-		BytesDone:      dl.BytesDownloaded, BytesTotal: dl.BytesTotal,
+		ID: state.ID, GameID: state.GameID, NXMURI: state.NXMURI,
+		GameSlug: state.GameSlug, ModID: state.ModID, FileID: state.FileID,
+		ArchiveRelPath: state.ArchiveRel,
+		BytesDone:      state.BytesDownloaded, BytesTotal: state.BytesTotal,
 		Status: LedgerFailed, Error: err.Error(),
 	})
 }
 
-func (m *Manager) emitProgress(dl *Download) {
+// update changes a download under the manager lock and returns its immutable state.
+func (m *Manager) update(dl *Download, change func(*Download)) Download {
+	m.mu.Lock()
+	change(dl)
+	state := *dl
+	m.mu.Unlock()
+	return state
+}
+
+// snapshot copies a download under the manager lock.
+func (m *Manager) snapshot(dl *Download) Download {
+	m.mu.RLock()
+	state := *dl
+	m.mu.RUnlock()
+	return state
+}
+
+// claimDestination reserves an archive for one pipeline.
+func (m *Manager) claimDestination(gameID, rel, id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.destinations == nil {
+		m.destinations = make(map[string]string)
+	}
+	key := gameID + "\x00" + rel
+	if _, taken := m.destinations[key]; taken {
+		return false
+	}
+	m.destinations[key] = id
+	return true
+}
+
+// releaseDestination frees an archive after its pipeline finishes.
+func (m *Manager) releaseDestination(gameID, rel, id string) {
+	m.mu.Lock()
+	key := gameID + "\x00" + rel
+	if m.destinations[key] == id {
+		delete(m.destinations, key)
+	}
+	m.mu.Unlock()
+}
+
+func (m *Manager) emitProgress(dl Download) {
 	if m.hooks.OnDownloadProgress != nil {
-		m.hooks.OnDownloadProgress(snapshotOf(dl))
+		m.hooks.OnDownloadProgress(snapshotOf(&dl))
 	}
 }
 
@@ -641,13 +965,14 @@ func snapshotOf(dl *Download) DownloadSnapshot {
 
 // pickArchiveFilename chooses the on-disk filename for an archive.
 func pickArchiveFilename(details *NexusFileDetails, downloadURL string, link *NXMLink) string {
-	if details != nil && details.FileName != "" {
-		return details.FileName
+	if details != nil {
+		if name, ok := SafeArchiveFilename(details.FileName); ok {
+			return name
+		}
 	}
 	if u, err := neturl.Parse(downloadURL); err == nil {
-		base := filepath.Base(u.Path)
-		if base != "" && base != "." && base != "/" {
-			return base
+		if name, ok := SafeArchiveFilename(u.Path); ok {
+			return name
 		}
 	}
 	return fmt.Sprintf("%d_%d.archive", link.ModID, link.FileID)

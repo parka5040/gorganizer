@@ -867,6 +867,14 @@ func TestLoaderFarmGuardMatchesTheVFSNames(t *testing.T) {
 		t.Fatalf("InstallModLoader: %v", err)
 	}
 	want := smapi.FarmGuard{DeployDir: "Mods", Sentinel: vfs.SentinelFilename, SiblingSuffixes: vfs.FarmSiblingSuffixes()}
+	if !contains(want.SiblingSuffixes, ".gorganizer-restoring") {
+		t.Fatal("interrupted confirmed restore must guard loader installation")
+	}
+	for _, suffix := range vfs.RetainedFarmSiblingSuffixes() {
+		if contains(want.SiblingSuffixes, suffix) {
+			t.Errorf("retained farm sibling %s was classified as an active transition", suffix)
+		}
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if len(specs) == 0 || !reflect.DeepEqual(specs[0].Farm, want) {

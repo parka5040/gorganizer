@@ -83,7 +83,7 @@ func TestRecovery_PathKeyedSharedFNVAndTTW(t *testing.T) {
 		t.Errorf("MountVFS(ttw) succeeded while recovery pending; should refuse")
 	}
 
-	if err := d.RestoreFromBackup("ttw"); err != nil {
+	if err := d.RestoreFromBackup("ttw", dto.RecoveryKindUnspecified, ""); err != nil {
 		t.Fatalf("RestoreFromBackup(ttw): %v", err)
 	}
 	for _, gid := range []string{"falloutnv", "ttw"} {
@@ -101,6 +101,60 @@ func TestRecovery_PathKeyedSharedFNVAndTTW(t *testing.T) {
 	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
 		t.Errorf("Data.orig/ still present after restore (should have been renamed)")
 	}
+}
+
+// TestVFSStatusCarriesPendingRecoveryForSharedInstall reports one pending item for both games with game-specific IDs.
+func TestVFSStatusCarriesPendingRecoveryForSharedInstall(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	install := filepath.Join(t.TempDir(), "fnv-install")
+	dataPath := filepath.Join(install, "Data")
+	writeFixture(t, filepath.Join(dataPath, "unmanaged.txt"))
+	writeFixture(t, filepath.Join(dataPath+".orig", "FalloutNV.esm"))
+
+	d := newIsolatedDaemon(t, map[string]config.GameConfig{
+		"falloutnv": {Name: "Fallout: New Vegas", InstallPath: install, DataSubpath: "Data", SteamAppID: 22380},
+		"ttw":       {Name: "Tale of Two Wastelands", InstallPath: install, DataSubpath: "Data", LinkedFromGameID: "falloutnv"},
+	})
+	d.mu.RLock()
+	original := d.recoveryPendingFor("falloutnv")
+	if original == nil {
+		d.mu.RUnlock()
+		t.Fatal("expected a pending recovery for the shared Data path")
+	}
+	originalGameID := original.GameID
+	d.mu.RUnlock()
+	var recoveryID string
+	for _, gameID := range []string{"falloutnv", "ttw"} {
+		status, err := d.GetVFSStatus(gameID)
+		if err != nil {
+			t.Fatalf("GetVFSStatus(%q): %v", gameID, err)
+		}
+		if status.LifecycleState != dto.VFSLifecycleStateRecoveryPending || status.PendingRecovery == nil {
+			t.Fatalf("GetVFSStatus(%q) = %+v, want a pending recovery", gameID, status)
+		}
+		pending := status.PendingRecovery
+		if pending.GameID != gameID || pending.Kind != dto.RecoveryKindData || pending.DataPath != dataPath || pending.BackupPath != dataPath+".orig" {
+			t.Errorf("GetVFSStatus(%q) pending = %+v, want the shared Data recovery for this game", gameID, pending)
+		}
+		if pending.RecoveryID == "" {
+			t.Errorf("GetVFSStatus(%q) has an empty recovery ID", gameID)
+		}
+		if recoveryID != "" && pending.RecoveryID != recoveryID {
+			t.Errorf("GetVFSStatus(%q) recovery ID = %q, want %q", gameID, pending.RecoveryID, recoveryID)
+		}
+		recoveryID = pending.RecoveryID
+	}
+	d.mu.RLock()
+	for _, gameID := range []string{"falloutnv", "ttw"} {
+		status := d.unmountedVFSStatusLocked(gameID)
+		if status.PendingRecovery == nil || status.PendingRecovery.GameID != gameID || status.PendingRecovery.RecoveryID != recoveryID {
+			t.Errorf("unmountedVFSStatusLocked(%q) = %+v, want the shared recovery for this game", gameID, status)
+		}
+	}
+	if original.GameID != originalGameID || original.RecoveryID != recoveryID {
+		t.Errorf("shared pending item was changed: %+v", original)
+	}
+	d.mu.RUnlock()
 }
 
 // TestRecovery_PathKeyedSingleGameUnaffected locks that an unshared Data path maps to exactly one game.

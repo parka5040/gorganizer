@@ -1,6 +1,10 @@
 add_library(gorganizer_ui STATIC
     MainWindow.cpp
+    WindowFit.cpp
+    ArchiveDrop.cpp
+    InstallController.cpp
     SessionController.cpp
+    SteamMaintenanceController.cpp
     LaunchController.cpp
     ModLoaderController.cpp
     ModLoaderProgressDialog.cpp
@@ -9,6 +13,7 @@ add_library(gorganizer_ui STATIC
     SetupWizard.cpp
     GameSelectorWidget.cpp
     ModListWidget.cpp
+    ModListSaveQueue.cpp
     ModListModel.cpp
     ModListRowDelegate.cpp
     PluginListWidget.cpp
@@ -24,7 +29,6 @@ add_library(gorganizer_ui STATIC
     SplashScreen.cpp
     ActivityLogPanel.cpp
     ModInstallDialog.cpp
-    InstallWorker.cpp
     FomodPlan.cpp
     FomodInstallerDialog.cpp
     IniEditorDialog.cpp
@@ -34,7 +38,10 @@ add_library(gorganizer_ui STATIC
     ImportDialog.cpp
     ThemeManager.cpp
     Dialogs.cpp
+    SafeLinks.cpp
     InstallErrorText.cpp
+    InstallCollisionDialog.cpp
+    ErrorPresenter.cpp
     ModDependencyText.cpp
     ModDependencyController.cpp
     DependencyFetchDialog.cpp
@@ -49,5 +56,4 @@ target_link_libraries(gorganizer_ui PUBLIC
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
-    Qt6::Network
 )

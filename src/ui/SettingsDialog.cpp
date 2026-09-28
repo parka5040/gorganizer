@@ -1,11 +1,14 @@
 #include "SettingsDialog.h"
 #include "AppConfig.h"
 #include "GrpcClient.h"
+#include "ErrorPresenter.h"
 #include "ThemeManager.h"
+#include "WindowFit.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFormLayout>
+#include <QScrollArea>
 #include <QLineEdit>
 #include <QDialogButtonBox>
 #include <QLabel>
@@ -13,11 +16,13 @@
 #include <QComboBox>
 #include <QCheckBox>
 #include <QProcess>
+#include <QTimer>
 #include <QFileInfo>
 #include <QFile>
 #include <QDir>
 #include <QStandardPaths>
 #include <QCoreApplication>
+#include <unistd.h>
 
 namespace gorganizer {
 
@@ -33,11 +38,13 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
     , m_config(config)
 {
     setWindowTitle("Settings");
-    setMinimumWidth(450);
 
     auto* layout = new QVBoxLayout(this);
-
-    auto* form = new QFormLayout;
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    auto* content = new QWidget;
+    auto* form = new QFormLayout(content);
 
     m_themeCombo = new QComboBox;
     populateThemeCombo();
@@ -46,9 +53,7 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
 
     m_collapseViewsCheck = new QCheckBox("Show one ordering for both views");
     m_collapseViewsCheck->setToolTip(
-        "When on, the Separator View checkbox in the mod list is forced on and "
-        "disabled, and any reorder writes the same index into both visual_index "
-        "and true_index. Toggling off later leaves any cross-stamping in place.");
+        "Keep grouped and priority views in the same order. Turning this off does not restore the previous order.");
     if (m_config)
         m_collapseViewsCheck->setChecked(m_config->collapsedSeparatorView());
     connect(m_collapseViewsCheck, &QCheckBox::toggled,
@@ -70,7 +75,7 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
     form->addRow("", m_statusLabel);
 
     m_protonCombo = new QComboBox;
-    m_protonCombo->setMinimumWidth(240);
+    m_protonCombo->setMinimumWidth(140);
     auto* protonRow = new QHBoxLayout;
     protonRow->addWidget(m_protonCombo);
     auto* protonSaveBtn = new QPushButton("Save");
@@ -83,20 +88,22 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
 
     auto* socketLabel = new QLabel;
     const char* xdg = std::getenv("XDG_RUNTIME_DIR");
-    QString socketPath = xdg ? QString("%1/gorganizer/gorganizer.sock").arg(xdg)
-                             : QString("/tmp/gorganizer/gorganizer.sock");
+    QString socketPath = xdg && xdg[0]
+        ? QString::fromUtf8(xdg) + "/gorganizer/gorganizer.sock"
+        : QDir::tempPath() + "/gorganizer-" + QString::number(getuid()) + "/gorganizer.sock";
     socketLabel->setText(socketPath);
+    socketLabel->setWordWrap(true);
     socketLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     form->addRow("Daemon Socket:", socketLabel);
 
     auto* nxmRow = new QHBoxLayout;
     auto* testNxmBtn = new QPushButton("Test NXM Handler");
-    auto* reregNxmBtn = new QPushButton("Re-register");
+    m_reregNxmBtn = new QPushButton("Re-register");
     nxmRow->addWidget(testNxmBtn);
-    nxmRow->addWidget(reregNxmBtn);
+    nxmRow->addWidget(m_reregNxmBtn);
     nxmRow->addStretch();
     connect(testNxmBtn, &QPushButton::clicked, this, &SettingsDialog::onTestNxm);
-    connect(reregNxmBtn, &QPushButton::clicked, this, &SettingsDialog::onReregisterNxm);
+    connect(m_reregNxmBtn, &QPushButton::clicked, this, &SettingsDialog::onReregisterNxm);
     form->addRow("Nexus NXM Handler:", nxmRow);
 
     m_nxmStatus = new QLabel;
@@ -104,7 +111,8 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
     m_nxmStatus->setWordWrap(true);
     form->addRow("", m_nxmStatus);
 
-    layout->addLayout(form);
+    scroll->setWidget(content);
+    layout->addWidget(scroll, 1);
 
     populateProtonCombo();
 
@@ -114,11 +122,16 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
     connect(m_saveBtn, &QPushButton::clicked, this, &SettingsDialog::onSaveKey);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     layout->addWidget(buttons);
+    buttons->button(QDialogButtonBox::Close)->setDefault(true);
+    fitToScreen(this, QSize(560, 520));
 
     connect(m_grpc, &GrpcClient::nexusAPIKeySet, this, &SettingsDialog::onKeyValidated);
-    connect(m_grpc, &GrpcClient::rpcError, this, [this](const QString& method, const QString& error) {
+    connect(m_grpc, &GrpcClient::rpcError, this, [this](const QString& method, const QString& error, int grpcCode) {
         if (method == "SetNexusAPIKey") {
-            m_statusLabel->setText(QString("<b style='color:%1;'>Error: %2</b>").arg(errHex(), error));
+            const GrpcError failure{grpcCode, method, error};
+            m_statusLabel->setText(QString("<b style='color:%1;'>%2</b>")
+                                       .arg(errHex(), errorSummary("save the Nexus API key", failure, true).toHtmlEscaped()));
+            presentError(this, "API Key Not Saved", "save the Nexus API key", failure, true);
             m_saveBtn->setEnabled(true);
         }
     });
@@ -147,7 +160,9 @@ void SettingsDialog::onKeyValidated(bool valid, const QString& errorMessage)
         m_statusLabel->setText(QString("<b style='color:%1;'>Validated!</b>").arg(okHex()));
     } else {
         m_statusLabel->setText(
-            QString("<b style='color:%1;'>Invalid: %2</b>").arg(errHex(), errorMessage));
+            QString("<b style='color:%1;'>%2</b>")
+                .arg(errHex(), errorSummary("validate the Nexus API key", errorMessage).toHtmlEscaped()));
+        presentError(this, "API Key Not Validated", "validate the Nexus API key", errorMessage);
     }
 }
 
@@ -161,10 +176,11 @@ void SettingsDialog::populateProtonCombo()
         return;
 
     std::vector<GrpcProtonVersion> versions;
-    QString err;
+    GrpcError err;
     if (!m_grpc->detectProtonVersions(versions, err)) {
         m_protonStatus->setText(
-            QString("<span style='color:%1;'>Cannot detect Proton: %2</span>").arg(errHex(), err));
+            QString("<span style='color:%1;'>%2</span>")
+                .arg(errHex(), errorSummary("detect Proton versions", err, false).toHtmlEscaped()));
         return;
     }
     for (const auto& v : versions)
@@ -228,17 +244,18 @@ void SettingsDialog::onTestNxm()
     const QString desktopFile = xdgDataHome() + "/applications/" + desktopId;
     const QString mimeapps = xdgConfigHome() + "/mimeapps.list";
     const QString script = findGorganizerScript();
+    const QString launcher = xdgDataHome() + "/gorganizer/bin/gorganizer";
 
     QProcess p;
     p.start("xdg-mime", {"query", "default", "x-scheme-handler/nxm"});
     if (p.waitForFinished(3000)) {
         const QString got = QString::fromUtf8(p.readAllStandardOutput()).trimmed();
         if (got == desktopId)
-            pass(QString("xdg-mime default = <code>%1</code>").arg(got));
+            pass(QString("xdg-mime default = <code>%1</code>").arg(got.toHtmlEscaped()));
         else if (got.isEmpty())
             fail("xdg-mime returned no default for x-scheme-handler/nxm");
         else
-            fail(QString("xdg-mime default = <code>%1</code> (expected <code>%2</code>)").arg(got, desktopId));
+            fail(QString("xdg-mime default = <code>%1</code> (expected <code>%2</code>)").arg(got.toHtmlEscaped(), desktopId.toHtmlEscaped()));
     } else {
         warn("xdg-mime not available — skipping query check");
     }
@@ -247,11 +264,11 @@ void SettingsDialog::onTestNxm()
     if (mf.open(QIODevice::ReadOnly | QIODevice::Text)) {
         const QString contents = QString::fromUtf8(mf.readAll());
         if (contents.contains(QString("x-scheme-handler/nxm=%1").arg(desktopId)))
-            pass(QString("<code>%1</code> contains nxm entry").arg(mimeapps));
+            pass(QString("<code>%1</code> contains nxm entry").arg(mimeapps.toHtmlEscaped()));
         else
-            fail(QString("<code>%1</code> missing nxm entry").arg(mimeapps));
+            fail(QString("<code>%1</code> missing nxm entry").arg(mimeapps.toHtmlEscaped()));
     } else {
-        fail(QString("<code>%1</code> not readable").arg(mimeapps));
+        fail(QString("<code>%1</code> not readable").arg(mimeapps.toHtmlEscaped()));
     }
 
     QFile df(desktopFile);
@@ -265,26 +282,29 @@ void SettingsDialog::onTestNxm()
             }
         }
         if (execLine.isEmpty()) {
-            fail(QString("<code>%1</code> has no Exec= line").arg(desktopFile));
-        } else if (!script.isEmpty() && !execLine.contains(script)) {
-            fail(QString("Exec= points elsewhere: <code>%1</code><br>"
-                         "&nbsp;&nbsp;Expected to contain: <code>%2</code>")
-                     .arg(execLine.toHtmlEscaped(), script.toHtmlEscaped()));
+            fail(QString("<code>%1</code> has no Exec= line").arg(desktopFile.toHtmlEscaped()));
+        } else if (!execLine.contains("/gorganizer/bin/gorganizer")) {
+            fail(QString("The desktop shortcut points somewhere else: <code>%1</code>")
+                     .arg(execLine.toHtmlEscaped()));
         } else {
             pass(QString("Exec= = <code>%1</code>").arg(execLine.toHtmlEscaped()));
         }
     } else {
-        fail(QString("<code>%1</code> missing").arg(desktopFile));
+        fail(QString("<code>%1</code> missing").arg(desktopFile.toHtmlEscaped()));
     }
+
+    QFileInfo launcherInfo(launcher);
+    if (!launcherInfo.isExecutable())
+        fail("The desktop shortcut needs updating. Select Re-register.");
 
     if (script.isEmpty()) {
         fail("gorganizer.sh not found next to frontend binary");
     } else {
         QFileInfo fi(script);
         if (fi.isExecutable())
-            pass(QString("<code>%1</code> is executable").arg(script));
+            pass(QString("<code>%1</code> is executable").arg(script.toHtmlEscaped()));
         else
-            fail(QString("<code>%1</code> exists but is not executable").arg(script));
+            fail(QString("<code>%1</code> exists but is not executable").arg(script.toHtmlEscaped()));
     }
 
     m_nxmStatus->setText(rows.join("<br>"));
@@ -292,24 +312,59 @@ void SettingsDialog::onTestNxm()
 
 void SettingsDialog::onReregisterNxm()
 {
+    if (m_nxmRegisterProcess)
+        return;
+
     const QString script = findGorganizerScript();
     if (script.isEmpty()) {
         m_nxmStatus->setText(QString("<span style='color:%1;'>Cannot find gorganizer.sh next to the frontend binary.</span>").arg(errHex()));
         return;
     }
 
-    QProcess p;
-    p.start(script, {"--register-nxm"});
-    if (!p.waitForFinished(15000)) {
+    auto* process = new QProcess(this);
+    m_nxmRegisterProcess = process;
+    m_reregNxmBtn->setEnabled(false);
+    connect(process, &QProcess::finished, this,
+            [this, process](int exitCode, QProcess::ExitStatus exitStatus) {
+                if (m_nxmRegisterProcess != process)
+                    return;
+                m_nxmRegisterProcess = nullptr;
+                m_reregNxmBtn->setEnabled(true);
+                if (exitStatus != QProcess::NormalExit || exitCode != 0) {
+                    const QString error = QString::fromUtf8(process->readAllStandardError());
+                    m_nxmStatus->setText(QString("<span style='color:%1;'>%2</span>")
+                                             .arg(errHex(), errorSummary("register Nexus download links", error).toHtmlEscaped()));
+                    presentError(this, "Registration Failed", "register Nexus download links", error);
+                } else {
+                    m_nxmStatus->setText(QString("<span style='color:%1;'>&#10003; Nexus download links are enabled. Use &quot;Test NXM Handler&quot; to check.</span>").arg(okHex()));
+                }
+                process->deleteLater();
+            });
+    connect(process, &QProcess::errorOccurred, this,
+            [this, process](QProcess::ProcessError) {
+                if (m_nxmRegisterProcess != process)
+                    return;
+                m_nxmRegisterProcess = nullptr;
+                m_reregNxmBtn->setEnabled(true);
+                QString detail = QString::fromUtf8(process->readAllStandardError());
+                if (detail.isEmpty())
+                    detail = process->errorString();
+                m_nxmStatus->setText(QString("<span style='color:%1;'>%2</span>")
+                                         .arg(errHex(), errorSummary("register Nexus download links", detail).toHtmlEscaped()));
+                presentError(this, "Registration Failed", "register Nexus download links", detail);
+                process->kill();
+                process->deleteLater();
+            });
+    QTimer::singleShot(15000, process, [this, process] {
+        if (m_nxmRegisterProcess != process)
+            return;
+        m_nxmRegisterProcess = nullptr;
+        process->kill();
+        m_reregNxmBtn->setEnabled(true);
         m_nxmStatus->setText(QString("<span style='color:%1;'>Re-registration timed out.</span>").arg(errHex()));
-        return;
-    }
-    if (p.exitStatus() != QProcess::NormalExit || p.exitCode() != 0) {
-        m_nxmStatus->setText(QString("<span style='color:%1;'>Re-registration failed: %2</span>")
-                                 .arg(errHex(), QString::fromUtf8(p.readAllStandardError()).toHtmlEscaped()));
-        return;
-    }
-    m_nxmStatus->setText(QString("<span style='color:%1;'>&#10003; Re-registered. Run 'Test NXM Handler' to verify.</span>").arg(okHex()));
+        process->deleteLater();
+    });
+    process->start(script, {"register"});
 }
 
 void SettingsDialog::populateThemeCombo()
@@ -339,10 +394,12 @@ void SettingsDialog::onSaveProton()
         return;
     }
     QString path = m_protonCombo->currentData().toString();
-    QString err;
+    GrpcError err;
     if (!m_grpc->setPreferredProton(path, err)) {
         m_protonStatus->setText(
-            QString("<b style='color:%1;'>Save failed: %2</b>").arg(errHex(), err));
+            QString("<b style='color:%1;'>%2</b>")
+                .arg(errHex(), errorSummary("save the Proton version", err, true).toHtmlEscaped()));
+        presentError(this, "Proton Not Saved", "save the Proton version", err, true);
         return;
     }
     m_protonStatus->setText(QString("<b style='color:%1;'>Saved.</b>").arg(okHex()));

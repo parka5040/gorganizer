@@ -1,11 +1,13 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/dto"
 	"github.com/parka/gorganizer/internal/mod"
+	"github.com/parka/gorganizer/internal/profile"
 	"github.com/parka/gorganizer/internal/separators"
 )
 
@@ -55,6 +58,45 @@ func makeModFolders(t *testing.T, names ...string) {
 		if err := os.MkdirAll(filepath.Join(config.ModsDir("skyrimse"), name), 0755); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestSetModListCannotFollowEmbeddedIdentity(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	d := newProfileDaemon(t, "Default")
+	makeModFolders(t, "SafeMod")
+	profileDir := d.profileMgr.ProfileDir("skyrimse", "Default")
+	profilePath := filepath.Join(profileDir, "profile.json")
+	if err := os.WriteFile(profilePath, []byte(`{"name":"../../escape","game_id":"othergame","created_at":"2026-01-02T03:04:05Z"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetModList("skyrimse", "Default", []dto.ModListEntryResult{{ModName: "SafeMod", Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(profileDir, "modlist.txt"))
+	if err != nil || !strings.Contains(string(data), "+SafeMod\n") {
+		t.Errorf("modlist in real profile = %q, err = %v", data, err)
+	}
+	for _, path := range []string{
+		filepath.Join(config.ProfilesDir("skyrimse"), "../../escape"),
+		filepath.Join(config.ProfilesDir("othergame"), "../../escape"),
+	} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("escaped location %s exists or could not be checked: %v", path, err)
+		}
+	}
+}
+
+func TestSetSeparatorsRejectsUnsafeGameID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	d := newProfileDaemon(t, "Default")
+	err := d.SetSeparators("..", "Default", nil, true)
+	var invalid *profile.IdentityInvalidError
+	if !errors.As(err, &invalid) || invalid.Name != ".." {
+		t.Fatalf("SetSeparators error = %v, want IdentityInvalidError", err)
+	}
+	if _, err := os.Lstat(filepath.Join(config.DataDir(), "profiles", "Default", "separators.yaml")); !os.IsNotExist(err) {
+		t.Errorf("unsafe game path was written: %v", err)
 	}
 }
 
@@ -444,7 +486,7 @@ func TestEnsureInModListReportsUnwritableProfile(t *testing.T) {
 	}
 
 	writeZipFiles(t, filepath.Join(config.DownloadsDir("skyrimse"), "Late.zip"), map[string]string{"plugin.esp": "plugin"})
-	_, _, err := d.StartInstall(dto.StartInstallRequest{GameID: "skyrimse", ArchiveRelPath: "Late.zip", Mode: dto.InstallAsNewMod})
+	_, _, err := d.StartInstall(context.Background(), dto.StartInstallRequest{GameID: "skyrimse", ArchiveRelPath: "Late.zip", Mode: dto.InstallAsNewMod})
 	var registration *download.ModRegistrationError
 	if !errors.As(err, &registration) || registration.Mod != "Late" {
 		t.Fatalf("StartInstall error = %v, want ModRegistrationError for Late", err)

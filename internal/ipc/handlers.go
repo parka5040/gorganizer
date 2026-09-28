@@ -80,8 +80,8 @@ func (s *gorganizerServer) UninstallMod(_ context.Context, req *pb.UninstallModR
 	return &pb.UninstallModResponse{ArchivesFlaggedUninstalled: flagged}, nil
 }
 
-func (s *gorganizerServer) ReinstallMod(_ context.Context, req *pb.ReinstallModRequest) (*pb.ReinstallModResponse, error) {
-	replayed, skipped, fileCount, err := s.ctrl.ReinstallMod(req.GetGameId(), req.GetModName())
+func (s *gorganizerServer) ReinstallMod(ctx context.Context, req *pb.ReinstallModRequest) (*pb.ReinstallModResponse, error) {
+	replayed, skipped, fileCount, err := s.ctrl.ReinstallMod(ctx, req.GetGameId(), req.GetModName(), req.GetClientRequestId())
 	if err != nil {
 		return nil, grpcError(err)
 	}
@@ -141,6 +141,14 @@ func (s *gorganizerServer) CreateProfile(_ context.Context, req *pb.CreateProfil
 	return profileToProto(p), nil
 }
 
+func (s *gorganizerServer) CopyProfile(_ context.Context, req *pb.CopyProfileRequest) (*pb.Profile, error) {
+	p, err := s.ctrl.CopyProfile(req.GetGameId(), req.GetSourceName(), req.GetName())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return profileToProto(p), nil
+}
+
 func (s *gorganizerServer) DeleteProfile(_ context.Context, req *pb.DeleteProfileRequest) (*pb.DeleteProfileResponse, error) {
 	if err := s.ctrl.DeleteProfile(req.GetGameId(), req.GetName()); err != nil {
 		return nil, grpcError(err)
@@ -193,7 +201,9 @@ func (s *gorganizerServer) MountVFS(_ context.Context, req *pb.MountVFSRequest) 
 		st  *dto.VFSStatusResult
 		err error
 	)
-	if req.GetAutoSwap() {
+	if req.GetRetargetIfMounted() {
+		st, err = s.ctrl.MountVFSWithOptions(req.GetGameId(), req.GetProfileName(), req.GetAutoSwap(), true)
+	} else if req.GetAutoSwap() {
 		st, err = s.ctrl.MountVFSWithSwap(req.GetGameId(), req.GetProfileName())
 	} else {
 		st, err = s.ctrl.MountVFS(req.GetGameId(), req.GetProfileName())
@@ -209,6 +219,33 @@ func (s *gorganizerServer) UnmountVFS(_ context.Context, req *pb.UnmountVFSReque
 		return nil, grpcError(err)
 	}
 	return &pb.UnmountVFSResponse{}, nil
+}
+
+// SetSteamMaintenance converts a maintenance request and returns the resulting deployment status.
+func (s *gorganizerServer) SetSteamMaintenance(_ context.Context, req *pb.SetSteamMaintenanceRequest) (*pb.VFSStatus, error) {
+	result, err := s.ctrl.SetSteamMaintenance(req.GetGameId(), req.GetEnabled(), req.GetVerificationConfirmed())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return vfsStatusToProto(result), nil
+}
+
+// ImportPreservedFiles converts a retained-file selection into a new disabled mod.
+func (s *gorganizerServer) ImportPreservedFiles(_ context.Context, req *pb.ImportPreservedFilesRequest) (*pb.ImportPreservedFilesResponse, error) {
+	name, count, err := s.ctrl.ImportPreservedFiles(req.GetGameId(), req.GetBatchId(), req.GetModName(), req.GetRelativePaths())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.ImportPreservedFilesResponse{ModName: name, FileCount: int32(count)}, nil
+}
+
+// DeletePreservedBatch removes a retained batch and returns the resulting deployment status.
+func (s *gorganizerServer) DeletePreservedBatch(_ context.Context, req *pb.DeletePreservedBatchRequest) (*pb.VFSStatus, error) {
+	result, err := s.ctrl.DeletePreservedBatch(req.GetGameId(), req.GetBatchId())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return vfsStatusToProto(result), nil
 }
 
 func (s *gorganizerServer) GetVFSStatus(_ context.Context, req *pb.GetVFSStatusRequest) (*pb.VFSStatus, error) {
@@ -227,10 +264,25 @@ func (s *gorganizerServer) RebuildVFS(_ context.Context, req *pb.RebuildVFSReque
 }
 
 func (s *gorganizerServer) RestoreFromBackup(_ context.Context, req *pb.RestoreFromBackupRequest) (*pb.RestoreFromBackupResponse, error) {
-	if err := s.ctrl.RestoreFromBackup(req.GetGameId()); err != nil {
+	kind := recoveryKindFromProto(req.GetExpectedKind())
+	if req.GetExpectedKind() != pb.RecoveryKind_RECOVERY_KIND_UNSPECIFIED && kind == dto.RecoveryKindUnspecified {
+		kind = dto.RecoveryKind(-1)
+	}
+	if err := s.ctrl.RestoreFromBackup(req.GetGameId(), kind, req.GetRecoveryId()); err != nil {
 		return nil, grpcError(err)
 	}
 	return &pb.RestoreFromBackupResponse{}, nil
+}
+
+func (s *gorganizerServer) RetryVFSRecovery(_ context.Context, req *pb.RetryVFSRecoveryRequest) (*pb.VFSStatus, error) {
+	if err := s.ctrl.RetryDeferredRecovery(req.GetGameId()); err != nil {
+		return nil, grpcError(err)
+	}
+	st, err := s.ctrl.GetVFSStatus(req.GetGameId())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return vfsStatusToProto(st), nil
 }
 
 func (s *gorganizerServer) GetConflicts(_ context.Context, req *pb.GetConflictsRequest) (*pb.ConflictsResponse, error) {
@@ -285,7 +337,7 @@ func (s *gorganizerServer) ListArchives(_ context.Context, req *pb.ListArchivesR
 }
 
 func (s *gorganizerServer) RemoveArchive(_ context.Context, req *pb.RemoveArchiveRequest) (*pb.RemoveArchiveResponse, error) {
-	if err := s.ctrl.RemoveArchive(req.GetGameId(), req.GetArchiveRelPath()); err != nil {
+	if err := s.ctrl.RemoveArchive(req.GetGameId(), req.GetArchiveRelPath(), req.GetDownloadId()); err != nil {
 		return nil, grpcError(err)
 	}
 	return &pb.RemoveArchiveResponse{}, nil
@@ -344,14 +396,21 @@ func (s *gorganizerServer) StreamArchiveEvents(req *pb.StreamArchiveEventsReques
 }
 
 func (s *gorganizerServer) PreviewInstall(_ context.Context, req *pb.PreviewInstallRequest) (*pb.PreviewInstallResponse, error) {
-	res, err := s.ctrl.PreviewInstall(req.GetGameId(), req.GetArchiveRelPath())
+	res, err := s.ctrl.PreviewInstall(dto.PreviewInstallRequest{
+		GameID:              req.GetGameId(),
+		ArchiveRelPath:      req.GetArchiveRelPath(),
+		ExternalArchivePath: req.GetExternalArchivePath(),
+	})
 	if err != nil {
 		return nil, grpcError(err)
 	}
 	out := &pb.PreviewInstallResponse{
-		PreviewId:    res.PreviewID,
-		HasFomod:     res.HasFomod,
-		FlatFileList: res.FlatFileList,
+		PreviewId:       res.PreviewID,
+		HasFomod:        res.HasFomod,
+		FlatFileList:    res.FlatFileList,
+		SelectableRoots: res.SelectableRoots,
+		DetectedRoot:    res.DetectedRoot,
+		RootAmbiguous:   res.RootAmbiguous,
 	}
 	if res.Plan != nil {
 		out.Plan = fomodPlanToProto(res.Plan)
@@ -359,7 +418,7 @@ func (s *gorganizerServer) PreviewInstall(_ context.Context, req *pb.PreviewInst
 	return out, nil
 }
 
-func (s *gorganizerServer) StartInstall(_ context.Context, req *pb.StartInstallRequest) (*pb.StartInstallResponse, error) {
+func (s *gorganizerServer) StartInstall(ctx context.Context, req *pb.StartInstallRequest) (*pb.StartInstallResponse, error) {
 	files := make([]dto.FomodFileResult, len(req.GetFomodSelectedFiles()))
 	for i, f := range req.GetFomodSelectedFiles() {
 		files[i] = dto.FomodFileResult{
@@ -367,7 +426,8 @@ func (s *gorganizerServer) StartInstall(_ context.Context, req *pb.StartInstallR
 			IsFolder: f.GetIsFolder(), Priority: f.GetPriority(),
 		}
 	}
-	folder, count, err := s.ctrl.StartInstall(dto.StartInstallRequest{
+	folder, count, err := s.ctrl.StartInstall(ctx, dto.StartInstallRequest{
+		ClientRequestID:     req.GetClientRequestId(),
 		GameID:              req.GetGameId(),
 		ArchiveRelPath:      req.GetArchiveRelPath(),
 		ExternalArchivePath: req.GetExternalArchivePath(),
@@ -375,11 +435,30 @@ func (s *gorganizerServer) StartInstall(_ context.Context, req *pb.StartInstallR
 		TargetMod:           req.GetTargetMod(),
 		PreviewID:           req.GetPreviewId(),
 		FomodSelectedFiles:  files,
+		FomodConfirmed:      req.GetFomodConfirmed(),
+		SelectedRoot:        req.GetSelectedRoot(),
 	})
 	if err != nil {
 		return nil, grpcError(err)
 	}
 	return &pb.StartInstallResponse{ModFolder: folder, FileCount: int32(count)}, nil
+}
+
+func (s *gorganizerServer) GetInstallOutcome(_ context.Context, req *pb.GetInstallOutcomeRequest) (*pb.GetInstallOutcomeResponse, error) {
+	outcome, err := s.ctrl.GetInstallOutcome(req.GetGameId(), req.GetClientRequestId())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	resp := &pb.GetInstallOutcomeResponse{
+		State: pb.InstallOutcomeState(outcome.State), ModFolder: outcome.ModFolder,
+		FileCount: int32(outcome.FileCount), ArchivesReplayed: int32(outcome.ArchivesReplayed),
+		ArchivesSkipped: int32(outcome.ArchivesSkipped),
+	}
+	if outcome.State == dto.InstallOutcomeFailed && outcome.Err != nil {
+		mapped := status.Convert(grpcError(outcome.Err))
+		resp.Error, resp.ErrorCode = mapped.Message(), int32(mapped.Code())
+	}
+	return resp, nil
 }
 
 func (s *gorganizerServer) DiscardPreview(_ context.Context, req *pb.DiscardPreviewRequest) (*pb.DiscardPreviewResponse, error) {
@@ -413,11 +492,12 @@ func installEventToProto(evt dto.InstallEventResult) *pb.InstallEvent {
 		return &pb.InstallEvent{Event: &pb.InstallEvent_InstallProgress{InstallProgress: installProgressToProto(evt.Progress)}}
 	case evt.Completed != nil:
 		return &pb.InstallEvent{Event: &pb.InstallEvent_InstallCompleted{InstallCompleted: &pb.InstallCompleted{
-			GameId:         evt.Completed.GameID,
-			ModName:        evt.Completed.ModName,
-			ArchiveRelPath: evt.Completed.ArchiveRelPath,
-			BatchId:        evt.Completed.BatchID,
-			BatchIds:       append([]string(nil), evt.Completed.BatchIDs...),
+			GameId:          evt.Completed.GameID,
+			ModName:         evt.Completed.ModName,
+			ArchiveRelPath:  evt.Completed.ArchiveRelPath,
+			BatchId:         evt.Completed.BatchID,
+			BatchIds:        append([]string(nil), evt.Completed.BatchIDs...),
+			ClientRequestId: evt.Completed.ClientRequestID,
 		}}}
 	}
 	return nil
@@ -457,10 +537,33 @@ func (s *gorganizerServer) ListProfileIniFiles(_ context.Context, req *pb.ListPr
 }
 
 func (s *gorganizerServer) SaveProfileIniFile(_ context.Context, req *pb.SaveProfileIniFileRequest) (*pb.SaveProfileIniFileResponse, error) {
-	if err := s.ctrl.SaveProfileIniFile(req.GetGameId(), req.GetProfileName(), req.GetFilename(), req.GetContent()); err != nil {
+	result, err := s.ctrl.SaveProfileIniFile(req.GetGameId(), req.GetProfileName(), req.GetFilename(), req.GetContent())
+	if err != nil {
 		return nil, grpcError(err)
 	}
-	return &pb.SaveProfileIniFileResponse{}, nil
+	return profileIniSaveToProto(result), nil
+}
+
+// profileIniSaveToProto converts a profile INI save result to its wire representation.
+func profileIniSaveToProto(result *dto.ProfileIniSaveResult) *pb.SaveProfileIniFileResponse {
+	out := &pb.SaveProfileIniFileResponse{ApplyError: result.ApplyError}
+	switch result.Outcome {
+	case dto.IniSaveSaved:
+		out.Outcome = pb.IniSaveOutcome_INI_SAVE_OUTCOME_SAVED
+	case dto.IniSaveSavedAndApplied:
+		out.Outcome = pb.IniSaveOutcome_INI_SAVE_OUTCOME_SAVED_AND_APPLIED
+	case dto.IniSaveSavedApplyFailed:
+		out.Outcome = pb.IniSaveOutcome_INI_SAVE_OUTCOME_SAVED_APPLY_FAILED
+	}
+	return out
+}
+
+func (s *gorganizerServer) ApplyProfileIniFiles(_ context.Context, req *pb.ApplyProfileIniFilesRequest) (*pb.ApplyProfileIniFilesResponse, error) {
+	count, err := s.ctrl.ApplyProfileIniFiles(req.GetGameId(), req.GetProfileName())
+	if err != nil {
+		return nil, grpcError(err)
+	}
+	return &pb.ApplyProfileIniFilesResponse{AppliedFileCount: int32(count)}, nil
 }
 
 func (s *gorganizerServer) SetProfileIniEnabled(_ context.Context, req *pb.SetProfileIniEnabledRequest) (*pb.ProfileIniStatus, error) {
@@ -616,7 +719,23 @@ func (s *gorganizerServer) Health(_ context.Context, _ *pb.HealthRequest) (*pb.R
 		RecoveryDone: r.RecoveryDone,
 		GamesWarmed:  r.GamesWarmed,
 		LastInitStep: r.LastInitStep,
+		InstanceId:   r.InstanceID,
+		Pid:          r.PID,
+		Version:      r.Version,
+		ApiEpoch:     r.APIEpoch,
+		Stopping:     r.Stopping,
 	}, nil
+}
+
+func (s *gorganizerServer) GetShutdownPlan(_ context.Context, _ *pb.GetShutdownPlanRequest) (*pb.ShutdownPlan, error) {
+	plan := &pb.ShutdownPlan{}
+	for _, item := range s.ctrl.GetShutdownPlan() {
+		plan.Items = append(plan.Items, &pb.ShutdownPlanItem{
+			GameId: item.GameID, ProfileName: item.ProfileName,
+			WillUnmount: item.WillUnmount, RetainedReason: item.RetainedReason,
+		})
+	}
+	return plan, nil
 }
 
 func (s *gorganizerServer) WatchStatus(_ *pb.WatchStatusRequest, stream pb.Gorganizer_WatchStatusServer) error {
@@ -644,6 +763,8 @@ func (s *gorganizerServer) WatchStatus(_ *pb.WatchStatusRequest, stream pb.Gorga
 					DataPath:   evt.RecoveryPending.DataPath,
 					BackupPath: evt.RecoveryPending.BackupPath,
 					Reason:     evt.RecoveryPending.Reason,
+					Kind:       recoveryKindToProto(evt.RecoveryPending.Kind),
+					RecoveryId: evt.RecoveryPending.RecoveryID,
 				},
 			}
 		case evt.DependencyWarning != nil:
@@ -1006,18 +1127,80 @@ func modListFromProto(entries []*pb.ModListEntry) []dto.ModListEntryResult {
 	return result
 }
 
-func vfsStatusToProto(st *dto.VFSStatusResult) *pb.VFSStatus {
-	return &pb.VFSStatus{
-		Mounted:         st.Mounted,
-		GameId:          st.GameID,
-		ProfileName:     st.ProfileName,
-		MountPoint:      st.MountPoint,
-		EnabledModCount: int32(st.EnabledModCount),
-		TotalFileCount:  int32(st.TotalFileCount),
-		Dirty:           st.Dirty,
-		DesiredGen:      st.DesiredGen,
-		AppliedGen:      st.AppliedGen,
+// recoveryKindFromProto translates a wire recovery kind into the domain kind.
+func recoveryKindFromProto(kind pb.RecoveryKind) dto.RecoveryKind {
+	switch kind {
+	case pb.RecoveryKind_RECOVERY_KIND_DATA:
+		return dto.RecoveryKindData
+	case pb.RecoveryKind_RECOVERY_KIND_MOD_LOADER:
+		return dto.RecoveryKindModLoader
+	case pb.RecoveryKind_RECOVERY_KIND_GAME_ROOT:
+		return dto.RecoveryKindGameRoot
+	default:
+		return dto.RecoveryKindUnspecified
 	}
+}
+
+// recoveryKindToProto translates a domain recovery kind into the wire kind.
+func recoveryKindToProto(kind dto.RecoveryKind) pb.RecoveryKind {
+	switch kind {
+	case dto.RecoveryKindData:
+		return pb.RecoveryKind_RECOVERY_KIND_DATA
+	case dto.RecoveryKindModLoader:
+		return pb.RecoveryKind_RECOVERY_KIND_MOD_LOADER
+	case dto.RecoveryKindGameRoot:
+		return pb.RecoveryKind_RECOVERY_KIND_GAME_ROOT
+	default:
+		return pb.RecoveryKind_RECOVERY_KIND_UNSPECIFIED
+	}
+}
+
+// vfsLifecycleToProto translates a domain lifecycle state into the wire state.
+func vfsLifecycleToProto(state dto.VFSLifecycleState) pb.VFSLifecycleState {
+	switch state {
+	case dto.VFSLifecycleStateReady:
+		return pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_READY
+	case dto.VFSLifecycleStateRecoveryDeferred:
+		return pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_RECOVERY_DEFERRED
+	case dto.VFSLifecycleStateRecoveryPending:
+		return pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_RECOVERY_PENDING
+	default:
+		return pb.VFSLifecycleState_VFS_LIFECYCLE_STATE_UNSPECIFIED
+	}
+}
+
+func vfsStatusToProto(st *dto.VFSStatusResult) *pb.VFSStatus {
+	out := &pb.VFSStatus{
+		Mounted:          st.Mounted,
+		GameId:           st.GameID,
+		ProfileName:      st.ProfileName,
+		MountPoint:       st.MountPoint,
+		EnabledModCount:  int32(st.EnabledModCount),
+		TotalFileCount:   int32(st.TotalFileCount),
+		Dirty:            st.Dirty,
+		DesiredGen:       st.DesiredGen,
+		AppliedGen:       st.AppliedGen,
+		LifecycleState:   vfsLifecycleToProto(st.LifecycleState),
+		LifecycleReason:  st.LifecycleReason,
+		SteamMaintenance: pb.SteamMaintenanceState(st.SteamMaintenance),
+	}
+	for _, batch := range st.PreservedBatches {
+		out.PreservedBatches = append(out.PreservedBatches, &pb.PreservedBatch{
+			BatchId: batch.BatchID, CreatedAt: batch.CreatedAt,
+			FileCount: int32(batch.FileCount), Reason: batch.Reason, Path: batch.Path,
+		})
+	}
+	if pending := st.PendingRecovery; pending != nil {
+		out.PendingRecovery = &pb.RecoveryPending{
+			GameId:     pending.GameID,
+			DataPath:   pending.DataPath,
+			BackupPath: pending.BackupPath,
+			Reason:     pending.Reason,
+			Kind:       recoveryKindToProto(pending.Kind),
+			RecoveryId: pending.RecoveryID,
+		}
+	}
+	return out
 }
 
 func downloadProgressToProto(p *dto.DownloadProgressResult) *pb.DownloadProgress {
@@ -1081,13 +1264,15 @@ func gameSettingsToProto(gs *dto.GameSettingsResult) *pb.GameSettings {
 
 func fomodPlanToProto(p *dto.FomodPlanResult) *pb.FomodPlan {
 	out := &pb.FomodPlan{
-		ModuleName:     p.ModuleName,
-		ModulePath:     p.ModulePath,
-		LegacyInfoOnly: p.LegacyInfoOnly,
-		Description:    p.Description,
-		ScreenshotPath: p.ScreenshotPath,
-		Version:        p.Version,
-		Author:         p.Author,
+		ModuleName:      p.ModuleName,
+		ModulePath:      p.ModulePath,
+		LegacyInfoOnly:  p.LegacyInfoOnly,
+		Description:     p.Description,
+		ScreenshotPath:  p.ScreenshotPath,
+		Version:         p.Version,
+		Author:          p.Author,
+		ModuleConfigXml: p.ModuleConfigXML,
+		ScreenshotData:  p.ScreenshotData,
 	}
 	for _, f := range p.RequiredFiles {
 		out.RequiredFiles = append(out.RequiredFiles, &pb.FomodFile{

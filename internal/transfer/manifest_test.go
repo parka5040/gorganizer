@@ -55,7 +55,7 @@ func TestImportRejectsGameMismatch(t *testing.T) {
 	if mismatch.Want != testGame || mismatch.Got != "falloutnv" {
 		t.Errorf("mismatch = %+v", mismatch)
 	}
-	if _, perr := Preview(testGame, archive); !errors.As(perr, &mismatch) {
+	if _, perr := Preview(context.Background(), testGame, archive); !errors.As(perr, &mismatch) {
 		t.Errorf("Preview err = %v, want TransferGameMismatchError", perr)
 	}
 }
@@ -86,7 +86,7 @@ func TestImportRejectsZeroSchema(t *testing.T) {
 	archive := writeArchiveFile(t, buildTarBytes(t, m, nil))
 	setRoot(t, t.TempDir())
 
-	_, err := Preview(testGame, archive)
+	_, err := Preview(context.Background(), testGame, archive)
 	var schema *TransferSchemaError
 	if !errors.As(err, &schema) {
 		t.Fatalf("err = %v, want TransferSchemaError", err)
@@ -100,7 +100,7 @@ func TestPreviewReportsManifestAndCollisions(t *testing.T) {
 	setRoot(t, t.TempDir())
 	seedCollisions(t)
 
-	preview, err := Preview(testGame, archive)
+	preview, err := Preview(context.Background(), testGame, archive)
 	if err != nil {
 		t.Fatalf("Preview: %v", err)
 	}

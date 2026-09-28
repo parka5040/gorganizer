@@ -333,6 +333,9 @@ func TestFenceLaunchAdmissionBlocksTheLoader(t *testing.T) {
 
 func TestFenceLoaderOperationBlocksSharedOperations(t *testing.T) {
 	d, _ := newLoaderTestDaemon(t, nil, nil)
+	if err := os.MkdirAll(filepath.Join(config.ModsDir("stardewvalley"), "Some Mod"), 0755); err != nil {
+		t.Fatal(err)
+	}
 	release, err := reserveExclusive(t, d, "stardewvalley")
 	if err != nil {
 		t.Fatal(err)
@@ -344,7 +347,10 @@ func TestFenceLoaderOperationBlocksSharedOperations(t *testing.T) {
 		"unmount":   func() error { return d.UnmountVFS("stardewvalley") },
 		"configure": func() error { return d.ConfigureGame("stardewvalley", "Stardew Valley", 413150, "/elsewhere", "Mods") },
 		"tool":      func() error { _, _, err := d.LaunchExecutable("stardewvalley", "missing", "Default"); return err },
-		"reinstall": func() error { _, _, _, err := d.ReinstallMod("stardewvalley", "Some Mod"); return err },
+		"reinstall": func() error {
+			_, _, _, err := d.ReinstallMod(context.Background(), "stardewvalley", "Some Mod", "")
+			return err
+		},
 		"import": func() error {
 			_, err := d.ImportInstance(context.Background(), dto.ImportRequest{GameID: "stardewvalley", ArchivePath: "/missing.tar.zst"}, func(dto.TransferProgress) {})
 			return err

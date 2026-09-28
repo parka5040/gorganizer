@@ -1,0 +1,28 @@
+# Pinned inputs for prebuilt release builds. Shell-sourceable KEY=VALUE lines.
+# Every download is verified against the SHA-256 here before use; mirrors are untrusted.
+# Resolved 2026-09-27. Update deliberately, one input at a time, and rebuild twice to compare.
+
+BUILDER_IMAGE=docker.io/library/ubuntu:22.04@sha256:b8b6ee6aa931ecd9d0d952abc34dc0e5f7c6a30c6bb71b079fe399fde0329c02
+
+GO_VERSION=1.26.8
+GO_URL=https://go.dev/dl/go1.26.8.linux-amd64.tar.gz
+GO_SHA256=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b
+
+GRPC_TAG=v1.84.0
+GRPC_COMMIT=3252a89f10d8e92997862167ca7d095ecda85973
+GRPC_REPO=https://github.com/grpc/grpc
+
+QT_VERSION=6.11.3
+QT_BASE_URL=https://download.qt.io/online/qtsdkrepository/linux_x64/desktop/qt6_6113/qt6_6113/qt.qt6.6113.linux_gcc_64
+QT_ARCHIVE_1=6.11.3-0-202609240253qtbase-Linux-RHEL_9_6-GCC-Linux-RHEL_9_6-X86_64.7z
+QT_ARCHIVE_1_SHA256=fadc26e718ad109bb0f9b9a301885b5888426703ccaf8fa83d23fc90881fcf97
+QT_ARCHIVE_2=6.11.3-0-202609240253qtsvg-Linux-RHEL_9_6-GCC-Linux-RHEL_9_6-X86_64.7z
+QT_ARCHIVE_2_SHA256=5cca33cc1906b7c0279c5ebabf07aa65f32069532d7758a1e1f1f6117fc8c1a0
+QT_ARCHIVE_3=6.11.3-0-202609240253qtwayland-Linux-RHEL_9_6-GCC-Linux-RHEL_9_6-X86_64.7z
+QT_ARCHIVE_3_SHA256=f66f455ce18dd4ec9b6a84494b289ea77f0dbf8786ccf562b435e8473402fa05
+QT_ARCHIVE_4=6.11.3-0-202609240253icu-linux-Rhel8.6-x86_64.7z
+QT_ARCHIVE_4_SHA256=9021d0ef1063d0c6940e98c4793467aa11660b9bbd5df13b0ba060b212e8762e
+
+ACTIONS_CHECKOUT=actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+ACTIONS_UPLOAD_ARTIFACT=actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+ACTIONS_DOWNLOAD_ARTIFACT=actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c

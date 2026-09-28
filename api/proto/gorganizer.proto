@@ -40,6 +40,9 @@ service Gorganizer {
   // Profile management
   rpc ListProfiles(ListProfilesRequest) returns (ListProfilesResponse);
   rpc CreateProfile(CreateProfileRequest) returns (Profile);
+  // CopyProfile creates a new profile with everything the source profile
+  // holds: mod choices and order, plugin load order, separators and INIs.
+  rpc CopyProfile(CopyProfileRequest) returns (Profile);
   rpc DeleteProfile(DeleteProfileRequest) returns (DeleteProfileResponse);
   rpc GetModList(GetModListRequest) returns (ModListResponse);
   rpc SetModList(SetModListRequest) returns (SetModListResponse);
@@ -59,6 +62,18 @@ service Gorganizer {
   // confirming calls RestoreFromBackup which performs the destructive
   // restore (remove Data, rename Data.orig → Data) under explicit consent.
   rpc RestoreFromBackup(RestoreFromBackupRequest) returns (RestoreFromBackupResponse);
+  // RetryVFSRecovery re-checks an install whose startup recovery was deferred
+  // because its game may still be running, and recovers it once the game is
+  // confirmed closed. It never forces recovery while the game runs.
+  rpc RetryVFSRecovery(RetryVFSRecoveryRequest) returns (VFSStatus);
+  // Steam maintenance: enabled=true takes the game's mods down (as Unmount
+  // does) and keeps them down while the user updates or verifies the game in
+  // Steam; enabled=false with verification_confirmed=true ends it once Steam
+  // is idle. Files Steam wrote while mods were deployed are kept in preserved
+  // batches that can be imported as a disabled mod or deleted.
+  rpc SetSteamMaintenance(SetSteamMaintenanceRequest) returns (VFSStatus);
+  rpc ImportPreservedFiles(ImportPreservedFilesRequest) returns (ImportPreservedFilesResponse);
+  rpc DeletePreservedBatch(DeletePreservedBatchRequest) returns (VFSStatus);
 
   // Conflict analysis
   rpc GetConflicts(GetConflictsRequest) returns (ConflictsResponse);
@@ -90,6 +105,10 @@ service Gorganizer {
   rpc StartInstall(StartInstallRequest) returns (StartInstallResponse);
   rpc DiscardPreview(DiscardPreviewRequest) returns (DiscardPreviewResponse);
   rpc StreamInstallEvents(StreamInstallEventsRequest) returns (stream InstallEvent);
+  // Reports what became of a StartInstall or ReinstallMod call by its
+  // client_request_id, so a client whose call ended without a definite
+  // answer (deadline, cancellation, lost connection) can reconcile it.
+  rpc GetInstallOutcome(GetInstallOutcomeRequest) returns (GetInstallOutcomeResponse);
 
   // Per-game settings (auto-install toggle, etc.)
   rpc GetGameSettings(GetGameSettingsRequest) returns (GameSettings);
@@ -102,6 +121,9 @@ service Gorganizer {
   rpc GetProfileIniStatus(GetProfileIniStatusRequest) returns (ProfileIniStatus);
   rpc ListIniTweaks(ListIniTweaksRequest) returns (ListIniTweaksResponse);
   rpc SetIniTweak(SetIniTweakRequest) returns (IniTweakState);
+  // ApplyProfileIniFiles copies the profile's INIs into the game's settings
+  // folder now, regardless of the profile's "use custom INIs" setting.
+  rpc ApplyProfileIniFiles(ApplyProfileIniFilesRequest) returns (ApplyProfileIniFilesResponse);
 
   // Game launch (with optional script extender)
   rpc LaunchGame(LaunchGameRequest) returns (LaunchGameResponse);
@@ -178,6 +200,9 @@ service Gorganizer {
   rpc RollbackManagedTool(RollbackManagedToolRequest) returns (ManagedToolStatus);
 
   rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+  // GetShutdownPlan reports, without changing anything, which games' mods
+  // a shutdown started now would leave deployed and why.
+  rpc GetShutdownPlan(GetShutdownPlanRequest) returns (ShutdownPlan);
   // Lightweight, non-streaming readiness probe used by the splash screen.
   // Polled at ~150 ms during cold start; the frontend unlocks the main
   // window when GamesWarmed flips true.
@@ -391,6 +416,9 @@ message UninstallModResponse {
 message ReinstallModRequest {
   string game_id = 1;
   string mod_name = 2;
+  // Optional client-chosen unique id (a UUID); GetInstallOutcome reports the
+  // call's outcome under it.
+  string client_request_id = 3;
 }
 message ReinstallModResponse {
   int32 archives_replayed = 1;
@@ -459,6 +487,12 @@ message ListProfilesResponse {
 message CreateProfileRequest {
   string game_id = 1;
   string name = 2;
+}
+
+message CopyProfileRequest {
+  string game_id = 1;
+  string source_name = 2;
+  string name = 3;
 }
 
 message DeleteProfileRequest {
@@ -530,6 +564,72 @@ message VFSStatus {
   bool dirty = 7;
   uint64 desired_gen = 8;
   uint64 applied_gen = 9;
+  // lifecycle_state reports whether the install is usable. RECOVERY_DEFERRED
+  // means startup recovery is waiting because the game may still be running:
+  // the deployed mods are kept and every change to this install is refused
+  // until the game closes. lifecycle_reason is a short machine-readable cause
+  // (e.g. "game_running", "launch_grace", "process_scan_failed").
+  VFSLifecycleState lifecycle_state = 10;
+  string lifecycle_reason = 11;
+  // pending_recovery is the recovery currently waiting for the user's
+  // decision for this game (the same item the RecoveryPending event carries),
+  // so a GUI that missed the event can still show the prompt.
+  RecoveryPending pending_recovery = 12;
+  // steam_maintenance is NONE when Steam and the deployed mods agree,
+  // STEAM_BUSY while Steam updates or checks the game, and VERIFY_REQUIRED
+  // after Steam changed the game while mods were deployed (mounting and
+  // launching are refused until the user confirms a Steam verification).
+  SteamMaintenanceState steam_maintenance = 13;
+  repeated PreservedBatch preserved_batches = 14;
+}
+
+enum SteamMaintenanceState {
+  STEAM_MAINTENANCE_STATE_UNSPECIFIED = 0;
+  STEAM_MAINTENANCE_STATE_NONE = 1;
+  STEAM_MAINTENANCE_STATE_STEAM_BUSY = 2;
+  STEAM_MAINTENANCE_STATE_VERIFY_REQUIRED = 3;
+  STEAM_MAINTENANCE_STATE_USER_REQUESTED = 4;
+}
+
+message PreservedBatch {
+  string batch_id = 1;
+  string created_at = 2;
+  int32 file_count = 3;
+  string reason = 4;
+  string path = 5;
+}
+
+message SetSteamMaintenanceRequest {
+  string game_id = 1;
+  bool enabled = 2;
+  bool verification_confirmed = 3;
+}
+
+message ImportPreservedFilesRequest {
+  string game_id = 1;
+  string batch_id = 2;
+  string mod_name = 3;
+  repeated string relative_paths = 4;
+}
+message ImportPreservedFilesResponse {
+  string mod_name = 1;
+  int32 file_count = 2;
+}
+
+message DeletePreservedBatchRequest {
+  string game_id = 1;
+  string batch_id = 2;
+}
+
+enum VFSLifecycleState {
+  VFS_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  VFS_LIFECYCLE_STATE_READY = 1;
+  VFS_LIFECYCLE_STATE_RECOVERY_DEFERRED = 2;
+  VFS_LIFECYCLE_STATE_RECOVERY_PENDING = 3;
+}
+
+message RetryVFSRecoveryRequest {
+  string game_id = 1;
 }
 
 message MountVFSRequest {
@@ -541,6 +641,11 @@ message MountVFSRequest {
   // once. Without auto_swap, the daemon returns VFSMutexError so the
   // GUI can prompt.
   bool auto_swap = 3;
+  // When true and this game's mods are already deployed with a different
+  // profile, the daemon switches the deployed mods to profile_name in one
+  // step (refused while the game runs). Without it, a different profile is
+  // refused as before.
+  bool retarget_if_mounted = 4;
 }
 message MountVFSResponse {
   VFSStatus status = 1;
@@ -553,6 +658,12 @@ message UnmountVFSResponse {}
 
 message RestoreFromBackupRequest {
   string game_id = 1;
+  // When set, the confirmation applies only if the game's current pending
+  // recovery has this kind and recovery_id; otherwise the daemon refuses with
+  // recovery_stale and re-announces the current item. Unset keeps the legacy
+  // behaviour of resolving the current item.
+  RecoveryKind expected_kind = 2;
+  string recovery_id = 3;
 }
 message RestoreFromBackupResponse {}
 
@@ -566,6 +677,19 @@ message RecoveryPending {
   string data_path = 2;
   string backup_path = 3;
   string reason = 4;
+  // kind selects the prompt: DATA restores Data from Data.orig (destructive),
+  // MOD_LOADER retries an interrupted SMAPI transaction, GAME_ROOT retries
+  // game-root file recovery. recovery_id is an opaque identity of this pending
+  // item; it changes when the item is replaced.
+  RecoveryKind kind = 5;
+  string recovery_id = 6;
+}
+
+enum RecoveryKind {
+  RECOVERY_KIND_UNSPECIFIED = 0;
+  RECOVERY_KIND_DATA = 1;
+  RECOVERY_KIND_MOD_LOADER = 2;
+  RECOVERY_KIND_GAME_ROOT = 3;
 }
 
 message GetVFSStatusRequest {
@@ -682,6 +806,9 @@ message ListArchivesResponse {
 message RemoveArchiveRequest {
   string game_id = 1;
   string archive_rel_path = 2;
+  // download_id removes a failed or cancelled download's entry, including one
+  // that never received an archive path. Active downloads are refused.
+  string download_id = 3;
 }
 message RemoveArchiveResponse {}
 
@@ -733,7 +860,10 @@ message ArchiveEvent {
 
 message PreviewInstallRequest {
   string game_id = 1;
+  // Exactly one of archive_rel_path (in Downloads) or external_archive_path
+  // (an absolute path to an archive outside the library) must be set.
   string archive_rel_path = 2;
+  string external_archive_path = 3;
 }
 message PreviewInstallResponse {
   // Daemon-side opaque handle referring to the cached extraction. Pass
@@ -742,6 +872,13 @@ message PreviewInstallResponse {
   bool has_fomod = 2;
   FomodPlan plan = 3;                    // valid when has_fomod=true
   repeated string flat_file_list = 4;    // relative to extract root; valid when has_fomod=false
+  // Candidate content roots (relative, '/'-separated; "" = archive root) the
+  // user may pick when root_ambiguous is true. Bounded and validated.
+  repeated string selectable_roots = 5;
+  // Content root the daemon would install from ("" = archive root).
+  string detected_root = 6;
+  // True when the daemon could not decide the content root on its own.
+  bool root_ambiguous = 7;
 }
 
 message DiscardPreviewRequest {
@@ -749,9 +886,43 @@ message DiscardPreviewRequest {
 }
 message DiscardPreviewResponse {}
 
+enum InstallOutcomeState {
+  INSTALL_OUTCOME_STATE_UNSPECIFIED = 0;
+  // The daemon has no record of the id: the call never arrived, the daemon
+  // restarted, or the record expired. The result cannot be confirmed.
+  INSTALL_OUTCOME_STATE_UNKNOWN = 1;
+  INSTALL_OUTCOME_STATE_RUNNING = 2;
+  INSTALL_OUTCOME_STATE_SUCCEEDED = 3;
+  INSTALL_OUTCOME_STATE_FAILED = 4;
+  // Stopped before anything was published; nothing changed.
+  INSTALL_OUTCOME_STATE_CANCELLED = 5;
+}
+
+message GetInstallOutcomeRequest {
+  string game_id = 1;
+  string client_request_id = 2;
+}
+message GetInstallOutcomeResponse {
+  InstallOutcomeState state = 1;
+  // SUCCEEDED: the installed or reinstalled mod folder and its file count.
+  string mod_folder = 2;
+  int32 file_count = 3;
+  // FAILED: the error exactly as the original call would have returned it
+  // (token grammar), with its gRPC status code.
+  string error = 4;
+  int32 error_code = 5;
+  // SUCCEEDED reinstall: archives replayed and skipped.
+  int32 archives_replayed = 6;
+  int32 archives_skipped = 7;
+}
+
 enum InstallMode {
   INSTALL_MODE_NEW_MOD = 0;      // install as a new mod folder
   INSTALL_MODE_MERGE_INTO = 1;   // append into target_mod's source_archives
+  // Replace target_mod's files with this archive (an update): the mod keeps
+  // its name, category, mod page and place in every profile; its old files
+  // are removed and its source archives become this archive.
+  INSTALL_MODE_REPLACE = 2;
 }
 
 message StartInstallRequest {
@@ -769,6 +940,14 @@ message StartInstallRequest {
   // When non-empty, skip auto-flatten and copy exactly this file set
   // (FOMOD path). Ignored when preview reported has_fomod=false.
   repeated FomodFile fomod_selected_files = 7;
+  // The user completed the FOMOD wizard (an empty fomod_selected_files list
+  // is then a deliberate empty selection, not "wizard not run").
+  bool fomod_confirmed = 8;
+  // Content root chosen by the user from PreviewInstallResponse.selectable_roots.
+  string selected_root = 9;
+  // Optional client-chosen unique id (a UUID); GetInstallOutcome reports the
+  // call's outcome under it and InstallCompleted echoes it.
+  string client_request_id = 10;
 }
 message StartInstallResponse {
   string mod_folder = 1;
@@ -824,6 +1003,9 @@ message InstallCompleted {
   string batch_id = 4;
   // Every dependency request batch the install satisfied (all profiles).
   repeated string batch_ids = 5;
+  // The StartInstallRequest.client_request_id of the call that installed it;
+  // empty for daemon-started installs.
+  string client_request_id = 6;
 }
 
 // --- Game launch messages ---
@@ -912,6 +1094,20 @@ message SetNexusAPIKeyResponse {
 message ShutdownRequest {}
 message ShutdownResponse {}
 
+message GetShutdownPlanRequest {}
+message ShutdownPlan {
+  repeated ShutdownPlanItem items = 1;
+}
+// One mounted game. retained_reason is empty when shutdown would turn its
+// mods off, otherwise a short machine-readable cause: game_running,
+// launch_recent, tool_running, recovery_deferred, steam_busy, busy.
+message ShutdownPlanItem {
+  string game_id = 1;
+  string profile_name = 2;
+  bool will_unmount = 3;
+  string retained_reason = 4;
+}
+
 message HealthRequest {}
 // Readiness reports the cold-start state of the daemon. The splash holds
 // the frontend until games_warmed is true; last_init_step is rendered as
@@ -921,6 +1117,15 @@ message Readiness {
   bool recovery_done = 2;    // crash recovery has finished for all games
   bool games_warmed = 3;     // initial DetectGames + per-game warmup completed
   string last_init_step = 4; // human-readable string for the splash subtitle
+  // Identity of the answering daemon process: a random ID chosen at start,
+  // its PID, its version string, and a compatibility epoch the GUI and
+  // launcher compare before relying on newer RPCs. stopping is true once
+  // shutdown began (new work is refused).
+  string instance_id = 5;
+  int32 pid = 6;
+  string version = 7;
+  int32 api_epoch = 8;
+  bool stopping = 9;
 }
 
 // --- Game settings ---
@@ -1141,6 +1346,11 @@ message FomodPlan {
   string screenshot_path = 7;           // absolute path to a screenshot in fomod/, or empty
   string version = 8;                   // from fomod/info.xml <Version>
   string author = 9;                    // from fomod/info.xml <Author>
+  // Raw fomod/ModuleConfig.xml bytes (at most 1 MiB) so the GUI can run the
+  // wizard without reading daemon-side files; empty for legacy info-only.
+  bytes module_config_xml = 10;
+  // Screenshot image bytes (at most 2 MiB), or empty.
+  bytes screenshot_data = 11;
 }
 
 // --- INI management messages ---
@@ -1167,7 +1377,27 @@ message SaveProfileIniFileRequest {
   string filename = 3;
   string content = 4;
 }
-message SaveProfileIniFileResponse {}
+message SaveProfileIniFileResponse {
+  // outcome distinguishes a save that was also applied to the game from one
+  // that was saved to the profile only; apply_error explains a failed apply.
+  IniSaveOutcome outcome = 1;
+  string apply_error = 2;
+}
+
+enum IniSaveOutcome {
+  INI_SAVE_OUTCOME_UNSPECIFIED = 0;
+  INI_SAVE_OUTCOME_SAVED = 1;
+  INI_SAVE_OUTCOME_SAVED_AND_APPLIED = 2;
+  INI_SAVE_OUTCOME_SAVED_APPLY_FAILED = 3;
+}
+
+message ApplyProfileIniFilesRequest {
+  string game_id = 1;
+  string profile_name = 2;
+}
+message ApplyProfileIniFilesResponse {
+  int32 applied_file_count = 1;
+}
 
 message SetProfileIniEnabledRequest {
   string game_id = 1;
@@ -1444,6 +1674,10 @@ message PreviewImportResponse {
   repeated TransferProfileEntry profiles = 6;
   bool includes_overwrite = 7;
   bool includes_game_settings = 8;
+  // Opaque identity of the archive file that was previewed (device, inode,
+  // size and change times). Pass it back as
+  // ImportInstanceRequest.expected_archive_identity.
+  string archive_identity = 9;
 }
 
 message ImportInstanceRequest {
@@ -1454,6 +1688,9 @@ message ImportInstanceRequest {
   map<string, TransferCollisionPolicy> mod_policy_overrides = 4;
   repeated string mod_folders = 5;    // empty = all mods in the archive
   repeated string profile_names = 6;  // empty = all profiles in the archive
+  // When set, the import is refused unless the opened archive still has this
+  // PreviewImportResponse.archive_identity; nothing is changed on refusal.
+  string expected_archive_identity = 7;
 }
 
 message TransferProgress {

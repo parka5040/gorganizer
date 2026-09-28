@@ -21,6 +21,8 @@ var newNexusDownloadClient = func(key string) nexusDownloadClient {
 	return download.NewNexusClient(key)
 }
 
+var newDownloadManager = download.NewManager
+
 // downloadStateSnapshot returns detached download settings and the current manager under a short session read lock.
 func (s *session) downloadStateSnapshot() downloadState {
 	s.mu.RLock()

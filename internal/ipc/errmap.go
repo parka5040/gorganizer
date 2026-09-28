@@ -1,6 +1,7 @@
 package ipc
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"github.com/parka/gorganizer/internal/daemon"
 	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/dto"
+	"github.com/parka/gorganizer/internal/profile"
 	"github.com/parka/gorganizer/internal/smapi"
 	"github.com/parka/gorganizer/internal/tools"
 	"github.com/parka/gorganizer/internal/transfer"
@@ -59,6 +61,17 @@ const (
 	tokenTransferPath               = "transfer_path:"
 	tokenTransferCollision          = "transfer_collision:"
 	tokenTransferOverwriteMounted   = "transfer_overwrite_mounted:"
+	tokenArchiveRejected            = "archive_rejected:"
+	tokenBundleRejected             = "bundle_rejected:"
+	tokenProfileIdentityInvalid     = "profile_identity_invalid:"
+	tokenInstallSelectionEmpty      = "install_selection_empty:"
+	tokenPluginStateFailed          = "plugin_state_failed:"
+	tokenFarmRecoveryDeferred       = "farm_recovery_deferred:"
+	tokenRecoveryStale              = "recovery_stale:"
+	tokenInstallRecordFailed        = "install_record_failed:"
+	tokenSteamMaintenanceRequired   = "steam_maintenance_required:"
+	tokenBundleIncomplete           = "bundle_incomplete:"
+	tokenReplacementPending         = "replacement_pending:"
 )
 
 var errorTokens = []string{
@@ -70,6 +83,10 @@ var errorTokens = []string{
 	tokenPreviewNotFound, tokenVFSMutex, tokenLinkedParentMissing, tokenTTWDrift, tokenPrefixMissing,
 	tokenSteamNotRunning, tokenTTWRequiresVanillaFNV, tokenXNVSEMissingForTTW, tokenFNV4GBNotAppliedForTTW,
 	tokenTransferGameMismatch, tokenTransferSchema, tokenTransferPath, tokenTransferCollision, tokenTransferOverwriteMounted,
+	tokenArchiveRejected, tokenBundleRejected, tokenProfileIdentityInvalid, tokenInstallSelectionEmpty,
+	tokenPluginStateFailed, tokenFarmRecoveryDeferred, tokenRecoveryStale,
+	tokenInstallRecordFailed, tokenSteamMaintenanceRequired, tokenBundleIncomplete,
+	tokenReplacementPending,
 }
 
 // MapError turns a structured error into a gRPC status; unrecognized errors pass through with ok=false.
@@ -77,9 +94,48 @@ func MapError(err error) (error, bool) {
 	if err == nil {
 		return nil, true
 	}
+	if errors.Is(err, context.Canceled) {
+		return status.Error(codes.Canceled, err.Error()), true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return status.Error(codes.DeadlineExceeded, err.Error()), true
+	}
+	if errors.Is(err, dto.ErrDuplicateClientRequestID) || errors.Is(err, dto.ErrInvalidClientRequestID) || errors.Is(err, dto.ErrInstallOutcomeGameMismatch) {
+		return status.Error(codes.InvalidArgument, err.Error()), true
+	}
+	if errors.Is(err, dto.ErrInstallOutcomeFull) {
+		return status.Error(codes.ResourceExhausted, err.Error()), true
+	}
 	var shuttingDown *dto.ShuttingDownError
 	if errors.As(err, &shuttingDown) {
 		return status.Error(codes.Unavailable, tokenDaemonShuttingDown), true
+	}
+	var pluginState *dto.PluginStateError
+	if errors.As(err, &pluginState) {
+		return status.Error(codes.FailedPrecondition, tokenPluginStateFailed+"game="+escapeTokenValue(pluginState.GameID)), true
+	}
+	var deferred *dto.RecoveryDeferredError
+	if errors.As(err, &deferred) {
+		msg := tokenFarmRecoveryDeferred + fmt.Sprintf("game=%s:operation=%s", escapeTokenValue(deferred.GameID), escapeTokenValue(deferred.Operation))
+		return status.Error(codes.FailedPrecondition, msg), true
+	}
+	var pendingReplacement *download.ReplacementPendingError
+	if errors.As(err, &pendingReplacement) {
+		return status.Error(codes.FailedPrecondition, tokenReplacementPending+"name="+escapeTokenValue(pendingReplacement.Name)), true
+	}
+	var incomplete *transfer.BundleIncompleteError
+	if errors.As(err, &incomplete) {
+		msg := tokenBundleIncomplete + fmt.Sprintf("items=%d:recovery=%s", incomplete.Items, escapeTokenValue(incomplete.Recovery))
+		return status.Error(codes.Aborted, msg), true
+	}
+	var maintenance *dto.SteamMaintenanceError
+	if errors.As(err, &maintenance) {
+		msg := tokenSteamMaintenanceRequired + fmt.Sprintf("game=%s:reason=%s", escapeTokenValue(maintenance.GameID), escapeTokenValue(maintenance.Reason))
+		return status.Error(codes.FailedPrecondition, msg), true
+	}
+	var stale *dto.RecoveryStaleError
+	if errors.As(err, &stale) {
+		return status.Error(codes.FailedPrecondition, tokenRecoveryStale+"game="+escapeTokenValue(stale.GameID)), true
 	}
 	var running *dto.GameRunningError
 	if errors.As(err, &running) {
@@ -90,6 +146,10 @@ func MapError(err error) (error, bool) {
 	if errors.As(err, &registration) {
 		msg := tokenModRegistrationFailed + "mod=" + escapeTokenValue(registration.Mod)
 		return status.Error(codes.Internal, msg), true
+	}
+	var installRecord *download.InstallRecordError
+	if errors.As(err, &installRecord) {
+		return status.Error(codes.Internal, tokenInstallRecordFailed+"mod="+escapeTokenValue(installRecord.Mod)), true
 	}
 	var invalidTarget *download.InvalidTargetModError
 	if errors.As(err, &invalidTarget) {
@@ -271,6 +331,25 @@ func MapError(err error) (error, bool) {
 		msg := tokenTransferOverwriteMounted + fmt.Sprintf("name=%s", overwriteMounted.Name)
 		return status.Error(codes.FailedPrecondition, msg), true
 	}
+	if errors.Is(err, download.ErrEmptyInstallSelection) {
+		return status.Error(codes.InvalidArgument, tokenInstallSelectionEmpty), true
+	}
+	var archiveRejected *download.ArchiveRejectedError
+	if errors.As(err, &archiveRejected) {
+		return status.Error(codes.InvalidArgument, tokenArchiveRejected+"reason="+escapeTokenValue(archiveRejected.Reason)), true
+	}
+	if errors.Is(err, download.ErrUnsafeArchive) {
+		return status.Error(codes.InvalidArgument, tokenArchiveRejected+"reason="+download.ArchiveRejectedUnsafeEntry), true
+	}
+	var bundleRejected *transfer.BundleRejectedError
+	if errors.As(err, &bundleRejected) {
+		msg := tokenBundleRejected + fmt.Sprintf("reason=%s:item=%s", escapeTokenValue(bundleRejected.Reason), escapeTokenValue(bundleRejected.Item))
+		return status.Error(codes.InvalidArgument, msg), true
+	}
+	var profileIdentity *profile.IdentityInvalidError
+	if errors.As(err, &profileIdentity) {
+		return status.Error(codes.InvalidArgument, tokenProfileIdentityInvalid+"name="+escapeTokenValue(profileIdentity.Name)), true
+	}
 	return nil, false
 }
 
@@ -311,6 +390,9 @@ var sentinelCodes = []struct {
 func grpcError(err error) error {
 	if mapped, ok := MapError(err); ok {
 		return mapped
+	}
+	if errors.Is(err, daemon.ErrVerificationConfirmationRequired) {
+		return status.Error(codes.InvalidArgument, err.Error())
 	}
 	for _, entry := range sentinelCodes {
 		if errors.Is(err, entry.sentinel) {

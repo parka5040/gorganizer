@@ -3,15 +3,21 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/dto"
 	inipkg "github.com/parka/gorganizer/internal/ini"
 	"github.com/parka/gorganizer/internal/profile"
+	"github.com/parka/gorganizer/internal/steam"
 	"github.com/parka/gorganizer/internal/tools"
+	"github.com/parka/gorganizer/internal/transfer"
 	"github.com/parka/gorganizer/internal/vfs"
 )
 
@@ -36,11 +42,36 @@ type Daemon struct {
 	*ModDependencyService
 }
 
+// RetryDeferredRecovery attempts an immediate deferred recovery through the VFS service.
+func (d *Daemon) RetryDeferredRecovery(gameID string) error {
+	return d.VFSService.RetryDeferredRecovery(gameID)
+}
+
+const APIEpoch int32 = 1
+
 // New creates a Daemon from configuration with all subsystems initialized.
 func New(cfg *config.Config) (*Daemon, error) {
+	return NewWithVersion(cfg, "dev")
+}
+
+// NewWithVersion creates a Daemon that reports the supplied build version.
+func NewWithVersion(cfg *config.Config, version string) (*Daemon, error) {
+	return newWithClockAndVersion(cfg, time.Now, version)
+}
+
+// newWithClock initializes a daemon using the supplied clock for startup recovery and launches.
+func newWithClock(cfg *config.Config, now func() time.Time, scans ...func(string) (bool, error)) (*Daemon, error) {
+	return newWithClockAndVersion(cfg, now, "dev", scans...)
+}
+
+// newWithClockAndVersion initializes a daemon with the supplied build version and clock.
+func newWithClockAndVersion(cfg *config.Config, now func() time.Time, version string, scans ...func(string) (bool, error)) (*Daemon, error) {
 	profileMgr := profile.NewManager(config.DataDir())
 	s := &session{
-		config:                  cfg,
+		config: cfg,
+		readiness: dto.ReadinessResult{
+			InstanceID: uuid.NewString(), PID: int32(os.Getpid()), Version: version, APIEpoch: APIEpoch,
+		},
 		profileMgr:              profileMgr,
 		iniMgr:                  inipkg.NewManager(profileMgr.ProfileDir),
 		mountMgrs:               make(map[string]*vfs.MountManager),
@@ -66,9 +97,18 @@ func New(cfg *config.Config) (*Daemon, error) {
 		pendingRecoveries:       make(map[string]*dto.RecoveryPendingResult),
 		rootPendingRecoveries:   make(map[string]*dto.RecoveryPendingResult),
 		loaderPendingRecoveries: make(map[string]*dto.RecoveryPendingResult),
+		deferredRecoveries:      make(map[string]deferredRecovery),
+		heldLandings:            make(map[string][]heldLanding),
+		replayPending:           make(map[string]bool),
+		replayRunning:           make(map[string]bool),
 		gamesAtPath:             make(map[string][]string),
 		nexusUsers:              nexusClientUserValidator{},
-		now:                     time.Now,
+		readSteamAppState:       steam.ReadAppState,
+		now:                     now,
+		installOutcomes:         installOutcomeRegistry{now: now},
+	}
+	if len(scans) > 0 {
+		s.procScan = scans[0]
 	}
 	s.svc = services{
 		game:      &GameService{s: s},
@@ -121,17 +161,23 @@ func New(cfg *config.Config) (*Daemon, error) {
 	go d.runPreviewSweeper()
 
 	download.SetModsDirResolver(config.ModsDir)
-	d.recoverInterruptedReinstalls()
-	gameIDs := make([]string, 0, len(cfg.Games))
-	for gameID := range cfg.Games {
-		gameIDs = append(gameIDs, gameID)
+	d.classifyStartupRecoveries()
+	for _, gameID := range d.configuredGameIDs() {
+		for _, root := range []string{config.ModsDir(gameID), config.ProfilesDir(gameID)} {
+			if err := transfer.RecoverTransfers(root); err != nil {
+				slog.Error("transfer recovery requires manual repair", "game", gameID, "root", root, "err", err)
+			}
+		}
 	}
+	d.recoverInterruptedReinstalls()
+	download.RecoverLandings(d.configuredGameIDs())
+	gameIDs := d.recoverableGameIDs()
 	recoveredLandings := d.svc.modDeps.recoverInterruptedRequests(gameIDs)
 
 	if cfg.NexusAPIKey != "" {
 		nexus := download.NewNexusClient(cfg.NexusAPIKey)
 		d.downloadMgr = download.NewManager(nexus, 3, d.managerHooks())
-		d.downloadMgr.RehydrateLedger(gameIDs)
+		d.downloadMgr.RehydrateLedger(d.configuredGameIDs())
 	}
 
 	d.mu.Lock()
@@ -144,6 +190,13 @@ func New(cfg *config.Config) (*Daemon, error) {
 		d.ensureMountManager(gameID, gc)
 	}
 	d.mu.Unlock()
+	for _, gameID := range d.configuredGameIDs() {
+		if d.deferredFor(gameID, "recovery") != nil {
+			if status, err := d.GetVFSStatus(gameID); err == nil {
+				d.publishGuarded(dto.StatusEventResult{VFSStatus: status})
+			}
+		}
+	}
 	d.svc.modDeps.resumeRecoveredLandings(recoveredLandings)
 
 	return d, nil
@@ -160,6 +213,7 @@ var shutdownLaunchDeadline = 30 * time.Second
 func (d *Daemon) Run(stopIPC func()) error {
 	d.setReadinessStep("socket bound", func(r *dto.ReadinessResult) { r.SocketReady = true })
 	go d.warmupAsync()
+	d.goBackground("deferred recovery", d.retryDeferredRecoveriesLoop)
 
 	<-d.shutdownCh
 
@@ -167,10 +221,97 @@ func (d *Daemon) Run(stopIPC func()) error {
 	return nil
 }
 
+// Health returns the daemon's identity and current readiness state.
 func (d *Daemon) Health() dto.ReadinessResult {
 	d.readinessMu.RLock()
-	defer d.readinessMu.RUnlock()
-	return d.readiness
+	result := d.readiness
+	d.readinessMu.RUnlock()
+	result.Stopping = d.shuttingDown.Load()
+	return result
+}
+
+// GetShutdownPlan reports which mounted games shutdown would leave active without changing daemon state.
+func (d *Daemon) GetShutdownPlan() []dto.ShutdownPlanItem {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	gameIDs := make([]string, 0, len(d.mountMgrs))
+	for gameID, mm := range d.mountMgrs {
+		if mm.IsMounted() {
+			gameIDs = append(gameIDs, gameID)
+		}
+	}
+	sort.Strings(gameIDs)
+	items := make([]dto.ShutdownPlanItem, 0, len(gameIDs))
+	for _, gameID := range gameIDs {
+		reason := d.shutdownRetentionReasonLocked(gameID)
+		items = append(items, dto.ShutdownPlanItem{
+			GameID: gameID, ProfileName: d.mountStates[gameID].profileName,
+			WillUnmount: reason == "", RetainedReason: reason,
+		})
+	}
+	return items
+}
+
+// shutdownRetentionReasonLocked reports why shutdown keeps a mounted game's farm; the caller holds s.mu.
+func (d *Daemon) shutdownRetentionReasonLocked(gameID string) string {
+	if d.deferredForLocked(gameID, "shutdown") != nil {
+		return "recovery_deferred"
+	}
+	key := d.fenceKeyLocked(gameID)
+	if d.exclusiveHeld(key) {
+		return "busy"
+	}
+	d.launchedMu.Lock()
+	for _, launch := range d.launched {
+		if launch.gameID == gameID {
+			d.launchedMu.Unlock()
+			return "game_running"
+		}
+	}
+	d.launchedMu.Unlock()
+	d.execRunsMu.Lock()
+	for _, run := range d.execRuns {
+		if run.gameID == gameID {
+			d.execRunsMu.Unlock()
+			return "tool_running"
+		}
+	}
+	d.execRunsMu.Unlock()
+
+	games := d.gamesOnFenceKeyLocked(gameID, key)
+	flagged, launchedAt := d.steamLaunchesAmong(games)
+	if filepath.IsAbs(key) {
+		running, err := d.processRunningIn(key, d.steamAppIDsLocked(games))
+		if err != nil {
+			slog.Warn("scanning processes before shutdown failed; retaining farm", "game", gameID, "path", key, "err", err)
+			return "game_running"
+		}
+		if running {
+			return "game_running"
+		}
+	}
+	for _, id := range flagged {
+		age := d.clock().Sub(launchedAt[id])
+		if age >= 0 && age < steamLaunchGrace {
+			return "launch_recent"
+		}
+	}
+	if len(flagged) > 0 {
+		return "game_running"
+	}
+	if d.sharedHeldLocked(gameID, dto.BusyOperationLaunch) {
+		return "launch_recent"
+	}
+	if d.sharedHeldLocked(gameID, dto.BusyOperationTool, dto.BusyOperationScriptExtender) {
+		return "tool_running"
+	}
+	if mm := d.mountMgrs[gameID]; mm != nil {
+		if _, _, err := d.steamCaptureLocked(gameID, mm.DataPath()); err != nil {
+			return "steam_busy"
+		}
+	}
+	return ""
 }
 
 func (s *session) setReadinessStep(step string, mutate func(*dto.ReadinessResult)) {
@@ -253,9 +394,14 @@ func (d *Daemon) deactivateIdleFarms() {
 		if !mm.IsMounted() {
 			continue
 		}
-		if d.teardownBusyLocked(gameID) || d.sharedHeldLocked(gameID, dto.BusyOperationLaunch, dto.BusyOperationTool) {
-			slog.Warn("leaving VFS mounted on shutdown; a launch may still be using it — recovery will restore on next start",
-				"game", gameID)
+		if reason := d.shutdownRetentionReasonLocked(gameID); reason != "" {
+			slog.Warn("leaving VFS mounted on shutdown; recovery will restore on next start",
+				"game", gameID, "reason", reason)
+			continue
+		}
+		_, capture, err := d.steamCaptureLocked(gameID, mm.DataPath())
+		if err != nil {
+			slog.Warn("leaving VFS mounted on shutdown while Steam is active or unreadable", "game", gameID, "err", err)
 			continue
 		}
 		slog.Info("deactivating VFS on shutdown", "game", gameID)
@@ -265,7 +411,7 @@ func (d *Daemon) deactivateIdleFarms() {
 				continue
 			}
 		}
-		if err := mm.Deactivate(); err != nil {
+		if err := mm.DeactivateWithOptions(capture); err != nil {
 			slog.Error("deactivation failed on shutdown", "game", gameID, "err", err)
 			gc, configErr := d.config.EffectiveGameConfig(gameID)
 			state := d.mountStates[gameID]
@@ -275,6 +421,9 @@ func (d *Daemon) deactivateIdleFarms() {
 				slog.Error("restoring root deployment after shutdown deactivation failure failed", "game", gameID, "err", restoreErr)
 			}
 			continue
+		}
+		if err := removeLaunchTicket(mm.DataPath()); err != nil {
+			slog.Error("removing launch record after shutdown deactivation failed", "game", gameID, "err", err)
 		}
 	}
 }
@@ -310,7 +459,10 @@ func (d *Daemon) waitForLaunchedExit(ctx context.Context) {
 
 // Shutdown closes d.shutdownCh to signal shutdown; repeated calls are no-ops.
 func (d *Daemon) Shutdown() {
-	d.shutdownOnce.Do(func() { close(d.shutdownCh) })
+	d.shutdownOnce.Do(func() {
+		d.beginShutdown()
+		close(d.shutdownCh)
+	})
 }
 
 func (d *Daemon) WatchStatus() <-chan dto.StatusEventResult {

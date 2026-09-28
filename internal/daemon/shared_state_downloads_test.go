@@ -195,7 +195,7 @@ func TestSharedConfigReadsConcurrentConfigureGame(t *testing.T) {
 		read func(*Daemon) error
 	}{
 		{"ListArchives", func(d *Daemon) error { _, err := d.ListArchives("skyrimse"); return err }},
-		{"RemoveArchive", func(d *Daemon) error { return d.RemoveArchive("skyrimse", "absent.zip") }},
+		{"RemoveArchive", func(d *Daemon) error { return d.RemoveArchive("skyrimse", "absent.zip", "") }},
 		{"SetArchiveHidden", func(d *Daemon) error {
 			if err := d.SetArchiveHidden("skyrimse", "absent.zip", true); err == nil || err.Error() != "archive \"absent.zip\" not in index" {
 				return fmt.Errorf("SetArchiveHidden missing archive: %v", err)

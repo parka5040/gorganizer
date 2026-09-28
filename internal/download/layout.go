@@ -1,6 +1,7 @@
 package download
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -122,7 +123,11 @@ func resolvePlannedSource(extractRoot, resolvedRoot, sourceRel string) (string, 
 }
 
 // copyPlanned copies each planned source folder into its own top-level folder of the stage.
-func copyPlanned(extractRoot, stageDir string, copies []PlannedCopy, installID string, sink ProgressSink) ([]string, error) {
+func copyPlanned(extractRoot, stageDir string, copies []PlannedCopy, installID string, sink ProgressSink, contexts ...context.Context) ([]string, error) {
+	var ctx context.Context
+	if len(contexts) > 0 {
+		ctx = contexts[0]
+	}
 	if err := ValidatePlannedCopies(copies); err != nil {
 		return nil, err
 	}
@@ -133,6 +138,9 @@ func copyPlanned(extractRoot, stageDir string, copies []PlannedCopy, installID s
 
 	var written []string
 	for _, planned := range copies {
+		if err := installContextErr(ctx); err != nil {
+			return written, err
+		}
 		source, err := resolvePlannedSource(extractRoot, resolvedRoot, planned.SourceRel)
 		if err != nil {
 			return written, err
@@ -143,6 +151,9 @@ func copyPlanned(extractRoot, stageDir string, copies []PlannedCopy, installID s
 		}
 		err = filepath.WalkDir(source, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
+				return err
+			}
+			if err := installContextErr(ctx); err != nil {
 				return err
 			}
 			rel, err := filepath.Rel(source, path)

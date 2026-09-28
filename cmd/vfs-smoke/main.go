@@ -16,15 +16,24 @@ import (
 
 // main round-trips a Data dir through activate, rematerialize, and deactivate, verifying byte identity.
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: vfs-smoke /path/to/Game/Data")
+	crashMatrix := len(os.Args) == 3 && os.Args[1] == "--crash-matrix"
+	if len(os.Args) != 2 && !crashMatrix {
+		fmt.Fprintln(os.Stderr, "usage: vfs-smoke [--crash-matrix] /path/to/Game/Data")
 		os.Exit(2)
 	}
-	dataPath := os.Args[1]
+	dataPath := os.Args[len(os.Args)-1]
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
+	if crashMatrix {
+		if err := runCrashMatrix(dataPath); err != nil {
+			fmt.Fprintf(os.Stderr, "crash matrix failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stderr, "smoke OK: crash matrix")
+		return
+	}
 
 	pre, err := hashTree(dataPath)
 	if err != nil {
@@ -46,7 +55,7 @@ func main() {
 		_ = mm.Deactivate()
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "mid-activate fingerprint (excluding sentinel): %s\n", mid)
+	fmt.Fprintf(os.Stderr, "mid-activate fingerprint (excluding farm metadata): %s\n", mid)
 	if mid != pre {
 		fmt.Fprintf(os.Stderr, "MISMATCH: materialized view diverges from source\n")
 		_ = mm.Deactivate()
@@ -69,7 +78,7 @@ func main() {
 		_ = mm.Deactivate()
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "post-rematerialize fingerprint (excluding sentinel): %s\n", remat)
+	fmt.Fprintf(os.Stderr, "post-rematerialize fingerprint (excluding farm metadata): %s\n", remat)
 	if remat != pre {
 		fmt.Fprintf(os.Stderr, "MISMATCH: re-materialized view diverges from source\n")
 		_ = mm.Deactivate()
@@ -111,7 +120,7 @@ func hashTree(dataPath string) (string, error) {
 		if info.IsDir() {
 			return nil
 		}
-		if filepath.Base(p) == vfs.SentinelFilename {
+		if vfs.IsFarmMetadataFile(filepath.Base(p)) {
 			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {

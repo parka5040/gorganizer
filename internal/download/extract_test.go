@@ -17,6 +17,7 @@ type zipTestEntry struct {
 
 // TestZipExtractorExtract extracts a normal zip archive.
 func TestZipExtractorExtract(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
 	archivePath := createZip(t, []zipTestEntry{{name: "meshes/example.nif", data: []byte("mesh")}})
 	destDir := filepath.Join(t.TempDir(), "extract")
 
@@ -33,17 +34,20 @@ func TestZipExtractorExtract(t *testing.T) {
 	}
 }
 
-// TestExtractEntriesRejectsUnsafeArchives rejects entries that violate extraction limits.
+// TestExtractEntriesRejectsUnsafeArchives returns typed rejections without deleting the caller's directory.
 func TestExtractEntriesRejectsUnsafeArchives(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
 	tests := []struct {
 		name    string
 		entries []zipTestEntry
 		limits  extractLimits
+		reason  string
 	}{
 		{
 			name:    "traversal",
 			entries: []zipTestEntry{{name: "../escape.txt", data: []byte("escape")}},
 			limits:  defaultExtractLimits(),
+			reason:  ArchiveRejectedUnsafeEntry,
 		},
 		{
 			name: "entry count",
@@ -52,11 +56,13 @@ func TestExtractEntriesRejectsUnsafeArchives(t *testing.T) {
 				{name: "two.txt", data: []byte("two")},
 			},
 			limits: extractLimits{MaxEntries: 1, MaxEntryBytes: 10, MaxTotalBytes: 10},
+			reason: ArchiveRejectedLimit,
 		},
 		{
 			name:    "entry bytes",
 			entries: []zipTestEntry{{name: "large.txt", data: []byte("12345")}},
 			limits:  extractLimits{MaxEntries: 1, MaxEntryBytes: 4, MaxTotalBytes: 10},
+			reason:  ArchiveRejectedLimit,
 		},
 		{
 			name: "total bytes",
@@ -65,11 +71,19 @@ func TestExtractEntriesRejectsUnsafeArchives(t *testing.T) {
 				{name: "two.txt", data: []byte("456")},
 			},
 			limits: extractLimits{MaxEntries: 2, MaxEntryBytes: 10, MaxTotalBytes: 5},
+			reason: ArchiveRejectedLimit,
 		},
 		{
 			name:    "symlink",
 			entries: []zipTestEntry{{name: "link", data: []byte("target"), mode: os.ModeSymlink | 0777}},
 			limits:  defaultExtractLimits(),
+			reason:  ArchiveRejectedUnsafeEntry,
+		},
+		{
+			name:    "duplicate",
+			entries: []zipTestEntry{{name: "same.txt", data: []byte("one")}, {name: "same.txt", data: []byte("two")}},
+			limits:  defaultExtractLimits(),
+			reason:  ArchiveRejectedUnsafeEntry,
 		},
 	}
 
@@ -77,12 +91,23 @@ func TestExtractEntriesRejectsUnsafeArchives(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			archivePath := createZip(t, test.entries)
 			destDir := filepath.Join(t.TempDir(), "extract")
+			if err := os.Mkdir(destDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(destDir, "marker")
+			if err := os.WriteFile(marker, []byte("keep"), 0644); err != nil {
+				t.Fatal(err)
+			}
 
 			err := extractZipWithLimits(archivePath, destDir, test.limits)
-			if !errors.Is(err, ErrUnsafeArchive) {
-				t.Fatalf("error = %v, want ErrUnsafeArchive", err)
+			var rejected *ArchiveRejectedError
+			if !errors.As(err, &rejected) || rejected.Reason != test.reason || !errors.Is(err, ErrUnsafeArchive) {
+				t.Fatalf("error = %v, want ArchiveRejectedError reason %q", err, test.reason)
 			}
-			assertEmptyDirectory(t, destDir)
+			data, err := os.ReadFile(marker)
+			if err != nil || string(data) != "keep" {
+				t.Fatalf("marker after extraction = %q, %v, want keep", data, err)
+			}
 		})
 	}
 }
@@ -125,7 +150,7 @@ func extractZipWithLimits(archivePath, destDir string, limits extractLimits) err
 		return err
 	}
 	defer archive.Close()
-	return extractEntries(archive.File, destDir, limits, func(file *zip.File) string {
+	return extractEntries(archive.File, destDir, newExtractBudget(limits), func(file *zip.File) string {
 		return file.Name
 	}, func(file *zip.File) bool {
 		return file.FileInfo().IsDir()
@@ -134,19 +159,4 @@ func extractZipWithLimits(archivePath, destDir string, limits extractLimits) err
 	}, func(file *zip.File) (io.ReadCloser, error) {
 		return file.Open()
 	})
-}
-
-// assertEmptyDirectory verifies that extraction cleanup left no output behind.
-func assertEmptyDirectory(t *testing.T, dir string) {
-	t.Helper()
-	entries, err := os.ReadDir(dir)
-	if os.IsNotExist(err) {
-		return
-	}
-	if err != nil {
-		t.Fatalf("ReadDir() error = %v", err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("directory contains %d entries, want none", len(entries))
-	}
 }

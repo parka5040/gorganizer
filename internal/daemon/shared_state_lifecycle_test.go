@@ -65,6 +65,58 @@ func lifecycleStopped(stop <-chan struct{}) bool {
 	}
 }
 
+// TestModListStatusRaceWithConfigure checks that mounted mod-list status publication reads configuration under the daemon lock.
+func TestModListStatusRaceWithConfigure(t *testing.T) {
+	d, _, _, _ := sessionFarmFixture(t)
+	install := t.TempDir()
+	lifecycleRunWorkers(t, func(stop <-chan struct{}) error {
+		for i := range 150 {
+			if lifecycleStopped(stop) {
+				return nil
+			}
+			if err := d.ConfigureGame("status-writer", fmt.Sprintf("Writer %d", i), 0, install, "Data"); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, func(stop <-chan struct{}) error {
+		for i := range 400 {
+			if lifecycleStopped(stop) {
+				return nil
+			}
+			if err := d.SetModList("stardewvalley", "Default", []dto.ModListEntryResult{{ModName: "SessionMod", Enabled: i%2 == 0}}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// TestMountedModDirtyStatusRaceWithConfigure checks that the uninstall dirty helper publishes status under the daemon lock.
+func TestMountedModDirtyStatusRaceWithConfigure(t *testing.T) {
+	d, _, _, _ := sessionFarmFixture(t)
+	install := t.TempDir()
+	lifecycleRunWorkers(t, func(stop <-chan struct{}) error {
+		for i := range 150 {
+			if lifecycleStopped(stop) {
+				return nil
+			}
+			if err := d.ConfigureGame("status-writer", fmt.Sprintf("Writer %d", i), 0, install, "Data"); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, func(stop <-chan struct{}) error {
+		for range 400 {
+			if lifecycleStopped(stop) {
+				return nil
+			}
+			d.svc.mods.markMountedProfileDirty("stardewvalley")
+		}
+		return nil
+	})
+}
+
 func TestGetConflictsConcurrentConfigureGame(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	install := filepath.Join(t.TempDir(), "game")
@@ -217,6 +269,9 @@ func TestPreferredProtonSaveConcurrentConfigureGame(t *testing.T) {
 func TestLaunchGamePreferredProtonConcurrentSet(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	install := filepath.Join(t.TempDir(), "game")
+	if err := os.Mkdir(install, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	d := newIsolatedDaemon(t, map[string]config.GameConfig{
 		"custom": {Name: "Custom", InstallPath: install, DataSubpath: "Data"},
 	})
@@ -247,6 +302,9 @@ func TestLaunchGamePreferredProtonConcurrentSet(t *testing.T) {
 func TestConfigSnapshotsOwnExecutableStorage(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	install := filepath.Join(t.TempDir(), "game")
+	if err := os.Mkdir(install, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	original := config.Executable{ID: "one", Title: "Old", ExePath: filepath.Join(install, "tool"), Args: []string{"old"}, Environment: map[string]string{"KEY": "old"}, ExtraRWPaths: []string{"old"}}
 	d := newIsolatedDaemon(t, map[string]config.GameConfig{
 		"custom": {InstallPath: install, Executables: []config.Executable{original}},
@@ -262,11 +320,11 @@ func TestConfigSnapshotsOwnExecutableStorage(t *testing.T) {
 	if err != nil || effective.InstallPath != install {
 		t.Fatalf("linked effective snapshot = %+v, %v", effective, err)
 	}
-	admitted, _, release, err := d.svc.launch.admitLaunch("custom")
+	admitted, _, reservation, err := d.svc.launch.admitLaunch("custom")
 	if err != nil {
 		t.Fatal(err)
 	}
-	release()
+	reservation.Release()
 	if nilConfig, _ := d.gameConfigSnapshot("nil"); nilConfig.Executables != nil {
 		t.Fatal("nil executable slice changed into a non-nil slice")
 	}
@@ -341,9 +399,9 @@ func TestLifecycleStateReadersConcurrentSettings(t *testing.T) {
 		"list":   func() error { _, err := d.ListConfiguredGames(); return err },
 		"status": func() error { _, err := d.GetVFSStatus("child"); return err },
 		"admission": func() error {
-			_, _, release, err := d.svc.launch.admitLaunch("parent")
+			_, _, reservation, err := d.svc.launch.admitLaunch("parent")
 			if err == nil {
-				release()
+				reservation.Release()
 			}
 			return err
 		},
@@ -386,11 +444,11 @@ func TestLifecycleStateReadersConcurrentSettings(t *testing.T) {
 			if err != nil || !status.Mounted {
 				return fmt.Errorf("GetVFSStatus: %v, %v", status, err)
 			}
-			_, _, release, err := d.svc.launch.admitLaunch("parent")
+			_, _, reservation, err := d.svc.launch.admitLaunch("parent")
 			if err != nil {
 				return err
 			}
-			release()
+			reservation.Release()
 		}
 		return nil
 	})

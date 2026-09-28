@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QByteArray>
 #include <QDateTime>
 #include <QMap>
 #include <QString>
@@ -107,6 +108,35 @@ struct GrpcProfile {
     QString createdAt;
 };
 
+enum class GrpcVFSLifecycleState { Unspecified, Ready, RecoveryDeferred, RecoveryPending };
+enum class GrpcSteamMaintenanceState { Unspecified, None, SteamBusy, VerifyRequired, UserRequested };
+
+enum class GrpcRecoveryKind { Unspecified, Data, ModLoader, GameRoot };
+
+struct GrpcRecoveryPending {
+    QString gameId;
+    QString dataPath;
+    QString backupPath;
+    QString reason;
+    GrpcRecoveryKind kind = GrpcRecoveryKind::Unspecified;
+    QString recoveryId;
+};
+
+struct GrpcShutdownPlanItem {
+    QString gameId;
+    QString profileName;
+    bool willUnmount = false;
+    QString retainedReason;
+};
+
+struct GrpcPreservedBatch {
+    QString batchId;
+    QString createdAt;
+    int fileCount = 0;
+    QString reason;
+    QString path;
+};
+
 struct GrpcVFSStatus {
     bool mounted = false;
     QString gameId;
@@ -115,6 +145,14 @@ struct GrpcVFSStatus {
     int enabledModCount = 0;
     int totalFileCount = 0;
     bool dirty = false;
+    uint64_t desiredGen = 0;
+    uint64_t appliedGen = 0;
+    GrpcVFSLifecycleState lifecycleState = GrpcVFSLifecycleState::Unspecified;
+    QString lifecycleReason;
+    GrpcSteamMaintenanceState steamMaintenance = GrpcSteamMaintenanceState::Unspecified;
+    std::vector<GrpcPreservedBatch> preservedBatches;
+    bool hasPendingRecovery = false;
+    GrpcRecoveryPending pendingRecovery;
 };
 
 struct GrpcFileConflict {
@@ -412,6 +450,17 @@ struct GrpcInstallCompleted {
     QString archiveRelPath;
     QString batchId;
     QStringList batchIds;
+    QString clientRequestId;
+};
+
+enum class GrpcInstallOutcomeState { Unknown, Running, Succeeded, Failed, Cancelled };
+
+struct GrpcInstallOutcome {
+    GrpcInstallOutcomeState state = GrpcInstallOutcomeState::Unknown;
+    QString modFolder;
+    int fileCount = 0;
+    QString error;
+    int errorCode = 0;
 };
 
 enum GrpcStatusCode {
@@ -421,6 +470,15 @@ enum GrpcStatusCode {
     GrpcStatusDeadlineExceeded = 4,
     GrpcStatusFailedPrecondition = 9,
     GrpcStatusUnavailable = 14,
+};
+
+struct GrpcError {
+    int code = 0;
+    QString method;
+    QString message;
+    bool ok() const;
+    bool outcomeUnknown() const;
+    bool unavailable() const;
 };
 
 struct GrpcReinstallResult {
@@ -433,6 +491,13 @@ struct GrpcProfileIniFile {
     QString filename;
     QString content;
     QString diskPath;
+};
+
+enum class GrpcIniSaveOutcome { Unspecified, Saved, SavedAndApplied, SavedApplyFailed };
+
+struct GrpcIniSaveResult {
+    GrpcIniSaveOutcome outcome = GrpcIniSaveOutcome::Unspecified;
+    QString applyError;
 };
 
 struct GrpcProfileIniStatus {
@@ -451,7 +516,7 @@ struct GrpcIniTweakState {
     bool enabled = false;
 };
 
-enum GrpcInstallMode { GrpcInstallAsNewMod = 0, GrpcInstallMergeIntoMod = 1 };
+enum GrpcInstallMode { GrpcInstallAsNewMod = 0, GrpcInstallMergeIntoMod = 1, GrpcInstallReplaceMod = 2 };
 
 enum GrpcBulkHideScope { GrpcBulkHideAll = 0, GrpcBulkHideInstalled = 1, GrpcBulkHideUninstalled = 2 };
 
@@ -498,6 +563,13 @@ struct GrpcFomodPlan {
     QString modulePath;
     std::vector<GrpcFomodFile> requiredFiles;
     std::vector<GrpcFomodStep> steps;
+    bool legacyInfoOnly = false;
+    QString description;
+    QString screenshotPath;
+    QString version;
+    QString author;
+    QByteArray moduleConfigXml;
+    QByteArray screenshotData;
 };
 
 struct GrpcPreviewInstallResult {
@@ -505,6 +577,9 @@ struct GrpcPreviewInstallResult {
     bool hasFomod = false;
     GrpcFomodPlan plan;
     QStringList flatFileList;
+    QStringList selectableRoots;
+    QString detectedRoot;
+    bool rootAmbiguous = false;
 };
 
 enum GrpcTransferPolicy {
@@ -538,6 +613,7 @@ struct GrpcImportPreview {
     std::vector<GrpcTransferProfileEntry> profiles;
     bool includesOverwrite = false;
     bool includesGameSettings = false;
+    QString archiveIdentity;
 };
 
 struct GrpcTransferProgress {

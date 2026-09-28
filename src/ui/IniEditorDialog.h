@@ -29,6 +29,9 @@ public:
                     const QString& profileName,
                     QWidget* parent = nullptr);
 
+protected:
+    void done(int result) override;
+
 private slots:
     void onSave();
     void onToggleEnabled(bool checked);
@@ -51,6 +54,13 @@ private:
     void reload();
     void markDirty(int tabIndex, bool dirty);
     bool anyDirty() const;
+    void startSave(bool applyAfterSave);
+    void saveNextFile();
+    void finishOperation();
+    void onIniSaved(quint64 requestId, const GrpcIniSaveResult& result);
+    void onIniSaveFailed(quint64 requestId, const QString& error, int grpcCode);
+    void onIniApplied(quint64 requestId, int appliedFileCount);
+    void onIniApplyFailed(quint64 requestId, const QString& error, int grpcCode);
 
     GrpcClient* m_grpc;
     QString m_gameId;
@@ -61,6 +71,14 @@ private:
     QLabel* m_pathLabel;
     QLabel* m_statusLabel;
     QPushButton* m_saveBtn;
+    QPushButton* m_applyBtn;
+    bool m_operationRunning = false;
+    bool m_applyAfterSave = false;
+    int m_savingIndex = -1;
+    quint64 m_requestId = 0;
+    QString m_savingContent;
+    GrpcIniSaveOutcome m_saveOutcome = GrpcIniSaveOutcome::SavedAndApplied;
+    QString m_applyError;
 
     QList<TabHandle> m_handles;
     bool m_suppressEnabledSignal = false;
@@ -79,11 +97,9 @@ private:
     QLabel* m_findStatus = nullptr;
 
     void buildTweaksTab();
-    // Built at construction time from ListProfileIniFiles since editor tabs come later.
     void buildResolutionTab(const std::vector<GrpcProfileIniFile>& files);
     void buildFindBar(QVBoxLayout* parentLayout);
     QPlainTextEdit* currentEditor() const;
-    // Patches iWidth/iHeight in [Display] of the target file's editor or via SaveProfileIniFile.
     void applyResolutionTo(const QString& filename, int width, int height);
 };
 

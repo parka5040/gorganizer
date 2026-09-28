@@ -1,0 +1,62 @@
+name: Prebuilt Linux release
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Check release tag
+        if: github.event_name == 'push'
+        run: test "$GITHUB_REF_NAME" = "v$(< VERSION)"
+      - name: Build twice and smoke-test
+        run: |
+          mkdir -p dist
+          docker build -f packaging/Containerfile -t gorganizer-release .
+          docker run --rm --mount "type=bind,src=$PWD,dst=/src,readonly" \
+            --mount "type=bind,src=$PWD/dist,dst=/dist" \
+            -e RELEASE_COMMIT="$(git rev-parse HEAD)" \
+            -e RELEASE_COMMIT_TIME="$(git show -s --format=%cI HEAD)" \
+            gorganizer-release bash /src/packaging/reproduce.sh /src /dist
+          docker run --rm --mount "type=bind,src=$PWD,dst=/src,readonly" \
+            --mount "type=bind,src=$PWD/dist,dst=/dist,readonly" \
+            gorganizer-release bash /src/packaging/smoke-release.sh "/dist/gorganizer-$(< VERSION)-linux-x86_64.tar.gz"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: prebuilt-linux-x86_64
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    # Configure required reviewers for the release environment in repository settings.
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: prebuilt-linux-x86_64
+          path: dist
+      - name: Verify and publish approved release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cd dist
+          sha256sum -c SHA256SUMS
+          printf 'Prebuilt Linux x86_64 bundle for SteamOS, Bazzite, Debian, Ubuntu, Fedora and Arch.\n' > "$RUNNER_TEMP/release-notes.md"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Gorganizer $TAG" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" ./*.tar.gz SHA256SUMS

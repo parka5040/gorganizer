@@ -35,14 +35,14 @@ private slots:
     // U-3 re-enable point: launch resolved successfully.
     void onGameLaunched(int pid);
     // U-3 re-enable point on failure; translates machine error strings into actionable dialogs.
-    void onGameLaunchFailed(const QString& error);
+    void onGameLaunchFailed(const QString& error, int grpcCode);
     // Re-evaluates Run when a SMAPI operation starts or ends.
     void onModLoaderActivityChanged(const QString& gameId, bool active);
     // Re-evaluates Run for the newly active game.
     void onActiveGameChanged(const GameInfo& game);
 
 private:
-    // Enables Run only while no launch is pending and no SMAPI operation runs for the active game.
+    // Enables Run only when connected, idle, and no SMAPI operation runs for the active game.
     void updateRunEnabled();
     // Explains a launch refused because SMAPI is unusable and offers to install or repair it.
     void offerModLoaderFix(const QString& gameId, const QString& reason);

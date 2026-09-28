@@ -1,21 +1,26 @@
 #include "ImportDialog.h"
 #include "Dialogs.h"
 #include "GrpcClient.h"
+#include "ErrorPresenter.h"
 #include "InstallErrorText.h"
 #include "ThemeManager.h"
+#include "WindowFit.h"
 
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QStackedWidget>
+#include <QScrollArea>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
@@ -43,6 +48,16 @@ QString humanBytes(int64_t b)
     return QString("%1 %2").arg(v, 0, 'f', 1).arg(units[u]);
 }
 
+QString replacementList(const QStringList& names)
+{
+    QStringList lines;
+    for (int i = 0; i < names.size() && i < 15; ++i)
+        lines << names.at(i);
+    if (names.size() > 15)
+        lines << QString("…and %1 more").arg(names.size() - 15);
+    return lines.join("\n");
+}
+
 }
 
 ImportDialog::ImportDialog(GrpcClient* grpc, const QString& gameId, QWidget* parent)
@@ -51,7 +66,6 @@ ImportDialog::ImportDialog(GrpcClient* grpc, const QString& gameId, QWidget* par
     , m_gameId(gameId)
 {
     setWindowTitle(QString("Import Mods — %1").arg(m_gameId));
-    resize(680, 600);
     setModal(true);
 
     auto* root = new QVBoxLayout(this);
@@ -66,6 +80,7 @@ ImportDialog::ImportDialog(GrpcClient* grpc, const QString& gameId, QWidget* par
     connect(m_grpc, &GrpcClient::transferFailed, this, &ImportDialog::onTransferFailed);
 
     m_stack->setCurrentIndex(PAGE_ARCHIVE);
+    fitToScreen(this, QSize(680, 600));
 }
 
 QWidget* ImportDialog::buildArchivePage()
@@ -88,6 +103,7 @@ QWidget* ImportDialog::buildArchivePage()
     lay->addLayout(row);
 
     m_archiveErrorLabel = new QLabel;
+    m_archiveErrorLabel->setTextFormat(Qt::PlainText);
     m_archiveErrorLabel->setWordWrap(true);
     m_archiveErrorLabel->setStyleSheet(QString("color: %1;").arg(errHex()));
     m_archiveErrorLabel->setVisible(false);
@@ -107,6 +123,8 @@ QWidget* ImportDialog::buildArchivePage()
 
     connect(browseBtn, &QPushButton::clicked, this, &ImportDialog::onBrowseArchive);
     connect(m_archiveEdit, &QLineEdit::textChanged, this, [this](const QString& text) {
+        if (!m_previewPath.isEmpty()) clearPreview();
+        m_archiveErrorLabel->setVisible(false);
         m_previewBtn->setEnabled(!text.trimmed().isEmpty());
     });
     connect(closeBtn, &QPushButton::clicked, this, &ImportDialog::reject);
@@ -119,15 +137,21 @@ QWidget* ImportDialog::buildSelectionPage()
 {
     auto* page = new QWidget;
     auto* lay = new QVBoxLayout(page);
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    auto* content = new QWidget;
+    auto* contentLay = new QVBoxLayout(content);
 
     m_manifestLabel = new QLabel;
+    m_manifestLabel->setTextFormat(Qt::RichText);
     m_manifestLabel->setWordWrap(true);
-    lay->addWidget(m_manifestLabel);
+    contentLay->addWidget(m_manifestLabel);
 
     m_tree = new QTreeWidget;
     m_tree->setHeaderHidden(true);
     m_tree->setSelectionMode(QAbstractItemView::NoSelection);
-    lay->addWidget(m_tree, 1);
+    m_tree->setMinimumHeight(130);
+    contentLay->addWidget(m_tree, 1);
 
     auto* policyBox = new QGroupBox("When a mod or profile already exists");
     auto* policyLay = new QVBoxLayout(policyBox);
@@ -138,13 +162,19 @@ QWidget* ImportDialog::buildSelectionPage()
     policyLay->addWidget(m_renameRadio);
     policyLay->addWidget(m_skipRadio);
     policyLay->addWidget(m_overwriteRadio);
-    lay->addWidget(policyBox);
+    auto* policyHint = new QLabel("Rename and Skip never replace anything you already have.", policyBox);
+    policyHint->setWordWrap(true);
+    policyLay->addWidget(policyHint);
+    contentLay->addWidget(policyBox);
 
     m_selectionErrorLabel = new QLabel;
+    m_selectionErrorLabel->setTextFormat(Qt::PlainText);
     m_selectionErrorLabel->setWordWrap(true);
     m_selectionErrorLabel->setStyleSheet(QString("color: %1;").arg(errHex()));
     m_selectionErrorLabel->setVisible(false);
-    lay->addWidget(m_selectionErrorLabel);
+    contentLay->addWidget(m_selectionErrorLabel);
+    scroll->setWidget(content);
+    lay->addWidget(scroll, 1);
 
     auto* btnRow = new QHBoxLayout;
     auto* backBtn = new QPushButton("Back");
@@ -222,21 +252,41 @@ void ImportDialog::onBrowseArchive()
 // Runs the synchronous manifest preview and advances to the selection page on success.
 void ImportDialog::onPreview()
 {
-    const QString path = m_archiveEdit->text().trimmed();
-    if (path.isEmpty()) return;
+    const QString archiveText = m_archiveEdit->text().trimmed();
+    if (archiveText.isEmpty()) return;
 
+    clearPreview();
     m_archiveErrorLabel->setVisible(false);
+    const QFileInfo file(archiveText);
+    m_previewPath = file.canonicalFilePath();
+    if (!file.isFile() || m_previewPath.isEmpty()) {
+        clearPreview();
+        m_archiveErrorLabel->setText("This backup could not be found. Choose a backup and check it again.");
+        m_archiveErrorLabel->setVisible(true);
+        return;
+    }
+    m_previewSize = file.size();
+    m_previewModified = file.lastModified();
+
     m_previewBtn->setEnabled(false);
     QApplication::setOverrideCursor(Qt::WaitCursor);
     GrpcImportPreview preview;
-    QString err;
+    GrpcError err;
+    const QString path = m_previewPath;
     const bool ok = m_grpc->previewImport(m_gameId, path, preview, err);
     QApplication::restoreOverrideCursor();
-    m_previewBtn->setEnabled(true);
+    m_previewBtn->setEnabled(!m_archiveEdit->text().trimmed().isEmpty());
 
+    if (m_previewPath != path) return;
     if (!ok) {
-        m_archiveErrorLabel->setText(friendlyTransferError(err));
+        clearPreview();
+        m_archiveErrorLabel->setText(errorSummary("read this backup", err, false));
         m_archiveErrorLabel->setVisible(true);
+        presentError(this, "Backup Could Not Be Read", "read this backup", err, false);
+        return;
+    }
+    if (!previewFileUnchanged()) {
+        showChangedBackup();
         return;
     }
 
@@ -245,13 +295,41 @@ void ImportDialog::onPreview()
     m_stack->setCurrentIndex(PAGE_SELECTION);
 }
 
+void ImportDialog::clearPreview()
+{
+    m_preview = {};
+    m_previewPath.clear();
+    m_previewSize = -1;
+    m_previewModified = {};
+    m_modsRoot = nullptr;
+    m_profilesRoot = nullptr;
+    m_tree->clear();
+    m_startBtn->setEnabled(false);
+    m_stack->setCurrentIndex(PAGE_ARCHIVE);
+}
+
+bool ImportDialog::previewFileUnchanged() const
+{
+    if (m_previewPath.isEmpty()) return false;
+    const QFileInfo file(m_previewPath);
+    return file.isFile() && file.size() == m_previewSize
+           && file.lastModified() == m_previewModified;
+}
+
+void ImportDialog::showChangedBackup()
+{
+    clearPreview();
+    m_archiveErrorLabel->setText("This backup changed after it was checked. Check it again before importing.");
+    m_archiveErrorLabel->setVisible(true);
+}
+
 // Rebuilds the manifest header and the checkable mods/profiles tree from the preview.
 void ImportDialog::populatePreview()
 {
     QString header = QString("<b>Game:</b> %1 &nbsp; <b>Gorganizer:</b> %2")
-                         .arg(m_preview.gameId, m_preview.gorganizerVersion);
+                         .arg(m_preview.gameId.toHtmlEscaped(), m_preview.gorganizerVersion.toHtmlEscaped());
     if (!m_preview.exportedAt.isEmpty())
-        header += QString(" &nbsp; <b>Exported:</b> %1").arg(m_preview.exportedAt);
+        header += QString(" &nbsp; <b>Exported:</b> %1").arg(m_preview.exportedAt.toHtmlEscaped());
     QStringList extras;
     if (m_preview.includesOverwrite) extras << "Overwrite folder";
     if (m_preview.includesGameSettings) extras << "game settings";
@@ -333,6 +411,59 @@ QStringList ImportDialog::checkedChildren(const QTreeWidgetItem* root) const
 void ImportDialog::onStartImport()
 {
     if (m_running) return;
+    if (!previewFileUnchanged()) {
+        showChangedBackup();
+        return;
+    }
+
+    const QString archivePath = m_previewPath;
+    const QString archiveIdentity = m_preview.archiveIdentity;
+    const GrpcTransferPolicy policy = selectedPolicy();
+    const QStringList mods = checkedChildren(m_modsRoot);
+    const QStringList profiles = checkedChildren(m_profilesRoot);
+
+    if (policy == GrpcTransferPolicyOverwrite) {
+        QStringList replacedMods;
+        QStringList replacedProfiles;
+        for (const auto& mod : m_preview.mods) {
+            if (mod.collision && mods.contains(mod.folder))
+                replacedMods << (mod.name.isEmpty() ? mod.folder : mod.name);
+        }
+        for (const auto& profile : m_preview.profiles) {
+            if (profile.collision && profiles.contains(profile.name))
+                replacedProfiles << profile.name;
+        }
+
+        QStringList details;
+        if (!replacedMods.isEmpty())
+            details << QString("Mods:\n%1").arg(replacementList(replacedMods));
+        if (!replacedProfiles.isEmpty())
+            details << QString("Profiles:\n%1").arg(replacementList(replacedProfiles));
+        if (m_preview.includesOverwrite)
+            details << "Files in the Overwrite folder with the same names will also be replaced.";
+        if (m_preview.includesGameSettings)
+            details << "Matching game settings will also be replaced.";
+
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Warning);
+        box.setWindowTitle("Replace existing items?");
+        box.setTextFormat(Qt::PlainText);
+        box.setText("Importing will replace any mods and profiles with the same names. This cannot be undone.");
+        if (!details.isEmpty())
+            box.setInformativeText(details.join("\n\n"));
+        auto* replaceBtn = box.addButton("Replace and import", QMessageBox::DestructiveRole);
+        auto* cancelBtn = box.addButton("Cancel", QMessageBox::RejectRole);
+        box.setDefaultButton(cancelBtn);
+        box.setEscapeButton(cancelBtn);
+        box.exec();
+        if (box.clickedButton() != replaceBtn) return;
+        if (m_previewPath != archivePath) return;
+        if (!previewFileUnchanged()) {
+            showChangedBackup();
+            return;
+        }
+    }
+
     m_running = true;
     m_cancelRequested = false;
 
@@ -345,11 +476,11 @@ void ImportDialog::onStartImport()
     m_closeBtn->setVisible(false);
     m_cancelBtn->setVisible(true);
     m_cancelBtn->setEnabled(true);
+    m_cancelBtn->setDefault(true);
     m_stack->setCurrentIndex(PAGE_PROGRESS);
 
-    m_grpc->startImport(m_gameId, m_archiveEdit->text().trimmed(), selectedPolicy(),
-                        QMap<QString, int>(), checkedChildren(m_modsRoot),
-                        checkedChildren(m_profilesRoot));
+    m_grpc->startImport(m_gameId, archivePath, policy, QMap<QString, int>(), mods, profiles,
+                        archiveIdentity);
 }
 
 void ImportDialog::onCancelTransfer()
@@ -414,10 +545,16 @@ void ImportDialog::onTransferCompleted(const GrpcTransferSummary& summary)
     emit importCompleted();
 }
 
-void ImportDialog::onTransferFailed(const QString& error)
+void ImportDialog::onTransferFailed(const QString& error, int grpcCode)
 {
     if (!m_running) return;
     m_running = false;
+    const InstallError parsed = parseInstallError(error);
+    if (parsed.token == QLatin1String("bundle_rejected")
+        && parsed.fields.value("reason") == QLatin1String("changed")) {
+        showChangedBackup();
+        return;
+    }
     m_progressBar->setRange(0, 100);
     m_progressBar->setValue(0);
     if (m_cancelRequested) {
@@ -427,31 +564,14 @@ void ImportDialog::onTransferFailed(const QString& error)
     } else {
         m_stepLabel->setText("Import failed.");
         m_resultLabel->setStyleSheet(QString("color: %1;").arg(errHex()));
-        m_resultLabel->setText(friendlyTransferError(error));
+        m_resultLabel->setText(errorSummary("import this backup", GrpcError{grpcCode, QStringLiteral("ImportInstance"), error}, true));
+        presentError(this, "Import Failed", "import this backup", GrpcError{grpcCode, QStringLiteral("ImportInstance"), error}, true);
     }
     m_resultLabel->setVisible(true);
     m_cancelBtn->setVisible(false);
     m_backBtn->setVisible(true);
     m_closeBtn->setVisible(true);
-}
-
-// Maps the daemon's machine-readable transfer errors to user-facing text.
-QString ImportDialog::friendlyTransferError(const QString& error)
-{
-    const QString token = parseInstallError(error).token;
-    if (token == QLatin1String("transfer_game_mismatch"))
-        return QString("This archive was exported from a different game and cannot be "
-                       "imported here.\n\n(%1)").arg(error);
-    if (token == QLatin1String("transfer_schema"))
-        return QString("This archive uses an export format this version of gorganizer "
-                       "does not understand.\n\n(%1)").arg(error);
-    if (token == QLatin1String("transfer_overwrite_mounted"))
-        return QString("A mod cannot be overwritten while the game's mod view is mounted. "
-                       "Unmount mods first, or choose Rename/Skip.\n\n(%1)").arg(error);
-    if (token == QLatin1String("transfer_collision"))
-        return QString("An item in the archive already exists in this instance and the "
-                       "chosen policy aborts on collisions.\n\n(%1)").arg(error);
-    return error;
+    m_closeBtn->setDefault(true);
 }
 
 bool ImportDialog::confirmAbortWhileRunning()

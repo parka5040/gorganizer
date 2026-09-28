@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +21,8 @@ import (
 	inipkg "github.com/parka/gorganizer/internal/ini"
 	"github.com/parka/gorganizer/internal/plugins"
 	"github.com/parka/gorganizer/internal/profile"
+	"github.com/parka/gorganizer/internal/protontricks"
+	"github.com/parka/gorganizer/internal/steam"
 	"github.com/parka/gorganizer/internal/tools"
 	"github.com/parka/gorganizer/internal/vfs"
 )
@@ -48,12 +51,17 @@ type session struct {
 	pendingRecoveries       map[string]*dto.RecoveryPendingResult
 	rootPendingRecoveries   map[string]*dto.RecoveryPendingResult
 	loaderPendingRecoveries map[string]*dto.RecoveryPendingResult
+	deferredRecoveries      map[string]deferredRecovery
+	heldLandings            map[string][]heldLanding
+	replayPending           map[string]bool
+	replayRunning           map[string]bool
 	gamesAtPath             map[string][]string
 	pendingRecoveriesMu     sync.Mutex
 
 	fenceMu        sync.Mutex
 	fenceExclusive map[string]fenceHolder
-	fenceShared    map[string]map[fenceHolder]int
+	fenceShared    map[string]map[uint64]fenceHolder
+	nextFenceID    uint64
 
 	installLocks   map[string]*sync.Mutex
 	installLocksMu sync.Mutex
@@ -61,9 +69,15 @@ type session struct {
 	profileLocks   map[string]*sync.Mutex
 	profileLocksMu sync.Mutex
 
-	reinstallFault func(step string) error
-	launchFault    func(step string) error
-	steamOpener    func(url string) (int, error)
+	reinstallFault         func(step string) error
+	uninstallRename        func(string, string) error
+	uninstallBeforeDelete  func(string)
+	modChangeRematerialize func(*vfs.MountManager) error
+	retargetData           func(*vfs.MountManager, []vfs.Layer, string) error
+	launchFault            func(step string) error
+	steamOpener            func(url string) (int, error)
+	readSteamAppState      func(string, int) (steam.AppState, error)
+	resolveProtontricks    func(context.Context, protontricks.Options) (protontricks.Invocation, error)
 
 	activeGameID   string
 	activeGameIDMu sync.RWMutex
@@ -80,7 +94,11 @@ type session struct {
 	archiveBus *streamBus[dto.ArchiveEventResult]
 	installBus *streamBus[dto.InstallEventResult]
 
-	previews *previewCache
+	previews             *previewCache
+	installOutcomes      installOutcomeRegistry
+	installAfterPublish  func()
+	installCopyProgress  func(download.InstallProgress)
+	installBeforePublish func()
 
 	shutdownCh   chan struct{}
 	shutdownOnce sync.Once
@@ -110,6 +128,15 @@ type session struct {
 	softDepFetcherMu sync.Mutex
 
 	svc services
+}
+
+// protontricksInvocation selects an installed Protontricks executable without holding the session lock.
+func (s *session) protontricksInvocation(ctx context.Context) (protontricks.Invocation, error) {
+	resolve := s.resolveProtontricks
+	if resolve == nil {
+		resolve = protontricks.Resolve
+	}
+	return resolve(ctx, protontricks.Options{})
 }
 
 type services struct {

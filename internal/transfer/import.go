@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -12,74 +13,214 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
-	"github.com/google/uuid"
+	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/download"
 	"github.com/parka/gorganizer/internal/dto"
+	"github.com/parka/gorganizer/internal/fsutil"
 	"github.com/parka/gorganizer/internal/mod"
 	"github.com/parka/gorganizer/internal/profile"
 )
 
+type importLimits struct {
+	entries       int64
+	fileBytes     int64
+	payloadBytes  int64
+	streamBytes   int64
+	manifestBytes int64
+}
+
+// defaultImportLimits returns the maximum sizes accepted from an import bundle.
+func defaultImportLimits() importLimits {
+	return importLimits{
+		entries:       500_000,
+		fileBytes:     8 << 30,
+		payloadBytes:  32 << 30,
+		streamBytes:   40 << 30,
+		manifestBytes: 64 << 20,
+	}
+}
+
 type ImportOptions struct {
+	limits             *importLimits
+	commitOps          *transferCommitOps
 	GameID             string
 	ArchivePath        string
+	ArchiveFile        *os.File
+	ArchiveIdentity    string
 	Policy             dto.CollisionPolicy
 	ModPolicyOverrides map[string]dto.CollisionPolicy
 	ModFolders         []string
 	ProfileNames       []string
 	LockMod            func(name string) func()
 	LockProfiles       func() func()
+	LockState          func() func()
+	CheckReplacement   func(root, name string) error
 }
 
 // ReadManifest opens an archive and returns its validated manifest without extracting anything.
-func ReadManifest(gameID, archivePath string) (*Manifest, error) {
-	tr, closer, err := openArchiveReader(archivePath)
+func ReadManifest(ctx context.Context, gameID, archivePath string) (*Manifest, error) {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return readManifestFromFile(ctx, gameID, f)
+}
+
+// readManifestFromFile reads a bounded manifest from an already opened archive.
+func readManifestFromFile(ctx context.Context, gameID string, f *os.File) (*Manifest, error) {
+	tr, _, closer, err := archiveReaderFromFile(f, defaultImportLimits().streamBytes)
 	if err != nil {
 		return nil, err
 	}
 	defer closer()
-	return readManifestEntry(tr, gameID)
+	m, _, err := readManifestEntry(ctx, tr, gameID, defaultImportLimits().manifestBytes)
+	return m, err
 }
 
-// readManifestEntry consumes the first tar entry, requiring a valid manifest for gameID.
-func readManifestEntry(tr *tar.Reader, gameID string) (*Manifest, error) {
+type manifestContextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+// Read returns the next manifest bytes unless validation was cancelled.
+func (r manifestContextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(p)
+}
+
+// readManifestEntry consumes the first tar entry, requiring a size-bounded valid manifest for gameID.
+func readManifestEntry(ctx context.Context, tr *tar.Reader, gameID string, maxBytes int64) (*Manifest, int64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	hdr, err := tr.Next()
 	if err != nil {
-		return nil, fmt.Errorf("reading archive: %w", err)
+		return nil, 0, fmt.Errorf("reading archive: %w", err)
 	}
-	if hdr.Name != manifestEntryName || hdr.Typeflag != tar.TypeReg {
-		return nil, &TransferPathError{Entry: hdr.Name}
+	if err := validateEntryType(hdr); err != nil {
+		return nil, 0, err
 	}
-	data, err := io.ReadAll(io.LimitReader(tr, 64<<20))
+	if hdr.Name != manifestEntryName || (hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA) {
+		return nil, 0, &TransferPathError{Entry: hdr.Name}
+	}
+	if hdr.Size < 0 || hdr.Size > maxBytes {
+		return nil, 0, &BundleRejectedError{Reason: BundleRejectedLimit, Item: manifestEntryName}
+	}
+	data, err := io.ReadAll(manifestContextReader{ctx: ctx, r: io.LimitReader(tr, hdr.Size)})
 	if err != nil {
-		return nil, fmt.Errorf("reading manifest: %w", err)
+		return nil, 0, fmt.Errorf("reading manifest: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
 	}
 	m, err := DecodeManifest(data)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if m.SchemaVersion < 1 || m.SchemaVersion > SchemaVersion {
-		return nil, &TransferSchemaError{Version: m.SchemaVersion}
+		return nil, 0, &TransferSchemaError{Version: m.SchemaVersion}
 	}
 	if m.GameID != gameID {
-		return nil, &TransferGameMismatchError{Want: gameID, Got: m.GameID}
+		return nil, 0, &TransferGameMismatchError{Want: gameID, Got: m.GameID}
 	}
+	if len(m.Mods) > 100_000 || len(m.Profiles) > 100_000 {
+		return nil, 0, &BundleRejectedError{Reason: BundleRejectedLimit, Item: manifestEntryName}
+	}
+	seenMods := make(map[string]string, len(m.Mods))
+	seenFolds := make(map[string]string, len(m.Mods))
 	for _, me := range m.Mods {
-		if err := download.ValidateTargetModName(me.Folder); err != nil {
-			return nil, err
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
 		}
+		if err := download.ValidateTargetModName(me.Folder); err != nil {
+			return nil, 0, err
+		}
+		key := strings.ToLower(me.Folder)
+		if folder, ok := seenMods[key]; ok && strings.EqualFold(folder, me.Folder) {
+			return nil, 0, &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: me.Folder}
+		}
+		fold := simpleFoldKey(me.Folder)
+		if folder, ok := seenFolds[fold]; ok && strings.EqualFold(folder, me.Folder) {
+			return nil, 0, &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: me.Folder}
+		}
+		seenMods[key] = me.Folder
+		seenFolds[fold] = me.Folder
 	}
-	return m, nil
+	seenProfiles := make(map[string]bool, len(m.Profiles))
+	for _, name := range m.Profiles {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		if err := validateImportedProfileName(name); err != nil {
+			return nil, 0, err
+		}
+		if seenProfiles[name] {
+			return nil, 0, &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: name}
+		}
+		seenProfiles[name] = true
+	}
+	return m, hdr.Size, nil
+}
+
+// simpleFoldKey maps equivalent Unicode spellings to the same mod identity key.
+func simpleFoldKey(name string) string {
+	return strings.Map(func(r rune) rune {
+		min := r
+		for next := unicode.SimpleFold(r); next != r; next = unicode.SimpleFold(next) {
+			if next < min {
+				min = next
+			}
+		}
+		return min
+	}, name)
+}
+
+// validateImportedProfileName rejects unsafe or reserved profile names from a bundle.
+func validateImportedProfileName(name string) error {
+	if fsutil.ValidateName(name) != nil || strings.HasPrefix(name, ".") || strings.EqualFold(name, profile.OverwriteModName) || strings.EqualFold(name, "Downloads") {
+		return &BundleRejectedError{Reason: BundleRejectedProfileName, Item: name}
+	}
+	return nil
+}
+
+// validateCollisionPolicy rejects unknown import collision policies.
+func validateCollisionPolicy(policy dto.CollisionPolicy) error {
+	switch policy {
+	case dto.PolicyAbort, dto.PolicySkip, dto.PolicyRename, dto.PolicyOverwrite:
+		return nil
+	default:
+		return &BundleRejectedError{Reason: BundleRejectedManifest, Item: fmt.Sprint(policy)}
+	}
 }
 
 // Preview reads an archive's manifest and reports per-item collisions against the target instance.
-func Preview(gameID, archivePath string) (dto.ImportPreview, error) {
-	m, err := ReadManifest(gameID, archivePath)
+func Preview(ctx context.Context, gameID, archivePath string) (dto.ImportPreview, error) {
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return dto.ImportPreview{}, err
+	}
+	defer file.Close()
+	return PreviewFromFile(ctx, gameID, file)
+}
+
+// PreviewFromFile previews the manifest and identity of one opened archive.
+func PreviewFromFile(ctx context.Context, gameID string, file *os.File) (dto.ImportPreview, error) {
+	identity, err := ArchiveIdentity(file)
+	if err != nil {
+		return dto.ImportPreview{}, err
+	}
+	m, err := readManifestFromFile(ctx, gameID, file)
 	if err != nil {
 		return dto.ImportPreview{}, err
 	}
 	out := dto.ImportPreview{
+		ArchiveIdentity:      identity,
 		SchemaVersion:        int32(m.SchemaVersion),
 		GorganizerVersion:    m.GorganizerVersion,
 		GameID:               m.GameID,
@@ -88,6 +229,9 @@ func Preview(gameID, archivePath string) (dto.ImportPreview, error) {
 		IncludesGameSettings: m.IncludesGameSettings,
 	}
 	for _, me := range m.Mods {
+		if err := ctx.Err(); err != nil {
+			return dto.ImportPreview{}, err
+		}
 		out.Mods = append(out.Mods, dto.ImportPreviewMod{
 			Folder:      me.Folder,
 			Name:        me.Name,
@@ -99,6 +243,9 @@ func Preview(gameID, archivePath string) (dto.ImportPreview, error) {
 		})
 	}
 	for _, name := range m.Profiles {
+		if err := ctx.Err(); err != nil {
+			return dto.ImportPreview{}, err
+		}
 		out.Profiles = append(out.Profiles, dto.ImportPreviewProfile{
 			Name:      name,
 			Collision: profileExists(gameID, name),
@@ -108,21 +255,61 @@ func Preview(gameID, archivePath string) (dto.ImportPreview, error) {
 }
 
 // Import applies an exported archive to the target instance under the configured collision policies.
-func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgress)) (dto.TransferSummary, error) {
-	summary := dto.TransferSummary{Renamed: map[string]string{}}
+func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgress)) (summary dto.TransferSummary, importErr error) {
+	summary = dto.TransferSummary{Renamed: map[string]string{}}
+	mergedFiles := 0
+	defer func() {
+		if importErr == nil {
+			return
+		}
+		var commitErr *transferCommitError
+		committed := int(summary.ModsImported+summary.ProfilesTransferred) + mergedFiles
+		if committed > 0 {
+			recovery := "none"
+			if errors.As(importErr, &commitErr) && commitErr.pending {
+				recovery = "pending"
+			}
+			importErr = &BundleIncompleteError{Items: committed, Recovery: recovery, Err: importErr}
+		}
+	}()
 	if emit == nil {
 		emit = func(dto.TransferProgress) {}
 	}
 
-	tr, closer, err := openArchiveReader(opts.ArchivePath)
+	limits := defaultImportLimits()
+	if opts.limits != nil {
+		limits = *opts.limits
+	}
+	var tr *tar.Reader
+	var stream *limitedArchiveReader
+	var closer func() error
+	var err error
+	if opts.ArchiveFile != nil {
+		tr, stream, closer, err = archiveReaderFromFile(opts.ArchiveFile, limits.streamBytes)
+	} else {
+		tr, stream, closer, err = openArchiveReaderWithLimit(opts.ArchivePath, limits.streamBytes)
+	}
 	if err != nil {
 		return summary, err
 	}
 	defer closer()
 
-	manifest, err := readManifestEntry(tr, opts.GameID)
+	manifest, manifestSize, err := readManifestEntry(ctx, tr, opts.GameID, limits.manifestBytes)
 	if err != nil {
 		return summary, err
+	}
+	if limits.entries < 1 || manifestSize > limits.payloadBytes {
+		return summary, &BundleRejectedError{Reason: BundleRejectedLimit, Item: manifestEntryName}
+	}
+	entryCount := int64(1)
+	payloadBytes := manifestSize
+	if err := validateCollisionPolicy(opts.Policy); err != nil {
+		return summary, err
+	}
+	for _, policy := range opts.ModPolicyOverrides {
+		if err := validateCollisionPolicy(policy); err != nil {
+			return summary, err
+		}
 	}
 
 	selMods, err := selectNames(manifestModFolders(manifest), opts.ModFolders, "mod folder")
@@ -161,7 +348,11 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 			skipMods[me.Folder] = true
 			continue
 		}
-		bytesTotal += me.TotalBytes
+		if me.TotalBytes > limits.payloadBytes-bytesTotal {
+			bytesTotal = limits.payloadBytes
+		} else if me.TotalBytes > 0 {
+			bytesTotal += me.TotalBytes
+		}
 	}
 	skipProfiles := map[string]bool{}
 	for _, name := range manifest.Profiles {
@@ -178,10 +369,15 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 	if err := os.MkdirAll(profilesDir, 0755); err != nil {
 		return summary, err
 	}
-	stageID := mod.ImportStagePrefix + uuid.NewString()
-	stageMods := filepath.Join(modsDir, stageID)
-	stageProfiles := filepath.Join(profilesDir, stageID)
+	stageMods, err := os.MkdirTemp(modsDir, mod.ImportStagePrefix)
+	if err != nil {
+		return summary, fmt.Errorf("creating import staging directory: %w", err)
+	}
 	defer os.RemoveAll(stageMods)
+	stageProfiles := filepath.Join(profilesDir, filepath.Base(stageMods))
+	if err := os.Mkdir(stageProfiles, 0700); err != nil {
+		return summary, fmt.Errorf("creating profile staging directory: %w", err)
+	}
 	defer os.RemoveAll(stageProfiles)
 
 	itemsTotal := int32(len(selMods) + len(selProfiles))
@@ -204,6 +400,8 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 	for _, name := range manifest.Profiles {
 		manifestProfiles[name] = true
 	}
+	seenEntries := map[string]byte{}
+	copyBuffer := make([]byte, 1<<20)
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -216,9 +414,30 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 		if err != nil {
 			return summary, fmt.Errorf("reading archive: %w", err)
 		}
+		stream.item = hdr.Name
+		if entryCount >= limits.entries {
+			return summary, &BundleRejectedError{Reason: BundleRejectedLimit, Item: hdr.Name}
+		}
+		entryCount++
 		prefix, rest, err := splitEntryName(hdr.Name)
 		if err != nil {
 			return summary, err
+		}
+		if err := validateEntryType(hdr); err != nil {
+			return summary, err
+		}
+		remainingPayload := limits.payloadBytes - payloadBytes
+		if hdr.Size < 0 || hdr.Size > remainingPayload || (hdr.Typeflag != tar.TypeDir && hdr.Size > limits.fileBytes) {
+			return summary, &BundleRejectedError{Reason: BundleRejectedLimit, Item: hdr.Name}
+		}
+		payloadBytes += hdr.Size
+		if (prefix == "overwrite" && !manifest.IncludesOverwrite) || (prefix == "gamesettings" && !manifest.IncludesGameSettings) {
+			return summary, &BundleRejectedError{Reason: BundleRejectedManifest, Item: hdr.Name}
+		}
+		if prefix != manifestEntryName {
+			if err := recordEntry(seenEntries, hdr); err != nil {
+				return summary, err
+			}
 		}
 		clean := strings.TrimSuffix(hdr.Name, "/")
 		switch prefix {
@@ -230,7 +449,7 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 			if !selMods[folder] || skipMods[folder] {
 				continue
 			}
-			n, err := extractEntry(tr, hdr, stageMods, strings.TrimPrefix(clean, "mods/"))
+			n, err := extractEntry(ctx, tr, hdr, stageMods, strings.TrimPrefix(clean, "mods/"), limits.fileBytes, remainingPayload, copyBuffer)
 			if err != nil {
 				return summary, err
 			}
@@ -244,12 +463,15 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 			if !selProfiles[name] || skipProfiles[name] {
 				continue
 			}
-			if _, err := extractEntry(tr, hdr, stageProfiles, strings.TrimPrefix(clean, "profiles/")); err != nil {
+			if rest == name+"/profile.json" && hdr.Size > 1<<20 {
+				return summary, &BundleRejectedError{Reason: BundleRejectedLimit, Item: name + "/profile.json"}
+			}
+			if _, err := extractEntry(ctx, tr, hdr, stageProfiles, strings.TrimPrefix(clean, "profiles/"), limits.fileBytes, remainingPayload, copyBuffer); err != nil {
 				return summary, err
 			}
 			progress("extract", clean)
 		case "overwrite":
-			if _, err := extractEntry(tr, hdr, filepath.Join(stageMods, "__overwrite__"), rest); err != nil {
+			if _, err := extractEntry(ctx, tr, hdr, filepath.Join(stageMods, "__overwrite__"), rest, limits.fileBytes, remainingPayload, copyBuffer); err != nil {
 				return summary, err
 			}
 			progress("extract", clean)
@@ -257,11 +479,49 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 			if rest != gsBase {
 				return summary, &TransferPathError{Entry: hdr.Name}
 			}
-			if _, err := extractEntry(tr, hdr, filepath.Join(stageMods, "__gamesettings__"), rest); err != nil {
+			if _, err := extractEntry(ctx, tr, hdr, filepath.Join(stageMods, "__gamesettings__"), rest, limits.fileBytes, remainingPayload, copyBuffer); err != nil {
 				return summary, err
 			}
 		default:
 			return summary, &TransferPathError{Entry: hdr.Name}
+		}
+	}
+
+	if opts.ArchiveIdentity != "" {
+		if opts.ArchiveFile == nil {
+			return summary, &BundleRejectedError{Reason: BundleRejectedChanged, Item: filepath.Base(opts.ArchivePath)}
+		}
+		identity, err := ArchiveIdentity(opts.ArchiveFile)
+		if err != nil || identity != opts.ArchiveIdentity {
+			return summary, &BundleRejectedError{Reason: BundleRejectedChanged, Item: filepath.Base(opts.ArchivePath)}
+		}
+	}
+	for _, me := range manifest.Mods {
+		if !selMods[me.Folder] || skipMods[me.Folder] {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return summary, err
+		}
+		if err := checkStagedRoot(filepath.Join(stageMods, me.Folder), "mods/"+me.Folder); err != nil {
+			return summary, err
+		}
+	}
+	for _, name := range manifest.Profiles {
+		if !selProfiles[name] || skipProfiles[name] {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return summary, err
+		}
+		if err := checkStagedRoot(filepath.Join(stageProfiles, name), "profiles/"+name); err != nil {
+			return summary, err
+		}
+	}
+
+	if opts.Policy == dto.PolicyAbort {
+		if err := checkAuxiliaryCollisions(filepath.Join(stageMods, "__overwrite__"), filepath.Join(modsDir, profile.OverwriteModName), filepath.Join(stageMods, "__gamesettings__", gsBase), config.GameSettingsPath(opts.GameID)); err != nil {
+			return summary, err
 		}
 	}
 
@@ -278,9 +538,6 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 			continue
 		}
 		staged := filepath.Join(stageMods, me.Folder)
-		if _, err := os.Stat(staged); err != nil {
-			return summary, fmt.Errorf("archive has no data for mod %q: %w", me.Folder, os.ErrNotExist)
-		}
 		if err := finalizeMod(opts, me.Folder, staged, policyFor(me.Folder), &summary); err != nil {
 			return summary, err
 		}
@@ -301,9 +558,6 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 			continue
 		}
 		staged := filepath.Join(stageProfiles, name)
-		if _, err := os.Stat(staged); err != nil {
-			return summary, fmt.Errorf("archive has no data for profile %q: %w", name, os.ErrNotExist)
-		}
 		if err := finalizeProfile(opts, name, staged, &summary); err != nil {
 			return summary, err
 		}
@@ -311,18 +565,65 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 		progress("finalize", name)
 	}
 
-	if err := mergeOverwrite(filepath.Join(stageMods, "__overwrite__"), filepath.Join(modsDir, profile.OverwriteModName)); err != nil {
+	merged, err := mergeOverwriteWithPolicy(filepath.Join(stageMods, "__overwrite__"), filepath.Join(modsDir, profile.OverwriteModName), opts.Policy, &summary)
+	mergedFiles += merged
+	if err != nil {
 		return summary, err
 	}
 	stagedGS := filepath.Join(stageMods, "__gamesettings__", gsBase)
 	if _, err := os.Stat(stagedGS); err == nil {
-		if err := os.Rename(stagedGS, config.GameSettingsPath(opts.GameID)); err != nil {
+		target := config.GameSettingsPath(opts.GameID)
+		_, existingErr := os.Lstat(target)
+		if existingErr != nil && !errors.Is(existingErr, os.ErrNotExist) {
+			return summary, fmt.Errorf("checking game settings: %w", existingErr)
+		}
+		if existingErr == nil {
+			switch opts.Policy {
+			case dto.PolicyAbort:
+				return summary, &TransferCollisionError{Name: "game settings"}
+			case dto.PolicyRename, dto.PolicySkip:
+				summary.Skipped = append(summary.Skipped, "game settings")
+				progress("done", "")
+				return summary, nil
+			}
+		}
+		if err := os.Rename(stagedGS, target); err != nil {
 			return summary, fmt.Errorf("applying game settings: %w", err)
 		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return summary, fmt.Errorf("checking staged game settings: %w", err)
 	}
 
 	progress("done", "")
 	return summary, nil
+}
+
+// checkStagedRoot requires a selected bundle root to be a real directory.
+func checkStagedRoot(path, item string) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) || err == nil && !info.IsDir() {
+		return &BundleRejectedError{Reason: BundleRejectedManifest, Item: item}
+	}
+	if err != nil {
+		return fmt.Errorf("checking staged bundle root %s: %w", item, err)
+	}
+	return nil
+}
+
+// checkImportReplacement refuses a name reserved by a pending journal before any import policy acts on it.
+func checkImportReplacement(opts ImportOptions, root, name string) error {
+	if err := CheckPendingReplacement(root, name); err != nil {
+		return err
+	}
+	unlockState := func() {}
+	if opts.LockState != nil {
+		unlockState = opts.LockState()
+	}
+	defer unlockState()
+	if opts.CheckReplacement != nil {
+		return opts.CheckReplacement(root, name)
+	}
+	return nil
 }
 
 // finalizeMod moves one staged mod into ModsDir, applying the collision policy under the install lock.
@@ -332,8 +633,16 @@ func finalizeMod(opts ImportOptions, folder, staged string, policy dto.Collision
 		unlock = opts.LockMod(folder)
 	}
 	defer unlock()
-
-	target := filepath.Join(config.ModsDir(opts.GameID), folder)
+	unlockProfiles := func() {}
+	if opts.LockState != nil && opts.LockProfiles != nil {
+		unlockProfiles = opts.LockProfiles()
+	}
+	defer unlockProfiles()
+	root := config.ModsDir(opts.GameID)
+	if err := checkImportReplacement(opts, root, folder); err != nil {
+		return err
+	}
+	target := filepath.Join(root, folder)
 	if _, err := os.Stat(target); err == nil {
 		switch policy {
 		case dto.PolicySkip:
@@ -343,7 +652,12 @@ func finalizeMod(opts ImportOptions, folder, staged string, policy dto.Collision
 			newName := renameCandidate(folder, func(c string) bool {
 				return modFolderExists(opts.GameID, c)
 			})
-			relabelModMetadata(staged, folder, newName)
+			if err := checkImportReplacement(opts, root, newName); err != nil {
+				return err
+			}
+			if err := relabelModMetadata(staged, folder, newName); err != nil {
+				return fmt.Errorf("preparing mod %q: %w", folder, err)
+			}
 			if err := os.Rename(staged, filepath.Join(config.ModsDir(opts.GameID), newName)); err != nil {
 				return fmt.Errorf("importing mod %q as %q: %w", folder, newName, err)
 			}
@@ -351,9 +665,21 @@ func finalizeMod(opts ImportOptions, folder, staged string, policy dto.Collision
 			summary.ModsImported++
 			return nil
 		case dto.PolicyOverwrite:
-			if err := os.RemoveAll(target); err != nil {
+			var replace error
+			if opts.commitOps != nil {
+				replace = replaceDirWithOps(config.ModsDir(opts.GameID), folder, staged, "mod", *opts.commitOps)
+			} else {
+				replace = replaceDir(config.ModsDir(opts.GameID), folder, staged)
+			}
+			if err := replace; err != nil {
+				var commitErr *transferCommitError
+				if errors.As(err, &commitErr) && commitErr.committed {
+					summary.ModsImported++
+				}
 				return fmt.Errorf("replacing mod %q: %w", folder, err)
 			}
+			summary.ModsImported++
+			return nil
 		default:
 			return &TransferCollisionError{Name: folder}
 		}
@@ -367,6 +693,9 @@ func finalizeMod(opts ImportOptions, folder, staged string, policy dto.Collision
 
 // finalizeProfile rewrites the staged modlist through the rename map and moves the profile into place.
 func finalizeProfile(opts ImportOptions, name, staged string, summary *dto.TransferSummary) error {
+	if err := validateImportedProfileName(name); err != nil {
+		return err
+	}
 	if err := rewriteModlist(filepath.Join(staged, "modlist.txt"), summary.Renamed); err != nil {
 		return err
 	}
@@ -375,33 +704,56 @@ func finalizeProfile(opts ImportOptions, name, staged string, summary *dto.Trans
 		unlock = opts.LockProfiles()
 	}
 	defer unlock()
-	target := filepath.Join(config.ProfilesDir(opts.GameID), name)
-	if _, err := os.Stat(target); err == nil {
+	root := config.ProfilesDir(opts.GameID)
+	if err := checkImportReplacement(opts, root, name); err != nil {
+		return err
+	}
+	target := filepath.Join(root, name)
+	finalName := name
+	collision := profileExists(opts.GameID, name)
+	if collision {
 		switch opts.Policy {
 		case dto.PolicySkip:
 			summary.Skipped = append(summary.Skipped, name)
 			return nil
 		case dto.PolicyRename:
-			newName := renameCandidate(name, func(c string) bool {
+			finalName = renameCandidate(name, func(c string) bool {
 				return profileExists(opts.GameID, c)
 			})
-			relabelProfileJSON(staged, newName)
-			if err := os.Rename(staged, filepath.Join(config.ProfilesDir(opts.GameID), newName)); err != nil {
-				return fmt.Errorf("importing profile %q as %q: %w", name, newName, err)
+			if err := checkImportReplacement(opts, root, finalName); err != nil {
+				return err
 			}
-			summary.Renamed[name] = newName
-			summary.ProfilesTransferred++
-			return nil
+			target = filepath.Join(root, finalName)
 		case dto.PolicyOverwrite:
-			if err := os.RemoveAll(target); err != nil {
-				return fmt.Errorf("replacing profile %q: %w", name, err)
-			}
 		default:
 			return &TransferCollisionError{Name: name}
 		}
 	}
+	if err := canonicalizeProfileJSON(staged, opts.GameID, finalName); err != nil {
+		return fmt.Errorf("preparing profile %q: %w", name, err)
+	}
+	if collision && opts.Policy == dto.PolicyOverwrite {
+		var replace error
+		if opts.commitOps != nil {
+			replace = replaceDirWithOps(config.ProfilesDir(opts.GameID), name, staged, "profile", *opts.commitOps)
+		} else {
+			replace = replaceDir(config.ProfilesDir(opts.GameID), name, staged)
+		}
+		if err := replace; err != nil {
+			var commitErr *transferCommitError
+			if errors.As(err, &commitErr) && commitErr.committed {
+				summary.ProfilesTransferred++
+			}
+			return fmt.Errorf("replacing profile %q: %w", name, err)
+		}
+		summary.ProfilesTransferred++
+		return nil
+	}
 	if err := os.Rename(staged, target); err != nil {
 		return fmt.Errorf("importing profile %q: %w", name, err)
+	}
+	if finalName != name {
+		summary.Renamed[name] = finalName
 	}
 	summary.ProfilesTransferred++
 	return nil
@@ -438,18 +790,75 @@ func rewriteModlist(path string, renamed map[string]string) error {
 	if err := mod.WriteModList(&buf, entries); err != nil {
 		return err
 	}
-	return os.WriteFile(path, buf.Bytes(), 0644)
+	return atomicfile.WriteFile(path, buf.Bytes(), 0644)
+}
+
+// checkAuxiliaryCollisions refuses existing Overwrite files or game settings before Abort publishes selected mods.
+func checkAuxiliaryCollisions(stagedRoot, owDir, stagedSettings, targetSettings string) error {
+	if _, err := os.Stat(stagedRoot); err == nil {
+		if err := filepath.WalkDir(stagedRoot, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return err
+			}
+			rel, err := filepath.Rel(stagedRoot, path)
+			if err != nil {
+				return err
+			}
+			if err := fsutil.CheckExistingPath(owDir, rel); err != nil {
+				if errors.Is(err, fsutil.ErrExistingLink) {
+					return &BundleRejectedError{Reason: BundleRejectedLink, Item: filepath.ToSlash(rel)}
+				}
+				if errors.Is(err, fsutil.ErrExistingNonDirectory) {
+					return &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: filepath.ToSlash(rel)}
+				}
+				return err
+			}
+			if _, err := os.Lstat(filepath.Join(owDir, rel)); err == nil {
+				return &TransferCollisionError{Name: "Overwrite/" + filepath.ToSlash(rel)}
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if _, err := os.Lstat(stagedSettings); err == nil {
+		if _, err := os.Lstat(targetSettings); err == nil {
+			return &TransferCollisionError{Name: "game settings"}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // mergeOverwrite moves every staged Overwrite file into the live Overwrite layer, replacing on conflict.
 func mergeOverwrite(stagedRoot, owDir string) error {
+	_, err := mergeOverwriteCount(stagedRoot, owDir)
+	return err
+}
+
+// mergeOverwriteCount moves staged Overwrite files and counts successful file replacements.
+func mergeOverwriteCount(stagedRoot, owDir string) (int, error) {
+	return mergeOverwriteWithPolicy(stagedRoot, owDir, dto.PolicyOverwrite, nil)
+}
+
+// mergeOverwriteWithPolicy merges staged Overwrite files and summarizes files skipped by the collision policy.
+func mergeOverwriteWithPolicy(stagedRoot, owDir string, policy dto.CollisionPolicy, summary *dto.TransferSummary) (int, error) {
 	if _, err := os.Stat(stagedRoot); err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return 0, nil
 		}
-		return err
+		return 0, err
 	}
-	return filepath.WalkDir(stagedRoot, func(p string, d fs.DirEntry, err error) error {
+	count := 0
+	skipped := 0
+	err := filepath.WalkDir(stagedRoot, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -460,53 +869,119 @@ func mergeOverwrite(stagedRoot, owDir string) error {
 		if rel == "." {
 			return nil
 		}
+		if err := fsutil.CheckExistingPath(owDir, rel); err != nil {
+			if errors.Is(err, fsutil.ErrExistingLink) {
+				return &BundleRejectedError{Reason: BundleRejectedLink, Item: filepath.ToSlash(rel)}
+			}
+			if errors.Is(err, fsutil.ErrExistingNonDirectory) {
+				return &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: filepath.ToSlash(rel)}
+			}
+			return err
+		}
 		dest := filepath.Join(owDir, rel)
+		info, err := os.Lstat(dest)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if err == nil && (info.IsDir() != d.IsDir() || !info.IsDir() && !info.Mode().IsRegular()) {
+			return &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: filepath.ToSlash(rel)}
+		}
 		if d.IsDir() {
 			return os.MkdirAll(dest, 0755)
+		}
+		if err == nil {
+			switch policy {
+			case dto.PolicyAbort:
+				return &TransferCollisionError{Name: "Overwrite/" + filepath.ToSlash(rel)}
+			case dto.PolicyRename, dto.PolicySkip:
+				skipped++
+				if summary != nil && skipped <= 50 {
+					summary.Skipped = append(summary.Skipped, "Overwrite/"+filepath.ToSlash(rel))
+				}
+				return nil
+			}
 		}
 		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 			return err
 		}
-		if err := os.RemoveAll(dest); err != nil {
+		if err := os.Rename(p, dest); err != nil {
 			return err
 		}
-		return os.Rename(p, dest)
+		count++
+		return nil
 	})
+	if summary != nil && skipped > 50 {
+		summary.Skipped = append(summary.Skipped, fmt.Sprintf("…and %d more files in Overwrite", skipped-50))
+	}
+	return count, err
 }
 
-// relabelModMetadata rewrites a staged mod's metadata.yaml folder/name after a RENAME, best-effort.
-func relabelModMetadata(staged, oldName, newName string) {
+// relabelModMetadata rewrites a staged mod's metadata.yaml folder and name after a rename.
+func relabelModMetadata(staged, oldName, newName string) error {
 	meta, err := download.LoadModMetadata(staged)
-	if err != nil || meta == nil {
-		return
+	if err != nil {
+		return fmt.Errorf("reading staged metadata: %w", err)
 	}
-	if meta.Folder == "" && meta.Name == "" {
-		return
+	if meta == nil || meta.Folder == "" && meta.Name == "" {
+		return nil
 	}
 	meta.Folder = newName
 	if meta.Name == oldName {
 		meta.Name = newName
 	}
-	_ = download.SaveModMetadata(staged, meta)
+	if err := download.SaveModMetadata(staged, meta); err != nil {
+		return fmt.Errorf("writing staged metadata: %w", err)
+	}
+	return nil
 }
 
-// relabelProfileJSON rewrites a staged profile.json name after a RENAME, best-effort.
-func relabelProfileJSON(staged, newName string) {
+// canonicalizeProfileJSON writes the final directory identity into staged profile.json.
+func canonicalizeProfileJSON(staged, gameID, name string) error {
 	path := filepath.Join(staged, "profile.json")
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
-		return
+		return fmt.Errorf("reading %s: %w", path, err)
 	}
-	var raw map[string]any
+	defer file.Close()
+	stat, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("checking %s: %w", path, err)
+	}
+	if stat.Size() > 1<<20 {
+		return &BundleRejectedError{Reason: BundleRejectedLimit, Item: filepath.Base(staged) + "/profile.json"}
+	}
+	data, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	if len(data) > 1<<20 {
+		return &BundleRejectedError{Reason: BundleRejectedLimit, Item: filepath.Base(staged) + "/profile.json"}
+	}
+	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return
+		return fmt.Errorf("parsing %s: %w", path, err)
 	}
-	raw["name"] = newName
+	if raw == nil {
+		return fmt.Errorf("parsing %s: expected a JSON object", path)
+	}
+	nameJSON, err := json.Marshal(name)
+	if err != nil {
+		return fmt.Errorf("encoding profile name: %w", err)
+	}
+	gameJSON, err := json.Marshal(gameID)
+	if err != nil {
+		return fmt.Errorf("encoding profile game ID: %w", err)
+	}
+	raw["name"] = nameJSON
+	raw["game_id"] = gameJSON
 	out, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
-		return
+		return fmt.Errorf("marshaling %s: %w", path, err)
 	}
-	_ = os.WriteFile(path, out, 0644)
+	if err := atomicfile.WriteFile(path, out, 0644); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
 }
 
 // renameCandidate returns "<base> (2)", "<base> (3)", ... skipping taken names.

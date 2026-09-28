@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -513,6 +514,9 @@ func (md *ModDependencyService) downloadLive(gameID, downloadID string, download
 			return true
 		}
 	}
+	if present, _ := download.HasLanding(gameID, downloadID); present {
+		return true
+	}
 	return ledger.nonTerminal(downloadID)
 }
 
@@ -521,6 +525,9 @@ func (md *ModDependencyService) observeDownload(snap download.DownloadSnapshot) 
 	switch snap.Status {
 	case download.StatusFailed, download.StatusCancelled:
 		if _, _, err := dependencySpecFor(snap.GameID); err != nil {
+			return
+		}
+		if present, _ := download.HasLanding(snap.GameID, snap.ID); present {
 			return
 		}
 		reason := snap.Error
@@ -536,6 +543,9 @@ func (md *ModDependencyService) observeDownload(snap download.DownloadSnapshot) 
 
 // consumeLandedArchive installs a landed archive for the dependency requests it satisfies and reports whether it handled the archive.
 func (md *ModDependencyService) consumeLandedArchive(gameID, downloadID, archivePath string, sidecar download.ArchiveSidecar) bool {
+	if md.s.deferredFor(gameID, "install") != nil {
+		return true
+	}
 	if _, _, err := dependencySpecFor(gameID); err != nil {
 		return false
 	}
@@ -645,12 +655,15 @@ func (md *ModDependencyService) checkLandedArchive(archivePath string) (archiveC
 // installForRequests installs a checked extraction as a new disabled mod, records the outcome on every entry attached to install, and announces the install with the batches whose update was recorded; an install refused or failed during shutdown leaves its entries installing for startup recovery.
 func (md *ModDependencyService) installForRequests(gameID, rel, root, install string, planned map[string]bool) {
 	defer md.dropCheck(root)
-	folder, _, installErr := md.s.svc.install.startInstallFrom(dto.StartInstallRequest{
+	published := false
+	folder, _, installErr := md.s.svc.install.startInstallFrom(context.Background(), dto.StartInstallRequest{
 		GameID: gameID, ArchiveRelPath: rel, Mode: dto.InstallAsNewMod,
-	}, root)
+	}, root, &published)
 	if installErr != nil {
-		if md.s.shuttingDown.Load() {
-			slog.Warn("dependency install interrupted by shutdown; startup recovery resumes it", "game", gameID, "archive", rel, "err", installErr)
+		var deferred *dto.RecoveryDeferredError
+		var busy *dto.OperationBusyError
+		if md.s.shuttingDown.Load() || errors.As(installErr, &deferred) || errors.As(installErr, &busy) && busy.Operation == "recovery" {
+			slog.Warn("dependency install interrupted; recovery will resume it", "game", gameID, "archive", rel, "err", installErr)
 			return
 		}
 		slog.Warn("dependency install failed", "game", gameID, "archive", rel, "err", installErr)
@@ -776,8 +789,13 @@ func (md *ModDependencyService) recoverInterruptedRequests(gameIDs []string) []r
 
 // recoverDownloadingEntry keeps a premium entry whose download is still pending, queues its landed archive for consumption, or fails it, reporting whether it changed.
 func recoverDownloadingEntry(gameID string, entry *depEntry, ledger *ledgerSnapshot, index *download.DownloadsIndex, now time.Time, seen map[string]bool, landings *[]recoveredLanding) bool {
-	if entry.DownloadID != "" && ledger.nonTerminal(entry.DownloadID) {
-		return false
+	if entry.DownloadID != "" {
+		if pending, _ := download.HasLanding(gameID, entry.DownloadID); pending {
+			return false
+		}
+		if ledger.nonTerminal(entry.DownloadID) {
+			return false
+		}
 	}
 	if id := ledger.pendingFor(entry.NexusModID, entry.FileID); id != "" {
 		entry.DownloadID = id

@@ -6,37 +6,56 @@ namespace gorganizer::dialogs {
 
 void info(QWidget* parent, const QString& title, const QString& text)
 {
-    QMessageBox::information(parent, title, text);
+    QMessageBox box(parent);
+    box.setIcon(QMessageBox::Information);
+    box.setWindowTitle(title);
+    box.setStandardButtons(QMessageBox::Ok);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(text);
+    box.exec();
 }
 
 void warn(QWidget* parent, const QString& title, const QString& text)
 {
-    QMessageBox::warning(parent, title, text);
+    QMessageBox box(parent);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(title);
+    box.setStandardButtons(QMessageBox::Ok);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(text);
+    box.exec();
 }
 
 void error(QWidget* parent, const QString& title, const QString& text)
 {
-    QMessageBox::critical(parent, title, text);
-}
-
-void richWarn(QWidget* parent, const QString& title, const QString& text)
-{
-    QMessageBox box(QMessageBox::Warning, title, text, QMessageBox::Ok, parent);
-    box.setTextFormat(Qt::RichText);
+    QMessageBox box(parent);
+    box.setIcon(QMessageBox::Critical);
+    box.setWindowTitle(title);
+    box.setStandardButtons(QMessageBox::Ok);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(text);
     box.exec();
 }
 
 void plainWarn(QWidget* parent, const QString& title, const QString& text)
 {
-    QMessageBox box(QMessageBox::Warning, title, text, QMessageBox::Ok, parent);
+    QMessageBox box(parent);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(title);
+    box.setStandardButtons(QMessageBox::Ok);
     box.setTextFormat(Qt::PlainText);
+    box.setText(text);
     box.exec();
 }
 
 void plainInfo(QWidget* parent, const QString& title, const QString& text)
 {
-    QMessageBox box(QMessageBox::Information, title, text, QMessageBox::Ok, parent);
+    QMessageBox box(parent);
+    box.setIcon(QMessageBox::Information);
+    box.setWindowTitle(title);
+    box.setStandardButtons(QMessageBox::Ok);
     box.setTextFormat(Qt::PlainText);
+    box.setText(text);
     box.exec();
 }
 
@@ -45,17 +64,27 @@ bool confirm(QWidget* parent, const QString& title, const QString& text,
              QMessageBox::StandardButton acceptButton,
              QMessageBox::StandardButton rejectButton)
 {
-    return QMessageBox::question(parent, title, text,
-                                 acceptButton | rejectButton, defaultButton)
-        == acceptButton;
+    QMessageBox box(parent);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle(title);
+    box.setStandardButtons(acceptButton | rejectButton);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(text);
+    box.setDefaultButton(defaultButton);
+    return box.exec() == acceptButton;
 }
 
 bool confirmWarn(QWidget* parent, const QString& title, const QString& text,
                  QMessageBox::StandardButton defaultButton)
 {
-    return QMessageBox::warning(parent, title, text,
-                                QMessageBox::Yes | QMessageBox::No, defaultButton)
-        == QMessageBox::Yes;
+    QMessageBox box(parent);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(title);
+    box.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(text);
+    box.setDefaultButton(defaultButton);
+    return box.exec() == QMessageBox::Yes;
 }
 
 bool confirmDestructive(QWidget* parent, const QString& title, const QString& text,
@@ -64,9 +93,12 @@ bool confirmDestructive(QWidget* parent, const QString& title, const QString& te
     QMessageBox box(parent);
     box.setWindowTitle(title);
     box.setIcon(QMessageBox::Warning);
+    box.setTextFormat(Qt::PlainText);
     box.setText(text);
     auto* acceptBtn = box.addButton(acceptLabel, QMessageBox::DestructiveRole);
-    box.addButton(rejectLabel, QMessageBox::RejectRole);
+    auto* cancelBtn = box.addButton(rejectLabel, QMessageBox::RejectRole);
+    box.setDefaultButton(static_cast<QPushButton*>(cancelBtn));
+    box.setEscapeButton(cancelBtn);
     box.exec();
     return box.clickedButton() == acceptBtn;
 }
@@ -74,8 +106,12 @@ bool confirmDestructive(QWidget* parent, const QString& title, const QString& te
 bool plainConfirm(QWidget* parent, const QString& title, const QString& text,
                   QMessageBox::Icon icon, QMessageBox::StandardButton defaultButton)
 {
-    QMessageBox box(icon, title, text, QMessageBox::Yes | QMessageBox::No, parent);
+    QMessageBox box(parent);
+    box.setIcon(icon);
+    box.setWindowTitle(title);
+    box.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
     box.setTextFormat(Qt::PlainText);
+    box.setText(text);
     box.setDefaultButton(defaultButton);
     return box.exec() == QMessageBox::Yes;
 }
@@ -89,7 +125,9 @@ bool plainConfirmDestructive(QWidget* parent, const QString& title, const QStrin
     box.setTextFormat(Qt::PlainText);
     box.setText(text);
     auto* acceptBtn = box.addButton(acceptLabel, QMessageBox::DestructiveRole);
-    box.addButton(rejectLabel, QMessageBox::RejectRole);
+    auto* cancelBtn = box.addButton(rejectLabel, QMessageBox::RejectRole);
+    box.setDefaultButton(static_cast<QPushButton*>(cancelBtn));
+    box.setEscapeButton(cancelBtn);
     box.exec();
     return box.clickedButton() == acceptBtn;
 }
