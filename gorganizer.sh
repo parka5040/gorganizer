@@ -144,11 +144,29 @@ prompt_yn() {
 
 # --- distro detection ------------------------------------------------------
 
+detect_immutable_host() {
+    [ -e "${GORGANIZER_OSTREE_MARKER:-/run/ostree-booted}" ] && return 0
+    [ -r "${GORGANIZER_OS_RELEASE:-/etc/os-release}" ] || return 1
+    local ID="" ID_LIKE="" VARIANT_ID=""
+    . "${GORGANIZER_OS_RELEASE:-/etc/os-release}"
+    case "${ID,,}" in
+        steamos|nixos|bazzite|bluefin|aurora|endless) return 0 ;;
+    esac
+    case "${VARIANT_ID,,}" in
+        *silverblue*|*kinoite*|*sericea*|*onyx*|*atomic*|*coreos*) return 0 ;;
+    esac
+    case " ${ID_LIKE,,} " in
+        *" steamos "*) return 0 ;;
+    esac
+    return 1
+}
+
 detect_distro_family() {
+    detect_immutable_host && { echo immutable; return; }
     local family="unknown"
-    if [ -r /etc/os-release ]; then
-        # shellcheck disable=SC1091
-        . /etc/os-release
+    if [ -r "${GORGANIZER_OS_RELEASE:-/etc/os-release}" ]; then
+        local ID="" ID_LIKE=""
+        . "${GORGANIZER_OS_RELEASE:-/etc/os-release}"
         local ids=" ${ID:-} ${ID_LIKE:-} "
         case "$ids" in
             *" arch "*|*" artix "*|*" manjaro "*|*" endeavouros "*|*" cachyos "*) family="arch" ;;
@@ -167,6 +185,8 @@ deps_for_family() {
     case "$1" in
         arch) cat <<'EOF'
 base-devel|base-devel
+make|make
+pkg-config|pkgconf
 cmake|cmake
 ninja|ninja
 go|go
@@ -180,6 +200,9 @@ EOF
             ;;
         debian) cat <<'EOF'
 build-essential|build-essential
+make|make
+pkg-config|pkg-config pkgconf
+libprotobuf-dev|libprotobuf-dev
 cmake|cmake
 ninja-build|ninja-build
 golang-go|golang-go
@@ -194,6 +217,9 @@ EOF
             ;;
         fedora) cat <<'EOF'
 gcc-c++|gcc-c++
+make|make
+pkg-config|pkgconf-pkg-config pkgconf
+protobuf-devel|protobuf-devel
 cmake|cmake
 ninja-build|ninja-build
 golang|golang
@@ -208,6 +234,8 @@ EOF
             ;;
         suse) cat <<'EOF'
 gcc-c++|gcc-c++
+make|make
+pkg-config|pkg-config pkgconf
 cmake|cmake
 ninja|ninja
 go|go
@@ -303,46 +331,78 @@ missing_deps() {
     return 0
 }
 
+IMMUTABLE_NOTICE_SHOWN=false
+show_immutable_notice() {
+    $IMMUTABLE_NOTICE_SHOWN && return 0
+    warn "This system keeps its system files read-only, so Gorganizer will not install developer tools on it. To build Gorganizer here, open a Distrobox or Toolbox container, run ./gorganizer.sh inside it, and start Gorganizer from that container."
+    IMMUTABLE_NOTICE_SHOWN=true
+}
+
+check_build_tools() {
+    local tool pkg_tool="" missing=()
+    for tool in make cmake go protoc grpc_cpp_plugin; do
+        command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+    done
+    if ! command -v c++ >/dev/null 2>&1 && ! command -v g++ >/dev/null 2>&1 && ! command -v clang++ >/dev/null 2>&1; then
+        missing+=("C++ compiler")
+    fi
+    if command -v pkg-config >/dev/null 2>&1; then
+        pkg_tool=pkg-config
+    elif command -v pkgconf >/dev/null 2>&1; then
+        pkg_tool=pkgconf
+    else
+        missing+=("pkg-config or pkgconf")
+    fi
+    if [ -n "$pkg_tool" ]; then
+        "$pkg_tool" --exists protobuf || missing+=("protobuf development headers")
+        "$pkg_tool" --exists grpc++ || missing+=("gRPC development headers")
+    fi
+    if [ ${#missing[@]} -ne 0 ]; then
+        err "Missing build tools: ${missing[*]}."
+        return 1
+    fi
+}
+
 # Prompt-and-install build deps. Used by `setup` and the first-run flow.
-# Returns 0 on success, non-zero if the user declined or the install failed.
 install_deps_interactive() {
     local family="$1" missing install_cmd deps_rc=0
     local -a install_cmd_parts=()
-    install_cmd="$(pm_install_cmd "$family")"
-    if [ -z "$install_cmd" ]; then
-        warn "Unknown distro family ($family). Install build deps manually:"
-        warn "    Need: cmake, ninja, go (1.26+), protoc, protoc-gen-grpc,"
-        warn "          qt6-base dev, grpc dev, 7zip, unzip."
-        return 1
+    if [ "$family" = immutable ]; then
+        show_immutable_notice
+    else
+        install_cmd="$(pm_install_cmd "$family")"
+        if [ -z "$install_cmd" ]; then
+            warn "Build packages cannot be installed automatically on this system."
+        else
+            missing_deps "$family" >/dev/null || deps_rc=$?
+            case "$deps_rc" in
+                2) ok "All build deps already installed." ;;
+                1) warn "Build packages cannot be checked automatically on this system." ;;
+                0)
+                    missing="${MISSING_BUILD_PACKAGES[*]}"
+                    if [ -n "$missing" ]; then
+                        log "Missing build dependencies (${BOLD}$family${RESET}):"
+                        printf '    %s\n' "$missing" >&2
+                        log "Install command:"
+                        printf '    %s %s\n' "$install_cmd" "$missing" >&2
+                        if [ ! -t 0 ] || ! prompt_yn "Install now via sudo?" Y; then
+                            err "Gorganizer cannot build because the needed tools were not installed. Install them and run ./gorganizer.sh again."
+                            return 1
+                        fi
+                        sudo -v || { err "sudo authentication failed. Build stopped."; return 1; }
+                        read -r -a install_cmd_parts <<< "$install_cmd"
+                        if ! "${install_cmd_parts[@]}" "${MISSING_BUILD_PACKAGES[@]}"; then
+                            err "Package install failed. Build stopped."
+                            return 1
+                        fi
+                        ok "Build deps installed."
+                    fi
+                    ;;
+            esac
+        fi
     fi
-    missing_deps "$family" >/dev/null || deps_rc=$?
-    case "$deps_rc" in
-        2) ok "All build deps already installed."; return 0 ;;
-        1) warn "Distro family unknown; can't auto-install."; return 1 ;;
-    esac
-    missing="${MISSING_BUILD_PACKAGES[*]}"
-    if [ -z "$missing" ]; then
-        warn "Build dependency packages could not be resolved; continuing without an install."
-        return 0
-    fi
-
-    log "Missing build dependencies (${BOLD}$family${RESET}):"
-    echo "    $missing" >&2
-    log "Install command:"
-    echo "    $install_cmd $missing" >&2
-    if ! prompt_yn "Install now via sudo?" Y; then
-        warn "Skipped. Run \`$install_cmd $missing\` yourself, then rerun."
-        return 1
-    fi
-    sudo -v || { err "sudo authentication failed."; return 1; }
-    read -r -a install_cmd_parts <<< "$install_cmd"
-    if ! "${install_cmd_parts[@]}" "${MISSING_BUILD_PACKAGES[@]}"; then
-        err "Package install failed."
-        return 1
-    fi
-    ok "Build deps installed."
+    check_build_tools || return 1
     check_go_version_warning
-    return 0
 }
 
 # Required runtime binaries, their per-family package candidates, and the
@@ -390,6 +450,8 @@ runtime_tools_check() {
         if [ -n "$resolved" ] && [ -n "$install_cmd" ]; then
             printf '         fix: %s %s\n' "$install_cmd" "$resolved"
             add_runtime_package "$resolved"
+        elif [ "$family" = immutable ]; then
+            printf '         available inside a Distrobox or Toolbox container\n'
         else
             printf '         fix: install %s manually for this distro\n' "$binary"
         fi
@@ -402,6 +464,10 @@ runtime_tools_check() {
 install_runtime_tools_interactive() {
     local family="$1" install_cmd
     local -a install_cmd_parts=()
+    if [ "$family" = immutable ]; then
+        runtime_tools_check "$family"
+        return 0
+    fi
     runtime_tools_check "$family"
     [ ${#RUNTIME_MISSING_PACKAGES[@]} -eq 0 ] && return 0
     if [ ! -t 0 ]; then
@@ -427,16 +493,27 @@ install_runtime_tools_interactive() {
 }
 
 check_go_version_warning() {
-    local gov
-    gov="$(go version 2>/dev/null | awk '{print $3}' | sed 's/^go//')"
-    [ -z "$gov" ] && return 0
-    local major minor
-    major="${gov%%.*}"
-    minor="${gov#*.}"; minor="${minor%%.*}"
-    if [ "${major:-0}" -lt 1 ] || { [ "${major:-0}" -eq 1 ] && [ "${minor:-0}" -lt 26 ]; }; then
-        warn "Detected go${gov}; this project requires 1.26+."
-        warn "If \`make\` fails with module-version errors, install a newer Go from"
-        warn "    https://go.dev/dl/"
+    export GOTOOLCHAIN=local
+    local required found output req_major req_minor req_patch got_major got_minor got_patch
+    required="$(sed -n 's/^go[[:space:]]\+\([0-9][0-9.]*\).*/\1/p' "$SCRIPT_DIR/go.mod" | sed -n '1p')"
+    if [ -z "$required" ]; then
+        err "Could not read the required Go version from go.mod."
+        return 1
+    fi
+    if ! output="$(go version 2>/dev/null)" || [[ ! "$output" =~ ^go\ version\ go([0-9]+\.[0-9]+(\.[0-9]+)?)\  ]]; then
+        err "Could not check the installed Go version."
+        return 1
+    fi
+    found="${BASH_REMATCH[1]}"
+    IFS=. read -r req_major req_minor req_patch <<< "$required"
+    IFS=. read -r got_major got_minor got_patch <<< "$found"
+    req_patch="${req_patch:-0}"
+    got_patch="${got_patch:-0}"
+    if (( 10#$got_major < 10#$req_major ||
+          (10#$got_major == 10#$req_major && 10#$got_minor < 10#$req_minor) ||
+          (10#$got_major == 10#$req_major && 10#$got_minor == 10#$req_minor && 10#$got_patch < 10#$req_patch) )); then
+        err "Gorganizer needs Go $required or newer, but this system has Go $found. Install a newer Go from https://go.dev/dl/ and run ./gorganizer.sh again."
+        return 1
     fi
 }
 
@@ -513,10 +590,15 @@ build_and_publish() (
 )
 
 do_build() {
+    local family
+    family="$(detect_distro_family)"
+    if [ "$family" = immutable ]; then
+        show_immutable_notice
+    fi
+    check_build_tools || return 1
+    check_go_version_warning || return 1
     if ! build_and_publish "${1:-}"; then
         err "The new build failed. Your installed version is unchanged."
-        local family
-        family="$(detect_distro_family)"
         local install_cmd; install_cmd="$(pm_install_cmd "$family")"
         if [ -n "$install_cmd" ]; then
             warn "If this looks like a missing tool/header, run:"
@@ -540,6 +622,8 @@ needs_register() {
 # Build only the maintenance tool when registration precedes installation.
 ensure_register_ctl() {
     [ -x "$CTL_BIN" ] && ! needs_build && return 0
+    check_build_tools || return 1
+    check_go_version_warning || return 1
     local stage="$SCRIPT_DIR/.build-staging" version tmp
     version="$(sed -n '1{s/[[:space:]]*$//;p;}' "$SCRIPT_DIR/VERSION")" || return 1
     mkdir -p "$stage/bin" || return 1
@@ -621,7 +705,7 @@ cmd_install() {
     if [ ! -x "$DAEMON_BIN" ] || [ ! -x "$GUI_BIN" ]; then
         local family
         family="$(detect_distro_family)"
-        install_deps_interactive "$family" || true
+        install_deps_interactive "$family" || return 1
     fi
 
     # Build (incremental): no-op when sources are unchanged AND both
@@ -864,6 +948,17 @@ cmd_doctor() {
     family="$(detect_distro_family)"
     install_cmd="$(pm_install_cmd "$family")"
     log "Distro family: ${BOLD}$family${RESET}"
+    if [ "$family" = immutable ]; then
+        show_immutable_notice
+        log "Build dependencies:"
+        check_build_tools || build_rc=1
+        if command -v go >/dev/null 2>&1; then
+            check_go_version_warning || build_rc=1
+        fi
+        log "Runtime tools (optional):"
+        runtime_tools_check "$family"
+        return "$build_rc"
+    fi
     if [ -n "$install_cmd" ]; then
         log "Package manager: $install_cmd"
     else

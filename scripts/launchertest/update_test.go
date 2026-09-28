@@ -73,7 +73,7 @@ func newUpdateFixture(t *testing.T) *updateFixture {
 	seed := f.root
 	origin := filepath.Join(t.TempDir(), "origin.git")
 	gitFixtureCommand(t, seed, "init", "-q", "-b", "main")
-	writeFixtureFile(t, filepath.Join(seed, ".gitignore"), []byte(".build-fingerprint\n.build-staging/\nbuild/\ngorganizerd\ngorganizerctl\nmake.log\ncalls.log\n"), 0o644)
+	writeFixtureFile(t, filepath.Join(seed, ".gitignore"), []byte(".build-fingerprint\n.build-staging/\nbuild/\ngorganizerd\ngorganizerctl\nmake.log\ngo.log\ncalls.log\n"), 0o644)
 	gitFixtureCommand(t, seed, "add", ".gitignore", "gorganizer.sh", "cleaner.sh", "VERSION", "go.mod", "Makefile", "main.go", "CMakeLists.txt", "resources/icons/icon.png", "api/proto/fake.pb.go")
 	gitFixtureCommand(t, seed, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Initial version")
 	gitFixtureCommand(t, seed, "init", "--bare", "-q", "-b", "main", origin)

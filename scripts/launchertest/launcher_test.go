@@ -15,7 +15,7 @@ import (
 
 const fakeMake = `#!/bin/bash
 set -euo pipefail
-printf 'make %s\n' "$*" >> "$FAKE_MAKE_LOG"
+printf 'make %s\ntoolchain %s\n' "$*" "${GOTOOLCHAIN-<unset>}" >> "$FAKE_MAKE_LOG"
 out=""
 gui=""
 for arg in "$@"; do
@@ -149,7 +149,8 @@ func newFixture(t *testing.T) *fixture {
 	}
 	for name, data := range map[string]string{
 		"VERSION":                  "0.1.0\n",
-		"go.mod":                   "module fake\n",
+		"go.mod":                   "module fake\n\ngo 1.26.2\n",
+		"os-release":               "ID=arch\n",
 		"Makefile":                 "all:\n\t@true\n",
 		"main.go":                  "package main\n",
 		"CMakeLists.txt":           "project(fake)\n",
@@ -159,7 +160,9 @@ func newFixture(t *testing.T) *fixture {
 		writeFixtureFile(t, filepath.Join(root, name), []byte(data), 0o644)
 	}
 	writeFixtureFile(t, filepath.Join(shims, "make"), []byte(fakeMake), 0o755)
-	for _, name := range []string{"go", "cmake"} {
+	writeFixtureFile(t, filepath.Join(shims, "go"), []byte("#!/bin/sh\nprintf 'go %s\\n' \"${GOTOOLCHAIN-<unset>}\" >> \"$FAKE_GO_LOG\"\n[ \"${1:-}\" = version ] && printf 'go version go%s linux/amd64\\n' \"${FAKE_GO_VERSION:-1.26.2}\"\n"), 0o755)
+	writeFixtureFile(t, filepath.Join(shims, "pkg-config"), []byte("#!/bin/sh\n[ \"$1\" = --exists ] || exit 1\n[ \"${FAKE_HEADERS_MISSING:-}\" != \"$2\" ]\n"), 0o755)
+	for _, name := range []string{"cmake", "protoc", "grpc_cpp_plugin", "c++"} {
 		writeFixtureFile(t, filepath.Join(shims, name), []byte("#!/bin/sh\nexit 0\n"), 0o755)
 	}
 	old := make(map[string][]byte)
@@ -175,9 +178,27 @@ func newFixture(t *testing.T) *fixture {
 // run invokes sourced launcher functions without starting the dispatcher.
 func (f *fixture) run(t *testing.T, command string, settings ...string) (string, error) {
 	t.Helper()
+	return f.runShell(t, command, "", false, settings...)
+}
+
+// runTerminal invokes a launcher function with a terminal and a scripted reply.
+func (f *fixture) runTerminal(t *testing.T, command, reply string, settings ...string) (string, error) {
+	t.Helper()
+	return f.runShell(t, command, reply, true, settings...)
+}
+
+// runShell invokes sourced launcher functions with isolated paths and fake build tools.
+func (f *fixture) runShell(t *testing.T, command, reply string, terminal bool, settings ...string) (string, error) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", "-c", ". \"$1\"; "+command, "bash", filepath.Join(f.root, "gorganizer.sh"))
+	var cmd *exec.Cmd
+	if terminal {
+		cmd = exec.CommandContext(ctx, "script", "-q", "-e", "-c", `bash -c '. "$1"; `+command+`' bash "$GORGANIZER_TEST_SCRIPT"`, "/dev/null")
+		cmd.Stdin = strings.NewReader(reply)
+	} else {
+		cmd = exec.CommandContext(ctx, "bash", "-c", ". \"$1\"; "+command, "bash", filepath.Join(f.root, "gorganizer.sh"))
+	}
 	cmd.Dir = f.root
 	for _, setting := range os.Environ() {
 		if !strings.HasPrefix(setting, "GORGANIZER_ROOT=") {
@@ -188,6 +209,10 @@ func (f *fixture) run(t *testing.T, command string, settings ...string) (string,
 		"GORGANIZER_SH_SOURCE_ONLY=1",
 		"PATH="+f.shims+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FAKE_MAKE_LOG="+f.log,
+		"FAKE_GO_LOG="+filepath.Join(f.root, "go.log"),
+		"GORGANIZER_TEST_SCRIPT="+filepath.Join(f.root, "gorganizer.sh"),
+		"GORGANIZER_OS_RELEASE="+filepath.Join(f.root, "os-release"),
+		"GORGANIZER_OSTREE_MARKER="+filepath.Join(f.root, "ostree-marker"),
 		"FAKE_BUILD_VERSION=0.1.0",
 		"FAKE_BUILD_MARKER=new-complete-artifact-with-extra-bytes",
 	)
