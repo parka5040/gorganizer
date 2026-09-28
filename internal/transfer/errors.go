@@ -42,6 +42,7 @@ const (
 	BundleRejectedDuplicate   = "duplicate"
 	BundleRejectedLimit       = "limit"
 	BundleRejectedManifest    = "manifest"
+	BundleRejectedChanged     = "changed"
 )
 
 type TransferTooLargeError struct {

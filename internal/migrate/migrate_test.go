@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -84,7 +85,7 @@ func TestPlanFindsLegacyFoldersAndBlockers(t *testing.T) {
 		{"collision", func(t *testing.T, mods, install string) {
 			put(t, filepath.Join(config.XDGModsDir("skyrimse"), "already"), "keep")
 		}, "already contains files", 0},
-		{"inside link", func(t *testing.T, mods, install string) { _ = os.Symlink("Overwrite", filepath.Join(mods, "alias")) }, "points inside the old folder", 0},
+		{"inside link", func(t *testing.T, mods, install string) { _ = os.Symlink("Overwrite", filepath.Join(mods, "alias")) }, "", 0},
 		{"inside link through alias", func(t *testing.T, mods, install string) {
 			alias := filepath.Join(filepath.Dir(filepath.Dir(mods)), "old-mods-alias")
 			if err := os.Symlink(mods, alias); err != nil {
@@ -192,6 +193,64 @@ func TestPlanDoesNotReadFileContents(t *testing.T) {
 			t.Fatalf("planning hashed %s", e.Path)
 		}
 	}
+}
+
+// TestRelativeExternalShortcutBlocksMigration checks outside relative targets are refused while internal relative targets move.
+func TestRelativeExternalShortcutBlocksMigration(t *testing.T) {
+	for _, tc := range []struct {
+		name, target string
+		blocked      bool
+	}{
+		{"external", "../shared", true},
+		{"internal", "Overwrite/file.esp", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			from, mods, _ := fixture(t)
+			put(t, filepath.Join(mods, "Overwrite", "file.esp"), "saved")
+			link := filepath.Join(mods, "shortcut")
+			if err := os.Symlink(tc.target, link); err != nil {
+				t.Fatal(err)
+			}
+			p := planned(t, from)
+			if p.HasBlockers() != tc.blocked {
+				t.Fatalf("blockers = %v", p.Items[0].Blockers)
+			}
+			if tc.blocked {
+				want := link + " is a shortcut that points outside the folder being moved. Remove or replace it, then try again."
+				if !slices.Contains(p.Items[0].Blockers, want) {
+					t.Fatalf("blockers = %v, want %q", p.Items[0].Blockers, want)
+				}
+				return
+			}
+			if err := Execute(p, ExecuteOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			moved := filepath.Join(config.XDGModsDir("skyrimse"), "shortcut")
+			if target, err := os.Readlink(moved); err != nil || target != tc.target {
+				t.Fatalf("moved shortcut = %q, %v", target, err)
+			}
+			if body, err := os.ReadFile(moved); err != nil || string(body) != "saved" {
+				t.Fatalf("moved shortcut destination = %q, %v", body, err)
+			}
+		})
+	}
+	t.Run("external through internal shortcut", func(t *testing.T) {
+		from, mods, _ := fixture(t)
+		external := filepath.Join(t.TempDir(), "shared")
+		put(t, filepath.Join(external, "file.esp"), "outside")
+		if err := os.Symlink(external, filepath.Join(mods, "bridge")); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(mods, "shortcut")
+		if err := os.Symlink("bridge/file.esp", link); err != nil {
+			t.Fatal(err)
+		}
+		p := planned(t, from)
+		want := link + " is a shortcut that points outside the folder being moved. Remove or replace it, then try again."
+		if !slices.Contains(p.Items[0].Blockers, want) {
+			t.Fatalf("blockers = %v, want %q", p.Items[0].Blockers, want)
+		}
+	})
 }
 
 // TestSameFilesystemMigrationMovesEverything checks a same-drive rename preserves hidden state and removes the source.

@@ -158,11 +158,11 @@ func TestReinstallSwapRefusalDiscardsTheStageAndIntent(t *testing.T) {
 	modDir := filepath.Join(config.ModsDir("stardewvalley"), folder)
 	writeFileContent(t, filepath.Join(modDir, "Late", "assets", "a.png"), "kept")
 	setStardewModList(t, d, "Default", map[string]bool{folder: true})
+	if _, err := d.MountVFS("stardewvalley", "Default"); err != nil {
+		t.Fatal(err)
+	}
 	d.reinstallFault = func(step string) error {
 		if step == "intent-written" {
-			if _, err := d.MountVFS("stardewvalley", "Default"); err != nil {
-				t.Errorf("MountVFS between the intent and the swap: %v", err)
-			}
 			fakeProcesses(d, true, nil)
 		}
 		return nil

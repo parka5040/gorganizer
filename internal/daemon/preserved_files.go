@@ -31,7 +31,7 @@ func (s *session) maintenanceDataPath(gameID string) (string, error) {
 	if subpath == "" {
 		subpath = "Data"
 	}
-	return filepath.Join(s.mountInstallPath(effective), subpath), nil
+	return filepath.Join(effective.InstallPath, subpath), nil
 }
 
 // SetSteamMaintenance pauses mods for a Steam update or resumes them after Steam becomes idle.
@@ -56,6 +56,58 @@ func (vs *VFSService) SetSteamMaintenance(gameID string, enabled, verificationCo
 		subpath = "Data"
 	}
 	dataPath := filepath.Join(vs.s.mountInstallPath(gc), subpath)
+	if enabled {
+		checkedRoots := make(map[*vfs.RootDeploymentManager]bool)
+		for otherID := range vs.s.config.Games {
+			if otherID == gameID {
+				continue
+			}
+			other, err := vs.s.config.EffectiveGameConfig(otherID)
+			if err != nil {
+				return nil, err
+			}
+			otherSubpath := other.DataSubpath
+			if otherSubpath == "" {
+				otherSubpath = "Data"
+			}
+			if filepath.Clean(filepath.Join(other.InstallPath, otherSubpath)) != filepath.Clean(dataPath) {
+				continue
+			}
+			if mm := vs.s.mountMgrs[otherID]; mm != nil && mm.IsMounted() {
+				return nil, &dto.OperationBusyError{GameID: gameID, Operation: dto.BusyOperationMounted, Holder: otherID}
+			}
+			root := vs.s.rootDeployMgrs[otherID]
+			if root == nil {
+				root, err = vs.s.ensureRootDeploymentManager(otherID, other)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if root != nil && !checkedRoots[root] {
+				checkedRoots[root] = true
+				manifest, err := root.ActiveManifest()
+				if err != nil {
+					return nil, err
+				}
+				if manifest != nil && manifest.GameID != gameID {
+					return nil, &dto.OperationBusyError{GameID: gameID, Operation: dto.BusyOperationMounted, Holder: otherID}
+				}
+			}
+		}
+	} else if state, _ := vs.s.steamStatusLocked(gameID, dataPath); state == dto.SteamMaintenanceVerify {
+		if mm := vs.s.mountMgrs[gameID]; mm != nil && mm.IsMounted() {
+			return nil, &dto.SteamMaintenanceError{GameID: gameID, Reason: "verify"}
+		}
+		if root := vs.s.rootDeployMgrs[gameID]; root != nil {
+			manifest, err := root.ActiveManifest()
+			if err != nil {
+				return nil, err
+			}
+			if manifest != nil {
+				return nil, &dto.SteamMaintenanceError{GameID: gameID, Reason: "verify"}
+			}
+		}
+	}
 	marker, err := vfs.ReadMaintenance(dataPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading Steam maintenance: %w", err)

@@ -39,7 +39,7 @@ const (
 
 // FarmSiblingSuffixes returns the pending transition siblings and parked original next to a farm's deploy folder.
 func FarmSiblingSuffixes() []string {
-	return []string{activatingSuffix, applyingSuffix, stagingSuffix, oldFarmSuffix, deactivatingSuffix, retiredSuffix, farmBackupSuffix}
+	return []string{activatingSuffix, applyingSuffix, stagingSuffix, oldFarmSuffix, deactivatingSuffix, retiredSuffix, restoringSuffix, farmBackupSuffix}
 }
 
 // RetainedFarmSiblingSuffixes returns farm siblings that persist while a launched game may still use its deploy folder.

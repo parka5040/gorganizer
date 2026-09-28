@@ -139,14 +139,28 @@ func openArchiveReaderWithLimit(archivePath string, streamLimit int64) (*tar.Rea
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	tr, bounded, closer, err := archiveReaderFromFile(f, streamLimit)
+	if err != nil {
+		f.Close()
+		return nil, nil, nil, err
+	}
+	return tr, bounded, func() error {
+		return errors.Join(closer(), f.Close())
+	}, nil
+}
+
+// archiveReaderFromFile opens a bounded tar stream without closing its underlying file.
+func archiveReaderFromFile(f *os.File, streamLimit int64) (*tar.Reader, *limitedArchiveReader, func() error, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, nil, nil, fmt.Errorf("seeking archive: %w", err)
+	}
 	br := bufio.NewReaderSize(f, 1<<16)
 	magic, err := br.Peek(4)
 	if err != nil && len(magic) < 2 {
-		f.Close()
-		return nil, nil, nil, fmt.Errorf("reading archive header %s: %w", archivePath, err)
+		return nil, nil, nil, fmt.Errorf("reading archive header: %w", err)
 	}
 	var reader io.Reader = br
-	closer := f.Close
+	closer := func() error { return nil }
 	switch {
 	case len(magic) >= 4 && bytes.Equal(magic[:4], zstdMagic):
 		zr, err := zstd.NewReader(br,
@@ -154,25 +168,20 @@ func openArchiveReaderWithLimit(archivePath string, streamLimit int64) (*tar.Rea
 			zstd.WithDecoderMaxWindow(128<<20),
 			zstd.WithDecoderConcurrency(1))
 		if err != nil {
-			f.Close()
 			return nil, nil, nil, fmt.Errorf("opening zstd stream: %w", err)
 		}
 		reader = zr
 		closer = func() error {
 			zr.Close()
-			return f.Close()
+			return nil
 		}
 	case len(magic) >= 2 && bytes.Equal(magic[:2], gzipMagic):
 		gr, err := gzip.NewReader(br)
 		if err != nil {
-			f.Close()
 			return nil, nil, nil, fmt.Errorf("opening gzip stream: %w", err)
 		}
 		reader = gr
-		closer = func() error {
-			gr.Close()
-			return f.Close()
-		}
+		closer = gr.Close
 	}
 	bounded := &limitedArchiveReader{reader: reader, limit: streamLimit, item: manifestEntryName}
 	return tar.NewReader(bounded), bounded, closer, nil

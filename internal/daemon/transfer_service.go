@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/dto"
@@ -49,7 +51,21 @@ func (ts *TransferService) ImportInstance(ctx context.Context, req dto.ImportReq
 		return dto.TransferSummary{}, err
 	}
 	defer release()
-	preview, err := transfer.Preview(ctx, req.GameID, req.ArchivePath)
+	archive, err := os.Open(req.ArchivePath)
+	if err != nil {
+		return dto.TransferSummary{}, err
+	}
+	defer archive.Close()
+	if req.ExpectedArchiveIdentity != "" {
+		identity, err := transfer.ArchiveIdentity(archive)
+		if err != nil {
+			return dto.TransferSummary{}, err
+		}
+		if identity != req.ExpectedArchiveIdentity {
+			return dto.TransferSummary{}, &transfer.BundleRejectedError{Reason: transfer.BundleRejectedChanged, Item: filepath.Base(req.ArchivePath)}
+		}
+	}
+	preview, err := transfer.PreviewFromFile(ctx, req.GameID, archive)
 	if err != nil {
 		return dto.TransferSummary{}, err
 	}
@@ -59,6 +75,7 @@ func (ts *TransferService) ImportInstance(ctx context.Context, req dto.ImportReq
 	opts := transfer.ImportOptions{
 		GameID:             req.GameID,
 		ArchivePath:        req.ArchivePath,
+		ArchiveFile:        archive,
 		Policy:             req.Policy,
 		ModPolicyOverrides: req.ModPolicyOverrides,
 		ModFolders:         req.ModFolders,
@@ -69,9 +86,32 @@ func (ts *TransferService) ImportInstance(ctx context.Context, req dto.ImportReq
 		LockProfiles: func() func() {
 			return ts.s.lockProfiles(req.GameID)
 		},
+		LockState: func() func() {
+			ts.s.mu.RLock()
+			return ts.s.mu.RUnlock
+		},
 		CheckReplacement: func(root, name string) error {
 			if root == config.ModsDir(req.GameID) {
-				return checkModReplacement(root, name)
+				if err := checkModReplacement(root, name); err != nil {
+					return err
+				}
+				policy := req.Policy
+				if override, ok := req.ModPolicyOverrides[name]; ok {
+					policy = override
+				}
+				if policy == dto.PolicyOverwrite {
+					used, err := ts.s.svc.mods.mountedModUsedLocked(req.GameID, name)
+					if err != nil {
+						return err
+					}
+					if used {
+						return &TransferOverwriteMountedError{Name: name}
+					}
+				}
+			} else if root == config.ProfilesDir(req.GameID) && req.Policy == dto.PolicyOverwrite {
+				if mm, state := ts.s.mountMgrs[req.GameID], ts.s.mountStates[req.GameID]; mm != nil && mm.IsMounted() && state.profileName == name {
+					return &TransferOverwriteMountedError{Name: name}
+				}
 			}
 			return nil
 		},

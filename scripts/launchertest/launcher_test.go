@@ -94,6 +94,12 @@ case "$1" in
     session)
         printf 'root=%s\nqt=%s\n' "${GORGANIZER_ROOT-<unset>}" "$QT_LOGGING_RULES" >> "$SHIM_LOG"
         ;;
+    ping)
+        [ "${FAKE_DAEMON_RUNNING:-}" = yes ]
+        ;;
+    nxm)
+        printf 'root=%s\n' "${GORGANIZER_ROOT-<unset>}" >> "$SHIM_LOG"
+        ;;
 esac
 `
 
@@ -232,6 +238,49 @@ func TestLaunchExecsSupervisor(t *testing.T) {
 	want := strings.Join([]string{"migrate-data --status", "migrate-data --from " + f.root + " --dry-run --count", "session --daemon " + filepath.Join(f.root, "gorganizerd") + " --gui " + filepath.Join(f.root, "build/src/gorganizer") + " -- nxm://example/mod?id=1 with spaces", "root=<unset>", "qt=qt.dbus.*=false;qt.qpa.systemtray.*=false;qt.qpa.theme.dbus.*=false;qt.qpa.theme.debug=false", ""}, "\n")
 	if got := string(readFixtureFile(t, logPath)); got != want {
 		t.Fatalf("supervisor arguments = %q, want %q", got, want)
+	}
+}
+
+// TestColdNXMMigratesBeforeForwarding checks that a cold link moves legacy mods before it starts a session.
+func TestColdNXMMigratesBeforeForwarding(t *testing.T) {
+	for _, blocked := range []bool{false, true} {
+		t.Run(map[bool]string{false: "moved", true: "blocked"}[blocked], func(t *testing.T) {
+			f := newFixture(t)
+			logPath := f.installMigrationShim(t)
+			writeFixtureFile(t, filepath.Join(f.root, "SkyrimSE_Mods", "mod.esp"), []byte("mod"), 0600)
+			settings := []string{"SHIM_LOG=" + logPath, "SHIM_NOTIFICATIONS=" + filepath.Join(f.root, "notifications"), "FAKE_SOURCES=[\"" + filepath.Join(f.root, "SkyrimSE_Mods") + "\"]"}
+			if blocked {
+				settings = append(settings, "FAKE_MOVE_FAIL=yes")
+			}
+			output, err := f.run(t, `cmd_nxm 'nxm://example/mod?id=1'`, settings...)
+			if err != nil {
+				t.Fatalf("nxm = %v: %s", err, output)
+			}
+			calls := string(readFixtureFile(t, logPath))
+			if !strings.Contains(calls, "migrate-data --status\n") || !strings.Contains(calls, "migrate-data --from "+f.root+" --yes\n") || !strings.Contains(calls, "nxm nxm://example/mod?id=1\n") || strings.Index(calls, " --yes") > strings.Index(calls, "nxm nxm://") {
+				t.Fatalf("nxm migration order = %q", calls)
+			}
+			root := "root=<unset>\n"
+			if blocked {
+				root = "root=" + f.root + "\n"
+			}
+			if !strings.Contains(calls, root) {
+				t.Fatalf("nxm migration root = %q", calls)
+			}
+		})
+	}
+}
+
+// TestRunningNXMForwardsWithoutMigration checks a live session receives the link without migration.
+func TestRunningNXMForwardsWithoutMigration(t *testing.T) {
+	f := newFixture(t)
+	logPath := f.installMigrationShim(t)
+	output, err := f.run(t, `cmd_nxm 'nxm://example/mod?id=1'`, "SHIM_LOG="+logPath, "FAKE_DAEMON_RUNNING=yes")
+	if err != nil || output != "" {
+		t.Fatalf("nxm = %v: %q", err, output)
+	}
+	if calls := string(readFixtureFile(t, logPath)); calls != "ping\nnxm nxm://example/mod?id=1\nroot=<unset>\n" {
+		t.Fatalf("running daemon calls = %q", calls)
 	}
 }
 

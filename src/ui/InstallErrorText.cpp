@@ -273,6 +273,8 @@ QString knownTokenMessage(const InstallError& parsed)
     if (token == QLatin1String("archive_rejected"))
         return archiveRejectedMessage(field("reason"));
     if (token == QLatin1String("bundle_rejected")) {
+        if (field("reason") == QLatin1String("changed"))
+            return QStringLiteral("This backup changed after it was checked. Check it again before importing.");
         if (field("reason") == QLatin1String("limit"))
             return QStringLiteral("This backup is too large to import safely. Ask for a smaller backup.");
         return QStringLiteral("This backup contains unsafe names or file links. Ask for a new backup.");

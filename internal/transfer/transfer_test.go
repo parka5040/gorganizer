@@ -234,8 +234,8 @@ func TestRerunWithSkipIsIdempotent(t *testing.T) {
 	if sum.ModsImported != 0 || sum.ProfilesTransferred != 0 {
 		t.Errorf("rerun summary = %+v, want nothing imported", sum)
 	}
-	if len(sum.Skipped) != 4 {
-		t.Errorf("skipped = %v, want 4 entries", sum.Skipped)
+	if len(sum.Skipped) != 6 {
+		t.Errorf("skipped = %v, want 6 entries including Overwrite and game settings", sum.Skipped)
 	}
 	after := snapshotTree(t, config.ModsDir(testGame))
 	if !reflect.DeepEqual(before, after) {

@@ -48,18 +48,30 @@ type ImportOptions struct {
 	commitOps          *transferCommitOps
 	GameID             string
 	ArchivePath        string
+	ArchiveFile        *os.File
 	Policy             dto.CollisionPolicy
 	ModPolicyOverrides map[string]dto.CollisionPolicy
 	ModFolders         []string
 	ProfileNames       []string
 	LockMod            func(name string) func()
 	LockProfiles       func() func()
+	LockState          func() func()
 	CheckReplacement   func(root, name string) error
 }
 
 // ReadManifest opens an archive and returns its validated manifest without extracting anything.
 func ReadManifest(ctx context.Context, gameID, archivePath string) (*Manifest, error) {
-	tr, closer, err := openArchiveReader(archivePath)
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return readManifestFromFile(ctx, gameID, f)
+}
+
+// readManifestFromFile reads a bounded manifest from an already opened archive.
+func readManifestFromFile(ctx context.Context, gameID string, f *os.File) (*Manifest, error) {
+	tr, _, closer, err := archiveReaderFromFile(f, defaultImportLimits().streamBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -188,11 +200,26 @@ func validateCollisionPolicy(policy dto.CollisionPolicy) error {
 
 // Preview reads an archive's manifest and reports per-item collisions against the target instance.
 func Preview(ctx context.Context, gameID, archivePath string) (dto.ImportPreview, error) {
-	m, err := ReadManifest(ctx, gameID, archivePath)
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return dto.ImportPreview{}, err
+	}
+	defer file.Close()
+	return PreviewFromFile(ctx, gameID, file)
+}
+
+// PreviewFromFile previews the manifest and identity of one opened archive.
+func PreviewFromFile(ctx context.Context, gameID string, file *os.File) (dto.ImportPreview, error) {
+	identity, err := ArchiveIdentity(file)
+	if err != nil {
+		return dto.ImportPreview{}, err
+	}
+	m, err := readManifestFromFile(ctx, gameID, file)
 	if err != nil {
 		return dto.ImportPreview{}, err
 	}
 	out := dto.ImportPreview{
+		ArchiveIdentity:      identity,
 		SchemaVersion:        int32(m.SchemaVersion),
 		GorganizerVersion:    m.GorganizerVersion,
 		GameID:               m.GameID,
@@ -252,7 +279,15 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 	if opts.limits != nil {
 		limits = *opts.limits
 	}
-	tr, stream, closer, err := openArchiveReaderWithLimit(opts.ArchivePath, limits.streamBytes)
+	var tr *tar.Reader
+	var stream *limitedArchiveReader
+	var closer func() error
+	var err error
+	if opts.ArchiveFile != nil {
+		tr, stream, closer, err = archiveReaderFromFile(opts.ArchiveFile, limits.streamBytes)
+	} else {
+		tr, stream, closer, err = openArchiveReaderWithLimit(opts.ArchivePath, limits.streamBytes)
+	}
 	if err != nil {
 		return summary, err
 	}
@@ -474,6 +509,12 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 		}
 	}
 
+	if opts.Policy == dto.PolicyAbort {
+		if err := checkAuxiliaryCollisions(filepath.Join(stageMods, "__overwrite__"), filepath.Join(modsDir, profile.OverwriteModName), filepath.Join(stageMods, "__gamesettings__", gsBase), config.GameSettingsPath(opts.GameID)); err != nil {
+			return summary, err
+		}
+	}
+
 	for _, me := range manifest.Mods {
 		if !selMods[me.Folder] {
 			continue
@@ -514,16 +555,33 @@ func Import(ctx context.Context, opts ImportOptions, emit func(dto.TransferProgr
 		progress("finalize", name)
 	}
 
-	merged, err := mergeOverwriteCount(filepath.Join(stageMods, "__overwrite__"), filepath.Join(modsDir, profile.OverwriteModName))
+	merged, err := mergeOverwriteWithPolicy(filepath.Join(stageMods, "__overwrite__"), filepath.Join(modsDir, profile.OverwriteModName), opts.Policy, &summary)
 	mergedFiles += merged
 	if err != nil {
 		return summary, err
 	}
 	stagedGS := filepath.Join(stageMods, "__gamesettings__", gsBase)
 	if _, err := os.Stat(stagedGS); err == nil {
-		if err := os.Rename(stagedGS, config.GameSettingsPath(opts.GameID)); err != nil {
+		target := config.GameSettingsPath(opts.GameID)
+		_, existingErr := os.Lstat(target)
+		if existingErr != nil && !errors.Is(existingErr, os.ErrNotExist) {
+			return summary, fmt.Errorf("checking game settings: %w", existingErr)
+		}
+		if existingErr == nil {
+			switch opts.Policy {
+			case dto.PolicyAbort:
+				return summary, &TransferCollisionError{Name: "game settings"}
+			case dto.PolicyRename, dto.PolicySkip:
+				summary.Skipped = append(summary.Skipped, "game settings")
+				progress("done", "")
+				return summary, nil
+			}
+		}
+		if err := os.Rename(stagedGS, target); err != nil {
 			return summary, fmt.Errorf("applying game settings: %w", err)
 		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return summary, fmt.Errorf("checking staged game settings: %w", err)
 	}
 
 	progress("done", "")
@@ -547,6 +605,11 @@ func checkImportReplacement(opts ImportOptions, root, name string) error {
 	if err := CheckPendingReplacement(root, name); err != nil {
 		return err
 	}
+	unlockState := func() {}
+	if opts.LockState != nil {
+		unlockState = opts.LockState()
+	}
+	defer unlockState()
 	if opts.CheckReplacement != nil {
 		return opts.CheckReplacement(root, name)
 	}
@@ -560,7 +623,11 @@ func finalizeMod(opts ImportOptions, folder, staged string, policy dto.Collision
 		unlock = opts.LockMod(folder)
 	}
 	defer unlock()
-
+	unlockProfiles := func() {}
+	if opts.LockState != nil && opts.LockProfiles != nil {
+		unlockProfiles = opts.LockProfiles()
+	}
+	defer unlockProfiles()
 	root := config.ModsDir(opts.GameID)
 	if err := checkImportReplacement(opts, root, folder); err != nil {
 		return err
@@ -716,6 +783,50 @@ func rewriteModlist(path string, renamed map[string]string) error {
 	return atomicfile.WriteFile(path, buf.Bytes(), 0644)
 }
 
+// checkAuxiliaryCollisions refuses existing Overwrite files or game settings before Abort publishes selected mods.
+func checkAuxiliaryCollisions(stagedRoot, owDir, stagedSettings, targetSettings string) error {
+	if _, err := os.Stat(stagedRoot); err == nil {
+		if err := filepath.WalkDir(stagedRoot, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return err
+			}
+			rel, err := filepath.Rel(stagedRoot, path)
+			if err != nil {
+				return err
+			}
+			if err := fsutil.CheckExistingPath(owDir, rel); err != nil {
+				if errors.Is(err, fsutil.ErrExistingLink) {
+					return &BundleRejectedError{Reason: BundleRejectedLink, Item: filepath.ToSlash(rel)}
+				}
+				if errors.Is(err, fsutil.ErrExistingNonDirectory) {
+					return &BundleRejectedError{Reason: BundleRejectedDuplicate, Item: filepath.ToSlash(rel)}
+				}
+				return err
+			}
+			if _, err := os.Lstat(filepath.Join(owDir, rel)); err == nil {
+				return &TransferCollisionError{Name: "Overwrite/" + filepath.ToSlash(rel)}
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if _, err := os.Lstat(stagedSettings); err == nil {
+		if _, err := os.Lstat(targetSettings); err == nil {
+			return &TransferCollisionError{Name: "game settings"}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 // mergeOverwrite moves every staged Overwrite file into the live Overwrite layer, replacing on conflict.
 func mergeOverwrite(stagedRoot, owDir string) error {
 	_, err := mergeOverwriteCount(stagedRoot, owDir)
@@ -724,6 +835,11 @@ func mergeOverwrite(stagedRoot, owDir string) error {
 
 // mergeOverwriteCount moves staged Overwrite files and counts successful file replacements.
 func mergeOverwriteCount(stagedRoot, owDir string) (int, error) {
+	return mergeOverwriteWithPolicy(stagedRoot, owDir, dto.PolicyOverwrite, nil)
+}
+
+// mergeOverwriteWithPolicy merges staged Overwrite files and summarizes files skipped by the collision policy.
+func mergeOverwriteWithPolicy(stagedRoot, owDir string, policy dto.CollisionPolicy, summary *dto.TransferSummary) (int, error) {
 	if _, err := os.Stat(stagedRoot); err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil
@@ -731,6 +847,7 @@ func mergeOverwriteCount(stagedRoot, owDir string) (int, error) {
 		return 0, err
 	}
 	count := 0
+	skipped := 0
 	err := filepath.WalkDir(stagedRoot, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -762,6 +879,18 @@ func mergeOverwriteCount(stagedRoot, owDir string) (int, error) {
 		if d.IsDir() {
 			return os.MkdirAll(dest, 0755)
 		}
+		if err == nil {
+			switch policy {
+			case dto.PolicyAbort:
+				return &TransferCollisionError{Name: "Overwrite/" + filepath.ToSlash(rel)}
+			case dto.PolicyRename, dto.PolicySkip:
+				skipped++
+				if summary != nil && skipped <= 50 {
+					summary.Skipped = append(summary.Skipped, "Overwrite/"+filepath.ToSlash(rel))
+				}
+				return nil
+			}
+		}
 		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 			return err
 		}
@@ -771,6 +900,9 @@ func mergeOverwriteCount(stagedRoot, owDir string) (int, error) {
 		count++
 		return nil
 	})
+	if summary != nil && skipped > 50 {
+		summary.Skipped = append(summary.Skipped, fmt.Sprintf("…and %d more files in Overwrite", skipped-50))
+	}
 	return count, err
 }
 

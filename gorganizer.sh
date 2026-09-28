@@ -673,14 +673,7 @@ notify_user() {
     fi
 }
 
-cmd_launch() {
-    if [ ! -x "$DAEMON_BIN" ] || [ ! -x "$GUI_BIN" ] || [ ! -x "$CTL_BIN" ]; then
-        err "Gorganizer is not built yet."
-        err "Run \`./gorganizer.sh\` from this clone to build and install."
-        exit 1
-    fi
-
-    export QT_LOGGING_RULES="${QT_LOGGING_RULES:+$QT_LOGGING_RULES;}qt.dbus.*=false;qt.qpa.systemtray.*=false;qt.qpa.theme.dbus.*=false;qt.qpa.theme.debug=false"
+preflight_data_migration() {
     if [ "${GORGANIZER_ROOT+x}" != x ]; then
         local status plan count result first_blocker
         if ! status="$("$CTL_BIN" migrate-data --status)"; then
@@ -730,6 +723,17 @@ cmd_launch() {
             export GORGANIZER_ROOT="$SCRIPT_DIR"
         fi
     fi
+}
+
+cmd_launch() {
+    if [ ! -x "$DAEMON_BIN" ] || [ ! -x "$GUI_BIN" ] || [ ! -x "$CTL_BIN" ]; then
+        err "Gorganizer is not built yet."
+        err "Run \`./gorganizer.sh\` from this clone to build and install."
+        exit 1
+    fi
+
+    export QT_LOGGING_RULES="${QT_LOGGING_RULES:+$QT_LOGGING_RULES;}qt.dbus.*=false;qt.qpa.systemtray.*=false;qt.qpa.theme.dbus.*=false;qt.qpa.theme.debug=false"
+    preflight_data_migration
     exec "$CTL_BIN" session --daemon "$DAEMON_BIN" --gui "$GUI_BIN" -- "$@"
 }
 
@@ -739,6 +743,9 @@ cmd_nxm() {
     if [ ! -x "$DAEMON_BIN" ] || [ ! -x "$CTL_BIN" ]; then
         err "Gorganizer is not built yet. Run ./gorganizer.sh first."
         exit 1
+    fi
+    if ! "$CTL_BIN" ping >/dev/null 2>&1; then
+        preflight_data_migration
     fi
     exec "$CTL_BIN" nxm "$@"
 }

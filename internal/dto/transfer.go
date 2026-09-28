@@ -19,12 +19,13 @@ type ExportRequest struct {
 }
 
 type ImportRequest struct {
-	GameID             string
-	ArchivePath        string
-	Policy             CollisionPolicy
-	ModPolicyOverrides map[string]CollisionPolicy
-	ModFolders         []string
-	ProfileNames       []string
+	GameID                  string
+	ArchivePath             string
+	ExpectedArchiveIdentity string
+	Policy                  CollisionPolicy
+	ModPolicyOverrides      map[string]CollisionPolicy
+	ModFolders              []string
+	ProfileNames            []string
 }
 
 type ImportPreviewMod struct {
@@ -43,6 +44,7 @@ type ImportPreviewProfile struct {
 }
 
 type ImportPreview struct {
+	ArchiveIdentity      string
 	SchemaVersion        int32
 	GorganizerVersion    string
 	GameID               string

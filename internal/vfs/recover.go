@@ -127,6 +127,28 @@ func CleanupStale(dataPath string, capture ...CaptureOptions) (RecoveryOutcome, 
 	}
 	backupPath := resolved + farmBackupSuffix
 	journalPath := deactivationJournalPath(resolved)
+	if record, recordErr := readRestoreRecord(resolved); recordErr != nil || record != nil {
+		outcome.Pending = &RecoveryPending{
+			DataPath: resolved, BackupPath: backupPath,
+			Reason: "A confirmed restore was interrupted. Check Data and Data.orig before continuing.",
+		}
+		if recordErr != nil {
+			return outcome, nil
+		}
+		_, backupExists, backupErr := directoryAt(backupPath)
+		data, dataExists, dataErr := directoryAt(resolved)
+		if err := errors.Join(backupErr, dataErr); err != nil {
+			return outcome, fmt.Errorf("checking interrupted restore: %w", err)
+		}
+		if !backupExists && dataExists && data == record.Backup {
+			if err := finishRestoreCleanup(resolved); err != nil {
+				return outcome, fmt.Errorf("finishing interrupted restore: %w", err)
+			}
+			outcome.Pending = nil
+			outcome.Restored = true
+		}
+		return outcome, nil
+	}
 	if _, statErr := os.Lstat(journalPath); !errors.Is(statErr, os.ErrNotExist) {
 		outcome.Pending = &RecoveryPending{
 			DataPath:   resolved,
@@ -527,6 +549,24 @@ func RestoreFromBackup(dataPath string, capture ...CaptureOptions) error {
 	if len(capture) > 0 {
 		opts = capture[0]
 	}
+	record, err := readRestoreRecord(resolved)
+	if err != nil {
+		return err
+	}
+	if record != nil {
+		backup, backupExists, backupErr := directoryAt(backupPath)
+		data, dataExists, dataErr := directoryAt(resolved)
+		if err := errors.Join(backupErr, dataErr); err != nil {
+			return fmt.Errorf("checking interrupted restore: %w", err)
+		}
+		if !backupExists && dataExists && data == record.Backup {
+			return finishRestoreCleanup(resolved)
+		}
+		if !backupExists || backup != record.Backup || dataExists && (record.Farm.Dev == 0 || data != record.Farm) {
+			return fmt.Errorf("confirmed restore needs review: Data and Data.orig do not match the restore record")
+		}
+		return restoreRecordedBackup(resolved, backupPath, record)
+	}
 	if _, err := os.Lstat(journal); err == nil {
 		j, err := readDeactivationJournal(journal)
 		if err != nil {
@@ -596,27 +636,78 @@ func RestoreFromBackup(dataPath string, capture ...CaptureOptions) error {
 			}
 		}
 	}
+	if err := restoreStep(0); err != nil {
+		return err
+	}
 	if backupErr == nil {
-		slog.Info("RestoreFromBackup: removing Data/", "path", resolved)
+		backup, exists, err := directoryAt(backupPath)
+		if err != nil || !exists || backup.Dev == 0 {
+			return fmt.Errorf("checking original Data backup: %v", err)
+		}
+		farm, _, err := directoryAt(resolved)
+		if err != nil {
+			return fmt.Errorf("checking farm before restore: %w", err)
+		}
+		record := &restoreRecord{SchemaVersion: 1, DataPath: resolved, Backup: backup, Farm: farm}
+		if err := writeRestoreRecord(resolved, record); err != nil {
+			return err
+		}
+		if err := restoreStep(1); err != nil {
+			return err
+		}
+		return restoreRecordedBackup(resolved, backupPath, record)
+	}
+	return finishRestoreCleanup(resolved)
+}
+
+// restoreRecordedBackup replaces the captured farm only while the backup still matches its durable identity.
+func restoreRecordedBackup(resolved, backupPath string, record *restoreRecord) error {
+	backup, exists, err := directoryAt(backupPath)
+	if err != nil || !exists || backup != record.Backup {
+		return fmt.Errorf("confirmed restore needs review: backup changed: %v", err)
+	}
+	data, dataExists, err := directoryAt(resolved)
+	if err != nil || dataExists && (record.Farm.Dev == 0 || data != record.Farm) {
+		return fmt.Errorf("confirmed restore needs review: Data changed: %v", err)
+	}
+	if dataExists {
 		if err := os.RemoveAll(resolved); err != nil {
 			return fmt.Errorf("removing %s: %w", resolved, err)
 		}
-		slog.Info("RestoreFromBackup: renaming backup", "from", backupPath, "to", resolved)
-		if err := os.Rename(backupPath, resolved); err != nil {
-			return fmt.Errorf("renaming %s to %s: %w", backupPath, resolved, err)
-		}
-		if err := atomicfile.SyncDir(filepath.Dir(resolved)); err != nil {
-			return fmt.Errorf("syncing restored Data: %w", err)
-		}
 	}
+	if err := restoreStep(2); err != nil {
+		return err
+	}
+	if err := os.Rename(backupPath, resolved); err != nil {
+		return fmt.Errorf("renaming %s to %s: %w", backupPath, resolved, err)
+	}
+	if err := atomicfile.SyncDir(filepath.Dir(resolved)); err != nil {
+		return fmt.Errorf("syncing restored Data: %w", err)
+	}
+	if err := restoreStep(3); err != nil {
+		return err
+	}
+	return finishRestoreCleanup(resolved)
+}
+
+// finishRestoreCleanup removes the remaining transition siblings and removes the restore record last.
+func finishRestoreCleanup(resolved string) error {
+	retired := retiredFarmPath(resolved)
+	journal := deactivationJournalPath(resolved)
 	if err := removeRetiredFarm(retired); err != nil {
 		return fmt.Errorf("removing retired farm: %w", err)
 	}
 	if err := atomicfile.SyncDir(filepath.Dir(resolved)); err != nil {
 		return fmt.Errorf("syncing removed retired farm: %w", err)
 	}
+	if err := restoreStep(4); err != nil {
+		return err
+	}
 	if err := atomicfile.RemoveDurable(journal); err != nil {
 		return fmt.Errorf("removing deactivation journal: %w", err)
+	}
+	if err := restoreStep(5); err != nil {
+		return err
 	}
 	for _, sibling := range []string{stagingDirPath(resolved), oldFarmPath(resolved)} {
 		if err := os.RemoveAll(sibling); err != nil {
@@ -626,10 +717,19 @@ func RestoreFromBackup(dataPath string, capture ...CaptureOptions) error {
 	if err := atomicfile.SyncDir(filepath.Dir(resolved)); err != nil {
 		return fmt.Errorf("syncing removed transition farms: %w", err)
 	}
+	if err := restoreStep(6); err != nil {
+		return err
+	}
 	for _, intent := range []string{activatingIntentPath(resolved), applyingIntentPath(resolved)} {
 		if err := RemoveIntent(intent); err != nil {
 			return fmt.Errorf("removing transition intent: %w", err)
 		}
+	}
+	if err := restoreStep(7); err != nil {
+		return err
+	}
+	if err := atomicfile.RemoveDurable(resolved + restoringSuffix); err != nil {
+		return fmt.Errorf("removing restore record: %w", err)
 	}
 	slog.Info("RestoreFromBackup: complete", "path", resolved)
 	return nil

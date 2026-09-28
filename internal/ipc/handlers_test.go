@@ -1129,6 +1129,7 @@ func TestExportInstanceStream(t *testing.T) {
 // TestPreviewImportMapping locks dto.ImportPreview → pb.PreviewImportResponse conversion.
 func TestPreviewImportMapping(t *testing.T) {
 	fake := &fakeController{preview: dto.ImportPreview{
+		ArchiveIdentity:   "v1:1:2:3:4:5",
 		SchemaVersion:     1,
 		GorganizerVersion: "1.0.0",
 		GameID:            "skyrimse",
@@ -1153,6 +1154,7 @@ func TestPreviewImportMapping(t *testing.T) {
 		t.Errorf("controller args = %v", fake.previewArgs)
 	}
 	mustEqualProto(t, resp, &pb.PreviewImportResponse{
+		ArchiveIdentity:   "v1:1:2:3:4:5",
 		SchemaVersion:     1,
 		GorganizerVersion: "1.0.0",
 		GameId:            "skyrimse",
@@ -1180,9 +1182,10 @@ func TestImportInstanceStream(t *testing.T) {
 	}
 	client := newTestClient(t, fake)
 	stream, err := client.ImportInstance(t.Context(), &pb.ImportInstanceRequest{
-		GameId:      "skyrimse",
-		ArchivePath: "/tmp/in.tar.zst",
-		Policy:      pb.TransferCollisionPolicy_TRANSFER_POLICY_RENAME,
+		GameId:                  "skyrimse",
+		ArchivePath:             "/tmp/in.tar.zst",
+		ExpectedArchiveIdentity: "v1:1:2:3:4:5",
+		Policy:                  pb.TransferCollisionPolicy_TRANSFER_POLICY_RENAME,
 		ModPolicyOverrides: map[string]pb.TransferCollisionPolicy{
 			"SkyUI": pb.TransferCollisionPolicy_TRANSFER_POLICY_SKIP,
 		},
@@ -1206,9 +1209,10 @@ func TestImportInstanceStream(t *testing.T) {
 		t.Errorf("final Recv err = %v, want io.EOF", err)
 	}
 	want := dto.ImportRequest{
-		GameID:      "skyrimse",
-		ArchivePath: "/tmp/in.tar.zst",
-		Policy:      dto.PolicyRename,
+		GameID:                  "skyrimse",
+		ArchivePath:             "/tmp/in.tar.zst",
+		ExpectedArchiveIdentity: "v1:1:2:3:4:5",
+		Policy:                  dto.PolicyRename,
 		ModPolicyOverrides: map[string]dto.CollisionPolicy{
 			"SkyUI": dto.PolicySkip,
 		},

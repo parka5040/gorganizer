@@ -39,6 +39,7 @@ func (s *gorganizerServer) PreviewImport(ctx context.Context, req *pb.PreviewImp
 		GorganizerVersion:    preview.GorganizerVersion,
 		GameId:               preview.GameID,
 		ExportedAt:           preview.ExportedAt,
+		ArchiveIdentity:      preview.ArchiveIdentity,
 		IncludesOverwrite:    preview.IncludesOverwrite,
 		IncludesGameSettings: preview.IncludesGameSettings,
 	}
@@ -76,12 +77,13 @@ func (s *gorganizerServer) ImportInstance(req *pb.ImportInstanceRequest, stream 
 		}
 	}
 	summary, err := s.ctrl.ImportInstance(stream.Context(), dto.ImportRequest{
-		GameID:             req.GetGameId(),
-		ArchivePath:        req.GetArchivePath(),
-		Policy:             dto.CollisionPolicy(req.GetPolicy()),
-		ModPolicyOverrides: overrides,
-		ModFolders:         req.GetModFolders(),
-		ProfileNames:       req.GetProfileNames(),
+		GameID:                  req.GetGameId(),
+		ArchivePath:             req.GetArchivePath(),
+		ExpectedArchiveIdentity: req.GetExpectedArchiveIdentity(),
+		Policy:                  dto.CollisionPolicy(req.GetPolicy()),
+		ModPolicyOverrides:      overrides,
+		ModFolders:              req.GetModFolders(),
+		ProfileNames:            req.GetProfileNames(),
 	}, emit)
 	if err != nil {
 		return grpcError(err)

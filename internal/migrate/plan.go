@@ -224,12 +224,14 @@ func inventory(root string) ([]entry, int64, int, []string, []string, error) {
 				target = filepath.Join(filepath.Dir(path), target)
 			}
 			inside := within(filepath.Clean(target), root) || within(filepath.Clean(target), realRoot)
-			if resolved, err := filepath.EvalSymlinks(target); err == nil && within(resolved, realRoot) {
-				inside = true
+			if resolved, err := filepath.EvalSymlinks(target); err == nil {
+				inside = within(resolved, realRoot)
 			}
-			if inside {
+			if !filepath.IsAbs(e.Target) && !inside {
+				blockers = append(blockers, fmt.Sprintf("%s is a shortcut that points outside the folder being moved. Remove or replace it, then try again.", path))
+			} else if filepath.IsAbs(e.Target) && inside {
 				blockers = append(blockers, fmt.Sprintf("A link inside %s points inside the old folder; move it manually.", root))
-			} else {
+			} else if filepath.IsAbs(e.Target) {
 				outside = append(outside, rel+" -> "+e.Target)
 			}
 		default:

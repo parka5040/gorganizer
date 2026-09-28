@@ -137,9 +137,7 @@ func (vs *VFSService) mountVFSOwned(gameID, profileName string, autoSwap, retarg
 	if err := vs.s.awaitRecovery(); err != nil {
 		return nil, err
 	}
-	if retarget {
-		defer vs.s.lockProfiles(gameID)()
-	}
+	defer vs.s.lockProfiles(gameID)()
 	vs.s.mu.Lock()
 	defer vs.s.mu.Unlock()
 
