@@ -500,11 +500,11 @@ check_go_version_warning() {
         err "Could not read the required Go version from go.mod."
         return 1
     fi
-    if ! output="$(go version 2>/dev/null)" || [[ ! "$output" =~ ^go\ version\ go([0-9]+\.[0-9]+(\.[0-9]+)?)\  ]]; then
+    if ! output="$(go version 2>/dev/null)" || [[ ! "$output" =~ ^go\ version\ (devel\ )?go([0-9]+\.[0-9]+(\.[0-9]+)?) ]]; then
         err "Could not check the installed Go version."
         return 1
     fi
-    found="${BASH_REMATCH[1]}"
+    found="${BASH_REMATCH[2]}"
     IFS=. read -r req_major req_minor req_patch <<< "$required"
     IFS=. read -r got_major got_minor got_patch <<< "$found"
     req_patch="${req_patch:-0}"

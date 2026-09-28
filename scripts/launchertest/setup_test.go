@@ -212,6 +212,8 @@ func TestLocalGoVersionGuard(t *testing.T) {
 		{"1.26.2", true},
 		{"1.26.10", true},
 		{"1.27.0", true},
+		{"1.27.1-X:nodwarf5", true},
+		{"1.27rc1", true},
 	} {
 		t.Run(tc.version, func(t *testing.T) {
 			f := newFixture(t)
@@ -301,4 +303,13 @@ func TestMissingBuildCommandsAndHeaders(t *testing.T) {
 		t.Fatalf("missing inputs: %v: %q", err, output)
 	}
 	assertNoPackageCalls(t, calls)
+}
+
+// TestDevelGoVersionIsParsed checks a development toolchain's version line is understood.
+func TestDevelGoVersionIsParsed(t *testing.T) {
+	f := newFixture(t)
+	output, err := f.run(t, "check_go_version_warning", "FAKE_GO_OUTPUT=go version devel go1.28-abc123 Mon Jan 1 00:00:00 2026 +0000 linux/amd64")
+	if err != nil {
+		t.Fatalf("devel toolchain refused: %v: %q", err, output)
+	}
 }

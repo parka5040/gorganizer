@@ -160,7 +160,7 @@ func newFixture(t *testing.T) *fixture {
 		writeFixtureFile(t, filepath.Join(root, name), []byte(data), 0o644)
 	}
 	writeFixtureFile(t, filepath.Join(shims, "make"), []byte(fakeMake), 0o755)
-	writeFixtureFile(t, filepath.Join(shims, "go"), []byte("#!/bin/sh\nprintf 'go %s\\n' \"${GOTOOLCHAIN-<unset>}\" >> \"$FAKE_GO_LOG\"\n[ \"${1:-}\" = version ] && printf 'go version go%s linux/amd64\\n' \"${FAKE_GO_VERSION:-1.26.2}\"\n"), 0o755)
+	writeFixtureFile(t, filepath.Join(shims, "go"), []byte("#!/bin/sh\nprintf 'go %s\\n' \"${GOTOOLCHAIN-<unset>}\" >> \"$FAKE_GO_LOG\"\n[ \"${1:-}\" = version ] && printf '%s\\n' \"${FAKE_GO_OUTPUT:-go version go${FAKE_GO_VERSION:-1.26.2} linux/amd64}\"\n"), 0o755)
 	writeFixtureFile(t, filepath.Join(shims, "pkg-config"), []byte("#!/bin/sh\n[ \"$1\" = --exists ] || exit 1\n[ \"${FAKE_HEADERS_MISSING:-}\" != \"$2\" ]\n"), 0o755)
 	for _, name := range []string{"cmake", "protoc", "grpc_cpp_plugin", "c++"} {
 		writeFixtureFile(t, filepath.Join(shims, name), []byte("#!/bin/sh\nexit 0\n"), 0o755)
