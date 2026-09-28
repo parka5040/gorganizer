@@ -61,6 +61,9 @@ cleaner_validate_desktop() {
         [ "$line" != "Exec=$SCRIPT_DIR/gorganizer.sh $action" ] || exec_found=true
     done < "$path"
     if ! $name_found || ! $exec_found; then
+        if "$CTL_BIN" desktop status --checkout "$SCRIPT_DIR" --icon "$data_base/icons/hicolor/256x256/apps/gorganizer.png" >/dev/null 2>&1; then
+            return 0
+        fi
         printf 'Cannot safely clean: desktop entry does not belong to this checkout: %s. Nothing has been removed.\n' "$path" >&2
         return 1
     fi
@@ -105,7 +108,8 @@ cleaner_check_paths() {
     done
     for path in "$SCRIPT_DIR/gorganizerd" "$CTL_BIN" "$SCRIPT_DIR/.build-fingerprint" \
         "$SCRIPT_DIR/api/proto/gorganizer.pb.go" "$SCRIPT_DIR/api/proto/gorganizer_grpc.pb.go" \
-        "$data_base/applications/gorganizer.desktop" "$data_base/applications/gorganizer-nxm.desktop"; do
+        "$data_base/applications/gorganizer.desktop" "$data_base/applications/gorganizer-nxm.desktop" \
+        "$data_base/gorganizer/bin/gorganizer"; do
         cleaner_validate_path "$path" file || return 1
     done
     for path in "${old_mods[@]}"; do
@@ -135,6 +139,7 @@ if ! $ASSUME_YES; then
     fi
 fi
 cleaner_check_paths || exit 1
+"$CTL_BIN" desktop unregister --checkout "$SCRIPT_DIR" || exit 1
 
 rm -rf -- "$SCRIPT_DIR/build" "$SCRIPT_DIR/.build-staging" "$SCRIPT_DIR/CMakeFiles" "$SCRIPT_DIR/.tools"
 rm -f -- "$SCRIPT_DIR/gorganizerd" "$SCRIPT_DIR/gorganizerctl" "$SCRIPT_DIR/.build-fingerprint" \
@@ -143,5 +148,4 @@ for path in "${old_mods[@]}" "${extracts[@]}"; do
     rm -rf -- "$path"
 done
 rm -rf -- "$config_dir"
-rm -f -- "$data_base/applications/gorganizer.desktop" "$data_base/applications/gorganizer-nxm.desktop"
 printf 'Local cleanup complete. Run ./gorganizer.sh to rebuild.\n'

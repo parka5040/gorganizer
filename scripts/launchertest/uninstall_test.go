@@ -15,6 +15,12 @@ const fakeUninstallCtl = `#!/bin/bash
 printf '%s\n' "$*" >> "$SHIM_LOG"
 case "$*" in
     'uninstall --check') [ "${FAKE_CHECK_FAIL:-}" != yes ] ;;
+    'desktop status'*) [ "${FAKE_DESKTOP_STATUS:-}" = yes ] ;;
+    'desktop unregister'*)
+        if [ "${FAKE_DESKTOP_STATUS:-}" = yes ]; then
+            rm -f "$XDG_DATA_HOME/applications/gorganizer.desktop" "$XDG_DATA_HOME/applications/gorganizer-nxm.desktop" "$XDG_DATA_HOME/gorganizer/bin/gorganizer"
+        fi
+        exit 0 ;;
     uninstall*) [ "${FAKE_UNINSTALL_FAIL:-}" != yes ] ;;
     migrate-data*'--dry-run --json')
         [ "${FAKE_JSON_FAIL:-}" != yes ] || exit 1
@@ -302,6 +308,39 @@ func TestCleanerRejectsForeignDesktopEntry(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(f.root, "gorganizerd")); err != nil {
 		t.Errorf("build deleted after failed ownership check: %v", err)
+	}
+}
+
+// TestCleanerAcceptsStableRegistration checks cleanup delegates new desktop entries to the maintenance tool.
+func TestCleanerAcceptsStableRegistration(t *testing.T) {
+	f := newFixture(t)
+	log := f.installUninstallCtl(t)
+	if err := os.Mkdir(filepath.Join(f.root, "tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := filepath.Join(f.root, "share")
+	app := filepath.Join(data, "applications", "gorganizer.desktop")
+	nxm := filepath.Join(data, "applications", "gorganizer-nxm.desktop")
+	launcher := filepath.Join(data, "gorganizer", "bin", "gorganizer")
+	for path, body := range map[string]string{
+		app:      "[Desktop Entry]\nName=Gorganizer\nExec=" + launcher + " launch\n",
+		nxm:      "[Desktop Entry]\nName=Gorganizer NXM Handler\nExec=" + launcher + " nxm %u\n",
+		launcher: "#!/bin/sh\n",
+	} {
+		writeFixtureFile(t, path, []byte(body), 0o755)
+	}
+	output, err := f.runCleaner(t, "SHIM_LOG="+log, "FAKE_DESKTOP_STATUS=yes")
+	if err != nil {
+		t.Fatalf("cleaner: %v, %q", err, output)
+	}
+	for _, path := range []string{app, nxm, launcher} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("desktop file remains at %s: %v", path, err)
+		}
+	}
+	calls := string(readFixtureFile(t, log))
+	if !strings.Contains(calls, "desktop status --checkout "+f.root+" --icon ") || !strings.Contains(calls, "desktop unregister --checkout "+f.root+"\n") {
+		t.Errorf("maintenance calls = %q", calls)
 	}
 }
 

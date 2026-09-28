@@ -35,6 +35,8 @@ func main() {
 		os.Exit(runPing(args))
 	case "doctor":
 		os.Exit(runDoctor(args))
+	case "desktop":
+		os.Exit(runDesktop(args))
 	case "bug-report":
 		os.Exit(runBugReport(args))
 	case "wait-ready":
@@ -130,6 +132,10 @@ func usage() {
 Subcommands:
   ping                         Check whether Gorganizer is running.
   doctor                       Check local settings, games and the background service.
+  desktop register --checkout DIR [--icon PATH]
+  desktop unregister --checkout DIR
+  desktop status --checkout DIR [--icon PATH]
+                               Set up or check the desktop shortcut and Nexus links.
   bug-report [--out DIR]        Save a private, redacted report to attach yourself.
   wait-ready [--timeout 60s]   Wait for startup to finish.
   stop [--timeout 46s]         Ask Gorganizer to stop and wait for it to exit.

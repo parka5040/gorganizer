@@ -17,6 +17,7 @@ import (
 	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/daemon"
+	"github.com/parka/gorganizer/internal/desktop"
 	"github.com/parka/gorganizer/internal/gamedef"
 	"github.com/parka/gorganizer/internal/instancelock"
 	"github.com/parka/gorganizer/internal/procscan"
@@ -180,7 +181,7 @@ func runUninstallWith(args []string, deps uninstallDeps) int {
 	for _, path := range paths {
 		if err := validateUninstallPath(path); errors.Is(err, errUninstallForeignDesktop) {
 			fmt.Fprintf(deps.out, "Kept %s because it belongs to another copy of Gorganizer.\n", path.path)
-			if path.name == "gorganizer-nxm.desktop" {
+			if path.name == desktop.Handler {
 				foreignNXM = true
 			}
 			continue
@@ -397,6 +398,7 @@ func uninstallPaths(purge bool, launcher string) ([]uninstallPath, error) {
 		{filepath.Join(dataBase, "applications", "gorganizer.desktop"), filepath.Join(dataBase, "applications"), "gorganizer.desktop", true, ""},
 		{filepath.Join(dataBase, "applications", "gorganizer-nxm.desktop"), filepath.Join(dataBase, "applications"), "gorganizer-nxm.desktop", true, ""},
 		{filepath.Join(dataBase, "icons", "hicolor", "256x256", "apps", "gorganizer.png"), filepath.Join(dataBase, "icons", "hicolor", "256x256", "apps"), "gorganizer.png", true, ""},
+		{filepath.Join(dataBase, "gorganizer", "bin", "gorganizer"), filepath.Join(dataBase, "gorganizer", "bin"), "gorganizer", true, ""},
 		{filepath.Join(stateBase, "gorganizer"), stateBase, "gorganizer", false, ""},
 	}
 	if purge {
@@ -413,6 +415,7 @@ func uninstallPaths(purge bool, launcher string) ([]uninstallPath, error) {
 	}
 	paths[0].launcher = launcher
 	paths[1].launcher = launcher
+	paths[3].launcher = launcher
 	return paths, nil
 }
 
@@ -456,16 +459,35 @@ func validateUninstallPath(path uninstallPath) error {
 		return fmt.Errorf("%s is not a Gorganizer-owned %s", path.path, map[bool]string{true: "file", false: "folder"}[path.file])
 	}
 	if path.launcher != "" {
+		if path.name == "gorganizer" {
+			owned, err := desktop.LauncherBelongsTo(path.path, filepath.Dir(path.launcher))
+			if err != nil {
+				return err
+			}
+			if !owned {
+				return errUninstallForeignDesktop
+			}
+		} else {
+			body, err := os.ReadFile(path.path)
+			if err != nil {
+				return fmt.Errorf("reading desktop entry: %w", err)
+			}
+			stable := filepath.Join(filepath.Dir(path.base), "gorganizer", "bin", "gorganizer")
+			if !desktop.OwnsEntry(path.name, body, filepath.Dir(path.launcher), stable) {
+				return errUninstallForeignDesktop
+			}
+		}
+	}
+	if path.name == "mimeapps.list" {
+		if info.Size() > 1<<20 {
+			return fmt.Errorf("NXM settings are too large")
+		}
 		body, err := os.ReadFile(path.path)
 		if err != nil {
-			return fmt.Errorf("reading desktop entry: %w", err)
+			return fmt.Errorf("reading NXM settings: %w", err)
 		}
-		action, name := "launch", "Gorganizer"
-		if path.name == "gorganizer-nxm.desktop" {
-			action, name = "nxm %u", "Gorganizer NXM Handler"
-		}
-		if !strings.Contains("\n"+string(body), "\nExec="+path.launcher+" "+action+"\n") || !strings.Contains("\n"+string(body), "\nName="+name+"\n") {
-			return errUninstallForeignDesktop
+		if _, err := desktop.EditMimeapps(body, false); err != nil {
+			return err
 		}
 	}
 	if path.path == config.RuntimeDir() {
@@ -490,39 +512,9 @@ func validateUninstallPath(path uninstallPath) error {
 	return nil
 }
 
-// uninstallNXMAssociation removes only Gorganizer's exact handler from the user's MIME settings.
+// uninstallNXMAssociation removes only Gorganizer from the user's NXM settings.
 func uninstallNXMAssociation(path string) error {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("checking NXM settings: %w", err)
-	}
-	if !info.Mode().IsRegular() || info.Size() > 4*1024*1024 {
-		return fmt.Errorf("NXM settings are not a regular, reasonably sized file")
-	}
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("reading NXM settings: %w", err)
-	}
-	lines := strings.Split(string(body), "\n")
-	kept := make([]string, 0, len(lines))
-	changed := false
-	for _, line := range lines {
-		if line == "x-scheme-handler/nxm=gorganizer-nxm.desktop" {
-			changed = true
-			continue
-		}
-		kept = append(kept, line)
-	}
-	if !changed {
-		return nil
-	}
-	if err := atomicfile.WriteFile(path, []byte(strings.Join(kept, "\n")), info.Mode().Perm()); err != nil {
-		return fmt.Errorf("updating NXM settings: %w", err)
-	}
-	return nil
+	return desktop.UpdateMimeapps(path, false)
 }
 
 // uninstallFolderSize totals real files in a data folder without following symlinks.

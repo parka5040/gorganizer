@@ -313,6 +313,11 @@ func TestUninstallDeletesNothingOnAnyFailure(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, args: []string{"--yes"}},
+		{name: "invalid MIME settings", setup: func(t *testing.T, f *uninstallFixture) {
+			if err := os.WriteFile(filepath.Join(f.root, "config", "mimeapps.list"), []byte{0xff}, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, args: []string{"--yes"}},
 		{name: "active check", setup: func(t *testing.T, f *uninstallFixture) {
 			if err := os.WriteFile(filepath.Join(f.data, vfs.SentinelFilename), []byte("invalid"), 0o600); err != nil {
 				t.Fatal(err)
@@ -458,7 +463,7 @@ func TestUninstallUnregistersOnlyItsHandler(t *testing.T) {
 		}
 	}
 	mime := filepath.Join(f.root, "config", "mimeapps.list")
-	body := "[Default Applications]\nx-scheme-handler/nxm=gorganizer-nxm.desktop\nx-scheme-handler/custom=other.desktop\n"
+	body := "[Default Applications]\nx-scheme-handler/nxm=gorganizer-nxm.desktop;\nx-scheme-handler/custom=other.desktop\n[Added Associations]\nx-scheme-handler/nxm=gorganizer-nxm.desktop;other.desktop;\n"
 	if err := os.WriteFile(mime, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -476,7 +481,7 @@ func TestUninstallUnregistersOnlyItsHandler(t *testing.T) {
 		t.Errorf("NXM startup lock remains: %v", err)
 	}
 	result, err := os.ReadFile(mime)
-	if err != nil || strings.Contains(string(result), "gorganizer-nxm.desktop") || !strings.Contains(string(result), "x-scheme-handler/custom=other.desktop") {
+	if err != nil || strings.Contains(string(result), "gorganizer-nxm.desktop") || !strings.Contains(string(result), "x-scheme-handler/custom=other.desktop") || !strings.Contains(string(result), "x-scheme-handler/nxm=other.desktop;") {
 		t.Errorf("NXM association = %q, %v", result, err)
 	}
 }
@@ -505,7 +510,7 @@ func TestUninstallKeepsForeignDesktopEntry(t *testing.T) {
 				t.Fatal(err)
 			}
 			mime := filepath.Join(f.root, "config", "mimeapps.list")
-			if err := os.WriteFile(mime, []byte("[Default Applications]\nx-scheme-handler/nxm=gorganizer-nxm.desktop\n"), 0o600); err != nil {
+			if err := os.WriteFile(mime, []byte("[Default Applications]\nx-scheme-handler/nxm=gorganizer-nxm.desktop;\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if code := runUninstallWith([]string{"--yes"}, f.deps); code != 0 || len(f.removed) == 0 {

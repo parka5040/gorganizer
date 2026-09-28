@@ -235,6 +235,7 @@ void SettingsDialog::onTestNxm()
     const QString desktopFile = xdgDataHome() + "/applications/" + desktopId;
     const QString mimeapps = xdgConfigHome() + "/mimeapps.list";
     const QString script = findGorganizerScript();
+    const QString launcher = xdgDataHome() + "/gorganizer/bin/gorganizer";
 
     QProcess p;
     p.start("xdg-mime", {"query", "default", "x-scheme-handler/nxm"});
@@ -273,16 +274,19 @@ void SettingsDialog::onTestNxm()
         }
         if (execLine.isEmpty()) {
             fail(QString("<code>%1</code> has no Exec= line").arg(desktopFile.toHtmlEscaped()));
-        } else if (!script.isEmpty() && !execLine.contains(script)) {
-            fail(QString("Exec= points elsewhere: <code>%1</code><br>"
-                         "&nbsp;&nbsp;Expected to contain: <code>%2</code>")
-                     .arg(execLine.toHtmlEscaped(), script.toHtmlEscaped()));
+        } else if (!execLine.contains("/gorganizer/bin/gorganizer")) {
+            fail(QString("The desktop shortcut points somewhere else: <code>%1</code>")
+                     .arg(execLine.toHtmlEscaped()));
         } else {
             pass(QString("Exec= = <code>%1</code>").arg(execLine.toHtmlEscaped()));
         }
     } else {
         fail(QString("<code>%1</code> missing").arg(desktopFile.toHtmlEscaped()));
     }
+
+    QFileInfo launcherInfo(launcher);
+    if (!launcherInfo.isExecutable())
+        fail("The desktop shortcut needs updating. Select Re-register.");
 
     if (script.isEmpty()) {
         fail("gorganizer.sh not found next to frontend binary");

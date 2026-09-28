@@ -531,141 +531,27 @@ do_build() {
 
 # --- desktop / mime registration -------------------------------------------
 
-# Icon=<absolute path>  is more reliable than the theme-name lookup
-# (Icon=gorganizer): the latter requires the icon cache to be current,
-# which trips up launchers that read .desktop files synchronously
-# (Niri's fuzzel/wofi, some KDE configurations).
-write_desktop_file() {
-    # Exec uses the `launch` subcommand because the no-arg form is the
-    # install/update flow — running it from a launcher would silently
-    # rebuild instead of opening the GUI. `launch` is the user-facing
-    # run path and the only thing the desktop entry should ever invoke.
-    cat > "$DESKTOP_FILE" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Gorganizer
-Comment=Native Linux mod organizer for Bethesda games
-Exec=$SCRIPT_DIR/gorganizer.sh launch
-Icon=$ICON_DEST
-Terminal=false
-Categories=Game;Utility;
-Keywords=mod;organizer;skyrim;fallout;bethesda;stardew;smapi;
-Version=$(gorganizer_version)
-EOF
-}
-
-write_nxm_desktop_file() {
-    cat > "$NXM_DESKTOP_FILE" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Gorganizer NXM Handler
-Comment=Nexus Mods download handler for Gorganizer
-Exec=$SCRIPT_DIR/gorganizer.sh nxm %u
-Icon=$ICON_DEST
-Terminal=false
-Categories=Game;
-NoDisplay=true
-MimeType=x-scheme-handler/nxm;
-EOF
-}
-
-# Idempotently write `key=value` under [section] in mimeapps.list. Drops any
-# prior line for the same key first so handlers don't stack on re-runs. Uses
-# python3 because the awk version was fiddly across awks.
-mimeapps_ensure() {
-    local section="$1" entry="$2"
-    mkdir -p "$(dirname "$MIMEAPPS")"
-    [ -f "$MIMEAPPS" ] || : > "$MIMEAPPS"
-    python3 - "$MIMEAPPS" "$section" "$entry" <<'PYEOF'
-import os, sys, tempfile
-path, section, entry = sys.argv[1:4]
-key = entry.split("=", 1)[0] + "="
-hdr = f"[{section}]"
-try:
-    with open(path, "r", encoding="utf-8") as f:
-        text = f.read()
-except FileNotFoundError:
-    text = ""
-out, in_target, inserted, seen = [], False, False, False
-for line in text.splitlines():
-    s = line.strip()
-    if s.startswith("[") and s.endswith("]"):
-        in_target = (s == hdr)
-        if in_target:
-            seen = True
-        out.append(line)
-        if in_target and not inserted:
-            out.append(entry); inserted = True
-        continue
-    if in_target and s.startswith(key):
-        continue
-    out.append(line)
-if not seen:
-    if out and out[-1].strip() != "":
-        out.append("")
-    out.append(hdr); out.append(entry)
-new = "\n".join(out)
-if not new.endswith("\n"):
-    new += "\n"
-# Atomic replace: write to a sibling tempfile, fsync, then os.replace.
-# Without this, a crash mid-write (or two gorganizer instances racing)
-# could leave mimeapps.list truncated and break every nxm:// link.
-d = os.path.dirname(path) or "."
-fd, tmp = tempfile.mkstemp(prefix=".mimeapps.", dir=d)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(new)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-except Exception:
-    try: os.unlink(tmp)
-    except OSError: pass
-    raise
-PYEOF
-}
-
-# Drop a `key=value` line from mimeapps.list (any section).
-mimeapps_drop() {
-    local entry="$1"
-    [ -f "$MIMEAPPS" ] || return 0
-    python3 - "$MIMEAPPS" "$entry" <<'PYEOF'
-import os, sys, tempfile
-path, entry = sys.argv[1:3]
-with open(path, "r", encoding="utf-8") as f:
-    text = f.read()
-out = [line for line in text.splitlines() if line.strip() != entry]
-new = "\n".join(out)
-if not new.endswith("\n"):
-    new += "\n"
-d = os.path.dirname(path) or "."
-fd, tmp = tempfile.mkstemp(prefix=".mimeapps.", dir=d)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(new)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-except Exception:
-    try: os.unlink(tmp)
-    except OSError: pass
-    raise
-PYEOF
-}
-
-# Returns 0 if the desktop entries / icon / NXM mime are missing or stale
-# (Exec= paths point somewhere other than this clone, or still point to the
-# pre-`launch`-subcommand entry that would re-run the installer instead of
-# opening the GUI). Returns 1 if all good.
+# Returns 0 when the desktop shortcut or icon needs updating.
 needs_register() {
-    [ -f "$DESKTOP_FILE" ]     || return 0
-    [ -f "$NXM_DESKTOP_FILE" ] || return 0
-    [ -f "$ICON_DEST" ]        || return 0
-    grep -qF "Exec=$SCRIPT_DIR/gorganizer.sh launch" "$DESKTOP_FILE"     2>/dev/null || return 0
-    grep -qF "Exec=$SCRIPT_DIR/gorganizer.sh nxm"    "$NXM_DESKTOP_FILE" 2>/dev/null || return 0
-    grep -qF "Icon=$ICON_DEST" "$DESKTOP_FILE"     2>/dev/null || return 0
-    grep -qF "Icon=$ICON_DEST" "$NXM_DESKTOP_FILE" 2>/dev/null || return 0
+    [ -f "$ICON_DEST" ] || return 0
+    [ -x "$CTL_BIN" ] || return 0
+    "$CTL_BIN" desktop status --checkout "$SCRIPT_DIR" --icon "$ICON_DEST" >/dev/null 2>&1 || return 0
     return 1
+}
+
+# Build only the maintenance tool when registration precedes installation.
+ensure_register_ctl() {
+    [ -x "$CTL_BIN" ] && return 0
+    local stage="$SCRIPT_DIR/.build-staging" version tmp
+    version="$(sed -n '1{s/[[:space:]]*$//;p;}' "$SCRIPT_DIR/VERSION")" || return 1
+    mkdir -p "$stage/bin" || return 1
+    make OUT_DIR="$stage/bin" GUI_BUILD_DIR="$stage/gui" ctl || return 1
+    validate_build_binary "$stage/bin/gorganizerctl" "$version" || return 1
+    tmp="$(mktemp "$CTL_BIN.tmp.XXXXXX")" || return 1
+    if ! install -m 755 "$stage/bin/gorganizerctl" "$tmp" || ! mv -f "$tmp" "$CTL_BIN"; then
+        rm -f "$tmp"
+        return 1
+    fi
 }
 
 cmd_register() {
@@ -673,42 +559,25 @@ cmd_register() {
         err "Icon missing at $ICON_SRC"
         return 1
     fi
-    install -d "$APPS_DIR" "$ICON_DIR"
+    ensure_register_ctl || { err "Could not build Gorganizer's maintenance tool."; return 1; }
     install -Dm644 "$ICON_SRC" "$ICON_DEST"
-    write_desktop_file
-    write_nxm_desktop_file
-
-    local entry="x-scheme-handler/nxm=gorganizer-nxm.desktop"
-    mimeapps_ensure "Default Applications" "$entry"
-    mimeapps_ensure "Added Associations"   "$entry"
-
+    "$CTL_BIN" desktop register --checkout "$SCRIPT_DIR" --icon "$ICON_DEST" || return 1
     xdg-mime default gorganizer-nxm.desktop x-scheme-handler/nxm 2>/dev/null || true
     update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
     gtk-update-icon-cache "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor" >/dev/null 2>&1 || true
-
-    log "Desktop file: $DESKTOP_FILE"
-    log "NXM handler:  $NXM_DESKTOP_FILE"
-    log "Icon:         $ICON_DEST"
-    log "Mimeapps:     $MIMEAPPS"
-
-    local current
-    current="$(xdg-mime query default x-scheme-handler/nxm 2>/dev/null || true)"
-    if [ "$current" = "gorganizer-nxm.desktop" ]; then
-        ok "nxm:// handler is now Gorganizer."
-    else
-        warn "xdg-mime says nxm:// default is '$current' (expected gorganizer-nxm.desktop)."
-        warn "Browsers may still find us via mimeapps.list. Try logging out + back in if not."
-    fi
-    ok "Registered. Re-run after moving the clone directory."
+    ok "Registered. If you move Gorganizer, run this again from its new folder."
 }
 
 cmd_unregister() {
-    local entry="x-scheme-handler/nxm=gorganizer-nxm.desktop"
-    [ -f "$DESKTOP_FILE" ]     && rm -f "$DESKTOP_FILE"     && log "Removed $DESKTOP_FILE"
-    [ -f "$NXM_DESKTOP_FILE" ] && rm -f "$NXM_DESKTOP_FILE" && log "Removed $NXM_DESKTOP_FILE"
-    [ -f "$ICON_DEST" ]        && rm -f "$ICON_DEST"        && log "Removed $ICON_DEST"
-    mimeapps_drop "$entry"
-    xdg-mime default '' x-scheme-handler/nxm 2>/dev/null || true
+    if [ ! -x "$CTL_BIN" ]; then
+        err "Gorganizer's maintenance tool is missing. Nothing was removed. Run ./gorganizer.sh register first."
+        return 1
+    fi
+    "$CTL_BIN" desktop unregister --checkout "$SCRIPT_DIR" || return 1
+    if [ ! -e "$DESKTOP_FILE" ] && [ ! -L "$DESKTOP_FILE" ] &&
+       [ ! -e "$NXM_DESKTOP_FILE" ] && [ ! -L "$NXM_DESKTOP_FILE" ]; then
+        [ ! -f "$ICON_DEST" ] || rm -f "$ICON_DEST"
+    fi
     update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
     ok "Unregistered."
 }
@@ -738,8 +607,7 @@ cmd_stop() {
 already_installed() {
     [ -x "$DAEMON_BIN" ] || return 1
     [ -x "$GUI_BIN" ]    || return 1
-    [ -f "$DESKTOP_FILE" ] || return 1
-    grep -qF "Exec=$SCRIPT_DIR/gorganizer.sh launch" "$DESKTOP_FILE" 2>/dev/null || return 1
+    needs_register && return 1
     return 0
 }
 
