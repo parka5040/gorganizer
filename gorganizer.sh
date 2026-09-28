@@ -68,6 +68,7 @@ GUI_BIN="$SCRIPT_DIR/build/src/gorganizer"
 RELEASE_MODE=false
 if [ -f "$SCRIPT_DIR/release.json" ]; then
     RELEASE_MODE=true
+    SCRIPT_DIR="$(cd "$SCRIPT_DIR" && pwd -P)"
     DAEMON_BIN="$SCRIPT_DIR/bin/gorganizerd"
     CTL_BIN="$SCRIPT_DIR/bin/gorganizerctl"
     GUI_BIN="$SCRIPT_DIR/bin/gorganizer-gui"
@@ -83,6 +84,11 @@ NXM_DESKTOP_FILE="$APPS_DIR/gorganizer-nxm.desktop"
 MIMEAPPS="${XDG_CONFIG_HOME:-$HOME/.config}/mimeapps.list"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gorganizer"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/gorganizer"
+RELEASE_CHECKOUT="$SCRIPT_DIR"
+if $RELEASE_MODE && [ -d "$DATA_DIR/releases" ] && [ ! -L "$DATA_DIR/releases" ] &&
+   [ "${SCRIPT_DIR%/*}" = "$(cd "$DATA_DIR/releases" && pwd -P)" ]; then
+    RELEASE_CHECKOUT="$DATA_DIR/releases/current"
+fi
 
 # --- output helpers --------------------------------------------------------
 
@@ -625,7 +631,7 @@ do_build() {
 needs_register() {
     [ -f "$ICON_DEST" ] || return 0
     [ -x "$CTL_BIN" ] || return 0
-    "$CTL_BIN" desktop status --checkout "$SCRIPT_DIR" --icon "$ICON_DEST" >/dev/null 2>&1 || return 0
+    "$CTL_BIN" desktop status --checkout "$RELEASE_CHECKOUT" --icon "$ICON_DEST" >/dev/null 2>&1 || return 0
     return 1
 }
 
@@ -657,7 +663,7 @@ cmd_register() {
     fi
     ensure_register_ctl || { err "Could not build Gorganizer's maintenance tool."; return 1; }
     install -Dm644 "$ICON_SRC" "$ICON_DEST"
-    "$CTL_BIN" desktop register --checkout "$SCRIPT_DIR" --icon "$ICON_DEST" || return 1
+    "$CTL_BIN" desktop register --checkout "$RELEASE_CHECKOUT" --icon "$ICON_DEST" || return 1
     xdg-mime default gorganizer-nxm.desktop x-scheme-handler/nxm 2>/dev/null || true
     update-desktop-database "$APPS_DIR" >/dev/null 2>&1 || true
     gtk-update-icon-cache "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor" >/dev/null 2>&1 || true
@@ -669,7 +675,7 @@ cmd_unregister() {
         err "Gorganizer's maintenance tool is missing. Nothing was removed. Run ./gorganizer.sh register first."
         return 1
     fi
-    "$CTL_BIN" desktop unregister --checkout "$SCRIPT_DIR" || return 1
+    "$CTL_BIN" desktop unregister --checkout "$RELEASE_CHECKOUT" || return 1
     if [ ! -e "$DESKTOP_FILE" ] && [ ! -L "$DESKTOP_FILE" ] &&
        [ ! -e "$NXM_DESKTOP_FILE" ] && [ ! -L "$NXM_DESKTOP_FILE" ]; then
         [ ! -f "$ICON_DEST" ] || rm -f "$ICON_DEST"
@@ -868,6 +874,14 @@ cmd_update() {
         esac
     done
 
+    if $RELEASE_MODE; then
+        "$CTL_BIN" release update || return $?
+        if $restart; then
+            log "Close Gorganizer and open it again to use the new version now."
+        fi
+        return 0
+    fi
+
     if ! command -v git >/dev/null 2>&1; then
         err "git not found in PATH; can't update."
         return 1
@@ -1016,10 +1030,16 @@ cmd_doctor() {
 
 uninstall_validate_build_paths() {
     local path ancestor kind uid
+    local -a paths
     uid="$(id -u)"
-    for path in "$SCRIPT_DIR/build" "$SCRIPT_DIR/.build-staging" "$SCRIPT_DIR/CMakeFiles" "$SCRIPT_DIR/.tools" \
-        "$DAEMON_BIN" "$CTL_BIN" "$SCRIPT_DIR/.build-fingerprint" \
-        "$SCRIPT_DIR/api/proto/gorganizer.pb.go" "$SCRIPT_DIR/api/proto/gorganizer_grpc.pb.go"; do
+    if [ "${1:-}" = release ]; then
+        paths=("$DAEMON_BIN" "$CTL_BIN" "$SCRIPT_DIR/gorganizer.sh" "$SCRIPT_DIR/release.json")
+    else
+        paths=("$SCRIPT_DIR/build" "$SCRIPT_DIR/.build-staging" "$SCRIPT_DIR/CMakeFiles" "$SCRIPT_DIR/.tools" \
+            "$DAEMON_BIN" "$CTL_BIN" "$SCRIPT_DIR/.build-fingerprint" \
+            "$SCRIPT_DIR/api/proto/gorganizer.pb.go" "$SCRIPT_DIR/api/proto/gorganizer_grpc.pb.go")
+    fi
+    for path in "${paths[@]}"; do
         ancestor="${path%/*}"
         while [ "$ancestor" != / ]; do
             if [ -L "$ancestor" ] || [ ! -d "$ancestor" ]; then
@@ -1041,11 +1061,54 @@ uninstall_validate_build_paths() {
     done
 }
 
+uninstall_validate_releases_paths() {
+    local path="$DATA_DIR/releases" ancestor entry uid
+    uid="$(id -u)"
+    ancestor="${path%/*}"
+    while [ "$ancestor" != / ]; do
+        if [ -L "$ancestor" ] || [ ! -d "$ancestor" ]; then
+            err "Cannot safely remove releases: $ancestor is not a real folder. Nothing was removed."
+            return 1
+        fi
+        ancestor="${ancestor%/*}"
+        [ -n "$ancestor" ] || ancestor=/
+    done
+    if [ -L "$path" ] || [ ! -d "$path" ] || [ "$(stat -c %u -- "$path")" != "$uid" ]; then
+        err "Cannot safely remove releases: $path is not an owned folder. Nothing was removed."
+        return 1
+    fi
+    for entry in "$path"/* "$path"/.[!.]*; do
+        [ -e "$entry" ] || [ -L "$entry" ] || continue
+        if [ "$(stat -c %u -- "$entry")" != "$uid" ]; then
+            err "Cannot safely remove releases: $entry is not owned by you. Nothing was removed."
+            return 1
+        fi
+    done
+}
+
 cmd_uninstall() {
     if $RELEASE_MODE; then
-        "$CTL_BIN" uninstall "$@" || return $?
-        if [ "${1:-}" != --check ]; then
-            cmd_unregister
+        local option purge=false check=false
+        for option in "$@"; do
+            [ "$option" != --purge ] || purge=true
+            [ "$option" != --check ] || check=true
+        done
+        if $purge && ! $check; then
+            uninstall_validate_build_paths release || return 1
+            uninstall_validate_releases_paths || return 1
+        fi
+        if $purge && ! $check; then
+            "$CTL_BIN" uninstall --preserve-releases "$@" || return $?
+        else
+            "$CTL_BIN" uninstall "$@" || return $?
+        fi
+        if ! $check; then
+            cmd_unregister || return 1
+            if $purge; then
+                uninstall_validate_releases_paths || return 1
+                ok "Uninstalled. Removing downloaded versions."
+                exec /bin/sh -c 'rm -rf -- "$1"' sh "$DATA_DIR/releases"
+            fi
             ok "Uninstalled. You can now delete this download folder."
         fi
         return 0
@@ -1097,9 +1160,6 @@ if $RELEASE_MODE; then
         setup|build|--rebuild)
             err "This is a prebuilt copy of Gorganizer. You do not need to build it."
             exit 1 ;;
-        update)
-            printf '%s\n' 'This is a prebuilt copy of Gorganizer. Download the new release to update it.'
-            exit 0 ;;
         import)
             err "Import from an old source folder is not available in this prebuilt copy."
             exit 1 ;;

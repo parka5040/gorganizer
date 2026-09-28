@@ -47,6 +47,8 @@ func main() {
 		os.Exit(runMigrateData(args))
 	case "session":
 		os.Exit(runSession(args))
+	case "release":
+		os.Exit(runRelease(args))
 	case "nxm":
 		os.Exit(runNXM(args))
 	case "recover":
@@ -145,6 +147,9 @@ Subcommands:
   migrate-data --resume        Finish an interrupted move.
   session [--daemon PATH] [--gui PATH] [--socket-path P] [-- GUI_ARGS…]
                                Open Gorganizer and supervise its background service.
+  release install [--from DIR | --tag vX.Y.Z]
+  release update | rollback | status
+                               Manage verified prebuilt releases.
   nxm <link>                   Add a Nexus Mods download, opening Gorganizer if needed.
   recover --game <id>          Repair interrupted SMAPI, game-root files and
                                the Data folder for a configured game.

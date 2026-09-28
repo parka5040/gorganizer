@@ -15,8 +15,10 @@ import (
 	"time"
 
 	pb "github.com/parka/gorganizer/api/proto"
+	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/config"
 	"github.com/parka/gorganizer/internal/fsutil"
+	"github.com/parka/gorganizer/internal/release"
 )
 
 const sessionStopTimeout = 46 * time.Second
@@ -60,6 +62,12 @@ func runSessionWith(args []string, deps sessionDeps) int {
 		return 1
 	}
 	defer release()
+	clearMarker, err := markSessionRelease()
+	if err != nil {
+		fmt.Fprintf(deps.errOut, "Gorganizer could not record its running version: %v\n", err)
+		return 1
+	}
+	defer clearMarker()
 
 	guiPath, err := sessionBinary(*guiFlag, filepath.Join("build", "src", "gorganizer"), "gorganizer")
 	if err != nil {
@@ -177,6 +185,40 @@ func runSessionWith(args []string, deps sessionDeps) int {
 	}
 	fmt.Fprintf(deps.errOut, "Gorganizer's window closed unexpectedly: %v\n", guiErr)
 	return 1
+}
+
+// markSessionRelease records the physical release directory while this supervisor holds the session lock.
+func markSessionRelease() (func(), error) {
+	self, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("finding the maintenance tool: %w", err)
+	}
+	self, err = filepath.EvalSymlinks(self)
+	if err != nil {
+		return nil, fmt.Errorf("resolving the maintenance tool: %w", err)
+	}
+	root, err := release.DataRoot()
+	if err != nil {
+		return nil, err
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return func() {}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	generation := filepath.Dir(filepath.Dir(self))
+	if filepath.Dir(generation) != root || filepath.Base(self) != "gorganizerctl" || filepath.Base(filepath.Dir(self)) != "bin" || release.ValidateTag("v"+filepath.Base(generation)) != nil {
+		return func() {}, nil
+	}
+	marker := filepath.Join(config.RuntimeDir(), "session-release")
+	if outcome, err := atomicfile.WriteFileDurable(marker, []byte(generation+"\n"), 0o600); err != nil {
+		return nil, fmt.Errorf("saving the active release: %w", err)
+	} else if outcome != atomicfile.Durable {
+		return nil, fmt.Errorf("saving the active release did not finish")
+	}
+	return func() { _ = atomicfile.RemoveDurable(marker) }, nil
 }
 
 // acquireSessionLock holds an exclusive private flock until its release function runs.

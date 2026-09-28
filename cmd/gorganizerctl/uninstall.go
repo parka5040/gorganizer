@@ -61,11 +61,12 @@ func runUninstallWith(args []string, deps uninstallDeps) int {
 	fs.SetOutput(deps.errOut)
 	keep := fs.Bool("keep-data", false, "keep settings, profiles, mods and downloads")
 	purge := fs.Bool("purge", false, "also remove settings, profiles, mods and downloads")
+	preserveReleases := fs.Bool("preserve-releases", false, "keep prebuilt releases until the launcher exits")
 	yes := fs.Bool("yes", false, "confirm the first removal prompt")
 	check := fs.Bool("check", false, "check that every game is already restored without changing anything")
 	holdLocks := fs.Bool("hold-locks", false, "hold both offline locks while a command runs after a successful check")
 	forgetMissing := fs.Bool("forget-missing-games", false, "permit purge when a configured game is no longer installed")
-	if fs.Parse(args) != nil || (!*holdLocks && fs.NArg() != 0) || (*holdLocks && (!*check || fs.NArg() == 0)) || *keep && *purge || *check && (*keep || *purge || *yes || *forgetMissing) || *forgetMissing && !*purge {
+	if fs.Parse(args) != nil || (!*holdLocks && fs.NArg() != 0) || (*holdLocks && (!*check || fs.NArg() == 0)) || *keep && *purge || *check && (*keep || *purge || *yes || *forgetMissing) || *forgetMissing && !*purge || *preserveReleases && (!*purge || *check) {
 		fmt.Fprintln(deps.errOut, "Choose either --keep-data or --purge, not both. --forget-missing-games requires --purge. --check cannot be combined with removal options.")
 		return 2
 	}
@@ -187,7 +188,7 @@ func runUninstallWith(args []string, deps uninstallDeps) int {
 		return 0
 	}
 
-	paths, err := uninstallPaths(*purge, deps.launcher)
+	paths, err := uninstallPaths(*purge, *preserveReleases, deps.launcher)
 	if err != nil {
 		fmt.Fprintf(deps.errOut, "Cannot safely remove Gorganizer: %v. Nothing has been deleted.\n", err)
 		return 1
@@ -391,7 +392,7 @@ func uninstallClearLaunchTicket(dataPath string) error {
 }
 
 // uninstallPaths lists the exact user paths that may be removed.
-func uninstallPaths(purge bool, launcher string) ([]uninstallPath, error) {
+func uninstallPaths(purge, preserveReleases bool, launcher string) ([]uninstallPath, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("finding your home folder: %w", err)
@@ -418,7 +419,31 @@ func uninstallPaths(purge bool, launcher string) ([]uninstallPath, error) {
 		{filepath.Join(stateBase, "gorganizer"), stateBase, "gorganizer", false, ""},
 	}
 	if purge {
-		paths = append(paths, uninstallPath{filepath.Join(dataBase, "gorganizer"), dataBase, "gorganizer", false, ""}, uninstallPath{filepath.Join(configBase, "gorganizer"), configBase, "gorganizer", false, ""})
+		data := filepath.Join(dataBase, "gorganizer")
+		if preserveReleases {
+			info, err := os.Lstat(data)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("checking application data: %w", err)
+			}
+			if err == nil {
+				if !info.IsDir() {
+					return nil, fmt.Errorf("application data is not a real folder")
+				}
+				entries, err := os.ReadDir(data)
+				if err != nil {
+					return nil, fmt.Errorf("checking application data: %w", err)
+				}
+				for _, entry := range entries {
+					if entry.Name() == "releases" {
+						continue
+					}
+					paths = append(paths, uninstallPath{filepath.Join(data, entry.Name()), data, entry.Name(), !entry.IsDir(), ""})
+				}
+			}
+		} else {
+			paths = append(paths, uninstallPath{data, dataBase, "gorganizer", false, ""})
+		}
+		paths = append(paths, uninstallPath{filepath.Join(configBase, "gorganizer"), configBase, "gorganizer", false, ""})
 	}
 	paths = append(paths, uninstallPath{filepath.Join(configBase, "mimeapps.list"), configBase, "mimeapps.list", true, ""})
 	paths = append(paths, uninstallPath{runtime, runtimeBase, filepath.Base(runtime), false, ""})
