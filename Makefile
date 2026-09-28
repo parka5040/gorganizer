@@ -33,7 +33,7 @@ COMMIT  ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(DATE)
 
-.PHONY: all build ctl test vet clean proto gui install check-comments verify
+.PHONY: all build ctl test vet clean proto gui install check-comments verify release
 
 all: proto build ctl
 
@@ -61,6 +61,23 @@ ctl: proto
 gui:
 	cmake -B "$(GUI_BUILD_DIR)" -DCMAKE_BUILD_TYPE=Release -DGORGANIZER_VERSION="$(VERSION)"
 	cmake --build "$(GUI_BUILD_DIR)" -j$$(command -v nproc >/dev/null 2>&1 && nproc || echo 1)
+
+release:
+	@set -eu; \
+	engine=$$(command -v docker || command -v podman); \
+	mkdir -p dist; \
+	"$$engine" build -f packaging/Containerfile -t gorganizer-release .; \
+	"$$engine" run --rm \
+		--mount "type=bind,src=$(CURDIR),dst=/src,readonly" \
+		--mount "type=bind,src=$(CURDIR)/dist,dst=/dist" \
+		-e RELEASE_OWNER="$$(id -u):$$(id -g)" \
+		-e RELEASE_COMMIT="$$(git rev-parse HEAD)" \
+		-e RELEASE_COMMIT_TIME="$$(git show -s --format=%cI HEAD)" \
+		gorganizer-release bash /src/packaging/reproduce.sh /src /dist; \
+	"$$engine" run --rm --mount "type=bind,src=$(CURDIR),dst=/src,readonly" \
+		--mount "type=bind,src=$(CURDIR)/dist,dst=/dist,readonly" \
+		gorganizer-release bash /src/packaging/smoke-release.sh \
+		"/dist/gorganizer-$(VERSION_FILE_VALUE)-linux-x86_64.tar.gz"
 
 test:
 	$(GO) test -race -count=1 ./internal/... ./cmd/... ./scripts/...

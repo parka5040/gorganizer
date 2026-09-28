@@ -44,7 +44,9 @@ cd "$SCRIPT_DIR"
 # `./gorganizer.sh --version` works even before anything is built.
 gorganizer_version() {
     local v
-    if [ -f "$SCRIPT_DIR/VERSION" ]; then
+    if [ -f "$SCRIPT_DIR/release.json" ]; then
+        v="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SCRIPT_DIR/release.json")"
+    elif [ -f "$SCRIPT_DIR/VERSION" ]; then
         v="$(sed -n '1{s/[[:space:]]*$//;p;}' "$SCRIPT_DIR/VERSION" 2>/dev/null)"
     fi
     [ -z "${v:-}" ] && v="dev"
@@ -63,6 +65,13 @@ gorganizer_version() {
 DAEMON_BIN="$SCRIPT_DIR/gorganizerd"
 CTL_BIN="$SCRIPT_DIR/gorganizerctl"
 GUI_BIN="$SCRIPT_DIR/build/src/gorganizer"
+RELEASE_MODE=false
+if [ -f "$SCRIPT_DIR/release.json" ]; then
+    RELEASE_MODE=true
+    DAEMON_BIN="$SCRIPT_DIR/bin/gorganizerd"
+    CTL_BIN="$SCRIPT_DIR/bin/gorganizerctl"
+    GUI_BIN="$SCRIPT_DIR/bin/gorganizer-gui"
+fi
 ICON_SRC="$SCRIPT_DIR/resources/icons/tmp_logo.png"
 
 # User-facing install locations (XDG).
@@ -532,6 +541,7 @@ build_fingerprint() (
 )
 
 needs_build() {
+    $RELEASE_MODE && return 1
     [ "${1:-}" = "force" ] && return 0
     [ ! -x "$DAEMON_BIN" ] && return 0
     [ ! -x "$CTL_BIN" ]    && return 0
@@ -621,6 +631,10 @@ needs_register() {
 
 # Build only the maintenance tool when registration precedes installation.
 ensure_register_ctl() {
+    if $RELEASE_MODE; then
+        [ -x "$CTL_BIN" ] || { err "Gorganizer's maintenance tool is missing from this download."; return 1; }
+        return 0
+    fi
     [ -x "$CTL_BIN" ] && ! needs_build && return 0
     check_build_tools || return 1
     check_go_version_warning || return 1
@@ -815,6 +829,9 @@ cmd_launch() {
     fi
 
     export QT_LOGGING_RULES="${QT_LOGGING_RULES:+$QT_LOGGING_RULES;}qt.dbus.*=false;qt.qpa.systemtray.*=false;qt.qpa.theme.dbus.*=false;qt.qpa.theme.debug=false"
+    if $RELEASE_MODE; then
+        exec "$CTL_BIN" session --daemon "$DAEMON_BIN" --gui "$GUI_BIN" -- "$@"
+    fi
     preflight_data_migration
     exec "$CTL_BIN" session --daemon "$DAEMON_BIN" --gui "$GUI_BIN" -- "$@"
 }
@@ -826,7 +843,7 @@ cmd_nxm() {
         err "Gorganizer is not built yet. Run ./gorganizer.sh first."
         exit 1
     fi
-    if ! "$CTL_BIN" ping >/dev/null 2>&1; then
+    if ! $RELEASE_MODE && ! "$CTL_BIN" ping >/dev/null 2>&1; then
         preflight_data_migration
     fi
     exec "$CTL_BIN" nxm "$@"
@@ -944,6 +961,10 @@ cmd_setup() {
 # --- doctor -----------------------------------------------------------------
 
 cmd_doctor() {
+    if $RELEASE_MODE; then
+        "$CTL_BIN" doctor "$@"
+        return $?
+    fi
     local family logical candidates resolved install_cmd build_rc=0
     family="$(detect_distro_family)"
     install_cmd="$(pm_install_cmd "$family")"
@@ -1021,6 +1042,14 @@ uninstall_validate_build_paths() {
 }
 
 cmd_uninstall() {
+    if $RELEASE_MODE; then
+        "$CTL_BIN" uninstall "$@" || return $?
+        if [ "${1:-}" != --check ]; then
+            cmd_unregister
+            ok "Uninstalled. You can now delete this download folder."
+        fi
+        return 0
+    fi
     local mods_json="" mods_list="" mods_checked=false
     if [ ! -x "$CTL_BIN" ]; then
         err "Gorganizer's maintenance tool is missing, so nothing was removed. Rebuild with ./gorganizer.sh, then run uninstall again."
@@ -1061,6 +1090,21 @@ cmd_uninstall() {
 # --- dispatch --------------------------------------------------------------
 
 [ "${GORGANIZER_SH_SOURCE_ONLY:-}" = 1 ] && return 0
+
+if $RELEASE_MODE; then
+    case "${1:-}" in
+        "") cmd_register; exit $? ;;
+        setup|build|--rebuild)
+            err "This is a prebuilt copy of Gorganizer. You do not need to build it."
+            exit 1 ;;
+        update)
+            printf '%s\n' 'This is a prebuilt copy of Gorganizer. Download the new release to update it.'
+            exit 0 ;;
+        import)
+            err "Import from an old source folder is not available in this prebuilt copy."
+            exit 1 ;;
+    esac
+fi
 
 # Compatibility alias: --rebuild → build --rebuild (top-level, no subcommand).
 if [ "${1:-}" = "--rebuild" ]; then

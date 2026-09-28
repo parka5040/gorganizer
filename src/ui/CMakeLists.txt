@@ -56,5 +56,4 @@ target_link_libraries(gorganizer_ui PUBLIC
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
-    Qt6::Network
 )

@@ -21,20 +21,34 @@ if(GORGANIZER_VERSION MATCHES "[\"\\\\\n\r]")
 endif()
 add_compile_definitions(GORGANIZER_VERSION="${GORGANIZER_VERSION}")
 
-find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Network)
-find_package(PkgConfig REQUIRED)
-# pkg_check_modules caches its results and never re-queries pkg-config.
-# A system upgrade that drops a library can leave the link line pointing
-# at a deleted file. Clearing these cached entries forces a fresh query on
-# every configure.
-get_cmake_property(_pkg_cache_vars CACHE_VARIABLES)
-foreach(_pkg_var IN LISTS _pkg_cache_vars)
-    if(_pkg_var MATCHES "^(__pkg_config_checked|pkgcfg_lib)_(PROTOBUF|GRPC)(_|$)")
-        unset(${_pkg_var} CACHE)
-    endif()
-endforeach()
-pkg_check_modules(PROTOBUF REQUIRED IMPORTED_TARGET protobuf)
-pkg_check_modules(GRPC REQUIRED IMPORTED_TARGET grpc++)
+option(GORGANIZER_RELEASE "Build against static release gRPC libraries" OFF)
+find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets)
+if(GORGANIZER_RELEASE)
+    find_package(Protobuf CONFIG REQUIRED)
+    find_package(gRPC CONFIG REQUIRED)
+    set(CMAKE_BUILD_RPATH "$ORIGIN/../lib")
+    set(CMAKE_INSTALL_RPATH "$ORIGIN/../lib")
+    set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
+    add_compile_options(
+        "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=."
+        "-ffile-prefix-map=/opt/qt=."
+        "-ffile-prefix-map=/opt/grpc=.")
+    add_link_options("LINKER:--enable-new-dtags")
+else()
+    find_package(PkgConfig REQUIRED)
+    # pkg_check_modules caches its results and never re-queries pkg-config.
+    # A system upgrade that drops a library can leave the link line pointing
+    # at a deleted file. Clearing these cached entries forces a fresh query on
+    # every configure.
+    get_cmake_property(_pkg_cache_vars CACHE_VARIABLES)
+    foreach(_pkg_var IN LISTS _pkg_cache_vars)
+        if(_pkg_var MATCHES "^(__pkg_config_checked|pkgcfg_lib)_(PROTOBUF|GRPC)(_|$)")
+            unset(${_pkg_var} CACHE)
+        endif()
+    endforeach()
+    pkg_check_modules(PROTOBUF REQUIRED IMPORTED_TARGET protobuf)
+    pkg_check_modules(GRPC REQUIRED IMPORTED_TARGET grpc++)
+endif()
 find_program(PROTOC protoc REQUIRED)
 find_program(gRPC_CPP_PLUGIN grpc_cpp_plugin REQUIRED)
 

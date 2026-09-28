@@ -1,5 +1,6 @@
 # Build output
 build/
+dist/
 .build-staging/
 .build-fingerprint
 # Repo-local Go build tools

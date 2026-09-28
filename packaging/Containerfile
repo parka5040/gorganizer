@@ -1,0 +1,20 @@
+FROM docker.io/library/ubuntu:22.04@sha256:b8b6ee6aa931ecd9d0d952abc34dc0e5f7c6a30c6bb71b079fe399fde0329c02
+
+ENV DEBIAN_FRONTEND=noninteractive TMPDIR=/run
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ make cmake ninja-build pkg-config git ca-certificates curl p7zip-full \
+    xz-utils patchelf file binutils python3 procps libgl1 libegl1 libglib2.0-0 \
+    libdbus-1-3 libfontconfig1 libfreetype6 libxkbcommon0 libxkbcommon-x11-0 \
+    libx11-xcb1 libxcb1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+    libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-render0 \
+    libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0 \
+    libxcb-xkb1 libxcb-util1 libxcb-xinput0 libxcb-dri3-0 libwayland-client0 libwayland-cursor0 \
+    libwayland-egl1 libssl3 libicu70 libopengl0 libglx0 libx11-6 \
+    libsm6 libice6 libxext6 libxi6 libxrender1 libxkbfile1 libxcomposite1 \
+    libvulkan1 libharfbuzz0b libxcursor1 libxinerama1 \
+    libxdamage1 libxfixes3 libxrandr2 libxss1 libxtst6 libxau6 libxdmcp6 \
+    libdrm2 libgbm1 libudev1 libnss3 libasound2 libpulse0 libzstd1 \
+    libbrotli1 libpcre2-16-0 libdouble-conversion3 \
+    libgl-dev libegl-dev libopengl-dev libglx-dev libxkbcommon-dev libvulkan-dev && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /build

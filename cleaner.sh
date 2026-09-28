@@ -3,6 +3,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/release.json" ]; then
+    printf '%s\n' 'This is a prebuilt copy of Gorganizer. Cleaner is only available in a source checkout.' >&2
+    exit 1
+fi
 CTL_BIN="$SCRIPT_DIR/gorganizerctl"
 KEEP_MODS=false
 ASSUME_YES=false
