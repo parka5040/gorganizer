@@ -4,7 +4,29 @@ Gorganizer helps you install and manage game mods on Linux without running the m
 
 ## Install
 
-You need a Steam install of a supported game. TTW needs both Fallout 3 and Fallout: New Vegas. To build Gorganizer from source, you also need Git, Go 1.26.2 or newer, CMake 3.21 or newer, a C++20 compiler, Ninja or Make, `pkg-config`, the protobuf compiler, and Qt6 and gRPC development files. On Arch, Debian/Ubuntu, Fedora, and openSUSE, the install script offers to install missing build packages through your package manager. It may also offer optional tools for specific features. You do not need to install `7z` or `unzip` separately to extract ordinary mod archives.
+You need a Steam install of a supported game. TTW needs both Fallout 3 and Fallout: New Vegas. You do not need to install `7z` or `unzip` separately to extract ordinary mod archives.
+
+### Prebuilt download
+
+On x86_64 SteamOS, Bazzite, Debian, Ubuntu, Fedora, or Arch, open a terminal and run:
+
+```bash
+curl -fsSL https://github.com/parka5040/gorganizer/releases/latest/download/install.sh | sh
+```
+
+Run it as your normal user, not with `sudo`. The script downloads the latest release, checks it against the release's SHA-256 checksums, and installs it into `~/.local/share/gorganizer/releases`. It adds an application-menu entry and an `nxm://` handler for Nexus Mods links. Installation does **not** open the window; open **Gorganizer** from your application menu.
+
+To install a specific version, add it after `sh -s --`, for example `... | sh -s -- v0.1.0`. To read the script before running it:
+
+```bash
+curl -fsSLO https://github.com/parka5040/gorganizer/releases/latest/download/install.sh
+less install.sh
+sh install.sh
+```
+
+### Build from source
+
+To build Gorganizer from source, you need Git, Go 1.26.2 or newer, CMake 3.21 or newer, a C++20 compiler, Ninja or Make, `pkg-config`, the protobuf compiler, and Qt6 and gRPC development files. On Arch, Debian/Ubuntu, Fedora, and openSUSE, the install script offers to install missing build packages through your package manager. It may also offer optional tools for specific features.
 
 Open a terminal and run:
 
@@ -89,7 +111,9 @@ Do not edit files directly in the game's `Data` folder while mods are active. A 
 
 ## Update or uninstall
 
-From the folder you cloned, run `./gorganizer.sh update` to fetch updates from this checkout's configured branch, rebuild, and refresh the menu entry. It refuses if you have uncommitted changes, no configured update source, or local commits that are not in that source. It does not stop a running Gorganizer session. Close and reopen Gorganizer to use an installed update; `--restart` only prints a reminder to reopen it.
+If you used the prebuilt download, run `~/.local/share/gorganizer/releases/current/gorganizer.sh update` to install the latest release. It checks the download the same way as the first install and does not stop a running Gorganizer session; close and reopen Gorganizer to use the new version. To go back to the version you had before, run `~/.local/share/gorganizer/releases/current/bin/gorganizerctl release rollback`. To uninstall, run the same `gorganizer.sh` with `uninstall` as described below; with `--purge`, it also removes the downloaded versions.
+
+If you built from source, run `./gorganizer.sh update` from the folder you cloned to fetch updates from this checkout's configured branch, rebuild, and refresh the menu entry. It refuses if you have uncommitted changes, no configured update source, or local commits that are not in that source. It does not stop a running Gorganizer session. Close and reopen Gorganizer to use an installed update; `--restart` only prints a reminder to reopen it.
 
 Close Gorganizer and your games before running `./gorganizer.sh uninstall`. It checks and restores your games before removing the menu entry and build files. By default, it keeps your mods, downloads, profiles, and settings. It also leaves SMAPI installed; use Steam's file verification if you want to remove it. To delete your Gorganizer data too, run `./gorganizer.sh uninstall --purge`. This needs an additional confirmation and cannot be undone. Uninstall refuses to proceed if a game is running or cannot be safely restored; it does not forcibly stop Gorganizer.
 
