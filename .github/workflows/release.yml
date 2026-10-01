@@ -1,22 +1,40 @@
 name: Prebuilt Linux release
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
+    paths:
+      - VERSION
   workflow_dispatch:
+
+concurrency:
+  group: prebuilt-linux-release
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Check release tag
-        if: github.event_name == 'push'
-        run: test "$GITHUB_REF_NAME" = "v$(< VERSION)"
+      - name: Read version
+        id: version
+        run: printf 'version=%s\n' "$(< VERSION)" >> "$GITHUB_OUTPUT"
+      - name: Check version is unreleased
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ steps.version.outputs.version }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::$TAG is already released. Bump VERSION to publish a new release."
+            exit 1
+          fi
       - name: Build twice and smoke-test
         run: |
           mkdir -p dist
@@ -29,19 +47,21 @@ jobs:
           docker run --rm --mount "type=bind,src=$PWD,dst=/src,readonly" \
             --mount "type=bind,src=$PWD/dist,dst=/dist,readonly" \
             gorganizer-release bash /src/packaging/smoke-release.sh "/dist/gorganizer-$(< VERSION)-linux-x86_64.tar.gz"
+          cp packaging/install.sh dist/install.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: prebuilt-linux-x86_64
           path: |
             dist/*.tar.gz
             dist/SHA256SUMS
+            dist/install.sh
           if-no-files-found: error
 
   publish:
     needs: build
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    # Configure required reviewers for the release environment in repository settings.
+    # The release environment only allows deployments from main.
     environment: release
     permissions:
       contents: write
@@ -50,13 +70,14 @@ jobs:
         with:
           name: prebuilt-linux-x86_64
           path: dist
-      - name: Verify and publish approved release
+      - name: Verify and publish release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: v${{ needs.build.outputs.version }}
         run: |
           cd dist
           sha256sum -c SHA256SUMS
-          printf 'Prebuilt Linux x86_64 bundle for SteamOS, Bazzite, Debian, Ubuntu, Fedora and Arch.\n' > "$RUNNER_TEMP/release-notes.md"
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Gorganizer $TAG" \
-            --notes-file "$RUNNER_TEMP/release-notes.md" ./*.tar.gz SHA256SUMS
+          printf 'Prebuilt Linux x86_64 bundle for SteamOS, Bazzite, Debian, Ubuntu, Fedora and Arch.\n\nInstall:\n\n    curl -fsSL https://github.com/%s/releases/latest/download/install.sh | sh\n' \
+            "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/release-notes.md"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Gorganizer $TAG" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" ./*.tar.gz SHA256SUMS install.sh
