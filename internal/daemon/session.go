@@ -156,6 +156,7 @@ type services struct {
 	transfer  *TransferService
 	modLoader *ModLoaderService
 	modDeps   *ModDependencyService
+	update    *UpdateService
 }
 
 type GameService struct{ s *session }
