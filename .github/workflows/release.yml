@@ -66,18 +66,61 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: prebuilt-linux-x86_64
           path: dist
-      - name: Verify and publish release
+      - name: Validate release artifacts
+        env:
+          TAG: v${{ needs.build.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$ ]]
+          shopt -s dotglob nullglob
+          entries=(dist/*)
+          [ "${#entries[@]}" -eq 3 ]
+          for name in "gorganizer-$VERSION-linux-x86_64.tar.gz" SHA256SUMS install.sh; do
+            [ -f "dist/$name" ] && [ ! -L "dist/$name" ]
+          done
+          for entry in "${entries[@]}"; do
+            case "$(basename "$entry")" in
+              "gorganizer-$VERSION-linux-x86_64.tar.gz"|SHA256SUMS|install.sh) ;;
+              *) exit 1 ;;
+            esac
+          done
+          cd dist
+          sha256sum -c SHA256SUMS
+      - name: Sign release checksums
+        env:
+          TAG: v${{ needs.build.outputs.version }}
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "${RELEASE_SIGNING_KEY:-}" ] || { echo "RELEASE_SIGNING_KEY is not configured." >&2; exit 1; }
+          umask 077
+          signing_dir="$RUNNER_TEMP/signing"
+          mkdir -p "$signing_dir"
+          trap 'rm -rf -- "$signing_dir"' EXIT
+          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$signing_dir/signing-key.pem"
+          bash packaging/sign-release.sh --tag "$TAG" --sums dist/SHA256SUMS --out dist/SHA256SUMS.sig "$signing_dir/signing-key.pem"
+      - name: Verify release signature
+        env:
+          TAG: v${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          bash packaging/verify-release-sig.sh --tag "$TAG" --sums dist/SHA256SUMS --sig dist/SHA256SUMS.sig --trust internal/release/release-signing.pub.pem --require-all
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: v${{ needs.build.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
-          cd dist
-          sha256sum -c SHA256SUMS
-          printf 'Prebuilt Linux x86_64 bundle for SteamOS, Bazzite, Debian, Ubuntu, Fedora and Arch.\n\nInstall:\n\n    curl -fsSL https://github.com/%s/releases/latest/download/install.sh | sh\n' \
+          printf 'Prebuilt Linux x86_64 bundle for SteamOS, Bazzite, Debian, Ubuntu, Fedora and Arch.\n\nReleases are signed; the in-app updater and gorganizer.sh update verify the signature.\n\nInstall:\n\n    curl -fsSL https://github.com/%s/releases/latest/download/install.sh | sh\n' \
             "$GITHUB_REPOSITORY" > "$RUNNER_TEMP/release-notes.md"
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Gorganizer $TAG" \
-            --notes-file "$RUNNER_TEMP/release-notes.md" ./*.tar.gz SHA256SUMS install.sh
+            --notes-file "$RUNNER_TEMP/release-notes.md" "dist/gorganizer-$VERSION-linux-x86_64.tar.gz" dist/SHA256SUMS dist/SHA256SUMS.sig dist/install.sh

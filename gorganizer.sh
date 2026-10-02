@@ -17,9 +17,11 @@
 #   setup                 Detect distro, install build deps via system PM.
 #   doctor                Check build and runtime dependencies without changes.
 #   build [--rebuild]     Build only. --rebuild forces a clean rebuild.
-#   update [--restart]    Update this branch from its own source, rebuild, and
-#                         re-register. --restart only reminds you to reopen a
-#                         running session; it never stops Gorganizer.
+#   update [--restart] [--tag vX.Y.Z]
+#                         Update this branch from its own source, rebuild, and
+#                         re-register. Prebuilt installs may select a release
+#                         tag. --restart only reminds you to reopen a running
+#                         session; it never stops Gorganizer.
 #   register              (Re-)install desktop file + icon + nxm:// handler.
 #   unregister            Reverse `register`.
 #   nxm <URI>             Open Gorganizer if needed and add a Nexus Mods download.
@@ -125,10 +127,12 @@ Subcommands:
   setup                 Detect distro, install build deps via system PM.
   doctor                Check build and runtime dependencies without changes.
   build [--rebuild]     Build only. --rebuild forces a clean rebuild.
-  update [--restart]    Update this branch from its own source and rebuild.
-                        Refuses to run if you have uncommitted changes.
-                        Your mods and settings are preserved. --restart only
-                        reminds you to reopen; it never stops Gorganizer.
+  update [--restart] [--tag vX.Y.Z]
+                        Update this branch from its own source and rebuild.
+                        Prebuilt installs may select a release tag. Refuses to
+                        run if you have uncommitted changes. Your mods and
+                        settings are preserved. --restart only reminds you to
+                        reopen; it never stops Gorganizer.
   register              (Re-)install desktop file + icon + nxm:// handler.
   unregister            Reverse \`register\`.
   nxm <URI>             Open Gorganizer if needed and add a Nexus Mods download.
@@ -866,20 +870,49 @@ update_migration_reminder() {
 }
 
 cmd_update() {
-    local restart=false branch upstream remote old_sha old_short new_sha
+    local restart=false tag="" branch upstream remote old_sha old_short new_sha
     while [ $# -gt 0 ]; do
         case "$1" in
             --restart) restart=true; shift ;;
+            --tag)
+                if [ $# -lt 2 ]; then
+                    err "--tag requires a version."
+                    return 2
+                fi
+                if [ -n "$tag" ]; then
+                    err "--tag may only be given once."
+                    return 2
+                fi
+                tag="$2"
+                shift 2
+                ;;
             *) err "Unknown option: $1"; return 2 ;;
         esac
     done
 
+    if ! $RELEASE_MODE && [ -n "$tag" ]; then
+        err "--tag is only available for prebuilt installs."
+        return 2
+    fi
+    if [ -n "$tag" ] && [[ ! "$tag" =~ ^v[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$ ]]; then
+        err "--tag must be vX.Y.Z."
+        return 2
+    fi
+
     if $RELEASE_MODE; then
-        "$CTL_BIN" release update || return $?
         if $restart; then
+            if [ -n "$tag" ]; then
+                "$CTL_BIN" release update --tag "$tag" || return $?
+            else
+                "$CTL_BIN" release update || return $?
+            fi
             log "Close Gorganizer and open it again to use the new version now."
+            return 0
         fi
-        return 0
+        if [ -n "$tag" ]; then
+            exec "$CTL_BIN" release update --tag "$tag"
+        fi
+        exec "$CTL_BIN" release update
     fi
 
     if ! command -v git >/dev/null 2>&1; then
