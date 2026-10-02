@@ -286,6 +286,17 @@ service Gorganizer {
   rpc GetModDependencyReport(ModDependencyReportRequest) returns (ModDependencyReport);
   rpc FetchModDependencies(FetchModDependenciesRequest) returns (FetchModDependenciesResponse);
   rpc AckDependencyEnable(AckDependencyEnableRequest) returns (AckDependencyEnableResponse);
+
+  // --- Gorganizer application updates ---
+  //
+  // CheckForUpdate asks GitHub for the latest published Gorganizer release and
+  // compares it with running_version (the GUI's own build version). It never
+  // inspects installations and never writes anything. Network problems are
+  // reported through the outcome (OFFLINE / UNAVAILABLE) with diagnostic text
+  // in detail, never through the RPC error; only caller cancellation or a
+  // missed deadline fails the call. A running_version without a release
+  // X.Y.Z base (for example "dev") yields NOT_SUPPORTED with no network call.
+  rpc CheckForUpdate(CheckForUpdateRequest) returns (UpdateCheck);
 }
 
 // --- Game messages ---
@@ -1950,4 +1961,37 @@ message AckDependencyEnableRequest {
 message AckDependencyEnableResponse {
   // Number of pending enables marked done by this call.
   int32 acknowledged = 1;
+}
+
+message CheckForUpdateRequest {
+  // The GUI's own build version, e.g. "0.2.0+0123456789ab"; build metadata
+  // after "+" is ignored for the comparison.
+  string running_version = 1;
+}
+
+// UpdateCheckOutcome is the result of CheckForUpdate. Values are frozen and
+// mirrored by dto.UpdateCheckOutcome.
+enum UpdateCheckOutcome {
+  UPDATE_CHECK_OUTCOME_UNSPECIFIED = 0;
+  UPDATE_CHECK_OUTCOME_UP_TO_DATE = 1;
+  UPDATE_CHECK_OUTCOME_UPDATE_AVAILABLE = 2;
+  // A best-effort connectivity failure: DNS, refused/reset/unreachable
+  // connections, timeouts or TLS certificate failures (captive portals).
+  UPDATE_CHECK_OUTCOME_OFFLINE = 3;
+  // GitHub answered unusably (HTTP error, rate limit, malformed answer) or
+  // the daemon is backing off after a rate limit.
+  UPDATE_CHECK_OUTCOME_UNAVAILABLE = 4;
+  // running_version has no release X.Y.Z base; nothing was fetched.
+  UPDATE_CHECK_OUTCOME_NOT_SUPPORTED = 5;
+}
+
+message UpdateCheck {
+  UpdateCheckOutcome outcome = 1;
+  // Bare X.Y.Z of the latest published release, set whenever it is known.
+  string latest_version = 2;
+  // https release-notes page; set only for UPDATE_AVAILABLE.
+  string notes_url = 3;
+  // Diagnostic text (at most 512 bytes, no control characters) for a
+  // Details view only; empty on success.
+  string detail = 4;
 }
