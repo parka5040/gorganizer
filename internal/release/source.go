@@ -17,10 +17,6 @@ import (
 	"github.com/parka/gorganizer/internal/httpx"
 )
 
-const repositoryURL = "https://github.com/parka5040/gorganizer/releases/download/"
-const notesURLBase = "https://github.com/parka5040/gorganizer/releases/tag/"
-const latestURL = "https://api.github.com/repos/parka5040/gorganizer/releases/latest"
-
 var tagPattern = regexp.MustCompile(`^v[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$`)
 var idleTimeout = 60 * time.Second
 
@@ -29,22 +25,6 @@ type Source struct {
 	LatestURL string
 	Client    *http.Client
 	Latest    func(context.Context) (string, error)
-}
-
-// allowLatestOrigin permits only the pinned GitHub API origin.
-func allowLatestOrigin(u *url.URL) error { return githubOrigin(u, u.Hostname() == "api.github.com") }
-
-// allowAssetOrigin permits GitHub releases and GitHubusercontent asset hosts.
-func allowAssetOrigin(u *url.URL) error {
-	return githubOrigin(u, u.Hostname() == "github.com" || strings.HasSuffix(u.Hostname(), ".githubusercontent.com"))
-}
-
-// githubOrigin checks the common HTTPS GitHub origin constraints.
-func githubOrigin(u *url.URL, host bool) error {
-	if !host || u.Scheme != "https" || u.User != nil || u.Port() != "" && u.Port() != "443" {
-		return fmt.Errorf("refusing release origin")
-	}
-	return nil
 }
 
 // LatestClient constructs the pinned latest-release API client.
@@ -59,6 +39,9 @@ func assetClient() *http.Client {
 
 // ResolveTag resolves a requested tag or the latest published tag.
 func (s Source) ResolveTag(ctx context.Context, requested string) (string, error) {
+	if err := configError(); err != nil {
+		return "", err
+	}
 	tag := requested
 	if tag == "" {
 		if s.Latest != nil {
@@ -93,6 +76,9 @@ func (s Source) ResolveTag(ctx context.Context, requested string) (string, error
 
 // AssetURL returns the URL for an asset of a validated tag.
 func (s Source) AssetURL(tag, name string) (string, error) {
+	if err := configError(); err != nil {
+		return "", err
+	}
 	if err := ValidateTag(tag); err != nil {
 		return "", err
 	}
@@ -181,6 +167,9 @@ func (s Source) open(ctx context.Context, address string) (*http.Response, error
 
 // openResource sends a watched request with the client for its operation.
 func (s Source) openResource(ctx context.Context, address string, latest bool) (*http.Response, error) {
+	if err := configError(); err != nil {
+		return nil, err
+	}
 	client := s.Client
 	if client == nil {
 		client = assetClient()
@@ -188,6 +177,10 @@ func (s Source) openResource(ctx context.Context, address string, latest bool) (
 			client = LatestClient()
 		}
 	}
+	if err := checkSourceOrigin(address, latest); err != nil {
+		return nil, err
+	}
+	client = checkedClient(client)
 	requestCtx, cancel := context.WithCancelCause(ctx)
 	timer := time.AfterFunc(idleTimeout, func() { cancel(context.DeadlineExceeded) })
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, address, nil)

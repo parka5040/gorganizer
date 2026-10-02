@@ -65,6 +65,51 @@ while IFS= read -r -d '' path; do
     done < <(readelf --version-info "$path" | grep -oE 'GLIBC_2\.[0-9]+' | sort -u || true)
 done < <(LC_ALL=C find "$bundle" -type f -print0 | sort -z)
 
+if ! command -v go >/dev/null 2>&1; then
+    bad 'go is required to inspect release binary build settings'
+else
+    for name in gorganizerctl gorganizerd; do
+        path="$bundle/bin/$name"
+        if [ ! -f "$path" ]; then
+            bad "bin/$name is missing"
+            continue
+        fi
+        if ! metadata="$(go version -m "$path" 2>&1)"; then
+            bad "bin/$name has no readable Go build information: $metadata"
+            continue
+        fi
+        if ! printf '%s\n' "$metadata" | grep -qE '^[[:space:]]*build[[:space:]]+'; then
+            bad "bin/$name has no Go build settings"
+            continue
+        fi
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^[[:space:]]*build[[:space:]]+-tags=.*releasefixture ]]; then
+                bad "bin/$name was built with releasefixture"
+            fi
+            if [[ "$line" =~ ^[[:space:]]*build[[:space:]]+-ldflags=.*internal/release ]]; then
+                bad "bin/$name has an internal/release linker override"
+            fi
+        done <<< "$metadata"
+    done
+fi
+expected="$(dirname "${BASH_SOURCE[0]}")/release-config.expected"
+for name in gorganizerctl gorganizerd; do
+    path="$bundle/bin/$name"
+    if [ ! -x "$path" ]; then
+        bad "bin/$name cannot print release configuration"
+        continue
+    fi
+    config_out="$(mktemp "${TMPDIR:?}/gorganizer-release-config.XXXXXXXX")"
+    args=(--release-config)
+    if [ "$name" = gorganizerctl ]; then args=(release config); fi
+    if ! "$path" "${args[@]}" > "$config_out"; then
+        bad "bin/$name could not print release configuration"
+    elif ! cmp -s "$config_out" "$expected"; then
+        bad "bin/$name release configuration differs from release-config.expected"
+    fi
+    rm -f "$config_out"
+done
+
 if [ -f "$bundle/MANIFEST.sha256" ]; then
     if ! (cd "$bundle" && sha256sum -c MANIFEST.sha256 >/dev/null); then
         bad 'MANIFEST.sha256 does not match the bundle'

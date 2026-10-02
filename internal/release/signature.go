@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/x509"
-	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
@@ -14,9 +13,6 @@ import (
 	"sort"
 	"strings"
 )
-
-//go:embed release-signing.pub.pem
-var productionKeys []byte
 
 type TrustSet map[string]ed25519.PublicKey
 
@@ -65,6 +61,9 @@ func ParseTrust(bundle []byte) (TrustSet, error) {
 
 // ProductionTrust returns the release keys embedded in this build.
 func ProductionTrust() (TrustSet, error) {
+	if err := configError(); err != nil {
+		return nil, err
+	}
 	if len(bytes.TrimSpace(productionKeys)) == 0 {
 		return nil, fmt.Errorf("no release signing keys are built into this Gorganizer")
 	}
@@ -108,6 +107,9 @@ func VerifySums(trust TrustSet, tag string, sums, sig []byte) error {
 
 // DescribeConfig prints the local release trust and origin policy.
 func DescribeConfig(w io.Writer) error {
+	if err := configError(); err != nil {
+		return err
+	}
 	trust, err := ProductionTrust()
 	if err != nil && len(bytes.TrimSpace(productionKeys)) != 0 {
 		return err
@@ -125,6 +127,6 @@ func DescribeConfig(w io.Writer) error {
 			return err
 		}
 	}
-	_, err = fmt.Fprintf(w, "latest-url %s\nassets-url %s\nlatest-origin api.github.com\nassets-origin github.com *.githubusercontent.com\nsignature required\n", latestURL, repositoryURL)
+	_, err = fmt.Fprintf(w, "latest-url %s\nassets-url %s\nlatest-origin %s\nassets-origin %s\nsignature required\n", latestURL, repositoryURL, latestOriginDescription(), assetOriginDescription())
 	return err
 }

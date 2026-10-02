@@ -1,3 +1,5 @@
+//go:build !releasefixture
+
 package release
 
 import (
