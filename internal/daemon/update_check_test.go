@@ -74,6 +74,33 @@ func TestUpdateCheckNotSupported(t *testing.T) {
 	}
 }
 
+// TestUpdateCheckUnsupportedCancellation reports canceled and expired contexts before unsupported versions.
+func TestUpdateCheckUnsupportedCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  func(context.Context) (context.Context, context.CancelFunc)
+		want error
+	}{
+		{"canceled", context.WithCancel, context.Canceled},
+		{"expired", func(ctx context.Context) (context.Context, context.CancelFunc) {
+			return context.WithDeadline(ctx, time.Now().Add(-time.Second))
+		}, context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := testUpdateService(t)
+			ctx, cancel := tc.ctx(t.Context())
+			defer cancel()
+			if tc.want == context.Canceled {
+				cancel()
+			}
+			result, err := u.CheckForUpdate(ctx, "dev")
+			if !errors.Is(err, tc.want) || result != (dto.UpdateCheckResult{}) {
+				t.Fatalf("CheckForUpdate(dev) = %+v, %v, want %v", result, err, tc.want)
+			}
+		})
+	}
+}
+
 // TestUpdateCheckOffline maps network failures and the service fetch budget to OFFLINE.
 func TestUpdateCheckOffline(t *testing.T) {
 	t.Run("DNS", func(t *testing.T) {
@@ -189,43 +216,69 @@ func TestUpdateCheckCache(t *testing.T) {
 	}
 }
 
-// TestUpdateCheckCoalescesCallers shares one tag fetch across eight per-version comparisons.
+// TestUpdateCheckCoalescesCallers shares one in-flight success or failure across all waiters.
 func TestUpdateCheckCoalescesCallers(t *testing.T) {
-	u := testUpdateService(t)
-	started := make(chan struct{})
-	releaseFetch := make(chan struct{})
-	var calls atomic.Int32
-	u.fetch = func(context.Context) (string, error) {
-		calls.Add(1)
-		close(started)
-		<-releaseFetch
-		return "v2.0.0", nil
-	}
-	versions := []string{"0.0.1", "1.0.0", "1.2.3", "2.0.0", "2.0.0+abc", "2.0.1", "3.0.0", "10.0.0"}
-	results := make([]dto.UpdateCheckResult, len(versions))
-	errs := make([]error, len(versions))
-	var wg sync.WaitGroup
-	for i, version := range versions {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			results[i], errs[i] = u.CheckForUpdate(t.Context(), version)
-		}()
-	}
-	<-started
-	close(releaseFetch)
-	wg.Wait()
-	if calls.Load() != 1 {
-		t.Fatalf("fetches = %d, want one", calls.Load())
-	}
-	for i, result := range results {
-		want := dto.UpdateCheckUpToDate
-		if i < 3 {
-			want = dto.UpdateCheckUpdateAvailable
-		}
-		if errs[i] != nil || result.Outcome != want || result.LatestVersion != "2.0.0" {
-			t.Errorf("version %s: %+v, %v, want %v", versions[i], result, errs[i], want)
-		}
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"success", nil},
+		{"shared failure", errors.New("shared fetch failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := testUpdateService(t)
+			versions := []string{"0.0.1", "1.0.0", "1.2.3", "2.0.0", "2.0.0+abc", "2.0.1", "3.0.0", "10.0.0"}
+			reached := make(chan struct{}, len(versions))
+			releaseFetch := make(chan struct{})
+			var releaseOnce sync.Once
+			finishFetch := func() { releaseOnce.Do(func() { close(releaseFetch) }) }
+			t.Cleanup(finishFetch)
+			var calls atomic.Int32
+			u.waiting = func() { reached <- struct{}{} }
+			u.fetch = func(context.Context) (string, error) {
+				calls.Add(1)
+				<-releaseFetch
+				return "v2.0.0", tc.err
+			}
+			results := make([]dto.UpdateCheckResult, len(versions))
+			errs := make([]error, len(versions))
+			var wg sync.WaitGroup
+			for i, version := range versions {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					results[i], errs[i] = u.CheckForUpdate(t.Context(), version)
+				}()
+			}
+			for range versions {
+				select {
+				case <-reached:
+				case <-time.After(2 * time.Second):
+					t.Fatal("not all callers reached the in-flight wait")
+				}
+			}
+			finishFetch()
+			wg.Wait()
+			if calls.Load() != 1 {
+				t.Fatalf("fetches = %d, want one", calls.Load())
+			}
+			for i, result := range results {
+				want := dto.UpdateCheckUpToDate
+				latest := "2.0.0"
+				detail := ""
+				if tc.err != nil {
+					want = dto.UpdateCheckUnavailable
+					latest = ""
+					detail = tc.err.Error()
+				} else if i < 3 {
+					want = dto.UpdateCheckUpdateAvailable
+				}
+				if errs[i] != nil || result.Outcome != want || result.LatestVersion != latest || result.Detail != detail {
+					t.Errorf("version %s: %+v, %v, want %v, latest %q, detail %q",
+						versions[i], result, errs[i], want, latest, detail)
+				}
+			}
+		})
 	}
 }
 

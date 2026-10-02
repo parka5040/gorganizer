@@ -42,7 +42,7 @@ public:
     // Returns the startup update-check preference, or no value before the user chooses.
     std::optional<bool> updateCheckAtStartup() const;
     // Saves whether Gorganizer checks for updates at startup.
-    void setUpdateCheckAtStartup(bool on);
+    bool setUpdateCheckAtStartup(bool on);
 
     void setLastProfileFor(const QString& gameShortName, const QString& profileName);
     QString lastProfileFor(const QString& gameShortName) const;

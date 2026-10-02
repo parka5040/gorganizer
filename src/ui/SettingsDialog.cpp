@@ -22,6 +22,7 @@
 #include <QDir>
 #include <QStandardPaths>
 #include <QCoreApplication>
+#include <QSignalBlocker>
 #include <unistd.h>
 
 namespace gorganizer {
@@ -65,6 +66,9 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
         m_updateCheck->setChecked(m_config->updateCheckAtStartup().value_or(false));
     connect(m_updateCheck, &QCheckBox::toggled, this, &SettingsDialog::onUpdateCheckToggled);
     form->addRow("Updates:", m_updateCheck);
+    m_updateStatus = new QLabel;
+    m_updateStatus->setWordWrap(true);
+    form->addRow("", m_updateStatus);
 
     m_apiKeyEdit = new QLineEdit;
     m_apiKeyEdit->setPlaceholderText("Paste your Nexus Mods API key here");
@@ -420,8 +424,15 @@ void SettingsDialog::onCollapsedSeparatorViewToggled(bool on)
 
 void SettingsDialog::onUpdateCheckToggled(bool on)
 {
-    if (m_config)
-        m_config->setUpdateCheckAtStartup(on);
+    if (!m_config)
+        return;
+    if (m_config->setUpdateCheckAtStartup(on)) {
+        m_updateStatus->clear();
+        return;
+    }
+    m_updateStatus->setText(QStringLiteral("Gorganizer could not save this setting. It will ask again next time."));
+    const QSignalBlocker blocker(m_updateCheck);
+    m_updateCheck->setChecked(m_config->updateCheckAtStartup().value_or(false));
 }
 
 }

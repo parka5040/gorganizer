@@ -166,10 +166,18 @@ std::optional<bool> AppConfig::updateCheckAtStartup() const
     return m_settings.value("updates/checkAtStartup").toBool();
 }
 
-void AppConfig::setUpdateCheckAtStartup(bool on)
+bool AppConfig::setUpdateCheckAtStartup(bool on)
 {
+    const auto previous = updateCheckAtStartup();
     m_settings.setValue("updates/checkAtStartup", on);
     m_settings.sync();
+    if (m_settings.status() == QSettings::NoError)
+        return true;
+    if (previous)
+        m_settings.setValue("updates/checkAtStartup", *previous);
+    else
+        m_settings.remove("updates/checkAtStartup");
+    return false;
 }
 
 void AppConfig::setLastProfileFor(const QString& gameShortName, const QString& profileName)

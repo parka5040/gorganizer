@@ -31,10 +31,11 @@ type updateFetch struct {
 type updateServiceEmbedding struct{ *UpdateService }
 
 type UpdateService struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	fetch  func(context.Context) (string, error)
-	now    func() time.Time
+	ctx     context.Context
+	cancel  context.CancelFunc
+	fetch   func(context.Context) (string, error)
+	now     func() time.Time
+	waiting func()
 
 	mu           sync.Mutex
 	inflight     *updateFetch
@@ -67,12 +68,12 @@ func newUpdateService(s *session) *UpdateService {
 
 // CheckForUpdate compares the GUI's release version with the latest published tag.
 func (u *UpdateService) CheckForUpdate(ctx context.Context, runningVersion string) (dto.UpdateCheckResult, error) {
+	if err := ctx.Err(); err != nil {
+		return dto.UpdateCheckResult{}, err
+	}
 	base, ok := release.BaseVersion(runningVersion)
 	if !ok {
 		return dto.UpdateCheckResult{Outcome: dto.UpdateCheckNotSupported}, nil
-	}
-	if err := ctx.Err(); err != nil {
-		return dto.UpdateCheckResult{}, err
 	}
 	tag, err, timedOut := u.latestTag(ctx)
 	if ctx.Err() != nil {
@@ -131,6 +132,9 @@ func (u *UpdateService) latestTag(ctx context.Context) (string, error, bool) {
 	u.mu.Unlock()
 	if start {
 		go u.fetchTag(call)
+	}
+	if u.waiting != nil {
+		u.waiting()
 	}
 
 	select {

@@ -50,6 +50,7 @@ private:
     QComboBox* m_themeCombo = nullptr;
     QCheckBox* m_collapseViewsCheck = nullptr;
     QCheckBox* m_updateCheck = nullptr;
+    QLabel* m_updateStatus = nullptr;
 };
 
 }
