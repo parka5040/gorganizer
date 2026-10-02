@@ -42,6 +42,7 @@ type fakeController struct {
 	TransferController
 	ModLoaderController
 	ModDependencyController
+	UpdateController
 
 	games             []dto.GameInfo
 	configureArgs     []any
@@ -97,6 +98,15 @@ type fakeController struct {
 	depErr            error
 	depArgs           []any
 	installEvents     []dto.InstallEventResult
+	updateResult      dto.UpdateCheckResult
+	updateErr         error
+	updateVersion     string
+}
+
+// CheckForUpdate records the running version and returns the canned update check.
+func (f *fakeController) CheckForUpdate(_ context.Context, version string) (dto.UpdateCheckResult, error) {
+	f.updateVersion = version
+	return f.updateResult, f.updateErr
 }
 
 // GetModDependencyReport records its arguments and returns the canned dependency report.
