@@ -335,7 +335,7 @@ func (m *Manager) install(ctx context.Context, tag string, newerOnly bool) (stri
 			writer = m.WrapWriter(fd)
 		}
 		hasher := sha256.New()
-		n, copyErr := io.Copy(io.MultiWriter(writer, hasher), io.LimitReader(contextReader{ctx, response.Body}, maxArchive+1))
+		n, copyErr := io.Copy(io.MultiWriter(writer, hasher), io.LimitReader(contextReader{ctx, archiveBodyReader{response.Request.Context(), response.Body}}, maxArchive+1))
 		if copyErr == nil {
 			copyErr = fd.Sync()
 		}
@@ -580,8 +580,13 @@ func (m *Manager) SessionMarker() string {
 
 // Status reads the active, previous, installed and running releases.
 func (m *Manager) Status() (Status, error) {
+	return m.StatusContext(context.Background())
+}
+
+// StatusContext reads release status while observing cancellation during the lock wait.
+func (m *Manager) StatusContext(ctx context.Context) (Status, error) {
 	var result Status
-	err := m.withLock(context.Background(), func(lock *heldLock) error {
+	err := m.withLock(ctx, func(lock *heldLock) error {
 		root := lock.root
 		var err error
 		result.Current, err = linkTarget(root, "current")

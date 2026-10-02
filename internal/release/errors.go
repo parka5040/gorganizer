@@ -12,7 +12,10 @@ import (
 
 var ErrUnreachable = errors.New("release server is unreachable")
 
-type TransportError struct{ Err error }
+type TransportError struct {
+	Err      error
+	timedOut bool
+}
 
 // Error returns the release transport failure text.
 func (e *TransportError) Error() string { return "downloading release: " + e.Err.Error() }
@@ -22,7 +25,7 @@ func (e *TransportError) Unwrap() error { return e.Err }
 
 // Is classifies connectivity and certificate failures.
 func (e *TransportError) Is(target error) bool {
-	return target == ErrUnreachable && connectivityError(e.Err)
+	return target == ErrUnreachable && (e.timedOut || connectivityError(e.Err))
 }
 
 type StatusError struct {
@@ -34,7 +37,10 @@ type StatusError struct {
 // Error returns the HTTP release failure text.
 func (e *StatusError) Error() string { return "release download returned " + e.Status }
 
-type readError struct{ err error }
+type readError struct {
+	err      error
+	timedOut bool
+}
 
 // Error returns the release body-read failure text.
 func (e *readError) Error() string { return "reading release file: " + e.err.Error() }
@@ -44,7 +50,26 @@ func (e *readError) Unwrap() error { return e.err }
 
 // Is classifies connectivity failures during a body read.
 func (e *readError) Is(target error) bool {
-	return target == ErrUnreachable && (connectivityError(e.err) || errors.Is(e.err, io.ErrUnexpectedEOF))
+	return target == ErrUnreachable && (e.timedOut || connectivityError(e.err) || errors.Is(e.err, io.ErrUnexpectedEOF))
+}
+
+type archiveReadError struct{ readError }
+
+// Error returns the archive body-read failure without changing its message.
+func (e *archiveReadError) Error() string { return e.err.Error() }
+
+type archiveBodyReader struct {
+	ctx context.Context
+	io.Reader
+}
+
+// Read classifies errors from the archive response body before they reach the writer.
+func (r archiveBodyReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if err != nil && err != io.EOF {
+		return n, &archiveReadError{readError{err: err, timedOut: errors.Is(context.Cause(r.ctx), context.DeadlineExceeded)}}
+	}
+	return n, err
 }
 
 // connectivityError reports whether a failure arose from the network or TLS verification.

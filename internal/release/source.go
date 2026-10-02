@@ -163,10 +163,7 @@ func (s Source) readResource(ctx context.Context, address string, limit int64, l
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil {
-		if cause := context.Cause(response.Request.Context()); errors.Is(cause, context.DeadlineExceeded) {
-			err = errors.Join(err, cause)
-		}
-		return nil, &readError{err}
+		return nil, &readError{err: err, timedOut: errors.Is(context.Cause(response.Request.Context()), context.DeadlineExceeded)}
 	}
 	if int64(len(body)) > limit {
 		return nil, fmt.Errorf("release file is too large")
@@ -199,11 +196,9 @@ func (s Source) openResource(ctx context.Context, address string, latest bool) (
 	response, err := client.Do(request)
 	if err != nil {
 		timer.Stop()
-		if errors.Is(context.Cause(requestCtx), context.DeadlineExceeded) {
-			err = errors.Join(err, context.DeadlineExceeded)
-		}
+		timedOut := errors.Is(context.Cause(requestCtx), context.DeadlineExceeded)
 		cancel(context.Canceled)
-		return nil, &TransportError{err}
+		return nil, &TransportError{Err: err, timedOut: timedOut}
 	}
 	response.Body = &watchedBody{ReadCloser: response.Body, cancel: cancel, timer: timer}
 	if response.StatusCode != http.StatusOK {

@@ -1,11 +1,15 @@
 package launchertest
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // updateExitCode returns the shell status from a rejected update.
@@ -60,6 +64,42 @@ func TestReleaseUpdateRestartKeepsReminder(t *testing.T) {
 	}
 }
 
+// TestReleaseUpdateRestartForwardsSIGTERM checks the update child receives TERM and no reminder is printed.
+func TestReleaseUpdateRestartForwardsSIGTERM(t *testing.T) {
+	f := releaseFixture(t)
+	ready := filepath.Join(t.TempDir(), "ready")
+	terminated := filepath.Join(t.TempDir(), "terminated")
+	writeFixtureFile(t, filepath.Join(f.root, "bin", "gorganizerctl"), []byte("#!/bin/bash\ntrap 'printf term > \"$FAKE_CTL_TERM\"; exit 143' TERM\nprintf ready > \"$FAKE_CTL_READY\"\nfor i in {1..30}; do sleep 0.05; done\n"), 0o755)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", "-c", `. "$1"; cmd_update --restart`, "bash", filepath.Join(f.root, "gorganizer.sh"))
+	cmd.Dir = f.root
+	cmd.Env = append(os.Environ(), "GORGANIZER_SH_SOURCE_ONLY=1", "FAKE_CTL_READY="+ready, "FAKE_CTL_TERM="+terminated)
+	var output bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &output, &output
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if ctx.Err() != nil {
+			t.Fatal("ctl did not start before timeout")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := syscall.Kill(cmd.Process.Pid, syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	err := cmd.Wait()
+	if ctx.Err() != nil || err == nil || !strings.Contains(string(readFixtureFile(t, terminated)), "term") || strings.Contains(output.String(), "Close Gorganizer and open it again") {
+		t.Fatalf("signal update: %v: %q; context=%v", err, output.String(), ctx.Err())
+	}
+}
+
 // TestReleaseUpdateRejectsInvalidTags checks invalid or repeated selected tags never invoke the control binary.
 func TestReleaseUpdateRejectsInvalidTags(t *testing.T) {
 	for _, command := range []string{
@@ -68,6 +108,8 @@ func TestReleaseUpdateRejectsInvalidTags(t *testing.T) {
 		"cmd_update --tag v1.2.3.4",
 		"cmd_update --tag v1234567890.0.0",
 		"cmd_update --tag v1.2.3 --tag v1.2.4",
+		`cmd_update --tag ""`,
+		`cmd_update --tag "" --tag v1.2.3`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			f := releaseFixture(t)
@@ -86,14 +128,18 @@ func TestReleaseUpdateRejectsInvalidTags(t *testing.T) {
 
 // TestSourceUpdateRejectsTag checks source checkouts reject the release-only tag option.
 func TestSourceUpdateRejectsTag(t *testing.T) {
-	f := newFixture(t)
-	calls := filepath.Join(t.TempDir(), "calls")
-	writeFixtureFile(t, filepath.Join(f.root, "gorganizerctl"), []byte("#!/bin/sh\nprintf called > \"$FAKE_CTL_CALLS\"\n"), 0o755)
-	out, err := f.run(t, "cmd_update --tag v1.2.3", "FAKE_CTL_CALLS="+calls)
-	if err == nil || updateExitCode(t, err) != 2 || !strings.Contains(out, "--tag is only available for prebuilt installs.") {
-		t.Fatalf("source update: %v: %q", err, out)
-	}
-	if _, err := os.Stat(calls); !os.IsNotExist(err) {
-		t.Fatalf("control binary was called: %v", err)
+	for _, command := range []string{"cmd_update --tag v1.2.3", `cmd_update --tag ""`} {
+		t.Run(command, func(t *testing.T) {
+			f := newFixture(t)
+			calls := filepath.Join(t.TempDir(), "calls")
+			writeFixtureFile(t, filepath.Join(f.root, "gorganizerctl"), []byte("#!/bin/sh\nprintf called > \"$FAKE_CTL_CALLS\"\n"), 0o755)
+			out, err := f.run(t, command, "FAKE_CTL_CALLS="+calls)
+			if err == nil || updateExitCode(t, err) != 2 || !strings.Contains(out, "--tag is only available for prebuilt installs.") {
+				t.Fatalf("source update: %v: %q", err, out)
+			}
+			if _, err := os.Stat(calls); !os.IsNotExist(err) {
+				t.Fatalf("control binary was called: %v", err)
+			}
+		})
 	}
 }

@@ -139,6 +139,7 @@ for index in "${!sig_lines[@]}"; do
     signature_file="$tmpdir/signature-$index.bin"
     printf '%s' "$signature_b64" | base64 -d > "$signature_file" 2>/dev/null || fail "invalid release signature file"
     [ "$(wc -c < "$signature_file")" -eq 64 ] || fail "invalid release signature file"
+    [ "$(base64 -w0 < "$signature_file")" = "$signature_b64" ] || fail "invalid release signature file"
     signature_ids+=("$keyid")
     signature_files+=("$signature_file")
 done

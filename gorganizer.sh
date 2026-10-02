@@ -870,7 +870,7 @@ update_migration_reminder() {
 }
 
 cmd_update() {
-    local restart=false tag="" branch upstream remote old_sha old_short new_sha
+    local restart=false tag="" tag_given=false branch upstream remote old_sha old_short new_sha
     while [ $# -gt 0 ]; do
         case "$1" in
             --restart) restart=true; shift ;;
@@ -879,10 +879,11 @@ cmd_update() {
                     err "--tag requires a version."
                     return 2
                 fi
-                if [ -n "$tag" ]; then
+                if $tag_given; then
                     err "--tag may only be given once."
                     return 2
                 fi
+                tag_given=true
                 tag="$2"
                 shift 2
                 ;;
@@ -890,22 +891,28 @@ cmd_update() {
         esac
     done
 
-    if ! $RELEASE_MODE && [ -n "$tag" ]; then
+    if ! $RELEASE_MODE && $tag_given; then
         err "--tag is only available for prebuilt installs."
         return 2
     fi
-    if [ -n "$tag" ] && [[ ! "$tag" =~ ^v[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$ ]]; then
+    if $tag_given && [[ ! "$tag" =~ ^v[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$ ]]; then
         err "--tag must be vX.Y.Z."
         return 2
     fi
 
     if $RELEASE_MODE; then
         if $restart; then
-            if [ -n "$tag" ]; then
-                "$CTL_BIN" release update --tag "$tag" || return $?
-            else
-                "$CTL_BIN" release update || return $?
-            fi
+            local child status
+            trap 'kill -TERM "$child" 2>/dev/null' TERM INT
+            "$CTL_BIN" release update ${tag:+--tag "$tag"} & child=$!
+            while true; do
+                wait "$child" && status=0 || status=$?
+                if ! kill -0 "$child" 2>/dev/null; then
+                    break
+                fi
+            done
+            trap - TERM INT
+            [ "$status" -eq 0 ] || return "$status"
             log "Close Gorganizer and open it again to use the new version now."
             return 0
         fi

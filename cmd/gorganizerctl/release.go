@@ -92,7 +92,7 @@ func runReleaseWith(args []string, deps releaseDeps) int {
 		} else {
 			if *tag != "" {
 				var state release.Status
-				state, err = manager.Status()
+				state, err = manager.StatusContext(ctx)
 				if err == nil {
 					var cmp int
 					cmp, err = release.Compare(strings.TrimPrefix(*tag, "v"), state.Current)
