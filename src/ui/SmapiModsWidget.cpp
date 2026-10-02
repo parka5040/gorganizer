@@ -69,6 +69,11 @@ SmapiModsWidget::SmapiModsWidget(QWidget* parent)
     buttons->addStretch();
     layout->addLayout(buttons);
 
+    m_onlineChecksHint = makeNoteLabel();
+    m_onlineChecksHint->setObjectName("hintLabel");
+    m_onlineChecksHint->setText(QStringLiteral("Online checks are off. Use Check for Updates to look up your mods now."));
+    layout->addWidget(m_onlineChecksHint);
+
     m_summaryLabel = new QLabel;
     m_summaryLabel->setTextFormat(Qt::PlainText);
     m_summaryLabel->setObjectName("hintLabel");
@@ -288,6 +293,11 @@ void SmapiModsWidget::setRemoteState(const QDateTime& lastChecked, const QString
         text += QStringLiteral(" The last online check failed (%1); showing cached information.").arg(lastError);
     m_remoteLabel->setText(text);
     updateButtons();
+}
+
+void SmapiModsWidget::setOnlineChecksHint(bool off)
+{
+    m_onlineChecksHint->setVisible(off);
 }
 
 void SmapiModsWidget::setActionsBusy(bool busy)

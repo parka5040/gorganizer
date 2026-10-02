@@ -4,21 +4,16 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/parka/gorganizer/internal/fsutil"
 	"golang.org/x/sys/unix"
@@ -107,13 +102,13 @@ func plainParents(root, relative string) error {
 }
 
 // unpack extracts a verified archive while rejecting unsafe entries and excessive contents.
-func unpack(archive, stage, version string, wrap func(io.Writer) io.Writer) error {
+func unpack(ctx context.Context, archive, stage, version string, wrap func(io.Writer) io.Writer) error {
 	file, err := os.Open(archive)
 	if err != nil {
 		return fmt.Errorf("opening release archive: %w", err)
 	}
 	defer file.Close()
-	gz, err := gzip.NewReader(file)
+	gz, err := gzip.NewReader(contextReader{ctx, file})
 	if err != nil {
 		return fmt.Errorf("opening compressed release: %w", err)
 	}
@@ -123,6 +118,9 @@ func unpack(archive, stage, version string, wrap func(io.Writer) io.Writer) erro
 	seen := make(map[string]bool)
 	var size int64
 	for entries := 0; ; entries++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		header, err := reader.Next()
 		if errors.Is(err, io.EOF) {
 			break
@@ -176,7 +174,7 @@ func unpack(archive, stage, version string, wrap func(io.Writer) io.Writer) erro
 			if wrap != nil {
 				writer = wrap(fd)
 			}
-			_, copyErr := io.CopyN(writer, reader, header.Size)
+			_, copyErr := io.CopyN(writer, contextReader{ctx, reader}, header.Size)
 			if copyErr == nil {
 				copyErr = fd.Sync()
 			}
@@ -198,14 +196,18 @@ func unpack(archive, stage, version string, wrap func(io.Writer) io.Writer) erro
 			return fmt.Errorf("unsupported release entry: %s", name)
 		}
 	}
-	if _, err := io.Copy(io.Discard, gz); err != nil {
+	n, err := io.Copy(io.Discard, io.LimitReader(contextReader{ctx, gz}, 64<<20+1))
+	if err != nil {
 		return fmt.Errorf("incomplete release archive: %w", err)
 	}
-	return nil
+	if n > 64<<20 {
+		return fmt.Errorf("the release archive has unexpected trailing data")
+	}
+	return ctx.Err()
 }
 
 // copyTree adopts an extracted release through exclusive writes into a private stage.
-func copyTree(source, stage string, wrap func(io.Writer) io.Writer) error {
+func copyTree(ctx context.Context, source, stage string, wrap func(io.Writer) io.Writer) error {
 	info, err := os.Lstat(source)
 	if err != nil {
 		return fmt.Errorf("opening extracted release: %w", err)
@@ -216,6 +218,9 @@ func copyTree(source, stage string, wrap func(io.Writer) io.Writer) error {
 	count := 0
 	var size int64
 	return filepath.WalkDir(source, func(name string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -266,7 +271,7 @@ func copyTree(source, stage string, wrap func(io.Writer) io.Writer) error {
 			if wrap != nil {
 				writer = wrap(to)
 			}
-			_, err = io.CopyN(writer, from, info.Size())
+			_, err = io.CopyN(writer, contextReader{ctx, from}, info.Size())
 			if err == nil {
 				err = to.Sync()
 			}
@@ -336,6 +341,9 @@ func checkBundle(ctx context.Context, stage, version string) error {
 	}
 	seen := make(map[string]bool)
 	err = filepath.WalkDir(stage, func(name string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -385,23 +393,7 @@ func checkBundle(ctx context.Context, stage, version string) error {
 				return fmt.Errorf("unlisted release file: %s", rel)
 			}
 			seen[rel] = true
-			fd, err := os.OpenFile(name, os.O_RDONLY|unix.O_NOFOLLOW, 0)
-			if err != nil {
-				return err
-			}
-			var digest hash.Hash = sha256.New()
-			_, err = io.Copy(digest, fd)
-			closeErr := fd.Close()
-			if err != nil {
-				return err
-			}
-			if closeErr != nil {
-				return closeErr
-			}
-			if hex.EncodeToString(digest.Sum(nil)) != expected {
-				return fmt.Errorf("release file does not match manifest: %s", rel)
-			}
-			return nil
+			return checkFileHash(ctx, name, rel, expected)
 		default:
 			return fmt.Errorf("unsupported release entry: %s", rel)
 		}
@@ -449,9 +441,7 @@ func checkBundle(ctx context.Context, stage, version string) error {
 		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
 			return fmt.Errorf("missing executable: %s", name)
 		}
-		checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		output, err := exec.CommandContext(checkCtx, binary, "--version").Output()
-		cancel()
+		output, err := probeVersion(ctx, binary)
 		if err != nil || !strings.HasPrefix(strings.TrimSpace(string(output)), name+" "+version) {
 			return fmt.Errorf("release executable failed its version check: %s", name)
 		}

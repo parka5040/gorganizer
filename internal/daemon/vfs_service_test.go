@@ -219,6 +219,24 @@ func newIsolatedDaemon(t *testing.T, games map[string]config.GameConfig) *Daemon
 	return d
 }
 
+// newIsolatedDaemonWithVersion builds a recovered daemon with a specified build version and private test directories.
+func newIsolatedDaemonWithVersion(t *testing.T, games map[string]config.GameConfig, version string) *Daemon {
+	t.Helper()
+	isolateDaemonState(t)
+	t.Setenv("HOME", t.TempDir())
+	cfg := config.DefaultConfig()
+	for id, gc := range games {
+		cfg.Games[id] = gc
+	}
+	d, err := NewWithVersion(cfg, version)
+	if err != nil {
+		t.Fatalf("NewWithVersion: %v", err)
+	}
+	t.Cleanup(d.Shutdown)
+	d.RecoverAll()
+	return d
+}
+
 // installEntries lists the names directly inside dir.
 func installEntries(t *testing.T, dir string) []string {
 	t.Helper()

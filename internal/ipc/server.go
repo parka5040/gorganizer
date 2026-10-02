@@ -35,6 +35,11 @@ type DaemonController interface {
 	TransferController
 	ModLoaderController
 	ModDependencyController
+	UpdateController
+}
+
+type UpdateController interface {
+	CheckForUpdate(ctx context.Context, runningVersion string) (dto.UpdateCheckResult, error)
 }
 
 type ModDependencyController interface {

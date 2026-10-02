@@ -17,7 +17,9 @@ namespace gorganizer {
 class GrpcWorker : public QObject {
     Q_OBJECT
 public:
-    explicit GrpcWorker(std::shared_ptr<grpc::Channel> channel);
+    // Creates a worker that shares the current automatic SMAPI online consent.
+    explicit GrpcWorker(std::shared_ptr<grpc::Channel> channel,
+                        std::shared_ptr<std::atomic<bool>> automaticSmapiOnlineAllowed);
 
     enum StreamKind { StreamArchive, StreamInstall, StreamPluginStatus };
 
@@ -101,7 +103,9 @@ public slots:
                           const QStringList& modFolders, const QStringList& profileNames,
                           const QString& expectedArchiveIdentity);
 
-    void doGetModLoaderStatus(quint64 requestId, const QString& gameId, bool checkLatest);
+    // Queries the latest Gorganizer release with a bounded deadline.
+    void doCheckForUpdate(quint64 requestId, const QString& runningVersion);
+    void doGetModLoaderStatus(quint64 requestId, const QString& gameId, bool checkLatest, bool automatic);
     void doInstallModLoader(quint64 requestId, const QString& gameId, bool repairOnly);
     void doUninstallModLoader(quint64 requestId, const QString& gameId);
     void doRollbackModLoader(quint64 requestId, const QString& gameId);
@@ -114,7 +118,7 @@ public slots:
     void doUninstallMod(quint64 requestId, const QString& gameId, const QString& modName, bool force);
     void doRenameMod(quint64 requestId, const QString& gameId, const QString& oldName, const QString& newName);
     void doGetModDependencyReport(quint64 requestId, const QString& gameId, const QString& profileName,
-                                  bool refreshRemote, bool forceRemote);
+                                  bool refreshRemote, bool forceRemote, bool automatic);
     void doFetchModDependencies(quint64 requestId, const QString& gameId, const QString& profileName,
                                 const QStringList& uniqueIds);
     void doAckDependencyEnable(quint64 requestId, const QString& gameId, const QString& batchId,
@@ -188,6 +192,10 @@ signals:
     void transferCompleted(const GrpcTransferSummary& summary);
     void transferFailed(const QString& error, int grpcCode);
 
+    // Reports a completed Gorganizer release query.
+    void updateCheckFinished(quint64 requestId, const GrpcUpdateCheck& result);
+    // Reports a failed Gorganizer release query and its gRPC code.
+    void updateCheckFailed(quint64 requestId, const QString& error, int grpcCode);
     void modLoaderStatusReceived(quint64 requestId, const QString& gameId, const GrpcModLoaderStatus& status);
     void modLoaderStatusFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     void modLoaderOperationFinished(quint64 requestId, const QString& gameId, const QString& operation,
@@ -230,6 +238,7 @@ private:
     using Stub = gorganizer::v1::Gorganizer::Stub;
 
     std::shared_ptr<grpc::Channel> m_channel;
+    std::shared_ptr<std::atomic<bool>> m_automaticSmapiOnlineAllowed;
     std::unique_ptr<Stub> m_stub;
     std::atomic<bool> m_stopped{false};
     std::atomic<quint64> m_streamGeneration{0};

@@ -352,8 +352,10 @@ GrpcInstallCompleted installCompletedFromProto(const gorganizer::v1::InstallComp
 }
 }
 
-GrpcWorker::GrpcWorker(std::shared_ptr<grpc::Channel> channel)
+GrpcWorker::GrpcWorker(std::shared_ptr<grpc::Channel> channel,
+                       std::shared_ptr<std::atomic<bool>> automaticSmapiOnlineAllowed)
     : m_channel(std::move(channel))
+    , m_automaticSmapiOnlineAllowed(std::move(automaticSmapiOnlineAllowed))
     , m_stub(gorganizer::v1::Gorganizer::NewStub(m_channel))
 {
 }
@@ -1343,14 +1345,56 @@ void GrpcWorker::doStreamPluginStatus(const QString& gameId, const QString& prof
         emit streamEnded(StreamPluginStatus, generation, static_cast<int>(status.error_code()));
 }
 
-// Queries the game's mod-loader status, allowing the longer network deadline when the latest release is resolved too.
-void GrpcWorker::doGetModLoaderStatus(quint64 requestId, const QString& gameId, bool checkLatest)
+// Checks for a published update against the running GUI version.
+void GrpcWorker::doCheckForUpdate(quint64 requestId, const QString& runningVersion)
+{
+    gorganizer::v1::CheckForUpdateRequest req;
+    req.set_running_version(runningVersion.toStdString());
+    gorganizer::v1::UpdateCheck resp;
+    const auto status = invoke(&Stub::CheckForUpdate, req, resp, std::chrono::seconds(30));
+    if (!status.ok()) {
+        emit updateCheckFailed(requestId, QString::fromStdString(status.error_message()),
+                               static_cast<int>(status.error_code()));
+        return;
+    }
+    GrpcUpdateCheck result;
+    switch (resp.outcome()) {
+    case gorganizer::v1::UPDATE_CHECK_OUTCOME_UNSPECIFIED:
+        result.outcome = GrpcUpdateCheck::Outcome::Unspecified;
+        break;
+    case gorganizer::v1::UPDATE_CHECK_OUTCOME_UP_TO_DATE:
+        result.outcome = GrpcUpdateCheck::Outcome::UpToDate;
+        break;
+    case gorganizer::v1::UPDATE_CHECK_OUTCOME_UPDATE_AVAILABLE:
+        result.outcome = GrpcUpdateCheck::Outcome::UpdateAvailable;
+        break;
+    case gorganizer::v1::UPDATE_CHECK_OUTCOME_OFFLINE:
+        result.outcome = GrpcUpdateCheck::Outcome::Offline;
+        break;
+    case gorganizer::v1::UPDATE_CHECK_OUTCOME_UNAVAILABLE:
+        result.outcome = GrpcUpdateCheck::Outcome::Unavailable;
+        break;
+    case gorganizer::v1::UPDATE_CHECK_OUTCOME_NOT_SUPPORTED:
+        result.outcome = GrpcUpdateCheck::Outcome::NotSupported;
+        break;
+    default:
+        result.outcome = GrpcUpdateCheck::Outcome::Unavailable;
+        break;
+    }
+    result.latestVersion = QString::fromStdString(resp.latest_version());
+    result.notesUrl = QString::fromStdString(resp.notes_url());
+    result.detail = QString::fromStdString(resp.detail());
+    emit updateCheckFinished(requestId, result);
+}
+
+void GrpcWorker::doGetModLoaderStatus(quint64 requestId, const QString& gameId, bool checkLatest, bool automatic)
 {
     gorganizer::v1::ModLoaderRequest req;
     req.set_game_id(gameId.toStdString());
-    req.set_check_latest(checkLatest);
     gorganizer::v1::ModLoaderStatus resp;
-    const std::chrono::milliseconds deadline = checkLatest ? std::chrono::seconds(60) : std::chrono::seconds(30);
+    const bool online = checkLatest && (!automatic || m_automaticSmapiOnlineAllowed->load());
+    req.set_check_latest(online);
+    const std::chrono::milliseconds deadline = online ? std::chrono::seconds(60) : std::chrono::seconds(30);
     auto status = invoke(&Stub::GetModLoaderStatus, req, resp, deadline);
     if (!status.ok()) {
         emit modLoaderStatusFailed(requestId, gameId, QString::fromStdString(status.error_message()), static_cast<int>(status.error_code()));
@@ -1484,16 +1528,18 @@ void GrpcWorker::doRenameMod(quint64 requestId, const QString& gameId, const QSt
 
 // Requests a SMAPI dependency report, allowing a longer deadline when smapi.io is consulted.
 void GrpcWorker::doGetModDependencyReport(quint64 requestId, const QString& gameId, const QString& profileName,
-                                          bool refreshRemote, bool forceRemote)
+                                          bool refreshRemote, bool forceRemote, bool automatic)
 {
     gorganizer::v1::ModDependencyReportRequest req;
     req.set_game_id(gameId.toStdString());
     req.set_profile_name(profileName.toStdString());
-    req.set_refresh_remote(refreshRemote || forceRemote);
-    req.set_force_remote(forceRemote);
     gorganizer::v1::ModDependencyReport resp;
-    const std::chrono::milliseconds deadline =
-        (refreshRemote || forceRemote) ? std::chrono::seconds(90) : std::chrono::seconds(30);
+    const bool online = !automatic || m_automaticSmapiOnlineAllowed->load();
+    const bool refresh = online && (refreshRemote || forceRemote);
+    const bool force = online && forceRemote;
+    req.set_refresh_remote(refresh);
+    req.set_force_remote(force);
+    const std::chrono::milliseconds deadline = refresh ? std::chrono::seconds(90) : std::chrono::seconds(30);
     auto status = invoke(&Stub::GetModDependencyReport, req, resp, deadline);
     if (!status.ok()) {
         emit modDependencyReportFailed(requestId, gameId, profileName,

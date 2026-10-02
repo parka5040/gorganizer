@@ -4,6 +4,7 @@ add_library(gorganizer_core STATIC
     GameDetector.cpp
     ModCatalog.cpp
     AppConfig.cpp
+    InstallLayout.cpp
     DirectoryManager.cpp
     PluginScanner.cpp
 )

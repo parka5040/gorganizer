@@ -1,0 +1,5 @@
+gorganizer-release-signature-v1
+repository=parka5040/gorganizer
+tag=v0.0.9
+platform=linux-x86_64
+sha256sums-sha256=b04cde52584fcf11f9825baaeb4c0240b8d1034c0078275dc1b4c2f42e1f87c6

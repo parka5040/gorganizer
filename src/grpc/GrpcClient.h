@@ -5,6 +5,7 @@
 #include <QThread>
 #include <QTimer>
 #include <array>
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,6 +30,8 @@ public:
     void connectToDaemon();
     void disconnectFromDaemon();
     bool isConnected() const;
+    // Sets whether queued automatic SMAPI online requests may contact remote services.
+    void setAutomaticSmapiOnlineAllowed(bool allowed);
 
     void listGames();
     void detectGames();
@@ -196,8 +199,10 @@ public:
     void cancelTransfer();
     bool transferActive() const { return m_transferActive; }
 
+    // Queues a Gorganizer update check on the update worker and returns its request id.
+    quint64 checkForUpdate(const QString& runningVersion);
     // Queues a mod-loader status query and returns the id its modLoaderStatus* signals carry; latest-release checks run on the mod-loader status worker, others on the unary worker.
-    quint64 getModLoaderStatus(const QString& gameId, bool checkLatest);
+    quint64 getModLoaderStatus(const QString& gameId, bool checkLatest, bool automatic);
     // Queues a mod-loader status query without a latest-release check on the mod-loader status worker and returns the id its modLoaderStatus* signals carry.
     quint64 pollModLoaderStatus(const QString& gameId);
     // Queues a mod-loader install, or a repair from the retained release, and returns the id modLoaderOperationFinished carries.
@@ -214,7 +219,7 @@ public:
                               const std::vector<GrpcModListEntry>& entries);
     // Queues a SMAPI dependency report, on the dependency worker when smapi.io is consulted, and returns the id its modDependencyReport* signals carry.
     quint64 getModDependencyReport(const QString& gameId, const QString& profileName,
-                                   bool refreshRemote, bool forceRemote);
+                                   bool refreshRemote, bool forceRemote, bool automatic);
     // Queues a dependency fetch on the dependency worker and returns the id modDependenciesFetched or modDependencyFetchFailed carries.
     quint64 fetchModDependencies(const QString& gameId, const QString& profileName, const QStringList& uniqueIds);
     // Queues a pending-enable acknowledgement on the unary worker and returns the id its dependencyEnableAck* signals carry.
@@ -343,6 +348,10 @@ signals:
     void transferCompleted(const GrpcTransferSummary& summary);
     void transferFailed(const QString& error, int grpcCode);
 
+    // Reports the response to an update check.
+    void updateCheckFinished(quint64 requestId, const GrpcUpdateCheck& result);
+    // Reports a failed update check with its gRPC status code.
+    void updateCheckFailed(quint64 requestId, const QString& error, int grpcCode);
     void modLoaderStatusReceived(quint64 requestId, const QString& gameId, const GrpcModLoaderStatus& status);
     void modLoaderStatusFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     void modLoaderOperationFinished(quint64 requestId, const QString& gameId, const QString& operation,
@@ -404,11 +413,13 @@ private:
         RoleDependencyRpc,
         RoleModLoaderRpc,
         RoleModLoaderStatus,
+        RoleUpdateRpc,
         RoleCount,
     };
 
     std::shared_ptr<grpc::Channel> m_channel;
     std::unique_ptr<GrpcSyncStub> m_syncStub;
+    std::shared_ptr<std::atomic<bool>> m_automaticSmapiOnlineAllowed = std::make_shared<std::atomic<bool>>(false);
     std::array<WorkerHandle, RoleCount> m_workers{{
         {nullptr, nullptr, "unary"},
         {nullptr, nullptr, "watch-status"},
@@ -421,6 +432,7 @@ private:
         {nullptr, nullptr, "dependency-rpc"},
         {nullptr, nullptr, "modloader-rpc"},
         {nullptr, nullptr, "modloader-status"},
+        {nullptr, nullptr, "update-rpc"},
     }};
     QTimer* m_connectionTimer = nullptr;
     bool m_connected = false;
@@ -431,6 +443,7 @@ private:
     quint64 m_nextInstallStatusRequestId = 0;
     quint64 m_nextModActionRequestId = 0;
     quint64 m_nextModLoaderRequestId = 0;
+    quint64 m_nextUpdateRequestId = 0;
     quint64 m_nextModListRequestId = 0;
     quint64 m_nextIniRequestId = 0;
     quint64 m_nextDependencyRequestId = 0;
@@ -461,6 +474,8 @@ private:
     GrpcWorker* dependencyRpcWorker() const { return m_workers[RoleDependencyRpc].worker; }
     GrpcWorker* modLoaderRpcWorker() const { return m_workers[RoleModLoaderRpc].worker; }
     GrpcWorker* modLoaderStatusWorker() const { return m_workers[RoleModLoaderStatus].worker; }
+    // Returns the worker dedicated to application update checks.
+    GrpcWorker* updateRpcWorker() const { return m_workers[RoleUpdateRpc].worker; }
 
     std::string socketTarget() const;
     void connectWorkerSignals(GrpcWorker* worker);
@@ -477,7 +492,7 @@ private:
     template <typename Method, typename... Args>
     quint64 postModLoaderOperation(const QString& gameId, const QString& operation, Method method, Args... args);
     // Assigns a request id and queues a mod-loader status query on worker, failing asynchronously when there is none.
-    quint64 postModLoaderStatus(GrpcWorker* worker, const QString& gameId, bool checkLatest);
+    quint64 postModLoaderStatus(GrpcWorker* worker, const QString& gameId, bool checkLatest, bool automatic);
 
     template <typename Method, typename... Args>
     void postTo(GrpcWorker* worker, Method method, Args... args);

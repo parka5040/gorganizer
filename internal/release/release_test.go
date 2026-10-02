@@ -1,3 +1,5 @@
+//go:build !releasefixture
+
 package release
 
 import (
@@ -99,13 +101,15 @@ func serveFixture(t *testing.T, version string, archive []byte, checks string) (
 			fmt.Fprintf(w, `{"tag_name":"v%s"}`, version)
 		case "SHA256SUMS":
 			io.WriteString(w, checks)
+		case "SHA256SUMS.sig":
+			w.Write(testSignature(1, "v"+version, []byte(checks)))
 		case "gorganizer-" + version + "-linux-x86_64.tar.gz":
 			w.Write(archive)
 		default:
 			http.NotFound(w, r)
 		}
 	}))
-	m := &Manager{Root: filepath.Join(t.TempDir(), "releases"), Source: Source{BaseURL: server.URL, LatestURL: server.URL + "/latest", Client: server.Client()}}
+	m := &Manager{Root: filepath.Join(t.TempDir(), "releases"), Trust: testTrust(t), Source: Source{BaseURL: server.URL, LatestURL: server.URL + "/latest", Client: server.Client()}}
 	return server, m
 }
 
@@ -167,7 +171,11 @@ func TestInstallRefusesBadDownloads(t *testing.T) {
 						w.Write(archive[:len(archive)/2])
 						return
 					}
-					io.WriteString(w, valid)
+					if strings.HasSuffix(r.URL.Path, ".sig") {
+						w.Write(testSignature(1, "v"+version, []byte(valid)))
+					} else {
+						io.WriteString(w, valid)
+					}
 				}))
 				manager.Source.BaseURL = server.URL
 			}

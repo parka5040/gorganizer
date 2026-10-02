@@ -21,6 +21,8 @@ public:
 
 signals:
     void collapsedSeparatorViewChanged(bool on);
+    // Reports a saved SMAPI online-check preference change.
+    void smapiOnlineChecksChanged(bool allowed);
 
 private slots:
     void onSaveKey();
@@ -30,6 +32,10 @@ private slots:
     void onReregisterNxm();
     void onThemeChanged(const QString& name);
     void onCollapsedSeparatorViewToggled(bool on);
+    // Saves the explicit startup update-check preference.
+    void onUpdateCheckToggled(bool on);
+    // Saves the explicit SMAPI online-check preference.
+    void onSmapiOnlineCheckToggled(bool on);
 
 private:
     void populateProtonCombo();
@@ -47,6 +53,10 @@ private:
     QProcess* m_nxmRegisterProcess = nullptr;
     QComboBox* m_themeCombo = nullptr;
     QCheckBox* m_collapseViewsCheck = nullptr;
+    QCheckBox* m_updateCheck = nullptr;
+    QLabel* m_updateStatus = nullptr;
+    QCheckBox* m_smapiOnlineCheck = nullptr;
+    QLabel* m_smapiOnlineStatus = nullptr;
 };
 
 }

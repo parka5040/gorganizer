@@ -19,12 +19,13 @@ namespace gorganizer {
 class GrpcClient;
 class ModLoaderProgressDialog;
 class SessionController;
+class SmapiOnlineConsent;
 
 class ModLoaderController : public QObject {
     Q_OBJECT
 public:
-    ModLoaderController(GrpcClient* grpc, SessionController* session, QMenu* menu,
-                        QStatusBar* statusBar, QWidget* parentWindow);
+    ModLoaderController(GrpcClient* grpc, SessionController* session, SmapiOnlineConsent* consent,
+                        QMenu* menu, QStatusBar* statusBar, QWidget* parentWindow);
 
     // Reports whether a SMAPI operation for gameId, including its mount handling, is in progress.
     bool operationActiveFor(const QString& gameId) const { return m_op && m_op->gameId == gameId; }
@@ -137,7 +138,7 @@ private:
     // Ends a reconciled operation from the status the daemon reported once idle, restoring the mount and showing it.
     void completeReconciled(const GrpcModLoaderStatus& status);
     // Sends a status query for gameId, remembering plain queries so activation does not repeat them.
-    quint64 requestStatus(const QString& gameId, bool checkLatest);
+    quint64 requestStatus(const QString& gameId, bool checkLatest, bool automatic);
     // Sends this session's one automatic update check for gameId.
     void scheduleLatestCheck(const QString& gameId);
     // Stores and publishes a status after merging the cached latest release into it.
@@ -166,6 +167,7 @@ private:
 
     GrpcClient* m_grpc;
     SessionController* m_session;
+    SmapiOnlineConsent* m_consent;
     QMenu* m_menu;
     QStatusBar* m_statusBar;
     QWidget* m_parentWindow;

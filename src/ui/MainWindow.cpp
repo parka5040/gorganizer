@@ -15,6 +15,9 @@
 #include "FalloutPatchController.h"
 #include "GameSetupController.h"
 #include "ModLoaderController.h"
+#include "UpdateController.h"
+#include "SmapiOnlineConsent.h"
+#include "NoticeBar.h"
 #include "ModDependencyController.h"
 #include "SteamMaintenanceController.h"
 #include "ModDependencyText.h"
@@ -79,6 +82,7 @@ MainWindow::MainWindow(AppConfig& config, GrpcClient* grpc, QWidget* parent)
     }
 
     m_session->loadManagedGames();
+    QTimer::singleShot(0, this, [this] { m_update->start(); });
 
     if (m_grpc->isConnected()) {
         statusBar()->showMessage("Gorganizer's background service connected", 3000);
@@ -86,6 +90,14 @@ MainWindow::MainWindow(AppConfig& config, GrpcClient* grpc, QWidget* parent)
         m_grpc->detectGames();
         m_grpc->startWatching();
     }
+}
+
+void MainWindow::setDaemonOwned(bool owned)
+{
+    m_daemonOwned = owned;
+    if (m_update)
+        m_update->setDaemonStopsOnExit(m_daemonOwned ||
+            (qgetenv("GORGANIZER_SUPERVISED") == "1" && qgetenv("GORGANIZER_DAEMON_OWNED") == "1"));
 }
 
 // Builds menus, toolbar, splitter layout, and status bar; controller wiring happens in wireConnections.
@@ -153,6 +165,9 @@ void MainWindow::setupUi()
     toolsMenu->addSeparator();
     toolsMenu->addAction("&Settings...", this, &MainWindow::onOpenSettings);
 
+    auto* helpMenu = menuBar()->addMenu("&Help");
+    m_checkUpdatesAction = helpMenu->addAction("Check for Gorganizer Updates…");
+
     auto* toolbar = addToolBar("Main");
     toolbar->setMovable(false);
     toolbar->setFloatable(false);
@@ -193,9 +208,17 @@ void MainWindow::setupUi()
     toolbar->addWidget(m_runButton);
 
     auto* central = new QWidget;
-    auto* centralLayout = new QVBoxLayout(central);
-    centralLayout->setContentsMargins(0, 0, 0, 0);
-    centralLayout->setSpacing(0);
+    m_centralLayout = new QVBoxLayout(central);
+    m_centralLayout->setContentsMargins(0, 0, 0, 0);
+    m_centralLayout->setSpacing(0);
+    m_notice = new NoticeBar(central);
+    m_centralLayout->insertWidget(0, m_notice);
+    auto* smapiNotice = new NoticeBar(central);
+    m_centralLayout->insertWidget(1, smapiNotice);
+    m_smapiConsent = new SmapiOnlineConsent(m_config, smapiNotice, this);
+    m_grpc->setAutomaticSmapiOnlineAllowed(m_smapiConsent->allowed());
+    connect(m_smapiConsent, &SmapiOnlineConsent::onlineChecksChanged, m_grpc,
+            &GrpcClient::setAutomaticSmapiOnlineAllowed);
 
     auto* vsplit = new QSplitter(Qt::Vertical);
 
@@ -234,7 +257,7 @@ void MainWindow::setupUi()
     vsplit->setStretchFactor(0, 4);
     vsplit->setStretchFactor(1, 1);
 
-    centralLayout->addWidget(vsplit, 1);
+    m_centralLayout->addWidget(vsplit, 1);
     setCentralWidget(central);
     setTabOrder(m_gameSelector, m_profileSelector);
     setTabOrder(m_profileSelector, m_modList);
@@ -265,7 +288,10 @@ void MainWindow::createControllers()
     m_session = new SessionController(m_config, m_grpc, m_gameSelector, m_profileSelector,
                                       m_modList, m_pluginList, m_downloadsLibrary, m_runButton,
                                       m_applyButton, m_unmountAction, m_statusInfo, statusBar(), this);
-    m_modLoader = new ModLoaderController(m_grpc, m_session, m_smapiMenu, statusBar(), this);
+    m_modLoader = new ModLoaderController(m_grpc, m_session, m_smapiConsent, m_smapiMenu, statusBar(), this);
+    const bool daemonStopsOnExit = m_daemonOwned ||
+        (qgetenv("GORGANIZER_SUPERVISED") == "1" && qgetenv("GORGANIZER_DAEMON_OWNED") == "1");
+    m_update = new UpdateController(m_grpc, m_config, m_notice, this, daemonStopsOnExit);
     m_steamMaintenance = new SteamMaintenanceController(m_grpc, m_session, m_steamHelpAction,
                                                         m_pauseForSteamAction, statusBar(), this);
     m_launch = new LaunchController(m_config, m_grpc, m_session, m_modLoader, m_runButton, statusBar(), this);
@@ -273,13 +299,16 @@ void MainWindow::createControllers()
                                                 statusBar(), this);
     m_gameSetup = new GameSetupController(m_config, m_grpc, m_session, m_modList,
                                           m_installTtwAction, statusBar(), this);
-    m_modDependencies = new ModDependencyController(m_grpc, m_session, m_modList, m_smapiMods,
-                                                    statusBar(), this);
+    m_modDependencies = new ModDependencyController(m_grpc, m_session, m_smapiConsent, m_modList,
+                                                    m_smapiMods, statusBar(), this);
 }
 
 // Wires widget signals to controllers, controller cross-links, and window-level daemon status handling.
 void MainWindow::wireConnections()
 {
+    connect(m_checkUpdatesAction, &QAction::triggered, m_update, &UpdateController::checkNow);
+    connect(m_update, &UpdateController::updatingChanged, m_checkUpdatesAction,
+            [this](bool updating) { m_checkUpdatesAction->setEnabled(!updating); });
     connect(m_gameSelector, &GameSelectorWidget::gameChanged,
             m_session, &SessionController::switchToGame);
     connect(m_profileSelector, &ProfileSelectorWidget::profileChanged,
@@ -337,6 +366,8 @@ void MainWindow::wireConnections()
             [this](const GameInfo&) { updateTransferActionsEnabled(); });
     connect(m_session, &SessionController::activeGameChanged,
             this, &MainWindow::applyGameCapabilities);
+    connect(m_session, &SessionController::activeGameChanged,
+            m_smapiConsent, &SmapiOnlineConsent::activeGameChanged);
     connect(m_session, &SessionController::activeGameChanged,
             m_modLoader, &ModLoaderController::onActiveGameChanged);
     connect(m_session, &SessionController::activeGameChanged,
@@ -439,6 +470,16 @@ void MainWindow::dropEvent(QDropEvent* event)
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
+    if (m_closeState == CloseState::StoppingUpdate) {
+        event->ignore();
+        return;
+    }
+    if (m_closeState == CloseState::Approved) {
+        QMainWindow::closeEvent(event);
+        if (event->isAccepted())
+            QSettings().setValue("mainWindow/geometry", saveGeometry());
+        return;
+    }
     const bool daemonStopsOnExit = m_daemonOwned ||
         (qgetenv("GORGANIZER_SUPERVISED") == "1" && qgetenv("GORGANIZER_DAEMON_OWNED") == "1");
     const QString loaderOperation = m_modLoader ? m_modLoader->interruptibleOperation() : QString();
@@ -463,6 +504,9 @@ void MainWindow::closeEvent(QCloseEvent* event)
                                          "Quitting may interrupt them. Keep Gorganizer open until they finish.\n\n%2")
                               .arg(m_installs->pendingCount()).arg(consequence));
     }
+    const bool updateRunning = m_update && m_update->updating();
+    if (updateRunning)
+        paragraphs.append(m_update->updateCloseParagraph());
     const bool interrupted = !paragraphs.isEmpty();
     if (m_grpc->isConnected()) {
         std::vector<GrpcShutdownPlanItem> items;
@@ -519,13 +563,24 @@ void MainWindow::closeEvent(QCloseEvent* event)
                 settings.setValue(QStringLiteral("shutdown/hideRetentionNotice"), true);
         }
     } else {
-        const QString title = loaderOperation.isEmpty() ? QStringLiteral("Mod Install Running")
-                                                        : QStringLiteral("SMAPI Operation Running");
+        const QString title = updateRunning ? QStringLiteral("Gorganizer Is Busy")
+            : loaderOperation.isEmpty() ? QStringLiteral("Mod Install Running")
+                                        : QStringLiteral("SMAPI Operation Running");
         const QString text = paragraphs.join(QStringLiteral("\n\n")) + QStringLiteral("\n\nQuit anyway?");
         if (!dialogs::plainConfirm(this, title, text, QMessageBox::Warning, QMessageBox::No)) {
             event->ignore();
             return;
         }
+    }
+    if (updateRunning && m_update->updating()) {
+        event->ignore();
+        m_closeState = CloseState::StoppingUpdate;
+        m_update->stopUpdateThen([this] {
+            m_closeState = CloseState::Approved;
+            if (!close())
+                m_closeState = CloseState::Normal;
+        });
+        return;
     }
     QMainWindow::closeEvent(event);
     if (event->isAccepted())
@@ -860,7 +915,11 @@ void MainWindow::onOpenSettings()
             this, [this](bool on) {
                 if (m_modList) m_modList->applyCollapsedSeparatorView(on);
             });
+    connect(&dlg, &SettingsDialog::smapiOnlineChecksChanged,
+            m_smapiConsent, &SmapiOnlineConsent::preferenceChanged);
     dlg.exec();
+    m_update->preferenceChanged();
+    m_smapiConsent->preferenceChanged();
     if (m_themeActions) {
         QString current = ThemeManager::canonicalThemeName(m_config.preferredStyle());
         for (auto* a : m_themeActions->actions())

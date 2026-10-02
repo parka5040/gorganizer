@@ -96,7 +96,7 @@ for name in gorganizerd gorganizerctl; do
     go build -trimpath -buildvcs=false -ldflags "$ldflags" -o "$bundle/bin/$name" "./cmd/$name"
 done
 cmake -S . -B "$work/gui" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-    -DGORGANIZER_RELEASE=ON -DCMAKE_PREFIX_PATH="$qt_root;/opt/grpc" \
+    -DGORGANIZER_RELEASE=ON -DGORGANIZER_VERSION="$version" -DCMAKE_PREFIX_PATH="$qt_root;/opt/grpc" \
     -DProtobuf_DIR=/opt/grpc/lib/cmake/protobuf \
     -DgRPC_DIR=/opt/grpc/lib/cmake/grpc -DPROTOC=/opt/grpc/bin/protoc \
     -DgRPC_CPP_PLUGIN=/opt/grpc/bin/grpc_cpp_plugin \

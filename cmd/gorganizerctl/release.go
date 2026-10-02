@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/parka/gorganizer/internal/atomicfile"
 	"github.com/parka/gorganizer/internal/config"
@@ -33,21 +35,28 @@ func runRelease(args []string) int {
 // runReleaseWith executes release commands with injectable local dependencies.
 func runReleaseWith(args []string, deps releaseDeps) int {
 	if len(args) == 0 {
-		fmt.Fprintln(deps.errOut, "Choose release install, update, rollback or status.")
+		fmt.Fprintln(deps.errOut, "Choose release install, update, rollback, status or config.")
 		return 2
 	}
 	command := args[0]
-	if command != "install" && command != "update" && command != "rollback" && command != "status" {
-		fmt.Fprintln(deps.errOut, "Choose release install, update, rollback or status.")
+	if command != "install" && command != "update" && command != "rollback" && command != "status" && command != "config" {
+		fmt.Fprintln(deps.errOut, "Choose release install, update, rollback, status or config.")
 		return 2
 	}
 	fs := flag.NewFlagSet("release "+command, flag.ContinueOnError)
 	fs.SetOutput(deps.errOut)
 	from := fs.String("from", "", "folder containing an extracted release")
 	tag := fs.String("tag", "", "release tag")
-	if fs.Parse(args[1:]) != nil || fs.NArg() != 0 || ((command == "rollback" || command == "status") && (*from != "" || *tag != "")) || (*from != "" && (*tag != "" || command != "install")) {
+	if fs.Parse(args[1:]) != nil || fs.NArg() != 0 || ((command == "rollback" || command == "status" || command == "config") && (*from != "" || *tag != "")) || (*from != "" && (*tag != "" || command != "install")) {
 		fmt.Fprintln(deps.errOut, "Check the release command options and try again.")
 		return 2
+	}
+	if command == "config" {
+		if err := release.DescribeConfig(deps.out); err != nil {
+			fmt.Fprintf(deps.errOut, "Could not describe release configuration: %v\n", err)
+			return 1
+		}
+		return 0
 	}
 	manager := deps.manager
 	if manager == nil {
@@ -55,6 +64,11 @@ func runReleaseWith(args []string, deps releaseDeps) int {
 		return 1
 	}
 	ctx := context.Background()
+	if command != "status" {
+		var stop context.CancelFunc
+		ctx, stop = signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+	}
 	var version string
 	var err error
 	switch command {
@@ -78,7 +92,7 @@ func runReleaseWith(args []string, deps releaseDeps) int {
 		} else {
 			if *tag != "" {
 				var state release.Status
-				state, err = manager.Status()
+				state, err = manager.StatusContext(ctx)
 				if err == nil {
 					var cmp int
 					cmp, err = release.Compare(strings.TrimPrefix(*tag, "v"), state.Current)

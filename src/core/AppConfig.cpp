@@ -159,6 +159,48 @@ bool AppConfig::collapsedSeparatorView() const
     return m_settings.value("ui/collapsedSeparatorView", false).toBool();
 }
 
+std::optional<bool> AppConfig::updateCheckAtStartup() const
+{
+    if (!m_settings.contains("updates/checkAtStartup"))
+        return std::nullopt;
+    return m_settings.value("updates/checkAtStartup").toBool();
+}
+
+bool AppConfig::setUpdateCheckAtStartup(bool on)
+{
+    const auto previous = updateCheckAtStartup();
+    m_settings.setValue("updates/checkAtStartup", on);
+    m_settings.sync();
+    if (m_settings.status() == QSettings::NoError)
+        return true;
+    if (previous)
+        m_settings.setValue("updates/checkAtStartup", *previous);
+    else
+        m_settings.remove("updates/checkAtStartup");
+    return false;
+}
+
+std::optional<bool> AppConfig::smapiOnlineChecks() const
+{
+    if (!m_settings.contains("smapi/onlineChecks"))
+        return std::nullopt;
+    return m_settings.value("smapi/onlineChecks").toBool();
+}
+
+bool AppConfig::setSmapiOnlineChecks(bool on)
+{
+    const auto previous = smapiOnlineChecks();
+    m_settings.setValue("smapi/onlineChecks", on);
+    m_settings.sync();
+    if (m_settings.status() == QSettings::NoError)
+        return true;
+    if (previous)
+        m_settings.setValue("smapi/onlineChecks", *previous);
+    else
+        m_settings.remove("smapi/onlineChecks");
+    return false;
+}
+
 void AppConfig::setLastProfileFor(const QString& gameShortName, const QString& profileName)
 {
     if (gameShortName.isEmpty() || profileName.isEmpty())

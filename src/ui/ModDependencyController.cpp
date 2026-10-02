@@ -8,6 +8,7 @@
 #include "ModDependencyText.h"
 #include "ModListWidget.h"
 #include "SessionController.h"
+#include "SmapiOnlineConsent.h"
 #include "SmapiModsWidget.h"
 #include "SafeLinks.h"
 
@@ -64,11 +65,13 @@ bool askPlain(QWidget* parent, const QString& title, const QString& text, const 
 }
 
 ModDependencyController::ModDependencyController(GrpcClient* grpc, SessionController* session,
-                                                 ModListWidget* modList, SmapiModsWidget* smapiMods,
-                                                 QStatusBar* statusBar, QWidget* parentWindow)
+                                                 SmapiOnlineConsent* consent, ModListWidget* modList,
+                                                 SmapiModsWidget* smapiMods, QStatusBar* statusBar,
+                                                 QWidget* parentWindow)
     : QObject(parentWindow)
     , m_grpc(grpc)
     , m_session(session)
+    , m_consent(consent)
     , m_modList(modList)
     , m_smapiMods(smapiMods)
     , m_statusBar(statusBar)
@@ -121,6 +124,12 @@ ModDependencyController::ModDependencyController(GrpcClient* grpc, SessionContro
             &ModDependencyController::onWaitingEnablesRequested);
     connect(m_smapiMods, &SmapiModsWidget::retryFetchRequested, this,
             &ModDependencyController::onRetryFetchRequested, Qt::QueuedConnection);
+    m_smapiMods->setOnlineChecksHint(!m_consent->allowed());
+    connect(m_consent, &SmapiOnlineConsent::onlineChecksChanged, this, [this](bool allowed) {
+        m_smapiMods->setOnlineChecksHint(!allowed);
+        if (allowed)
+            scheduleRefresh(RefreshMode::RemoteIfStale);
+    });
 }
 
 bool ModDependencyController::active() const
@@ -145,6 +154,8 @@ void ModDependencyController::syncContext()
         return;
     m_contextKey = key;
     ++m_generation;
+    m_pendingMode = RefreshMode::None;
+    m_heldModes.clear();
     m_report.reset();
     m_job.reset();
     m_reportDuringJob = false;
@@ -178,6 +189,8 @@ void ModDependencyController::scheduleRefresh(RefreshMode mode, int delayMs)
 {
     if (!active())
         return;
+    if (!m_consent->allowed() && mode != RefreshMode::Force)
+        mode = RefreshMode::Offline;
     m_pendingMode = std::max(m_pendingMode, mode);
     m_refreshTimer->start(delayMs < 0 ? kRefreshDebounceMs : delayMs);
 }
@@ -217,16 +230,15 @@ void ModDependencyController::requestReport(RefreshMode mode)
     if (inFlight && flight.value() == m_generation)
         return;
     const bool remote = !inFlight
-        && (mode == RefreshMode::Remote || mode == RefreshMode::Force
-            || (mode == RefreshMode::RemoteIfStale && remoteStale(gameId)));
+        && (mode == RefreshMode::Force || (m_consent->allowed()
+            && (mode == RefreshMode::Remote || (mode == RefreshMode::RemoteIfStale && remoteStale(gameId)))));
     const bool force = remote && mode == RefreshMode::Force;
 
-    const quint64 requestId = m_grpc->getModDependencyReport(gameId, profile, remote, force);
-    m_reportRequests.insert(requestId,
-                            ReportRequest{gameId, profile, m_generation, remote, m_remoteAttemptAt.value(gameId)});
+    const quint64 requestId = m_grpc->getModDependencyReport(gameId, profile, remote, force,
+                                                             mode != RefreshMode::Force);
+    m_reportRequests.insert(requestId, ReportRequest{gameId, profile, m_generation, remote});
     if (remote) {
         m_remoteInFlight.insert(gameId, m_generation);
-        m_remoteAttemptAt.insert(gameId, QDateTime::currentDateTimeUtc());
         publishRemoteState();
     }
 }
@@ -257,15 +269,14 @@ void ModDependencyController::onReportReceived(quint64 requestId, const GrpcModD
     if (request.remote) {
         m_remoteInFlight.remove(request.gameId);
         if (report.remoteChecked && applicable) {
-            m_remoteCheckedAt.insert(request.gameId, QDateTime::currentDateTimeUtc());
+            const QDateTime now = QDateTime::currentDateTimeUtc();
+            m_remoteAttemptAt.insert(request.gameId, now);
+            m_remoteCheckedAt.insert(request.gameId, now);
             m_remoteError.remove(request.gameId);
         } else if (report.remoteChecked) {
             dropped = true;
-            if (request.previousAttempt.isValid())
-                m_remoteAttemptAt.insert(request.gameId, request.previousAttempt);
-            else
-                m_remoteAttemptAt.remove(request.gameId);
         } else if (!report.remoteError.isEmpty()) {
+            m_remoteAttemptAt.insert(request.gameId, QDateTime::currentDateTimeUtc());
             m_remoteError.insert(request.gameId, errorSummary("check SMAPI mod requirements", report.remoteError));
         }
         publishRemoteState();

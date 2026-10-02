@@ -40,6 +40,7 @@ type Daemon struct {
 	*TransferService
 	*ModLoaderService
 	*ModDependencyService
+	*updateServiceEmbedding
 }
 
 // RetryDeferredRecovery attempts an immediate deferred recovery through the VFS service.
@@ -127,25 +128,27 @@ func newWithClockAndVersion(cfg *config.Config, now func() time.Time, version st
 		transfer:  &TransferService{s: s},
 		modLoader: newModLoaderService(s),
 		modDeps:   newModDependencyService(s),
+		update:    newUpdateService(s),
 	}
 	d := &Daemon{
-		session:              s,
-		GameService:          s.svc.game,
-		ProfileService:       s.svc.profiles,
-		VFSService:           s.svc.vfs,
-		ModService:           s.svc.mods,
-		ArchiveService:       s.svc.archives,
-		InstallService:       s.svc.install,
-		LaunchService:        s.svc.launch,
-		SettingsService:      s.svc.settings,
-		IniService:           s.svc.ini,
-		ExecutableService:    s.svc.execs,
-		TTWService:           s.svc.ttw,
-		PluginStatusService:  s.svc.plugins,
-		FNV4GBService:        s.svc.fnv4gb,
-		TransferService:      s.svc.transfer,
-		ModLoaderService:     s.svc.modLoader,
-		ModDependencyService: s.svc.modDeps,
+		session:                s,
+		GameService:            s.svc.game,
+		ProfileService:         s.svc.profiles,
+		VFSService:             s.svc.vfs,
+		ModService:             s.svc.mods,
+		ArchiveService:         s.svc.archives,
+		InstallService:         s.svc.install,
+		LaunchService:          s.svc.launch,
+		SettingsService:        s.svc.settings,
+		IniService:             s.svc.ini,
+		ExecutableService:      s.svc.execs,
+		TTWService:             s.svc.ttw,
+		PluginStatusService:    s.svc.plugins,
+		FNV4GBService:          s.svc.fnv4gb,
+		TransferService:        s.svc.transfer,
+		ModLoaderService:       s.svc.modLoader,
+		ModDependencyService:   s.svc.modDeps,
+		updateServiceEmbedding: &updateServiceEmbedding{UpdateService: s.svc.update},
 	}
 	if status, statusErr := s.lootInstaller.Status(); statusErr == nil && status.Installed {
 		if syncErr := s.svc.execs.syncManagedLOOT(status); syncErr != nil {

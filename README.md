@@ -14,7 +14,7 @@ On x86_64 SteamOS, Bazzite, Debian, Ubuntu, Fedora, or Arch, open a terminal and
 curl -fsSL https://github.com/parka5040/gorganizer/releases/latest/download/install.sh | sh
 ```
 
-Run it as your normal user, not with `sudo`. The script downloads the latest release, checks it against the release's SHA-256 checksums, and installs it into `~/.local/share/gorganizer/releases`. It adds an application-menu entry and an `nxm://` handler for Nexus Mods links. Installation does **not** open the window; open **Gorganizer** from your application menu.
+Run it as your normal user, not with `sudo`. The script downloads the latest release, checks it against the release's SHA-256 checksums, and installs it into `~/.local/share/gorganizer/releases`. Later updates are also signature-checked; see [Update or uninstall](#update-or-uninstall). It adds an application-menu entry and an `nxm://` handler for Nexus Mods links. Installation does **not** open the window; open **Gorganizer** from your application menu.
 
 To install a specific version, add it after `sh -s --`, for example `... | sh -s -- v0.1.0`. To read the script before running it:
 
@@ -111,7 +111,17 @@ Do not edit files directly in the game's `Data` folder while mods are active. A 
 
 ## Update or uninstall
 
-If you used the prebuilt download, run `~/.local/share/gorganizer/releases/current/gorganizer.sh update` to install the latest release. It checks the download the same way as the first install and does not stop a running Gorganizer session; close and reopen Gorganizer to use the new version. To go back to the version you had before, run `~/.local/share/gorganizer/releases/current/bin/gorganizerctl release rollback`. To uninstall, run the same `gorganizer.sh` with `uninstall` as described below; with `--purge`, it also removes the downloaded versions.
+### Checking for updates
+
+The first time you open this version, Gorganizer asks whether it may check for updates each time it starts. A check only asks GitHub which Gorganizer release is newest; no game or mod information is sent. You can change your answer in **Tools → Settings...**, and you can always check by hand with **Help → Check for Gorganizer Updates…**. If you are offline, Gorganizer tells you it could not check, and nothing else happens. SMAPI update checks for Stardew Valley are separate; see [Stardew Valley and SMAPI](#stardew-valley-and-smapi).
+
+If a newer release exists and you used the prebuilt download, choose **Update Now**. Gorganizer runs the same `gorganizer.sh update` command described below, so it needs no terminal and no password, and your mods, profiles and settings are kept. When it finishes, close and reopen Gorganizer to use the new version. **Cancel** stops the update; your current version stays selected unless the update had already finished. If you built from source, the notice offers the update command to copy instead.
+
+### Updating from a terminal
+
+If you used the prebuilt download, run `~/.local/share/gorganizer/releases/current/gorganizer.sh update` to install the latest release, or add `--tag vX.Y.Z` to choose a version. Releases are signed: before it downloads or runs anything, the updater checks the release's signature with the key built into your installed Gorganizer, and it refuses a release that is not signed or does not match. It never installs an older version over a newer one, and it does not stop a running Gorganizer session; close and reopen Gorganizer to use the new version.
+
+The first install (the `curl … | sh` command, or running `install.sh` again) cannot check a signature, because no Gorganizer is installed yet to check it; it relies on HTTPS and the release checksums. Gorganizer 0.1.0 predates signing, so the update from 0.1.0 to the next release is checked only against its checksums. Every update after that is signature-checked. To go back to the version you had before, run `~/.local/share/gorganizer/releases/current/bin/gorganizerctl release rollback`. To uninstall, run the same `gorganizer.sh` with `uninstall` as described below; with `--purge`, it also removes the downloaded versions.
 
 If you built from source, run `./gorganizer.sh update` from the folder you cloned to fetch updates from this checkout's configured branch, rebuild, and refresh the menu entry. It refuses if you have uncommitted changes, no configured update source, or local commits that are not in that source. It does not stop a running Gorganizer session. Close and reopen Gorganizer to use an installed update; `--restart` only prints a reminder to reopen it.
 
@@ -130,6 +140,8 @@ If uninstall warns that mods are still inside the cloned folder, follow the move
 ## Stardew Valley and SMAPI
 
 SMAPI is the mod loader used by Stardew Valley mods. Gorganizer supports the native Linux Steam build only. With Stardew Valley selected, use **Tools → SMAPI → Install SMAPI…** to download the official release and install it. Gorganizer checks its published SHA-256 checksum and runs the installer on a private copy of the game before applying the result. If a Steam update replaces SMAPI's launcher, choose **Tools → SMAPI → Repair SMAPI…** to reuse the saved installer. **Tools → SMAPI → Uninstall SMAPI…** removes the loader but keeps your mod folders.
+
+The first time you select a Stardew Valley game that uses SMAPI, Gorganizer asks separately whether it may check online for SMAPI and mod updates. If you agree, it checks GitHub for new SMAPI releases and asks smapi.io about your SMAPI mods; smapi.io receives your SMAPI mod list (mod IDs and versions) and your SMAPI and game versions. If you decline, the **SMAPI** tab uses the information it already has, and **Check for Updates** on that tab, **Tools → SMAPI → Check for SMAPI Updates** and **Fetch Missing** still go online when you click them. You can change your answer in **Tools → Settings...**.
 
 SMAPI mod folders stay together when you install an archive. The **SMAPI** tab shows mod dependencies and can check smapi.io for updates. **Fetch Missing** downloads missing dependencies with Nexus Premium, or opens their Nexus pages so you can choose **Mod Manager Download**. New files created by mods while you play are kept in **Overwrite**.
 
