@@ -1,6 +1,8 @@
 add_library(gorganizer_ui STATIC
     MainWindow.cpp
     NoticeBar.cpp
+    SmapiOnlineConsent.cpp
+    SmapiOnlineConsent.h
     UpdateController.cpp
     WindowFit.cpp
     ArchiveDrop.cpp

@@ -16,6 +16,7 @@
 #include "GameSetupController.h"
 #include "ModLoaderController.h"
 #include "UpdateController.h"
+#include "SmapiOnlineConsent.h"
 #include "NoticeBar.h"
 #include "ModDependencyController.h"
 #include "SteamMaintenanceController.h"
@@ -212,6 +213,9 @@ void MainWindow::setupUi()
     m_centralLayout->setSpacing(0);
     m_notice = new NoticeBar(central);
     m_centralLayout->insertWidget(0, m_notice);
+    auto* smapiNotice = new NoticeBar(central);
+    m_centralLayout->insertWidget(1, smapiNotice);
+    m_smapiConsent = new SmapiOnlineConsent(m_config, smapiNotice, this);
 
     auto* vsplit = new QSplitter(Qt::Vertical);
 
@@ -281,7 +285,7 @@ void MainWindow::createControllers()
     m_session = new SessionController(m_config, m_grpc, m_gameSelector, m_profileSelector,
                                       m_modList, m_pluginList, m_downloadsLibrary, m_runButton,
                                       m_applyButton, m_unmountAction, m_statusInfo, statusBar(), this);
-    m_modLoader = new ModLoaderController(m_grpc, m_session, m_smapiMenu, statusBar(), this);
+    m_modLoader = new ModLoaderController(m_grpc, m_session, m_smapiConsent, m_smapiMenu, statusBar(), this);
     const bool daemonStopsOnExit = m_daemonOwned ||
         (qgetenv("GORGANIZER_SUPERVISED") == "1" && qgetenv("GORGANIZER_DAEMON_OWNED") == "1");
     m_update = new UpdateController(m_grpc, m_config, m_notice, this, daemonStopsOnExit);
@@ -292,8 +296,8 @@ void MainWindow::createControllers()
                                                 statusBar(), this);
     m_gameSetup = new GameSetupController(m_config, m_grpc, m_session, m_modList,
                                           m_installTtwAction, statusBar(), this);
-    m_modDependencies = new ModDependencyController(m_grpc, m_session, m_modList, m_smapiMods,
-                                                    statusBar(), this);
+    m_modDependencies = new ModDependencyController(m_grpc, m_session, m_smapiConsent, m_modList,
+                                                    m_smapiMods, statusBar(), this);
 }
 
 // Wires widget signals to controllers, controller cross-links, and window-level daemon status handling.
@@ -359,6 +363,8 @@ void MainWindow::wireConnections()
             [this](const GameInfo&) { updateTransferActionsEnabled(); });
     connect(m_session, &SessionController::activeGameChanged,
             this, &MainWindow::applyGameCapabilities);
+    connect(m_session, &SessionController::activeGameChanged,
+            m_smapiConsent, &SmapiOnlineConsent::activeGameChanged);
     connect(m_session, &SessionController::activeGameChanged,
             m_modLoader, &ModLoaderController::onActiveGameChanged);
     connect(m_session, &SessionController::activeGameChanged,
@@ -908,6 +914,7 @@ void MainWindow::onOpenSettings()
             });
     dlg.exec();
     m_update->preferenceChanged();
+    m_smapiConsent->preferenceChanged();
     if (m_themeActions) {
         QString current = ThemeManager::canonicalThemeName(m_config.preferredStyle());
         for (auto* a : m_themeActions->actions())

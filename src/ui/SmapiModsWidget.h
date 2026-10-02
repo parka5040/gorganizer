@@ -27,6 +27,8 @@ public:
     void setReportError(const QString& error);
     // Shows when smapi.io was last reached for the game and the last online-check failure, if any.
     void setRemoteState(const QDateTime& lastChecked, const QString& lastError, bool checking);
+    // Shows the offline hint while automatic online checks are disabled.
+    void setOnlineChecksHint(bool off);
     // Disables the fetch and enable actions while one of them is running.
     void setActionsBusy(bool busy);
     // Lists downloaded dependencies whose automatic enable gave up, one line each, hiding the section when empty.
@@ -57,6 +59,7 @@ private:
     QTreeView* m_view = nullptr;
     QLabel* m_versionLabel = nullptr;
     QLabel* m_remoteLabel = nullptr;
+    QLabel* m_onlineChecksHint = nullptr;
     QLabel* m_rootManifestLabel = nullptr;
     QLabel* m_errorLabel = nullptr;
     QLabel* m_summaryLabel = nullptr;

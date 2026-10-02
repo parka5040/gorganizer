@@ -70,6 +70,16 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
     m_updateStatus->setWordWrap(true);
     form->addRow("", m_updateStatus);
 
+    m_smapiOnlineCheck = new QCheckBox(
+        "Check online for SMAPI and Stardew Valley mod updates (contacts GitHub and smapi.io)");
+    if (m_config)
+        m_smapiOnlineCheck->setChecked(m_config->smapiOnlineChecks().value_or(false));
+    connect(m_smapiOnlineCheck, &QCheckBox::toggled, this, &SettingsDialog::onSmapiOnlineCheckToggled);
+    form->addRow("", m_smapiOnlineCheck);
+    m_smapiOnlineStatus = new QLabel;
+    m_smapiOnlineStatus->setWordWrap(true);
+    form->addRow("", m_smapiOnlineStatus);
+
     m_apiKeyEdit = new QLineEdit;
     m_apiKeyEdit->setPlaceholderText("Paste your Nexus Mods API key here");
     m_apiKeyEdit->setEchoMode(QLineEdit::Password);
@@ -433,6 +443,19 @@ void SettingsDialog::onUpdateCheckToggled(bool on)
     m_updateStatus->setText(QStringLiteral("Gorganizer could not save this setting. It will ask again next time."));
     const QSignalBlocker blocker(m_updateCheck);
     m_updateCheck->setChecked(m_config->updateCheckAtStartup().value_or(false));
+}
+
+void SettingsDialog::onSmapiOnlineCheckToggled(bool on)
+{
+    if (!m_config)
+        return;
+    if (m_config->setSmapiOnlineChecks(on)) {
+        m_smapiOnlineStatus->clear();
+        return;
+    }
+    m_smapiOnlineStatus->setText(QStringLiteral("Gorganizer could not save this setting. It will ask again next time."));
+    const QSignalBlocker blocker(m_smapiOnlineCheck);
+    m_smapiOnlineCheck->setChecked(m_config->smapiOnlineChecks().value_or(false));
 }
 
 }

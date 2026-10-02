@@ -43,6 +43,10 @@ public:
     std::optional<bool> updateCheckAtStartup() const;
     // Saves whether Gorganizer checks for updates at startup.
     bool setUpdateCheckAtStartup(bool on);
+    // Returns the automatic SMAPI online-check preference, or no value before the user chooses.
+    std::optional<bool> smapiOnlineChecks() const;
+    // Saves whether SMAPI checks for releases and mod updates automatically.
+    bool setSmapiOnlineChecks(bool on);
 
     void setLastProfileFor(const QString& gameShortName, const QString& profileName);
     QString lastProfileFor(const QString& gameShortName) const;

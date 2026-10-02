@@ -5,6 +5,7 @@
 #include "ErrorPresenter.h"
 #include "ModLoaderProgressDialog.h"
 #include "SessionController.h"
+#include "SmapiOnlineConsent.h"
 
 #include <QAction>
 #include <QMenu>
@@ -57,11 +58,12 @@ QString capped(const QString& text)
 
 }
 
-ModLoaderController::ModLoaderController(GrpcClient* grpc, SessionController* session, QMenu* menu,
-                                         QStatusBar* statusBar, QWidget* parentWindow)
+ModLoaderController::ModLoaderController(GrpcClient* grpc, SessionController* session, SmapiOnlineConsent* consent,
+                                         QMenu* menu, QStatusBar* statusBar, QWidget* parentWindow)
     : QObject(parentWindow)
     , m_grpc(grpc)
     , m_session(session)
+    , m_consent(consent)
     , m_menu(menu)
     , m_statusBar(statusBar)
     , m_parentWindow(parentWindow)
@@ -104,6 +106,10 @@ ModLoaderController::ModLoaderController(GrpcClient* grpc, SessionController* se
     connect(m_grpc, &GrpcClient::daemonInfo, this, &ModLoaderController::onDaemonInfo);
     connect(m_grpc, &GrpcClient::connected, this, &ModLoaderController::onConnected);
     connect(m_grpc, &GrpcClient::disconnected, this, &ModLoaderController::onDisconnected);
+    connect(m_consent, &SmapiOnlineConsent::onlineChecksChanged, this, [this](bool allowed) {
+        if (allowed && managesSmapi(m_game))
+            scheduleLatestCheck(m_game.shortName);
+    });
 }
 
 QString ModLoaderController::interruptibleOperation() const
@@ -133,7 +139,7 @@ void ModLoaderController::onActiveGameChanged(const GameInfo& game)
 
 void ModLoaderController::scheduleLatestCheck(const QString& gameId)
 {
-    if (m_latestChecked.contains(gameId) || !m_grpc->isConnected())
+    if (!m_consent->allowed() || m_latestChecked.contains(gameId) || !m_grpc->isConnected())
         return;
     m_latestChecked.insert(gameId);
     m_autoCheckIds.insert(requestStatus(gameId, true));

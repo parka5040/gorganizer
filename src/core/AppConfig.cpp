@@ -180,6 +180,27 @@ bool AppConfig::setUpdateCheckAtStartup(bool on)
     return false;
 }
 
+std::optional<bool> AppConfig::smapiOnlineChecks() const
+{
+    if (!m_settings.contains("smapi/onlineChecks"))
+        return std::nullopt;
+    return m_settings.value("smapi/onlineChecks").toBool();
+}
+
+bool AppConfig::setSmapiOnlineChecks(bool on)
+{
+    const auto previous = smapiOnlineChecks();
+    m_settings.setValue("smapi/onlineChecks", on);
+    m_settings.sync();
+    if (m_settings.status() == QSettings::NoError)
+        return true;
+    if (previous)
+        m_settings.setValue("smapi/onlineChecks", *previous);
+    else
+        m_settings.remove("smapi/onlineChecks");
+    return false;
+}
+
 void AppConfig::setLastProfileFor(const QString& gameShortName, const QString& profileName)
 {
     if (gameShortName.isEmpty() || profileName.isEmpty())
