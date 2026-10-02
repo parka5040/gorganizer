@@ -196,6 +196,8 @@ public:
     void cancelTransfer();
     bool transferActive() const { return m_transferActive; }
 
+    // Queues a Gorganizer update check on the update worker and returns its request id.
+    quint64 checkForUpdate(const QString& runningVersion);
     // Queues a mod-loader status query and returns the id its modLoaderStatus* signals carry; latest-release checks run on the mod-loader status worker, others on the unary worker.
     quint64 getModLoaderStatus(const QString& gameId, bool checkLatest);
     // Queues a mod-loader status query without a latest-release check on the mod-loader status worker and returns the id its modLoaderStatus* signals carry.
@@ -343,6 +345,10 @@ signals:
     void transferCompleted(const GrpcTransferSummary& summary);
     void transferFailed(const QString& error, int grpcCode);
 
+    // Reports the response to an update check.
+    void updateCheckFinished(quint64 requestId, const GrpcUpdateCheck& result);
+    // Reports a failed update check with its gRPC status code.
+    void updateCheckFailed(quint64 requestId, const QString& error, int grpcCode);
     void modLoaderStatusReceived(quint64 requestId, const QString& gameId, const GrpcModLoaderStatus& status);
     void modLoaderStatusFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     void modLoaderOperationFinished(quint64 requestId, const QString& gameId, const QString& operation,
@@ -404,6 +410,7 @@ private:
         RoleDependencyRpc,
         RoleModLoaderRpc,
         RoleModLoaderStatus,
+        RoleUpdateRpc,
         RoleCount,
     };
 
@@ -421,6 +428,7 @@ private:
         {nullptr, nullptr, "dependency-rpc"},
         {nullptr, nullptr, "modloader-rpc"},
         {nullptr, nullptr, "modloader-status"},
+        {nullptr, nullptr, "update-rpc"},
     }};
     QTimer* m_connectionTimer = nullptr;
     bool m_connected = false;
@@ -431,6 +439,7 @@ private:
     quint64 m_nextInstallStatusRequestId = 0;
     quint64 m_nextModActionRequestId = 0;
     quint64 m_nextModLoaderRequestId = 0;
+    quint64 m_nextUpdateRequestId = 0;
     quint64 m_nextModListRequestId = 0;
     quint64 m_nextIniRequestId = 0;
     quint64 m_nextDependencyRequestId = 0;
@@ -461,6 +470,8 @@ private:
     GrpcWorker* dependencyRpcWorker() const { return m_workers[RoleDependencyRpc].worker; }
     GrpcWorker* modLoaderRpcWorker() const { return m_workers[RoleModLoaderRpc].worker; }
     GrpcWorker* modLoaderStatusWorker() const { return m_workers[RoleModLoaderStatus].worker; }
+    // Returns the worker dedicated to application update checks.
+    GrpcWorker* updateRpcWorker() const { return m_workers[RoleUpdateRpc].worker; }
 
     std::string socketTarget() const;
     void connectWorkerSignals(GrpcWorker* worker);

@@ -159,6 +159,19 @@ bool AppConfig::collapsedSeparatorView() const
     return m_settings.value("ui/collapsedSeparatorView", false).toBool();
 }
 
+std::optional<bool> AppConfig::updateCheckAtStartup() const
+{
+    if (!m_settings.contains("updates/checkAtStartup"))
+        return std::nullopt;
+    return m_settings.value("updates/checkAtStartup").toBool();
+}
+
+void AppConfig::setUpdateCheckAtStartup(bool on)
+{
+    m_settings.setValue("updates/checkAtStartup", on);
+    m_settings.sync();
+}
+
 void AppConfig::setLastProfileFor(const QString& gameShortName, const QString& profileName)
 {
     if (gameShortName.isEmpty() || profileName.isEmpty())

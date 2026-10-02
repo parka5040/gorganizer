@@ -11,14 +11,14 @@ namespace gorganizer {
 
 enum class ModLoaderKind { None = 0, Smapi = 1 };
 
-enum class InstallLayout { Unspecified = 0, DataRoot = 1, SmapiManifest = 2 };
+enum class GameInstallLayout { Unspecified = 0, DataRoot = 1, SmapiManifest = 2 };
 
 struct GameCapabilities {
     bool plugins = true;
     bool ini = true;
     bool loot = true;
     ModLoaderKind modLoader = ModLoaderKind::None;
-    InstallLayout installLayout = InstallLayout::DataRoot;
+    GameInstallLayout installLayout = GameInstallLayout::DataRoot;
     bool manifestDependencies = false;
 };
 
