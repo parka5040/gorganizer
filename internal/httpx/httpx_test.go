@@ -1,9 +1,11 @@
 package httpx
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -81,5 +83,41 @@ func TestNewClientLeavesZeroTimeoutUnset(t *testing.T) {
 	client := NewClient(Options{})
 	if client.Timeout != 0 {
 		t.Fatalf("Timeout = %v, want 0", client.Timeout)
+	}
+}
+
+// TestAllowOriginChecksInitialAndRedirectedRequests rejects disallowed origins before sending.
+func TestAllowOriginChecksInitialAndRedirectedRequests(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Path == "/redirect" {
+			http.Redirect(w, r, r.URL.Query().Get("to"), http.StatusFound)
+			return
+		}
+		io.WriteString(w, "ok")
+	}))
+	defer server.Close()
+	client := NewClient(Options{AllowOrigin: func(u *url.URL) error {
+		if u.Host == strings.TrimPrefix(server.URL, "http://") && u.User == nil {
+			return nil
+		}
+		return fmt.Errorf("disallowed origin")
+	}})
+	if _, err := client.Get("http://outside.invalid/path"); err == nil || calls != 0 {
+		t.Fatalf("initial origin reached transport: %d: %v", calls, err)
+	}
+	for i, destination := range []string{"http://outside.invalid/", "http://" + strings.Split(strings.TrimPrefix(server.URL, "http://"), ":")[0] + ":444/", "http://user@" + strings.TrimPrefix(server.URL, "http://") + "/"} {
+		if _, err := client.Get(server.URL + "/redirect?to=" + url.QueryEscape(destination)); err == nil || calls != i+1 {
+			t.Fatalf("redirect to %s reached transport: %d: %v", destination, calls, err)
+		}
+	}
+	response, err := client.Get(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if calls != 4 {
+		t.Fatalf("allowed origin not reached: %d", calls)
 	}
 }
