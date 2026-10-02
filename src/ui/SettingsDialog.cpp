@@ -60,6 +60,12 @@ SettingsDialog::SettingsDialog(GrpcClient* grpc, AppConfig* config, QWidget* par
             this, &SettingsDialog::onCollapsedSeparatorViewToggled);
     form->addRow("Mod list:", m_collapseViewsCheck);
 
+    m_updateCheck = new QCheckBox("Check for Gorganizer updates when it starts (contacts GitHub)");
+    if (m_config)
+        m_updateCheck->setChecked(m_config->updateCheckAtStartup().value_or(false));
+    connect(m_updateCheck, &QCheckBox::toggled, this, &SettingsDialog::onUpdateCheckToggled);
+    form->addRow("Updates:", m_updateCheck);
+
     m_apiKeyEdit = new QLineEdit;
     m_apiKeyEdit->setPlaceholderText("Paste your Nexus Mods API key here");
     m_apiKeyEdit->setEchoMode(QLineEdit::Password);
@@ -410,6 +416,12 @@ void SettingsDialog::onCollapsedSeparatorViewToggled(bool on)
     if (m_config)
         m_config->setCollapsedSeparatorView(on);
     emit collapsedSeparatorViewChanged(on);
+}
+
+void SettingsDialog::onUpdateCheckToggled(bool on)
+{
+    if (m_config)
+        m_config->setUpdateCheckAtStartup(on);
 }
 
 }

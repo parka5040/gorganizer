@@ -1344,6 +1344,47 @@ void GrpcWorker::doStreamPluginStatus(const QString& gameId, const QString& prof
 }
 
 // Queries the game's mod-loader status, allowing the longer network deadline when the latest release is resolved too.
+void GrpcWorker::doCheckForUpdate(quint64 requestId, const QString& runningVersion)
+{
+    gorganizer::v1::CheckForUpdateRequest req;
+    req.set_running_version(runningVersion.toStdString());
+    gorganizer::v1::UpdateCheck resp;
+    const auto status = invoke(&Stub::CheckForUpdate, req, resp, std::chrono::seconds(30));
+    if (!status.ok()) {
+        emit updateCheckFailed(requestId, QString::fromStdString(status.error_message()),
+                               static_cast<int>(status.error_code()));
+        return;
+    }
+    GrpcUpdateCheck result;
+    switch (resp.outcome()) {
+    case gorganizer::v1::UPDATE_CHECK_OUTCOME_UNSPECIFIED:
+        result.outcome = GrpcUpdateCheck::Outcome::Unspecified;
+        break;
+    case gorganizer::v1::UPDATE_CHECK_OUTCOME_UP_TO_DATE:
+        result.outcome = GrpcUpdateCheck::Outcome::UpToDate;
+        break;
+    case gorganizer::v1::UPDATE_CHECK_OUTCOME_UPDATE_AVAILABLE:
+        result.outcome = GrpcUpdateCheck::Outcome::UpdateAvailable;
+        break;
+    case gorganizer::v1::UPDATE_CHECK_OUTCOME_OFFLINE:
+        result.outcome = GrpcUpdateCheck::Outcome::Offline;
+        break;
+    case gorganizer::v1::UPDATE_CHECK_OUTCOME_UNAVAILABLE:
+        result.outcome = GrpcUpdateCheck::Outcome::Unavailable;
+        break;
+    case gorganizer::v1::UPDATE_CHECK_OUTCOME_NOT_SUPPORTED:
+        result.outcome = GrpcUpdateCheck::Outcome::NotSupported;
+        break;
+    default:
+        result.outcome = GrpcUpdateCheck::Outcome::Unavailable;
+        break;
+    }
+    result.latestVersion = QString::fromStdString(resp.latest_version());
+    result.notesUrl = QString::fromStdString(resp.notes_url());
+    result.detail = QString::fromStdString(resp.detail());
+    emit updateCheckFinished(requestId, result);
+}
+
 void GrpcWorker::doGetModLoaderStatus(quint64 requestId, const QString& gameId, bool checkLatest)
 {
     gorganizer::v1::ModLoaderRequest req;

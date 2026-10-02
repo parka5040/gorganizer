@@ -30,6 +30,8 @@ private slots:
     void onReregisterNxm();
     void onThemeChanged(const QString& name);
     void onCollapsedSeparatorViewToggled(bool on);
+    // Saves the explicit startup update-check preference.
+    void onUpdateCheckToggled(bool on);
 
 private:
     void populateProtonCombo();
@@ -47,6 +49,7 @@ private:
     QProcess* m_nxmRegisterProcess = nullptr;
     QComboBox* m_themeCombo = nullptr;
     QCheckBox* m_collapseViewsCheck = nullptr;
+    QCheckBox* m_updateCheck = nullptr;
 };
 
 }

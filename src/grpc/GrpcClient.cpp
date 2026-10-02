@@ -195,6 +195,7 @@ GrpcClient::GrpcClient(QObject* parent)
     qRegisterMetaType<GrpcIniSaveResult>();
     qRegisterMetaType<QStringList>();
     qRegisterMetaType<GrpcRecoveryPending>();
+    qRegisterMetaType<GrpcUpdateCheck>();
     qRegisterMetaType<quint64>();
     m_connectionTimer = new QTimer(this);
     m_connectionTimer->setInterval(5000);
@@ -313,6 +314,8 @@ void GrpcClient::connectWorkerSignals(GrpcWorker* worker)
         m_transferActive = false;
         emit transferFailed(error, grpcCode);
     });
+    connect(worker, &GrpcWorker::updateCheckFinished, this, &GrpcClient::updateCheckFinished);
+    connect(worker, &GrpcWorker::updateCheckFailed, this, &GrpcClient::updateCheckFailed);
     connect(worker, &GrpcWorker::modLoaderStatusReceived, this, &GrpcClient::modLoaderStatusReceived);
     connect(worker, &GrpcWorker::modLoaderStatusFailed, this, &GrpcClient::modLoaderStatusFailed);
     connect(worker, &GrpcWorker::modLoaderOperationFinished, this, &GrpcClient::modLoaderOperationFinished);
@@ -746,6 +749,19 @@ quint64 GrpcClient::postModLoaderStatus(GrpcWorker* worker, const QString& gameI
         return requestId;
     }
     postTo(worker, &GrpcWorker::doGetModLoaderStatus, requestId, gameId, checkLatest);
+    return requestId;
+}
+
+quint64 GrpcClient::checkForUpdate(const QString& runningVersion)
+{
+    const quint64 requestId = ++m_nextUpdateRequestId;
+    if (!updateRpcWorker()) {
+        QMetaObject::invokeMethod(this, [this, requestId] {
+            emit updateCheckFailed(requestId, QStringLiteral("not connected"), GrpcStatusUnavailable);
+        }, Qt::QueuedConnection);
+        return requestId;
+    }
+    postTo(updateRpcWorker(), &GrpcWorker::doCheckForUpdate, requestId, runningVersion);
     return requestId;
 }
 
@@ -1879,6 +1895,8 @@ bool GrpcClient::health(GrpcReadiness& out, GrpcError& errorOut)
     out.recoveryDone = resp.recovery_done();
     out.gamesWarmed = resp.games_warmed();
     out.lastInitStep = QString::fromStdString(resp.last_init_step());
+    out.version = QString::fromStdString(resp.version());
+    out.apiEpoch = resp.api_epoch();
     if (!m_connected) {
         m_connected = true;
         resumeSubscriptions();

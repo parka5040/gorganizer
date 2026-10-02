@@ -4,6 +4,7 @@
 #include <QString>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <vector>
 
 namespace gorganizer {
@@ -37,6 +38,11 @@ public:
 
     void setCollapsedSeparatorView(bool on);
     bool collapsedSeparatorView() const;
+
+    // Returns the startup update-check preference, or no value before the user chooses.
+    std::optional<bool> updateCheckAtStartup() const;
+    // Saves whether Gorganizer checks for updates at startup.
+    void setUpdateCheckAtStartup(bool on);
 
     void setLastProfileFor(const QString& gameShortName, const QString& profileName);
     QString lastProfileFor(const QString& gameShortName) const;

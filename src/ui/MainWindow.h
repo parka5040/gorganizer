@@ -15,6 +15,7 @@ class QDragEnterEvent;
 class QDragMoveEvent;
 class QDropEvent;
 class QToolButton;
+class QVBoxLayout;
 
 namespace gorganizer {
 
@@ -33,6 +34,8 @@ class LaunchController;
 class FalloutPatchController;
 class GameSetupController;
 class ModLoaderController;
+class UpdateController;
+class NoticeBar;
 class ModDependencyController;
 class SteamMaintenanceController;
 class SmapiModsWidget;
@@ -44,7 +47,7 @@ public:
     explicit MainWindow(AppConfig& config, GrpcClient* grpc, QWidget* parent = nullptr);
 
     // Records whether this gorganizer started the daemon, which then stops when gorganizer quits.
-    void setDaemonOwned(bool owned) { m_daemonOwned = owned; }
+    void setDaemonOwned(bool owned);
 
 protected:
     // Asks before closing while a SMAPI operation or an asynchronous mod install that quitting could interrupt is still running.
@@ -122,6 +125,8 @@ private:
     PluginListWidget* m_pluginList = nullptr;
     DownloadsLibraryView* m_downloadsLibrary = nullptr;
     ActivityLogPanel* m_activityLog = nullptr;
+    QVBoxLayout* m_centralLayout = nullptr;
+    NoticeBar* m_notice = nullptr;
     QTabWidget* m_rightTabs = nullptr;
     QWidget* m_dataPlaceholder = nullptr;
     SmapiModsWidget* m_smapiMods = nullptr;
@@ -137,6 +142,7 @@ private:
     FalloutPatchController* m_falloutPatch = nullptr;
     GameSetupController* m_gameSetup = nullptr;
     ModLoaderController* m_modLoader = nullptr;
+    UpdateController* m_update = nullptr;
     ModDependencyController* m_modDependencies = nullptr;
     SteamMaintenanceController* m_steamMaintenance = nullptr;
 
@@ -152,6 +158,7 @@ private:
     QAction* m_patch4GBAction = nullptr;
     QAction* m_installTtwAction = nullptr;
     QAction* m_iniEditorAction = nullptr;
+    QAction* m_checkUpdatesAction = nullptr;
     QMenu* m_smapiMenu = nullptr;
 
     std::optional<PendingExternalInstall> m_pendingExternalInstall;
@@ -160,6 +167,8 @@ private:
     std::optional<DropQueue> m_dropQueue;
     bool m_restorePluginsTab = false;
     bool m_daemonOwned = false;
+    bool m_closingAfterUpdate = false;
+    bool m_updateCloseReady = false;
 };
 
 }

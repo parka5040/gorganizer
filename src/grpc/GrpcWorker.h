@@ -101,6 +101,8 @@ public slots:
                           const QStringList& modFolders, const QStringList& profileNames,
                           const QString& expectedArchiveIdentity);
 
+    // Queries the latest Gorganizer release with a bounded deadline.
+    void doCheckForUpdate(quint64 requestId, const QString& runningVersion);
     void doGetModLoaderStatus(quint64 requestId, const QString& gameId, bool checkLatest);
     void doInstallModLoader(quint64 requestId, const QString& gameId, bool repairOnly);
     void doUninstallModLoader(quint64 requestId, const QString& gameId);
@@ -188,6 +190,10 @@ signals:
     void transferCompleted(const GrpcTransferSummary& summary);
     void transferFailed(const QString& error, int grpcCode);
 
+    // Reports a completed Gorganizer release query.
+    void updateCheckFinished(quint64 requestId, const GrpcUpdateCheck& result);
+    // Reports a failed Gorganizer release query and its gRPC code.
+    void updateCheckFailed(quint64 requestId, const QString& error, int grpcCode);
     void modLoaderStatusReceived(quint64 requestId, const QString& gameId, const GrpcModLoaderStatus& status);
     void modLoaderStatusFailed(quint64 requestId, const QString& gameId, const QString& error, int grpcCode);
     void modLoaderOperationFinished(quint64 requestId, const QString& gameId, const QString& operation,

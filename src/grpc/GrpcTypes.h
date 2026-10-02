@@ -326,6 +326,14 @@ enum GrpcModLoaderState {
     GrpcModLoaderStateInterrupted = 6,
 };
 
+struct GrpcUpdateCheck {
+    enum class Outcome { Unspecified, UpToDate, UpdateAvailable, Offline, Unavailable, NotSupported };
+    Outcome outcome = Outcome::Unspecified;
+    QString latestVersion;
+    QString notesUrl;
+    QString detail;
+};
+
 struct GrpcModLoaderStatus {
     QString gameId;
     ModLoaderKind kind = ModLoaderKind::None;
@@ -469,6 +477,7 @@ enum GrpcStatusCode {
     GrpcStatusUnknown = 2,
     GrpcStatusDeadlineExceeded = 4,
     GrpcStatusFailedPrecondition = 9,
+    GrpcStatusUnimplemented = 12,
     GrpcStatusUnavailable = 14,
 };
 
@@ -526,6 +535,8 @@ struct GrpcProtonVersion {
 };
 
 struct GrpcReadiness {
+    QString version;
+    int apiEpoch = 0;
     bool socketReady = false;
     bool recoveryDone = false;
     bool gamesWarmed = false;
