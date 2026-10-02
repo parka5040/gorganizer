@@ -89,6 +89,9 @@ func TestInstallRequiresValidSignatureBeforeArchive(t *testing.T) {
 // TestProductionTrustFailsClosedWithoutRunningArchive checks an empty embedded trust prevents downloads.
 func TestProductionTrustFailsClosedWithoutRunningArchive(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	saved := productionKeys
+	productionKeys = nil
+	t.Cleanup(func() { productionKeys = saved })
 	var requests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests++ }))
 	defer server.Close()

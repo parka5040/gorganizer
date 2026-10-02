@@ -105,8 +105,16 @@ func TestParseTrustRejectsInvalidPEM(t *testing.T) {
 			t.Fatalf("accepted invalid trust %q", tc)
 		}
 	}
-	if _, err := ProductionTrust(); err == nil {
+	saved := productionKeys
+	productionKeys = nil
+	_, emptyErr := ProductionTrust()
+	productionKeys = saved
+	if emptyErr == nil {
 		t.Fatal("empty production trust was accepted")
+	}
+	production, err := ProductionTrust()
+	if err != nil || len(production) != 1 || production["b107acc071785a65"] == nil {
+		t.Fatalf("production trust is not exactly the release key: %v %v", production, err)
 	}
 }
 
@@ -135,7 +143,7 @@ func TestDescribeConfigGolden(t *testing.T) {
 	if err := DescribeConfig(&out); err != nil {
 		t.Fatal(err)
 	}
-	want := "trust none\nlatest-url https://api.github.com/repos/parka5040/gorganizer/releases/latest\nassets-url https://github.com/parka5040/gorganizer/releases/download/\nlatest-origin api.github.com\nassets-origin github.com *.githubusercontent.com\nsignature required\n"
+	want := "trust b107acc071785a65\nlatest-url https://api.github.com/repos/parka5040/gorganizer/releases/latest\nassets-url https://github.com/parka5040/gorganizer/releases/download/\nlatest-origin api.github.com\nassets-origin github.com *.githubusercontent.com\nsignature required\n"
 	if out.String() != want {
 		t.Fatalf("config: %q", out.String())
 	}

@@ -71,7 +71,7 @@ func TestReleaseConfigGolden(t *testing.T) {
 	if code := runReleaseWith([]string{"config"}, deps); code != 0 {
 		t.Fatalf("config: %d: %s", code, errOut)
 	}
-	want := "trust none\nlatest-url https://api.github.com/repos/parka5040/gorganizer/releases/latest\nassets-url https://github.com/parka5040/gorganizer/releases/download/\nlatest-origin api.github.com\nassets-origin github.com *.githubusercontent.com\nsignature required\n"
+	want := "trust b107acc071785a65\nlatest-url https://api.github.com/repos/parka5040/gorganizer/releases/latest\nassets-url https://github.com/parka5040/gorganizer/releases/download/\nlatest-origin api.github.com\nassets-origin github.com *.githubusercontent.com\nsignature required\n"
 	if out.String() != want {
 		t.Fatalf("config: %q", out.String())
 	}
