@@ -355,7 +355,7 @@ void GrpcClient::connectToDaemon()
     m_syncStub = std::make_unique<GrpcSyncStub>(m_channel);
 
     for (auto& handle : m_workers) {
-        handle.worker = new GrpcWorker(m_channel);
+        handle.worker = new GrpcWorker(m_channel, m_automaticSmapiOnlineAllowed);
         handle.thread = new QThread(this);
         handle.worker->moveToThread(handle.thread);
         connectWorkerSignals(handle.worker);
@@ -407,6 +407,11 @@ void GrpcClient::disconnectFromDaemon()
 }
 
 bool GrpcClient::isConnected() const { return m_connected; }
+
+void GrpcClient::setAutomaticSmapiOnlineAllowed(bool allowed)
+{
+    m_automaticSmapiOnlineAllowed->store(allowed);
+}
 
 void GrpcClient::onCheckConnection()
 {
@@ -739,7 +744,7 @@ quint64 GrpcClient::postModLoaderOperation(const QString& gameId, const QString&
     return requestId;
 }
 
-quint64 GrpcClient::postModLoaderStatus(GrpcWorker* worker, const QString& gameId, bool checkLatest)
+quint64 GrpcClient::postModLoaderStatus(GrpcWorker* worker, const QString& gameId, bool checkLatest, bool automatic)
 {
     const quint64 requestId = ++m_nextModLoaderRequestId;
     if (!worker) {
@@ -748,7 +753,7 @@ quint64 GrpcClient::postModLoaderStatus(GrpcWorker* worker, const QString& gameI
         }, Qt::QueuedConnection);
         return requestId;
     }
-    postTo(worker, &GrpcWorker::doGetModLoaderStatus, requestId, gameId, checkLatest);
+    postTo(worker, &GrpcWorker::doGetModLoaderStatus, requestId, gameId, checkLatest, automatic);
     return requestId;
 }
 
@@ -765,14 +770,14 @@ quint64 GrpcClient::checkForUpdate(const QString& runningVersion)
     return requestId;
 }
 
-quint64 GrpcClient::getModLoaderStatus(const QString& gameId, bool checkLatest)
+quint64 GrpcClient::getModLoaderStatus(const QString& gameId, bool checkLatest, bool automatic)
 {
-    return postModLoaderStatus(checkLatest ? modLoaderStatusWorker() : unaryWorker(), gameId, checkLatest);
+    return postModLoaderStatus(checkLatest ? modLoaderStatusWorker() : unaryWorker(), gameId, checkLatest, automatic);
 }
 
 quint64 GrpcClient::pollModLoaderStatus(const QString& gameId)
 {
-    return postModLoaderStatus(modLoaderStatusWorker(), gameId, false);
+    return postModLoaderStatus(modLoaderStatusWorker(), gameId, false, false);
 }
 
 quint64 GrpcClient::installModLoader(const QString& gameId, bool repairOnly)
@@ -820,7 +825,7 @@ quint64 GrpcClient::setModListTracked(const QString& gameId, const QString& prof
 
 // Queues a dependency report on the dependency worker when it consults smapi.io and on the unary worker otherwise.
 quint64 GrpcClient::getModDependencyReport(const QString& gameId, const QString& profileName,
-                                           bool refreshRemote, bool forceRemote)
+                                           bool refreshRemote, bool forceRemote, bool automatic)
 {
     const quint64 requestId = ++m_nextDependencyRequestId;
     GrpcWorker* worker = (refreshRemote || forceRemote) ? dependencyRpcWorker() : unaryWorker();
@@ -831,7 +836,7 @@ quint64 GrpcClient::getModDependencyReport(const QString& gameId, const QString&
         return requestId;
     }
     postTo(worker, &GrpcWorker::doGetModDependencyReport, requestId, gameId, profileName,
-           refreshRemote, forceRemote);
+           refreshRemote, forceRemote, automatic);
     return requestId;
 }
 

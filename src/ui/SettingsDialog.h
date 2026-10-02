@@ -21,6 +21,8 @@ public:
 
 signals:
     void collapsedSeparatorViewChanged(bool on);
+    // Reports a saved SMAPI online-check preference change.
+    void smapiOnlineChecksChanged(bool allowed);
 
 private slots:
     void onSaveKey();

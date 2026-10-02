@@ -5,6 +5,7 @@
 #include <QThread>
 #include <QTimer>
 #include <array>
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,6 +30,8 @@ public:
     void connectToDaemon();
     void disconnectFromDaemon();
     bool isConnected() const;
+    // Sets whether queued automatic SMAPI online requests may contact remote services.
+    void setAutomaticSmapiOnlineAllowed(bool allowed);
 
     void listGames();
     void detectGames();
@@ -199,7 +202,7 @@ public:
     // Queues a Gorganizer update check on the update worker and returns its request id.
     quint64 checkForUpdate(const QString& runningVersion);
     // Queues a mod-loader status query and returns the id its modLoaderStatus* signals carry; latest-release checks run on the mod-loader status worker, others on the unary worker.
-    quint64 getModLoaderStatus(const QString& gameId, bool checkLatest);
+    quint64 getModLoaderStatus(const QString& gameId, bool checkLatest, bool automatic);
     // Queues a mod-loader status query without a latest-release check on the mod-loader status worker and returns the id its modLoaderStatus* signals carry.
     quint64 pollModLoaderStatus(const QString& gameId);
     // Queues a mod-loader install, or a repair from the retained release, and returns the id modLoaderOperationFinished carries.
@@ -216,7 +219,7 @@ public:
                               const std::vector<GrpcModListEntry>& entries);
     // Queues a SMAPI dependency report, on the dependency worker when smapi.io is consulted, and returns the id its modDependencyReport* signals carry.
     quint64 getModDependencyReport(const QString& gameId, const QString& profileName,
-                                   bool refreshRemote, bool forceRemote);
+                                   bool refreshRemote, bool forceRemote, bool automatic);
     // Queues a dependency fetch on the dependency worker and returns the id modDependenciesFetched or modDependencyFetchFailed carries.
     quint64 fetchModDependencies(const QString& gameId, const QString& profileName, const QStringList& uniqueIds);
     // Queues a pending-enable acknowledgement on the unary worker and returns the id its dependencyEnableAck* signals carry.
@@ -416,6 +419,7 @@ private:
 
     std::shared_ptr<grpc::Channel> m_channel;
     std::unique_ptr<GrpcSyncStub> m_syncStub;
+    std::shared_ptr<std::atomic<bool>> m_automaticSmapiOnlineAllowed = std::make_shared<std::atomic<bool>>(false);
     std::array<WorkerHandle, RoleCount> m_workers{{
         {nullptr, nullptr, "unary"},
         {nullptr, nullptr, "watch-status"},
@@ -488,7 +492,7 @@ private:
     template <typename Method, typename... Args>
     quint64 postModLoaderOperation(const QString& gameId, const QString& operation, Method method, Args... args);
     // Assigns a request id and queues a mod-loader status query on worker, failing asynchronously when there is none.
-    quint64 postModLoaderStatus(GrpcWorker* worker, const QString& gameId, bool checkLatest);
+    quint64 postModLoaderStatus(GrpcWorker* worker, const QString& gameId, bool checkLatest, bool automatic);
 
     template <typename Method, typename... Args>
     void postTo(GrpcWorker* worker, Method method, Args... args);

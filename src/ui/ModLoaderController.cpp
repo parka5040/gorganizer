@@ -107,7 +107,9 @@ ModLoaderController::ModLoaderController(GrpcClient* grpc, SessionController* se
     connect(m_grpc, &GrpcClient::connected, this, &ModLoaderController::onConnected);
     connect(m_grpc, &GrpcClient::disconnected, this, &ModLoaderController::onDisconnected);
     connect(m_consent, &SmapiOnlineConsent::onlineChecksChanged, this, [this](bool allowed) {
-        if (allowed && managesSmapi(m_game))
+        if (!allowed)
+            m_latestChecked.clear();
+        else if (managesSmapi(m_game))
             scheduleLatestCheck(m_game.shortName);
     });
 }
@@ -130,7 +132,7 @@ void ModLoaderController::onActiveGameChanged(const GameInfo& game)
             emit modLoaderStatusChanged(gameId, it.value());
         if (m_grpc->isConnected()) {
             if (!m_pendingStatus.contains(gameId))
-                requestStatus(gameId, false);
+                requestStatus(gameId, false, false);
             scheduleLatestCheck(gameId);
         }
     }
@@ -142,7 +144,7 @@ void ModLoaderController::scheduleLatestCheck(const QString& gameId)
     if (!m_consent->allowed() || m_latestChecked.contains(gameId) || !m_grpc->isConnected())
         return;
     m_latestChecked.insert(gameId);
-    m_autoCheckIds.insert(requestStatus(gameId, true));
+    m_autoCheckIds.insert(requestStatus(gameId, true, true));
 }
 
 void ModLoaderController::startInstall(const QString& gameId, bool confirmed)
@@ -161,7 +163,7 @@ void ModLoaderController::refreshStatus(const QString& gameId)
 {
     if (gameId.isEmpty())
         return;
-    requestStatus(gameId, false);
+    requestStatus(gameId, false, false);
 }
 
 void ModLoaderController::onInstallTriggered()
@@ -193,14 +195,14 @@ void ModLoaderController::onCheckUpdatesTriggered()
         return;
     }
     m_latestChecked.insert(m_game.shortName);
-    m_interactiveCheckId = requestStatus(m_game.shortName, true);
+    m_interactiveCheckId = requestStatus(m_game.shortName, true, false);
     m_statusBar->showMessage("Checking for SMAPI updates…", 5000);
     updateMenu();
 }
 
-quint64 ModLoaderController::requestStatus(const QString& gameId, bool checkLatest)
+quint64 ModLoaderController::requestStatus(const QString& gameId, bool checkLatest, bool automatic)
 {
-    const quint64 requestId = m_grpc->getModLoaderStatus(gameId, checkLatest);
+    const quint64 requestId = m_grpc->getModLoaderStatus(gameId, checkLatest, automatic);
     if (!checkLatest)
         m_pendingStatus.insert(gameId, requestId);
     return requestId;
@@ -567,7 +569,7 @@ void ModLoaderController::onPhaseTimeout()
     const std::optional<Operation> op = releaseOperation();
     m_session->finishMaintenance(op->gameId, remountProfileFor(*op), true);
     if (m_grpc->isConnected())
-        m_statusFloor.insert(op->gameId, requestStatus(op->gameId, false));
+        m_statusFloor.insert(op->gameId, requestStatus(op->gameId, false, false));
     m_statusBar->clearMessage();
     QString message = QStringLiteral("gorganizer waited 30 minutes for the gorganizer daemon to finish %1 SMAPI for "
                                      "%2 without learning the result, so it stopped waiting. Tools → SMAPI shows "
@@ -731,7 +733,7 @@ void ModLoaderController::completeOperation(bool ok, const GrpcModLoaderStatus& 
     if (ok)
         applyStatus(op->gameId, status);
     if (m_grpc->isConnected()) {
-        m_statusFloor.insert(op->gameId, requestStatus(op->gameId, false));
+        m_statusFloor.insert(op->gameId, requestStatus(op->gameId, false, false));
         if (mountedMeanwhile)
             m_grpc->getVfsStatus(op->gameId);
     }
@@ -832,7 +834,7 @@ void ModLoaderController::onConnected()
     }
     const QString gameId = m_game.shortName;
     if (!m_pendingStatus.contains(gameId))
-        requestStatus(gameId, false);
+        requestStatus(gameId, false, false);
     scheduleLatestCheck(gameId);
     updateMenu();
 }

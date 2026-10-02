@@ -451,6 +451,7 @@ void SettingsDialog::onSmapiOnlineCheckToggled(bool on)
         return;
     if (m_config->setSmapiOnlineChecks(on)) {
         m_smapiOnlineStatus->clear();
+        emit smapiOnlineChecksChanged(on);
         return;
     }
     m_smapiOnlineStatus->setText(QStringLiteral("Gorganizer could not save this setting. It will ask again next time."));
