@@ -1,0 +1,9 @@
+Test-only Ed25519 release signing vectors. Never trusted by production builds.
+
+Each private key is ed25519.NewKeyFromSeed(sha256(phrase)):
+  K1 phrase: gorganizer test-only release signing key 1   (key id c893dee9499f4b4b)
+  K2 phrase: gorganizer test-only release signing key 2   (key id 285ba6c5c73b6770)
+
+statement.txt is the exact signed statement for tag v0.0.9 over the SHA256SUMS file in this folder.
+SHA256SUMS.k1.sig, SHA256SUMS.k2.sig and SHA256SUMS.k1k2.sig are the expected signature files.
+OpenSSL 3 `pkeyutl -sign -rawin` produces byte-identical signatures (Ed25519 is deterministic).
