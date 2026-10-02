@@ -25,7 +25,7 @@ func (e *TransportError) Unwrap() error { return e.Err }
 
 // Is classifies connectivity and certificate failures.
 func (e *TransportError) Is(target error) bool {
-	return target == ErrUnreachable && (e.timedOut || connectivityError(e.Err))
+	return target == ErrUnreachable && (e.timedOut || connectivityError(e.Err) || errors.Is(e.Err, io.EOF) || errors.Is(e.Err, io.ErrUnexpectedEOF))
 }
 
 type StatusError struct {

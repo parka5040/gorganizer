@@ -199,3 +199,32 @@ func TestOriginRulesChecksGitHubHosts(t *testing.T) {
 		}
 	}
 }
+
+// TestConnectionClosedBeforeHeadersIsUnreachable classifies a server hang-up before any response as a connectivity failure.
+func TestConnectionClosedBeforeHeadersIsUnreachable(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			buffer := make([]byte, 4096)
+			_, _ = conn.Read(buffer)
+			conn.Close()
+		}
+	}()
+	source := Source{Client: &http.Client{Timeout: 5 * time.Second}}
+	_, err = source.fetch(context.Background(), "http://"+listener.Addr().String()+"/latest", 1<<10)
+	if err == nil || !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("hang-up before headers: %v", err)
+	}
+	if err.Error() != "downloading release: "+errors.Unwrap(err).Error() {
+		t.Fatalf("hang-up changed error text: %q", err)
+	}
+}
