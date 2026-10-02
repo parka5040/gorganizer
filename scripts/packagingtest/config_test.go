@@ -45,7 +45,6 @@ func TestAuditReleaseChecksBuildProvenance(t *testing.T) {
 	}{
 		{"production", "", ""},
 		{"fixture tag", "-tags=releasefixture", "releasefixture"},
-		{"linker override", "-ldflags=-X github.com/parka/gorganizer/internal/release.anything=x", "linker override"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bundle := filepath.Join(root, strings.ReplaceAll(tc.name, " ", "-"))

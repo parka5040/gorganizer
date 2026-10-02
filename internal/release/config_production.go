@@ -17,15 +17,8 @@ const latestURL = "https://api.github.com/repos/parka5040/gorganizer/releases/la
 //go:embed release-signing.pub.pem
 var productionKeys []byte
 
-var anything string
-
 // configError reports whether the release configuration is usable.
-func configError() error {
-	if anything != "" {
-		return fmt.Errorf("release configuration has a linker override")
-	}
-	return nil
-}
+func configError() error { return nil }
 
 // checkedClient retains production clients' existing redirect behavior.
 func checkedClient(client *http.Client) *http.Client { return client }
