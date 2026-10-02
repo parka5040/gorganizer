@@ -301,6 +301,73 @@ func TestVersionHelpersAndXDGRoot(t *testing.T) {
 	}
 }
 
+// TestReleaseStoreRefusesWritableAncestors checks that unsafe parent permissions block status and collection.
+func TestReleaseStoreRefusesWritableAncestors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode os.FileMode
+	}{
+		{"group writable", 0o775},
+		{"world writable", 0o777},
+		{"user owned sticky", os.ModeSticky | 0o777},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := filepath.Join(t.TempDir(), "writable")
+			if err := os.Mkdir(parent, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(parent, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			m := &Manager{Root: filepath.Join(parent, "gorganizer", "releases")}
+			for _, operation := range []struct {
+				name string
+				run  func() error
+			}{
+				{"status", func() error { _, err := m.Status(); return err }},
+				{"collect", m.Collect},
+			} {
+				t.Run(operation.name, func(t *testing.T) {
+					err := operation.run()
+					if err == nil || !strings.Contains(err.Error(), "inside a folder other users can change: "+parent) {
+						t.Fatalf("unsafe ancestor accepted: %v", err)
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestReleaseStoreAcceptsSecureAncestry checks ordinary and symlink-resolved parents.
+func TestReleaseStoreAcceptsSecureAncestry(t *testing.T) {
+	base := t.TempDir()
+	physical := filepath.Join(base, "real")
+	if err := os.Mkdir(physical, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(base, "alias")
+	if err := os.Symlink(physical, alias); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, parent string
+	}{
+		{"ordinary", physical},
+		{"symlinked ancestor", alias},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &Manager{Root: filepath.Join(tc.parent, "gorganizer", "releases")}
+			root, err := m.prepareRoot()
+			if err != nil || root != filepath.Join(physical, "gorganizer", "releases") {
+				t.Fatalf("secure root: %s: %v", root, err)
+			}
+			if _, err := m.Status(); err != nil {
+				t.Fatalf("secure status: %v", err)
+			}
+		})
+	}
+}
+
 // checkNoStage reports any stage or link left in the release store.
 func checkNoStage(t *testing.T, root string) {
 	t.Helper()

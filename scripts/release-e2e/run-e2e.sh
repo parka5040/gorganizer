@@ -3,10 +3,20 @@
 # Try the update-consent prompt: Yes, No, and close (✕), each in a fresh scratch run.
 # For offline handling start with E2E_MODE=normal, then stop the printed server PID.
 # Try E2E_MODE=status403 for a refused latest check.
-# With normal mode, choose Update Now, close the GUI, and reopen the printed current/gorganizer.sh.
-# With E2E_MODE=throttle, cancel while the archive downloads.
-# With E2E_MODE=badsig, verify that the archive is never requested.
+# With normal mode, choose Update Now, close the GUI, and reopen with the printed launch.sh launch.
+# With E2E_MODE=throttle, cancel while the archive downloads; reopen with launch.sh launch.
+# With E2E_MODE=badsig, verify that the archive is never requested; reopen with launch.sh launch.
+# Never run the scratch gorganizer.sh directly; use launch.sh for every manual launch.
 # Launch a dev GUI separately to verify that it makes zero requests to the fixture server.
+write_launch_wrapper() {
+    {
+        printf '#!/bin/bash\nexec env -i'
+        printf ' %q' "${fixture_env[@]}" "$scratch/data/gorganizer/releases/current/gorganizer.sh"
+        printf ' "$@"\n'
+    } > "$scratch/launch.sh"
+    chmod 700 "$scratch/launch.sh"
+}
+if [ "${GORGANIZER_SH_SOURCE_ONLY:-}" = 1 ]; then return 0; fi
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -85,6 +95,7 @@ fixture_env+=(
     "GORGANIZER_FIXTURE_ASSETS_URL=https://$origin/download/"
     "GORGANIZER_FIXTURE_NOTES_URL=https://$origin/notes/"
 )
+write_launch_wrapper
 env -i "${fixture_env[@]}" "$scratch/bin-0.0.8/gorganizerctl" release install \
     --from "$scratch/bundles/0.0.8/gorganizer-0.0.8" > "$scratch/logs/install.log" 2>&1 || {
     printf 'Fixture install failed; see %s/logs/install.log\n' "$scratch" >&2
@@ -93,8 +104,8 @@ env -i "${fixture_env[@]}" "$scratch/bin-0.0.8/gorganizerctl" release install \
 mkdir -p "$scratch/config/gorganizer"
 printf '[setup]\ncomplete=true\n' > "$scratch/config/gorganizer/gorganizer.conf"
 store="$scratch/data/gorganizer/releases"
-printf 'Scratch: %s\nLogs: %s/logs\nRequests: %s/fixture-state/requests.log\nStore: %s\nServer PID: %s\n' \
-    "$scratch" "$scratch" "$scratch" "$store" "$server_pid"
+printf 'Scratch: %s\nLogs: %s/logs\nRequests: %s/fixture-state/requests.log\nStore: %s\nServer PID: %s\nLaunch or reopen with: %s/launch.sh launch\n' \
+    "$scratch" "$scratch" "$scratch" "$store" "$server_pid" "$scratch"
 if ! $no_launch; then
-    env -i "${fixture_env[@]}" "$store/current/gorganizer.sh" launch > "$scratch/logs/launch.log" 2>&1
+    "$scratch/launch.sh" launch > "$scratch/logs/launch.log" 2>&1
 fi
