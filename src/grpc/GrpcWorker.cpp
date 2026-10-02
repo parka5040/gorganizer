@@ -1343,7 +1343,7 @@ void GrpcWorker::doStreamPluginStatus(const QString& gameId, const QString& prof
         emit streamEnded(StreamPluginStatus, generation, static_cast<int>(status.error_code()));
 }
 
-// Queries the game's mod-loader status, allowing the longer network deadline when the latest release is resolved too.
+// Checks for a published update against the running GUI version.
 void GrpcWorker::doCheckForUpdate(quint64 requestId, const QString& runningVersion)
 {
     gorganizer::v1::CheckForUpdateRequest req;

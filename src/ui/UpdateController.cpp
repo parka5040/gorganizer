@@ -125,21 +125,35 @@ void UpdateController::onConnected()
 
 void UpdateController::showConsent()
 {
-    if (m_notice == Notice::Updating || m_notice == Notice::UpdateResult)
+    if (m_consentDismissed || m_notice == Notice::Updating || m_notice == Notice::UpdateResult)
         return;
     m_notice = Notice::Consent;
     m_bar->showNotice(NoticeBar::Kind::Info,
         QStringLiteral("Check for Gorganizer updates each time it starts? This contacts GitHub; "
                        "no game or mod information is sent."),
         {{QStringLiteral("Check at Startup"), [this] {
-            m_config.setUpdateCheckAtStartup(true);
+            if (!m_config.setUpdateCheckAtStartup(true)) {
+                m_consentDismissed = true;
+                m_notice = Notice::CheckResult;
+                m_resultInteractive = true;
+                m_bar->showNotice(NoticeBar::Kind::Warning,
+                    QStringLiteral("Gorganizer could not save this setting. It will ask again next time."), {}, true);
+                return;
+            }
             m_bar->clear();
             m_notice = Notice::None;
             m_interactive = true;
             m_autoQueued = true;
             sendCheck();
         }}, {QStringLiteral("Don't Check"), [this] {
-            m_config.setUpdateCheckAtStartup(false);
+            if (!m_config.setUpdateCheckAtStartup(false)) {
+                m_consentDismissed = true;
+                m_notice = Notice::CheckResult;
+                m_resultInteractive = true;
+                m_bar->showNotice(NoticeBar::Kind::Warning,
+                    QStringLiteral("Gorganizer could not save this setting. It will ask again next time."), {}, true);
+                return;
+            }
             m_bar->clear();
             m_notice = Notice::None;
         }}}, true);
@@ -147,7 +161,7 @@ void UpdateController::showConsent()
 
 void UpdateController::showInstalled(const QString& version)
 {
-    if (m_notice == Notice::Updating || m_notice == Notice::UpdateResult)
+    if (m_notice == Notice::Updating)
         return;
     m_notice = Notice::Installed;
     m_bar->showNotice(NoticeBar::Kind::Info,
@@ -167,10 +181,33 @@ void UpdateController::sendCheck()
             m_connectedHandler = connect(m_grpc, &GrpcClient::connected, this, &UpdateController::onConnected);
         return;
     }
+    if (installedVersionChanged())
+        return;
     m_autoQueued = false;
     m_discardAutomatic = false;
     m_checkId = m_grpc->checkForUpdate(m_layout.runningVersion);
     releaseConnection();
+}
+
+bool UpdateController::installedVersionChanged()
+{
+    if (m_layout.kind != InstallKind::Prebuilt)
+        return false;
+    QString installed;
+    if (!readInstalledVersion(m_layout.releasesRoot, &installed))
+        return false;
+    if (installed == m_layout.runningBase) {
+        m_installedDifferent.clear();
+        return false;
+    }
+    m_installedDifferent = installed;
+    m_skipAutomatic = true;
+    m_autoQueued = false;
+    m_checkId = 0;
+    m_interactive = false;
+    showInstalled(installed);
+    releaseConnection();
+    return true;
 }
 
 void UpdateController::releaseConnection()
@@ -183,7 +220,7 @@ void UpdateController::releaseConnection()
 
 void UpdateController::checkNow()
 {
-    if (updating() || m_notice == Notice::UpdateResult)
+    if (updating())
         return;
     if (!m_started) {
         m_layout = detectInstallLayout();
@@ -194,6 +231,8 @@ void UpdateController::checkNow()
             QStringLiteral("Update checks are not available for development builds."), {}, true);
         return;
     }
+    if (installedVersionChanged() || m_notice == Notice::UpdateResult)
+        return;
     if (m_checkId || m_autoQueued) {
         m_interactive = true;
         m_discardAutomatic = false;
@@ -257,10 +296,9 @@ void UpdateController::onCheckFailed(quint64 requestId, const QString& error, in
                              || m_config.updateCheckAtStartup() != std::optional<bool>(true))))
         return;
     if (grpcCode == GrpcStatusUnimplemented) {
-        if (interactive)
-            showCheckNotice(NoticeBar::Kind::Warning,
-                QStringLiteral("Gorganizer's background service is from an older version and cannot check "
-                               "for updates. Restart your computer, then try again."), {}, true);
+        showCheckNotice(NoticeBar::Kind::Warning,
+            QStringLiteral("Gorganizer's background service is from an older version and cannot check "
+                           "for updates. Restart your computer, then try again."), {}, interactive);
         return;
     }
     showCheckNotice(NoticeBar::Kind::Warning,
@@ -392,6 +430,8 @@ void UpdateController::onDismissed()
         restoreNotice();
         return;
     }
+    if (previous == Notice::Consent)
+        m_consentDismissed = true;
     m_autoDismissed = true;
 }
 
@@ -433,6 +473,18 @@ void UpdateController::updateNow(const QString& version, const QString& bundleDi
     process->setStandardInputFile(QProcess::nullDevice());
     process->setProcessChannelMode(QProcess::MergedChannels);
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    for (const QString& key : {QStringLiteral("BASH_ENV"), QStringLiteral("ENV"), QStringLiteral("CDPATH"),
+                               QStringLiteral("GLOBIGNORE"), QStringLiteral("SHELLOPTS"),
+                               QStringLiteral("BASHOPTS"), QStringLiteral("PS4"), QStringLiteral("IFS"),
+                               QStringLiteral("LD_PRELOAD"), QStringLiteral("LD_LIBRARY_PATH"),
+                               QStringLiteral("LD_AUDIT"), QStringLiteral("GCONV_PATH"),
+                               QStringLiteral("PYTHONSTARTUP")})
+        env.remove(key);
+    for (const QString& key : env.keys()) {
+        if (key.startsWith(QLatin1String("BASH_FUNC_")))
+            env.remove(key);
+    }
+    env.insert(QStringLiteral("PATH"), QStringLiteral("/usr/local/bin:/usr/bin:/bin"));
     env.insert(QStringLiteral("GIT_TERMINAL_PROMPT"), QStringLiteral("0"));
     env.insert(QStringLiteral("XDG_DATA_HOME"), current.dataHome);
     process->setProcessEnvironment(env);
@@ -474,9 +526,15 @@ void UpdateController::cancelUpdate()
     auto* timer = new QTimer(process);
     timer->setSingleShot(true);
     m_killTimer = timer;
-    connect(timer, &QTimer::timeout, process, [process] {
-        if (process->state() != QProcess::NotRunning)
-            process->kill();
+    connect(timer, &QTimer::timeout, process, [this, process] {
+        if (process->state() == QProcess::NotRunning)
+            return;
+        process->kill();
+        QTimer::singleShot(5000, process, [this, process] {
+            if (m_process == process && process->state() != QProcess::NotRunning)
+                m_bar->showNotice(NoticeBar::Kind::Info,
+                    QStringLiteral("Gorganizer is still stopping the update…"), {}, false);
+        });
     });
     timer->start(15000);
     m_bar->showNotice(NoticeBar::Kind::Info, QStringLiteral("Stopping the update…"), {}, false);
@@ -492,13 +550,6 @@ void UpdateController::stopUpdateThen(std::function<void()> done)
         return;
     m_closeDone = std::move(done);
     cancelUpdate();
-    QProcess* process = m_process;
-    QTimer::singleShot(20000, this, [this, process] {
-        if (m_process == process && m_closeDone) {
-            auto callback = std::move(m_closeDone);
-            callback();
-        }
-    });
 }
 
 void UpdateController::collectOutput(QProcess* process)
@@ -513,7 +564,7 @@ void UpdateController::collectOutput(QProcess* process)
 
 void UpdateController::reconcile(QProcess* process, int exitCode, QProcess::ExitStatus exitStatus)
 {
-    if (m_process != process)
+    if (m_process != process || process->state() != QProcess::NotRunning)
         return;
     collectOutput(process);
     if (m_killTimer)

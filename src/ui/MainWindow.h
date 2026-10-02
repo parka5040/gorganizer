@@ -166,9 +166,9 @@ private:
     QSet<QString> m_pendingInstallRefresh;
     std::optional<DropQueue> m_dropQueue;
     bool m_restorePluginsTab = false;
+    enum class CloseState { Normal, StoppingUpdate, Approved };
     bool m_daemonOwned = false;
-    bool m_closingAfterUpdate = false;
-    bool m_updateCloseReady = false;
+    CloseState m_closeState = CloseState::Normal;
 };
 
 }

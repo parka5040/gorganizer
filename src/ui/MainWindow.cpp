@@ -461,8 +461,14 @@ void MainWindow::dropEvent(QDropEvent* event)
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
-    if (m_closingAfterUpdate && !m_updateCloseReady) {
+    if (m_closeState == CloseState::StoppingUpdate) {
         event->ignore();
+        return;
+    }
+    if (m_closeState == CloseState::Approved) {
+        QMainWindow::closeEvent(event);
+        if (event->isAccepted())
+            QSettings().setValue("mainWindow/geometry", saveGeometry());
         return;
     }
     const bool daemonStopsOnExit = m_daemonOwned ||
@@ -489,7 +495,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
                                          "Quitting may interrupt them. Keep Gorganizer open until they finish.\n\n%2")
                               .arg(m_installs->pendingCount()).arg(consequence));
     }
-    const bool updateRunning = m_update && m_update->updating() && !m_closingAfterUpdate;
+    const bool updateRunning = m_update && m_update->updating();
     if (updateRunning)
         paragraphs.append(m_update->updateCloseParagraph());
     const bool interrupted = !paragraphs.isEmpty();
@@ -559,10 +565,11 @@ void MainWindow::closeEvent(QCloseEvent* event)
     }
     if (updateRunning && m_update->updating()) {
         event->ignore();
-        m_closingAfterUpdate = true;
+        m_closeState = CloseState::StoppingUpdate;
         m_update->stopUpdateThen([this] {
-            m_updateCloseReady = true;
-            close();
+            m_closeState = CloseState::Approved;
+            if (!close())
+                m_closeState = CloseState::Normal;
         });
         return;
     }

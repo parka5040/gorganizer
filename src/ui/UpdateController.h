@@ -35,7 +35,7 @@ public:
     bool updating() const;
     // Returns the warning to show when closing during an update.
     QString updateCloseParagraph() const;
-    // Stops an update and calls done after it exits or the close timeout elapses.
+    // Stops an update and calls done only after the process exits.
     void stopUpdateThen(std::function<void()> done);
 
 signals:
@@ -48,6 +48,8 @@ private:
     void onConnected();
     // Starts the single pending check when the daemon is reachable.
     void sendCheck();
+    // Shows the reopen notice when another prebuilt release is selected.
+    bool installedVersionChanged();
     // Disconnects the one-shot connection trigger after its check is resolved.
     void releaseConnection();
     // Reports a matching update-check response.
@@ -91,6 +93,7 @@ private:
     bool m_autoQueued = false;
     bool m_interactive = false;
     bool m_autoDismissed = false;
+    bool m_consentDismissed = false;
     bool m_discardAutomatic = false;
     bool m_resultInteractive = false;
     bool m_daemonStopsOnExit = false;
