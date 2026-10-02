@@ -19,6 +19,7 @@ import (
 	"github.com/parka/gorganizer/internal/ipc"
 	"github.com/parka/gorganizer/internal/migrate"
 	"github.com/parka/gorganizer/internal/protontricks"
+	"github.com/parka/gorganizer/internal/release"
 	"github.com/parka/gorganizer/internal/transfer"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -36,6 +37,7 @@ func main() {
 	logLevel := flag.String("log-level", "", "Log level (debug, info, warn, error)")
 	handleNXM := flag.String("handle-nxm", "", "Forward NXM URI to running daemon and exit")
 	showVersion := flag.Bool("version", false, "Print version and exit")
+	showReleaseConfig := flag.Bool("release-config", false, "Print release verification configuration and exit")
 	printSocket := flag.Bool("print-socket-path", false, "Print the daemon socket path and exit")
 	flag.Parse()
 
@@ -45,6 +47,14 @@ func main() {
 	}
 	if *showVersion {
 		fmt.Printf("gorganizerd %s (commit %s, built %s)\n", version, commit, buildDate)
+		return
+	}
+
+	if *showReleaseConfig {
+		if err := release.DescribeConfig(os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		return
 	}
 

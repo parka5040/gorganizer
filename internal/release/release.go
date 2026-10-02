@@ -1,7 +1,6 @@
 package release
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -25,6 +24,7 @@ import (
 
 type Manager struct {
 	Root         string
+	Trust        *TrustSet
 	RuntimeDir   string
 	Source       Source
 	WrapWriter   func(io.Writer) io.Writer
@@ -45,7 +45,7 @@ func DataRoot() (string, error) {
 		return "", fmt.Errorf("finding your home folder: %w", err)
 	}
 	data := os.Getenv("XDG_DATA_HOME")
-	if data == "" {
+	if !filepath.IsAbs(data) {
 		data = filepath.Join(home, ".local", "share")
 	}
 	return filepath.Join(data, "gorganizer", "releases"), nil
@@ -81,6 +81,23 @@ func Compare(first, second string) (int, error) {
 		}
 	}
 	return 0, nil
+}
+
+// BaseVersion extracts a bounded release version from build metadata.
+func BaseVersion(v string) (string, bool) {
+	base, _, _ := strings.Cut(v, "+")
+	if ValidateTag("v"+base) != nil {
+		return "", false
+	}
+	return base, true
+}
+
+// NotesURL returns the release notes page for a validated tag.
+func NotesURL(tag string) (string, error) {
+	if err := ValidateTag(tag); err != nil {
+		return "", err
+	}
+	return notesURLBase + tag, nil
 }
 
 // rootPath resolves a configured or default releases folder.
@@ -122,8 +139,17 @@ func (m *Manager) prepareRoot() (string, error) {
 	return filepath.Join(parent, filepath.Base(root)), nil
 }
 
-// withLock serializes changes to the release generations.
-func (m *Manager) withLock(action func(string) error) error {
+type heldLock struct{ root string }
+
+var installDeadline = 30 * time.Minute
+var renameLink = os.Rename
+var syncReleaseDir = atomicfile.SyncDir
+
+// withLock serializes changes to the release generations and clears abandoned stages.
+func (m *Manager) withLock(ctx context.Context, action func(*heldLock) error) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("waiting for release lock: %w", err)
+	}
 	root, err := m.prepareRoot()
 	if err != nil {
 		return err
@@ -140,15 +166,55 @@ func (m *Manager) withLock(action func(string) error) error {
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 || stat.Mode&0o077 != 0 {
 		return fmt.Errorf("the releases folder contains an unsafe lock file")
 	}
-	if err := unix.Flock(fd, unix.LOCK_EX); err != nil {
-		return fmt.Errorf("locking releases: %w", err)
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("waiting for release lock: %w", err)
+		}
+		err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if err != unix.EWOULDBLOCK && err != unix.EAGAIN {
+			return fmt.Errorf("locking releases: %w", err)
+		}
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("waiting for release lock: %w", ctx.Err())
+		case <-timer.C:
+		}
 	}
 	defer unix.Flock(fd, unix.LOCK_UN)
-	return action(root)
+	if err := sweep(root); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return action(&heldLock{root})
 }
 
-// newStage creates an unpredictable staging folder in the release store.
-func newStage(root string) (string, error) {
+// sweep removes abandoned stages and temporary links under the exclusive lock.
+func sweep(root string) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".stage-") || strings.HasPrefix(name, ".link-") {
+			if err := os.RemoveAll(filepath.Join(root, name)); err != nil {
+				return fmt.Errorf("removing abandoned release stage: %w", err)
+			}
+		}
+	}
+	return syncReleaseDir(root)
+}
+
+// newStage creates an unpredictable staging folder while holding the release lock.
+func newStage(lock *heldLock) (string, error) {
+	root := lock.root
 	var id [16]byte
 	if _, err := rand.Read(id[:]); err != nil {
 		return "", err
@@ -178,13 +244,16 @@ func (m *Manager) Update(ctx context.Context, tag string) (string, bool, error) 
 
 // install resolves a tag and optionally enforces a newer version under the release lock.
 func (m *Manager) install(ctx context.Context, tag string, newerOnly bool) (string, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, installDeadline)
+	defer cancel()
 	resolved, err := m.Source.ResolveTag(ctx, tag)
 	if err != nil {
 		return "", false, err
 	}
 	version := strings.TrimPrefix(resolved, "v")
 	changed := false
-	err = m.withLock(func(root string) error {
+	err = m.withLock(ctx, func(lock *heldLock) error {
+		root := lock.root
 		if newerOnly {
 			current, err := linkTarget(root, "current")
 			if err != nil {
@@ -203,11 +272,14 @@ func (m *Manager) install(ctx context.Context, tag string, newerOnly bool) (stri
 				}
 			}
 		}
-		stage, err := newStage(root)
-		if err != nil {
-			return err
+		trust := m.Trust
+		if trust == nil {
+			keys, err := ProductionTrust()
+			if err != nil {
+				return err
+			}
+			trust = &keys
 		}
-		defer os.RemoveAll(stage)
 		archive := "gorganizer-" + version + "-linux-x86_64.tar.gz"
 		checksURL, err := m.Source.AssetURL(resolved, "SHA256SUMS")
 		if err != nil {
@@ -217,10 +289,30 @@ func (m *Manager) install(ctx context.Context, tag string, newerOnly bool) (stri
 		if err != nil {
 			return fmt.Errorf("getting release checksums: %w", err)
 		}
+		sigURL, err := m.Source.AssetURL(resolved, "SHA256SUMS.sig")
+		if err != nil {
+			return err
+		}
+		sig, err := m.Source.fetch(ctx, sigURL, 2<<10)
+		if err != nil {
+			var status *StatusError
+			if errors.As(err, &status) && status.Code == 404 {
+				return fmt.Errorf("this release is not signed; nothing was installed")
+			}
+			return fmt.Errorf("getting release signature: %w", err)
+		}
+		if err := VerifySums(*trust, resolved, checks, sig); err != nil {
+			return err
+		}
 		expected, err := expectedDigest(checks, archive)
 		if err != nil {
 			return err
 		}
+		stage, err := newStage(lock)
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(stage)
 		archiveURL, err := m.Source.AssetURL(resolved, archive)
 		if err != nil {
 			return err
@@ -243,7 +335,7 @@ func (m *Manager) install(ctx context.Context, tag string, newerOnly bool) (stri
 			writer = m.WrapWriter(fd)
 		}
 		hasher := sha256.New()
-		n, copyErr := io.Copy(io.MultiWriter(writer, hasher), io.LimitReader(response.Body, maxArchive+1))
+		n, copyErr := io.Copy(io.MultiWriter(writer, hasher), io.LimitReader(contextReader{ctx, response.Body}, maxArchive+1))
 		if copyErr == nil {
 			copyErr = fd.Sync()
 		}
@@ -263,7 +355,7 @@ func (m *Manager) install(ctx context.Context, tag string, newerOnly bool) (stri
 		if hex.EncodeToString(hasher.Sum(nil)) != expected {
 			return fmt.Errorf("release download failed its checksum check")
 		}
-		if err := unpack(target, stage, version, m.WrapWriter); err != nil {
+		if err := unpack(ctx, target, stage, version, m.WrapWriter); err != nil {
 			return err
 		}
 		if err := os.Remove(target); err != nil {
@@ -309,13 +401,14 @@ func (m *Manager) Adopt(ctx context.Context, source string) (string, error) {
 	if err := ValidateTag("v" + version); err != nil {
 		return "", err
 	}
-	err = m.withLock(func(root string) error {
-		stage, err := newStage(root)
+	err = m.withLock(ctx, func(lock *heldLock) error {
+		root := lock.root
+		stage, err := newStage(lock)
 		if err != nil {
 			return err
 		}
 		defer os.RemoveAll(stage)
-		if err := copyTree(source, stage, m.WrapWriter); err != nil {
+		if err := copyTree(ctx, source, stage, m.WrapWriter); err != nil {
 			return fmt.Errorf("copying release: %w", err)
 		}
 		return m.publish(ctx, root, stage, version)
@@ -332,6 +425,10 @@ func (m *Manager) publish(ctx context.Context, root, stage, version string) erro
 		return fmt.Errorf("saving release files: %w", err)
 	}
 	destination := filepath.Join(root, version)
+	commitCtx := context.WithoutCancel(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := unix.Renameat2(unix.AT_FDCWD, stage, unix.AT_FDCWD, destination, unix.RENAME_NOREPLACE); err != nil {
 		if !errors.Is(err, unix.EEXIST) {
 			return fmt.Errorf("publishing release: %w", err)
@@ -344,22 +441,14 @@ func (m *Manager) publish(ctx context.Context, root, stage, version string) erro
 		if !info.IsDir() || !ok || int(stat.Uid) != os.Getuid() {
 			return fmt.Errorf("an existing release is not an owned real folder")
 		}
-		if err := checkBundle(ctx, destination, version); err != nil {
-			return fmt.Errorf("an existing release is not valid: %w", err)
-		}
-		newManifest, err := os.ReadFile(filepath.Join(stage, "MANIFEST.sha256"))
-		if err != nil {
+		if err := existingMatches(ctx, stage, destination); err != nil {
 			return err
 		}
-		oldManifest, err := os.ReadFile(filepath.Join(destination, "MANIFEST.sha256"))
-		if err != nil {
+		if err := ctx.Err(); err != nil {
 			return err
-		}
-		if !bytes.Equal(newManifest, oldManifest) {
-			return fmt.Errorf("the installed release does not match this download")
 		}
 	} else {
-		if err := atomicfile.SyncDir(root); err != nil {
+		if err := syncReleaseDir(root); err != nil {
 			return err
 		}
 	}
@@ -371,7 +460,7 @@ func (m *Manager) publish(ctx context.Context, root, stage, version string) erro
 	if err := switchTo(root, version); err != nil {
 		return err
 	}
-	return m.collect(root)
+	return m.collect(commitCtx, root)
 }
 
 // linkTarget returns a version symlink target without following arbitrary links.
@@ -383,8 +472,19 @@ func linkTarget(root, name string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("checking release %s: %w", name, err)
 	}
-	if err := ValidateTag("v" + target); err != nil {
-		return "", fmt.Errorf("unsafe release %s link: %w", name, err)
+	if ValidateTag("v"+target) != nil {
+		return "", nil
+	}
+	info, err := os.Lstat(filepath.Join(root, target))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("checking release %s target: %w", name, err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !info.IsDir() || !ok || int(stat.Uid) != os.Getuid() {
+		return "", nil
 	}
 	return target, nil
 }
@@ -403,10 +503,10 @@ func replaceLink(root, name, target string) error {
 		return fmt.Errorf("creating release link: %w", err)
 	}
 	defer os.Remove(tmp)
-	if err := os.Rename(tmp, filepath.Join(root, name)); err != nil {
+	if err := renameLink(tmp, filepath.Join(root, name)); err != nil {
 		return fmt.Errorf("switching release link: %w", err)
 	}
-	return atomicfile.SyncDir(root)
+	return syncReleaseDir(root)
 }
 
 // switchTo keeps the old current release as previous before switching current.
@@ -429,7 +529,8 @@ func switchTo(root, version string) error {
 // Rollback switches to the previous verified release.
 func (m *Manager) Rollback(ctx context.Context) (string, error) {
 	var restored string
-	err := m.withLock(func(root string) error {
+	err := m.withLock(ctx, func(lock *heldLock) error {
+		root := lock.root
 		previous, err := linkTarget(root, "previous")
 		if err != nil {
 			return err
@@ -437,11 +538,18 @@ func (m *Manager) Rollback(ctx context.Context) (string, error) {
 		if previous == "" {
 			return fmt.Errorf("there is no previous release to restore")
 		}
+		current, err := linkTarget(root, "current")
+		if err != nil {
+			return err
+		}
+		if current == previous {
+			return fmt.Errorf("there is no previous release to restore")
+		}
 		if err := checkBundle(ctx, filepath.Join(root, previous), previous); err != nil {
 			return fmt.Errorf("previous release is not valid: %w", err)
 		}
-		current, err := linkTarget(root, "current")
-		if err != nil {
+		commitCtx := context.WithoutCancel(ctx)
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if err := replaceLink(root, "current", previous); err != nil {
@@ -453,7 +561,7 @@ func (m *Manager) Rollback(ctx context.Context) (string, error) {
 			}
 		}
 		restored = previous
-		return m.collect(root)
+		return m.collect(commitCtx, root)
 	})
 	return restored, err
 }
@@ -473,7 +581,8 @@ func (m *Manager) SessionMarker() string {
 // Status reads the active, previous, installed and running releases.
 func (m *Manager) Status() (Status, error) {
 	var result Status
-	err := m.withLock(func(root string) error {
+	err := m.withLock(context.Background(), func(lock *heldLock) error {
+		root := lock.root
 		var err error
 		result.Current, err = linkTarget(root, "current")
 		if err != nil {
@@ -527,7 +636,10 @@ func (m *Manager) inUse(root string) string {
 }
 
 // collect removes obsolete verified generations and old staging directories.
-func (m *Manager) collect(root string) error {
+func (m *Manager) collect(ctx context.Context, root string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	current, err := linkTarget(root, "current")
 	if err != nil {
 		return err
@@ -564,8 +676,12 @@ func (m *Manager) collect(root string) error {
 			return fmt.Errorf("removing old release: %w", err)
 		}
 	}
-	return atomicfile.SyncDir(root)
+	return syncReleaseDir(root)
 }
 
-// Collect removes unused release generations and old staging directories.
-func (m *Manager) Collect() error { return m.withLock(m.collect) }
+// Collect removes unused release generations and abandoned stages.
+func (m *Manager) Collect() error {
+	return m.withLock(context.Background(), func(lock *heldLock) error {
+		return m.collect(context.Background(), lock.root)
+	})
+}

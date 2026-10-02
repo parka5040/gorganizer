@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -61,6 +63,21 @@ func commandDeps(t *testing.T) (releaseDeps, *bytes.Buffer, *bytes.Buffer) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
 	out, errOut := new(bytes.Buffer), new(bytes.Buffer)
 	return releaseDeps{manager: &release.Manager{Root: filepath.Join(home, "data", "gorganizer", "releases")}, out: out, errOut: errOut, running: func() bool { return false }}, out, errOut
+}
+
+// TestReleaseConfigGolden checks that the CLI reports verification settings without writing state.
+func TestReleaseConfigGolden(t *testing.T) {
+	deps, out, errOut := commandDeps(t)
+	if code := runReleaseWith([]string{"config"}, deps); code != 0 {
+		t.Fatalf("config: %d: %s", code, errOut)
+	}
+	want := "trust none\nlatest-url https://api.github.com/repos/parka5040/gorganizer/releases/latest\nassets-url https://github.com/parka5040/gorganizer/releases/download/\nlatest-origin api.github.com\nassets-origin github.com *.githubusercontent.com\nsignature required\n"
+	if out.String() != want {
+		t.Fatalf("config: %q", out.String())
+	}
+	if _, err := os.Lstat(deps.manager.Root); !os.IsNotExist(err) {
+		t.Fatalf("config touched release root: %v", err)
+	}
 }
 
 // TestReleaseStatusGolden checks the status report's stable plain-language format.
@@ -166,14 +183,31 @@ func TestReleaseExplicitOlderInstallWarns(t *testing.T) {
 	version := "1.9.9"
 	archive := commandArchive(t, commandFixture(t, version), version)
 	checksum := sha256.Sum256(archive)
+	phrase := sha256.Sum256([]byte("gorganizer test-only release signing key 1"))
+	private := ed25519.NewKeyFromSeed(phrase[:])
+	keyDigest := sha256.Sum256(private.Public().(ed25519.PublicKey))
+	checks := fmt.Sprintf("%x  gorganizer-%s-linux-x86_64.tar.gz\n", checksum, version)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if filepath.Base(r.URL.Path) == "SHA256SUMS" {
-			fmt.Fprintf(w, "%x  gorganizer-%s-linux-x86_64.tar.gz\n", checksum, version)
-		} else {
+		switch filepath.Base(r.URL.Path) {
+		case "SHA256SUMS":
+			io.WriteString(w, checks)
+		case "SHA256SUMS.sig":
+			signed := ed25519.Sign(private, release.SignedStatement("v"+version, []byte(checks)))
+			fmt.Fprintf(w, "gorganizer-sig-v1 %x %s\n", keyDigest[:8], base64.StdEncoding.EncodeToString(signed))
+		default:
 			w.Write(archive)
 		}
 	}))
 	defer server.Close()
+	public, err := os.ReadFile("../../internal/release/testdata/signing/test-k1.pub.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trust, err := release.ParseTrust(public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps.manager.Trust = &trust
 	deps.manager.Source = release.Source{BaseURL: server.URL, Client: server.Client()}
 	if code := runReleaseWith([]string{"install", "--tag", "v" + version}, deps); code != 0 {
 		t.Fatalf("explicit older install: %d: %s", code, errOut)

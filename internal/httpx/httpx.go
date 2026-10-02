@@ -3,6 +3,7 @@ package httpx
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -11,6 +12,20 @@ type Options struct {
 	OverallTimeout        time.Duration
 	MaxRedirects          int
 	RequireHTTPS          bool
+	AllowOrigin           func(*url.URL) error
+}
+
+type originTransport struct {
+	base  http.RoundTripper
+	allow func(*url.URL) error
+}
+
+// RoundTrip checks the request origin before sending it.
+func (t originTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if err := t.allow(req.URL); err != nil {
+		return nil, err
+	}
+	return t.base.RoundTrip(req)
 }
 
 // NewClient returns an HTTP client configured from o.
@@ -20,7 +35,11 @@ func NewClient(o Options) *http.Client {
 		transport.ResponseHeaderTimeout = o.ResponseHeaderTimeout
 	}
 
-	client := &http.Client{Transport: transport}
+	var roundTripper http.RoundTripper = transport
+	if o.AllowOrigin != nil {
+		roundTripper = originTransport{base: transport, allow: o.AllowOrigin}
+	}
+	client := &http.Client{Transport: roundTripper}
 	if o.OverallTimeout != 0 {
 		client.Timeout = o.OverallTimeout
 	}
