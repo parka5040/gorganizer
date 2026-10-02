@@ -60,9 +60,9 @@ bool plainVersion(const QString& version)
 
 }
 
-InstallLayout detectInstallLayout()
+AppInstallLayout detectInstallLayout()
 {
-    InstallLayout layout;
+    AppInstallLayout layout;
     layout.runningVersion = QCoreApplication::applicationVersion();
     if (!buildPattern().match(layout.runningVersion).hasMatch()) {
         layout.kind = InstallKind::Development;

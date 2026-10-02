@@ -43,15 +43,15 @@ ModLoaderKind modLoaderKindFromProto(gorganizer::v1::ModLoaderKind k)
     }
 }
 
-GameInstallLayout installLayoutFromProto(gorganizer::v1::InstallLayout l)
+InstallLayout installLayoutFromProto(gorganizer::v1::InstallLayout l)
 {
     switch (l) {
     case gorganizer::v1::INSTALL_LAYOUT_DATA_ROOT:
-        return GameInstallLayout::DataRoot;
+        return InstallLayout::DataRoot;
     case gorganizer::v1::INSTALL_LAYOUT_SMAPI_MANIFEST:
-        return GameInstallLayout::SmapiManifest;
+        return InstallLayout::SmapiManifest;
     default:
-        return GameInstallLayout::Unspecified;
+        return InstallLayout::Unspecified;
     }
 }
 

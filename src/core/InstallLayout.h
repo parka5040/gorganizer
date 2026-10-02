@@ -6,7 +6,7 @@ namespace gorganizer {
 
 enum class InstallKind { Development, Prebuilt, Source, Other };
 
-struct InstallLayout {
+struct AppInstallLayout {
     InstallKind kind = InstallKind::Other;
     QString runningVersion;
     QString runningBase;
@@ -17,7 +17,7 @@ struct InstallLayout {
 };
 
 // Identifies the running GUI's release layout without following bundle-file symlinks.
-InstallLayout detectInstallLayout();
+AppInstallLayout detectInstallLayout();
 // Reads the selected release name from the releases directory's current link.
 bool readInstalledVersion(const QString& releasesRoot, QString* version);
 // Compares two strict three-component numeric release versions.

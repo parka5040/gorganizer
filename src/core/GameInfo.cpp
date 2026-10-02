@@ -154,7 +154,7 @@ QStringList GameInfo::dlcOrderFor(const QString& shortName)
 bool usesLocalDataRootInstall(const GameInfo& game)
 {
     if (game.capabilitiesKnown)
-        return game.capabilities.installLayout == GameInstallLayout::DataRoot;
+        return game.capabilities.installLayout == InstallLayout::DataRoot;
     const auto known = GameInfo::findByShortName(game.shortName);
     return known && !known->dataDirOptional;
 }

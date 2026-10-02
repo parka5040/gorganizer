@@ -415,7 +415,7 @@ void UpdateController::updateNow(const QString& version, const QString& bundleDi
 {
     if (updating() || m_notice == Notice::UpdateResult)
         return;
-    const InstallLayout current = detectInstallLayout();
+    const AppInstallLayout current = detectInstallLayout();
     QString selected;
     if (current.kind != InstallKind::Prebuilt || current.bundleDir != bundleDir
         || !QDir::isAbsolutePath(current.dataHome)

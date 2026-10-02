@@ -83,7 +83,7 @@ private:
     AppConfig& m_config;
     NoticeBar* m_bar;
     QWidget* m_parentWindow;
-    InstallLayout m_layout;
+    AppInstallLayout m_layout;
     Notice m_notice = Notice::None;
     bool m_started = false;
     bool m_readinessChecked = false;
