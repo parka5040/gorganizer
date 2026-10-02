@@ -234,12 +234,11 @@ void ModDependencyController::requestReport(RefreshMode mode)
             && (mode == RefreshMode::Remote || (mode == RefreshMode::RemoteIfStale && remoteStale(gameId)))));
     const bool force = remote && mode == RefreshMode::Force;
 
-    const quint64 requestId = m_grpc->getModDependencyReport(gameId, profile, remote, force);
-    m_reportRequests.insert(requestId,
-                            ReportRequest{gameId, profile, m_generation, remote, m_remoteAttemptAt.value(gameId)});
+    const quint64 requestId = m_grpc->getModDependencyReport(gameId, profile, remote, force,
+                                                             mode != RefreshMode::Force);
+    m_reportRequests.insert(requestId, ReportRequest{gameId, profile, m_generation, remote});
     if (remote) {
         m_remoteInFlight.insert(gameId, m_generation);
-        m_remoteAttemptAt.insert(gameId, QDateTime::currentDateTimeUtc());
         publishRemoteState();
     }
 }
@@ -270,15 +269,14 @@ void ModDependencyController::onReportReceived(quint64 requestId, const GrpcModD
     if (request.remote) {
         m_remoteInFlight.remove(request.gameId);
         if (report.remoteChecked && applicable) {
-            m_remoteCheckedAt.insert(request.gameId, QDateTime::currentDateTimeUtc());
+            const QDateTime now = QDateTime::currentDateTimeUtc();
+            m_remoteAttemptAt.insert(request.gameId, now);
+            m_remoteCheckedAt.insert(request.gameId, now);
             m_remoteError.remove(request.gameId);
         } else if (report.remoteChecked) {
             dropped = true;
-            if (request.previousAttempt.isValid())
-                m_remoteAttemptAt.insert(request.gameId, request.previousAttempt);
-            else
-                m_remoteAttemptAt.remove(request.gameId);
         } else if (!report.remoteError.isEmpty()) {
+            m_remoteAttemptAt.insert(request.gameId, QDateTime::currentDateTimeUtc());
             m_remoteError.insert(request.gameId, errorSummary("check SMAPI mod requirements", report.remoteError));
         }
         publishRemoteState();

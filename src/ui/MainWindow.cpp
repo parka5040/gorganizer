@@ -216,6 +216,9 @@ void MainWindow::setupUi()
     auto* smapiNotice = new NoticeBar(central);
     m_centralLayout->insertWidget(1, smapiNotice);
     m_smapiConsent = new SmapiOnlineConsent(m_config, smapiNotice, this);
+    m_grpc->setAutomaticSmapiOnlineAllowed(m_smapiConsent->allowed());
+    connect(m_smapiConsent, &SmapiOnlineConsent::onlineChecksChanged, m_grpc,
+            &GrpcClient::setAutomaticSmapiOnlineAllowed);
 
     auto* vsplit = new QSplitter(Qt::Vertical);
 
@@ -912,6 +915,8 @@ void MainWindow::onOpenSettings()
             this, [this](bool on) {
                 if (m_modList) m_modList->applyCollapsedSeparatorView(on);
             });
+    connect(&dlg, &SettingsDialog::smapiOnlineChecksChanged,
+            m_smapiConsent, &SmapiOnlineConsent::preferenceChanged);
     dlg.exec();
     m_update->preferenceChanged();
     m_smapiConsent->preferenceChanged();

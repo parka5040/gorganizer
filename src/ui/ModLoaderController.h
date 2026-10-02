@@ -138,7 +138,7 @@ private:
     // Ends a reconciled operation from the status the daemon reported once idle, restoring the mount and showing it.
     void completeReconciled(const GrpcModLoaderStatus& status);
     // Sends a status query for gameId, remembering plain queries so activation does not repeat them.
-    quint64 requestStatus(const QString& gameId, bool checkLatest);
+    quint64 requestStatus(const QString& gameId, bool checkLatest, bool automatic);
     // Sends this session's one automatic update check for gameId.
     void scheduleLatestCheck(const QString& gameId);
     // Stores and publishes a status after merging the cached latest release into it.

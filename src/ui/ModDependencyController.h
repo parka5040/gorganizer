@@ -96,7 +96,6 @@ private:
         QString profileName;
         quint64 generation = 0;
         bool remote = false;
-        QDateTime previousAttempt;
     };
 
     struct FetchRequest {
