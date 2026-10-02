@@ -1,0 +1,6 @@
+trust b107acc071785a65
+latest-url https://api.github.com/repos/parka5040/gorganizer/releases/latest
+assets-url https://github.com/parka5040/gorganizer/releases/download/
+latest-origin api.github.com
+assets-origin github.com *.githubusercontent.com
+signature required

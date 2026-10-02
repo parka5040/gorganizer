@@ -86,8 +86,8 @@ func TestAuditReleaseRejectsUnsafeFiles(t *testing.T) {
 		name, rpath, content, want string
 		includeStatic              bool
 	}{
-		{name: "static binaries", includeStatic: true},
-		{name: "valid GUI", rpath: "$ORIGIN/../lib"},
+		{name: "static binaries", includeStatic: true, want: "release configuration"},
+		{name: "valid GUI", rpath: "$ORIGIN/../lib", want: "missing"},
 		{name: "missing RUNPATH", want: "RUNPATH"},
 		{name: "wrong RUNPATH", rpath: "$ORIGIN", want: "RUNPATH"},
 		{name: "legacy RPATH", rpath: "$ORIGIN/../lib", want: "RPATH"},

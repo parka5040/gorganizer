@@ -11,6 +11,11 @@ shopt -s nullglob
 bundles=("$base/path with spaces"/gorganizer-*)
 [ "${#bundles[@]}" -eq 1 ] || { printf 'Unexpected tarball layout.\n' >&2; exit 1; }
 bundle="${bundles[0]}"
+version="${bundle##*/gorganizer-}"
+if [ "$("$bundle/bin/gorganizer-gui" --version)" != "gorganizer-gui $version" ]; then
+    printf 'GUI version does not match bundle version %s.\n' "$version" >&2
+    exit 1
+fi
 "$bundle/bin/gorganizerd" --version
 "$bundle/bin/gorganizerctl" --version
 if ldd "$bundle/bin/gorganizer-gui" | grep -q 'not found'; then

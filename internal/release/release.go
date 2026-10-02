@@ -94,6 +94,9 @@ func BaseVersion(v string) (string, bool) {
 
 // NotesURL returns the release notes page for a validated tag.
 func NotesURL(tag string) (string, error) {
+	if err := configError(); err != nil {
+		return "", err
+	}
 	if err := ValidateTag(tag); err != nil {
 		return "", err
 	}
