@@ -60,7 +60,7 @@ if [ -n "${WAYLAND_DISPLAY:-}" ]; then
     [ -n "${XDG_RUNTIME_DIR:-}" ] || { printf 'WAYLAND_DISPLAY needs a caller XDG_RUNTIME_DIR.\n' >&2; exit 1; }
     fixture_env+=("WAYLAND_DISPLAY=$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY")
 fi
-for name in DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS QT_QPA_PLATFORM; do
+for name in DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS QT_QPA_PLATFORM LANG LANGUAGE LC_ALL LC_CTYPE LC_MESSAGES; do
     if [ "${!name+x}" = x ]; then fixture_env+=("$name=${!name}"); fi
 done
 for version in 0.0.8 0.0.9; do
