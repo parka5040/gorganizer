@@ -32,6 +32,8 @@ private slots:
     void onCollapsedSeparatorViewToggled(bool on);
     // Saves the explicit startup update-check preference.
     void onUpdateCheckToggled(bool on);
+    // Saves the explicit SMAPI online-check preference.
+    void onSmapiOnlineCheckToggled(bool on);
 
 private:
     void populateProtonCombo();
@@ -51,6 +53,8 @@ private:
     QCheckBox* m_collapseViewsCheck = nullptr;
     QCheckBox* m_updateCheck = nullptr;
     QLabel* m_updateStatus = nullptr;
+    QCheckBox* m_smapiOnlineCheck = nullptr;
+    QLabel* m_smapiOnlineStatus = nullptr;
 };
 
 }

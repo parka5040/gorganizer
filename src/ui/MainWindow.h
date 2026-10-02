@@ -35,6 +35,7 @@ class FalloutPatchController;
 class GameSetupController;
 class ModLoaderController;
 class UpdateController;
+class SmapiOnlineConsent;
 class NoticeBar;
 class ModDependencyController;
 class SteamMaintenanceController;
@@ -143,6 +144,7 @@ private:
     GameSetupController* m_gameSetup = nullptr;
     ModLoaderController* m_modLoader = nullptr;
     UpdateController* m_update = nullptr;
+    SmapiOnlineConsent* m_smapiConsent = nullptr;
     ModDependencyController* m_modDependencies = nullptr;
     SteamMaintenanceController* m_steamMaintenance = nullptr;
 

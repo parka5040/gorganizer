@@ -20,13 +20,15 @@ namespace gorganizer {
 class GrpcClient;
 class ModListWidget;
 class SessionController;
+class SmapiOnlineConsent;
 class SmapiModsWidget;
 
 class ModDependencyController : public QObject {
     Q_OBJECT
 public:
-    ModDependencyController(GrpcClient* grpc, SessionController* session, ModListWidget* modList,
-                            SmapiModsWidget* smapiMods, QStatusBar* statusBar, QWidget* parentWindow);
+    ModDependencyController(GrpcClient* grpc, SessionController* session, SmapiOnlineConsent* consent,
+                            ModListWidget* modList, SmapiModsWidget* smapiMods, QStatusBar* statusBar,
+                            QWidget* parentWindow);
 
 public slots:
     // Tracks the active game and schedules a report, going online when this game's last smapi.io check is stale.
@@ -172,6 +174,7 @@ private:
 
     GrpcClient* m_grpc;
     SessionController* m_session;
+    SmapiOnlineConsent* m_consent;
     ModListWidget* m_modList;
     SmapiModsWidget* m_smapiMods;
     QStatusBar* m_statusBar;
