@@ -139,7 +139,24 @@ func (m *Manager) prepareRoot() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolving application data folder: %w", err)
 	}
-	return filepath.Join(parent, filepath.Base(root)), nil
+	physicalRoot := filepath.Join(parent, filepath.Base(root))
+	path := string(os.PathSeparator)
+	for _, component := range strings.Split(strings.TrimPrefix(physicalRoot, path), path) {
+		if component != "" {
+			path = filepath.Join(path, component)
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return "", fmt.Errorf("checking releases folder ancestry %s: %w", path, err)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !info.IsDir() || !ok || (stat.Uid != 0 && int(stat.Uid) != os.Getuid()) ||
+			(info.Mode().Perm()&0o022 != 0 && !(stat.Uid == 0 && info.Mode()&os.ModeSticky != 0)) ||
+			((path == parent || path == physicalRoot) && int(stat.Uid) != os.Getuid()) {
+			return "", fmt.Errorf("the releases folder is inside a folder other users can change: %s", path)
+		}
+	}
+	return physicalRoot, nil
 }
 
 type heldLock struct{ root string }
