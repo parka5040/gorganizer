@@ -141,6 +141,8 @@ If uninstall warns that mods are still inside the cloned folder, follow the move
 
 SMAPI is the mod loader used by Stardew Valley mods. Gorganizer supports the native Linux Steam build only. With Stardew Valley selected, use **Tools → SMAPI → Install SMAPI…** to download the official release and install it. Gorganizer checks its published SHA-256 checksum and runs the installer on a private copy of the game before applying the result. If a Steam update replaces SMAPI's launcher, choose **Tools → SMAPI → Repair SMAPI…** to reuse the saved installer. **Tools → SMAPI → Uninstall SMAPI…** removes the loader but keeps your mod folders.
 
+The first time you select a Stardew Valley game that uses SMAPI, Gorganizer asks separately whether it may check online for SMAPI and mod updates. If you agree, it checks GitHub for new SMAPI releases and asks smapi.io about your SMAPI mods; smapi.io receives your SMAPI mod list (mod IDs and versions) and your SMAPI and game versions. If you decline, the **SMAPI** tab uses the information it already has, and **Check for Updates** on that tab, **Tools → SMAPI → Check for SMAPI Updates** and **Fetch Missing** still go online when you click them. You can change your answer in **Tools → Settings...**.
+
 SMAPI mod folders stay together when you install an archive. The **SMAPI** tab shows mod dependencies and can check smapi.io for updates. **Fetch Missing** downloads missing dependencies with Nexus Premium, or opens their Nexus pages so you can choose **Mod Manager Download**. New files created by mods while you play are kept in **Overwrite**.
 
 ## Tools
