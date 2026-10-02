@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,6 +101,32 @@ func TestReleaseNetworkErrorClassification(t *testing.T) {
 				t.Fatalf("retry interval: %v", status.RetryAfter)
 			}
 		})
+	}
+}
+
+// TestIdleTimeoutKeepsSingleCauseText checks watchdog classification does not append another error line.
+func TestIdleTimeoutKeepsSingleCauseText(t *testing.T) {
+	original := idleTimeout
+	idleTimeout = 25 * time.Millisecond
+	defer func() { idleTimeout = original }()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	_, err := (Source{Client: server.Client()}).fetch(context.Background(), server.URL, 1024)
+	var read *readError
+	if !errors.As(err, &read) || !errors.Is(err, ErrUnreachable) || err.Error() != "reading release file: context deadline exceeded" || strings.Contains(err.Error(), "\n") || strings.Count(err.Error(), context.DeadlineExceeded.Error()) > 1 {
+		t.Fatalf("idle timeout text or classification: %v", err)
+	}
+	headers := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer headers.Close()
+	_, err = (Source{Client: headers.Client()}).fetch(context.Background(), headers.URL, 1024)
+	var transport *TransportError
+	if !errors.As(err, &transport) || !errors.Is(err, ErrUnreachable) || err.Error() != "downloading release: "+transport.Err.Error() {
+		t.Fatalf("header timeout text or classification: %v", err)
 	}
 }
 

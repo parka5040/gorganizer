@@ -5,8 +5,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -130,6 +133,84 @@ func TestExistingVersionNeverExecutesInstalledBinary(t *testing.T) {
 	}
 	if _, err := m.Adopt(context.Background(), bundle); err != nil {
 		t.Fatalf("unchanged installed version was not reusable: %v", err)
+	}
+}
+
+// TestExistingVersionRejectsTreeDifferencesWithoutExecuting checks all installed paths and modes without running them.
+func TestExistingVersionRejectsTreeDifferencesWithoutExecuting(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*testing.T, string)
+	}{
+		{"extra library", func(t *testing.T, root string) {
+			if err := os.WriteFile(filepath.Join(root, "lib", "extra.so"), []byte("extra"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"missing symlink", func(t *testing.T, root string) {
+			if err := os.Remove(filepath.Join(root, "lib", "libsample.so.1")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"retargeted symlink", func(t *testing.T, root string) {
+			link := filepath.Join(root, "lib", "libsample.so.1")
+			if err := os.Remove(link); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("../bin/gorganizerctl", link); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"removed execute bit", func(t *testing.T, root string) {
+			if err := os.Chmod(filepath.Join(root, "bin", "gorganizerctl"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"extra empty directory", func(t *testing.T, root string) {
+			if err := os.Mkdir(filepath.Join(root, "unused"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			bundle := writeFixture(t, "1.2.3")
+			m := &Manager{Root: filepath.Join(t.TempDir(), "releases")}
+			marker := filepath.Join(t.TempDir(), "executed")
+			binary := filepath.Join(bundle, "bin", "gorganizerctl")
+			original, err := os.ReadFile(binary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			modified := []byte(fmt.Sprintf("#!/bin/sh\ncase \"$0\" in %q/*) printf ran > %q;; esac\nprintf 'gorganizerctl 1.2.3\\n'\n", filepath.Join(m.Root, "1.2.3"), marker))
+			if err := os.WriteFile(binary, modified, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			manifest := filepath.Join(bundle, "MANIFEST.sha256")
+			contents, err := os.ReadFile(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			oldHash, newHash := sha256.Sum256(original), sha256.Sum256(modified)
+			updated := strings.Replace(string(contents), fmt.Sprintf("%x  bin/gorganizerctl", oldHash), fmt.Sprintf("%x  bin/gorganizerctl", newHash), 1)
+			if err := os.WriteFile(manifest, []byte(updated), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := m.Adopt(context.Background(), bundle); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(marker); !os.IsNotExist(err) {
+				t.Fatalf("staged binary wrote installed marker: %v", err)
+			}
+			tc.change(t, filepath.Join(m.Root, "1.2.3"))
+			if _, err := m.Adopt(context.Background(), bundle); err == nil || err.Error() != "the installed release does not match this download" {
+				t.Fatalf("different installed tree accepted: %v", err)
+			}
+			if _, err := os.Lstat(marker); !os.IsNotExist(err) {
+				t.Fatalf("installed binary was executed: %v", err)
+			}
+			assertLinks(t, m.Root, "1.2.3", "")
+		})
 	}
 }
 
@@ -294,6 +375,31 @@ func TestCancelledLockWaitLeavesCurrentUntouched(t *testing.T) {
 	checkNoStage(t, m.Root)
 }
 
+// TestStatusContextCancelledLockWait checks status returns promptly when its lock wait is cancelled.
+func TestStatusContextCancelledLockWait(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := &Manager{Root: filepath.Join(t.TempDir(), "releases")}
+	if _, err := m.Status(); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.Open(filepath.Join(m.Root, ".release.lock"), unix.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Flock(fd, unix.LOCK_UN)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = m.StatusContext(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > time.Second {
+		t.Fatalf("status lock wait: %v; elapsed %v", err, time.Since(start))
+	}
+}
+
 // TestSIGTERMDownloadLeavesLinksUntouched checks SIGTERM during an archive download cleans the stage.
 func TestSIGTERMDownloadLeavesLinksUntouched(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
@@ -366,6 +472,82 @@ func TestCancelledExtractionLeavesLinksUntouched(t *testing.T) {
 	}
 	assertLinks(t, m.Root, "1.2.3", "")
 	checkNoStage(t, m.Root)
+}
+
+type failingArchiveReader struct{ err error }
+
+// Read returns a simulated connection reset after partial archive data.
+func (r failingArchiveReader) Read([]byte) (int, error) { return 0, r.err }
+
+type releaseRoundTrip func(*http.Request) (*http.Response, error)
+
+// RoundTrip sends a test release request through an injected transport.
+func (f releaseRoundTrip) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
+
+type failingArchiveWriter struct{ err error }
+
+// Write returns a staged archive write failure.
+func (w failingArchiveWriter) Write([]byte) (int, error) { return 0, w.err }
+
+// TestArchiveBodyErrorsClassifyOnlyNetworkFailures checks copy failures retain their cause and provenance.
+func TestArchiveBodyErrorsClassifyOnlyNetworkFailures(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	original := idleTimeout
+	idleTimeout = 25 * time.Millisecond
+	defer func() { idleTimeout = original }()
+	archive := packFixture(t, "1.2.3", fixture("1.2.3"))
+	checks := checksumLine("1.2.3", archive)
+	diskError := syscall.ENOSPC
+	for _, tc := range []struct {
+		name        string
+		unreachable bool
+		serve       func(http.ResponseWriter, *http.Request)
+		reset       bool
+		writeError  bool
+	}{
+		{"reset", true, func(w http.ResponseWriter, _ *http.Request) { w.Write(archive) }, true, false},
+		{"idle timeout", true, func(w http.ResponseWriter, r *http.Request) {
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		}, false, false},
+		{"disk write", false, func(w http.ResponseWriter, _ *http.Request) { w.Write(archive) }, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch filepath.Base(r.URL.Path) {
+				case "SHA256SUMS":
+					io.WriteString(w, checks)
+				case "SHA256SUMS.sig":
+					w.Write(testSignature(1, "v1.2.3", []byte(checks)))
+				default:
+					tc.serve(w, r)
+				}
+			}))
+			defer server.Close()
+			m := &Manager{Root: filepath.Join(t.TempDir(), "releases"), Trust: testTrust(t), Source: Source{BaseURL: server.URL, Client: server.Client()}}
+			if tc.reset {
+				transport := m.Source.Client.Transport
+				m.Source.Client = &http.Client{Transport: releaseRoundTrip(func(request *http.Request) (*http.Response, error) {
+					if strings.HasSuffix(request.URL.Path, ".tar.gz") {
+						body := io.MultiReader(bytes.NewReader(archive[:len(archive)/2]), failingArchiveReader{&net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}})
+						return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", ContentLength: int64(len(archive)), Body: io.NopCloser(body), Request: request}, nil
+					}
+					return transport.RoundTrip(request)
+				})}
+			}
+			if tc.writeError {
+				m.WrapWriter = func(io.Writer) io.Writer { return failingArchiveWriter{diskError} }
+			}
+			_, err := m.Install(context.Background(), "v1.2.3")
+			if err == nil || errors.Is(err, ErrUnreachable) != tc.unreachable || !strings.HasPrefix(err.Error(), "downloading release archive: ") || strings.Contains(err.Error(), "reading release file:") {
+				t.Fatalf("archive copy error: %v; unreachable=%v", err, errors.Is(err, ErrUnreachable))
+			}
+			if tc.reset && !errors.Is(err, syscall.ECONNRESET) || tc.writeError && !errors.Is(err, diskError) {
+				t.Fatalf("lost copy cause: %v", err)
+			}
+			checkNoStage(t, m.Root)
+		})
+	}
 }
 
 // TestInstallDeadlineBoundsTagResolution checks the overall deadline includes latest-tag resolution.

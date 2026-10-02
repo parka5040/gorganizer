@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/parka/gorganizer/internal/release"
 )
 
 // signingFixture returns a release signing test vector path.
@@ -217,6 +219,57 @@ func TestVerifyReleaseSignatureChecksGoldenAndRejectedInputs(t *testing.T) {
 				t.Fatalf("verify unexpectedly succeeded: %q", out)
 			}
 		})
+	}
+}
+
+// TestVerifyReleaseSignatureRejectsNoncanonicalBase64 checks both verifiers refuse altered padding bits.
+func TestVerifyReleaseSignatureRejectsNoncanonicalBase64(t *testing.T) {
+	requireOpenSSL(t)
+	golden, err := os.ReadFile(signingFixture(t, "SHA256SUMS.k1.sig"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	modified := bytes.Replace(golden, []byte("Cw=="), []byte("Cx=="), 1)
+	if bytes.Equal(golden, modified) {
+		t.Fatal("golden signature changed")
+	}
+	sig := filepath.Join(t.TempDir(), "noncanonical.sig")
+	if err := os.WriteFile(sig, modified, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustFile := writeSigningTrust(t, "test-k1.pub.pem")
+	out, err := runScript(t, packagingScript(t, "verify-release-sig.sh"), "--tag", "v0.0.9", "--sums", signingFixture(t, "SHA256SUMS"), "--sig", sig, "--trust", trustFile)
+	if err == nil || !strings.Contains(out, "invalid release signature file") {
+		t.Fatalf("shell verifier: %v: %q", err, out)
+	}
+	realBase64, err := exec.LookPath("base64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shim := t.TempDir()
+	if err := os.WriteFile(filepath.Join(shim, "base64"), []byte("#!/bin/bash\nif [ \"$1\" = -d ]; then\n    IFS= read -r data || :\n    printf '%s' \"${data/Cx==/Cw==}\" | \"$REAL_BASE64\" -d\nelse\n    exec \"$REAL_BASE64\" \"$@\"\nfi\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REAL_BASE64", realBase64)
+	t.Setenv("PATH", shim+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err = runScript(t, packagingScript(t, "verify-release-sig.sh"), "--tag", "v0.0.9", "--sums", signingFixture(t, "SHA256SUMS"), "--sig", sig, "--trust", trustFile)
+	if err == nil || !strings.Contains(out, "invalid release signature file") {
+		t.Fatalf("permissive decoder: %v: %q", err, out)
+	}
+	trustBytes, err := os.ReadFile(trustFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trust, err := release.ParseTrust(trustBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sums, err := os.ReadFile(signingFixture(t, "SHA256SUMS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := release.VerifySums(trust, "v0.0.9", sums, modified); err == nil {
+		t.Fatal("Go verifier accepted noncanonical base64")
 	}
 }
 
